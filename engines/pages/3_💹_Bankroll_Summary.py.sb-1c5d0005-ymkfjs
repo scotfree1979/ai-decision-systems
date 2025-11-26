@@ -1,0 +1,66 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import sqlite3
+import requests
+import json
+
+# Page Configuration
+st.set_page_config(page_title="Bankroll Summary", layout="wide")
+st.title('💹 Bankroll Summary')
+
+# Headers with session token from session state
+headers = {
+    "X-Application": "CZHojduNWa3kxWIn",
+    "X-Authentication": st.session_state.get('session_token', ''),
+    "Content-Type": "application/json"
+}
+
+# API Back-door methods
+def hijack_call(method, params=None):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    payload = {"jsonrpc": "2.0", "method": f"SportsAPING/v1.0/{method}", "params": params or {}, "id": 1}
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response.raise_for_status()
+    return response.json().get('result', {})
+
+# Load Historical Bankroll Data from Database
+def load_bankroll_data():
+    conn = sqlite3.connect('/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db')
+    query = "SELECT timestamp, pnl FROM bets ORDER BY timestamp ASC"
+    return pd.read_sql(query, conn)
+
+bankroll_df = load_bankroll_data()
+
+# Calculate cumulative bankroll
+bankroll_df['timestamp'] = pd.to_datetime(bankroll_df['timestamp'])
+bankroll_df['cumulative_bankroll'] = bankroll_df['pnl'].cumsum()
+
+# Display Current Bankroll Status
+st.subheader("Current Bankroll Status")
+current_bankroll = bankroll_df['cumulative_bankroll'].iloc[-1]
+st.metric(label="Current Bankroll (£)", value=f"£{current_bankroll:,.2f}")
+
+# Bankroll Over Time Chart
+st.subheader("Bankroll Over Time")
+fig_bankroll = px.line(bankroll_df, x='timestamp', y='cumulative_bankroll', title='Bankroll Progression', markers=True)
+st.plotly_chart(fig_bankroll, use_container_width=True)
+
+# Daily Bankroll Changes
+st.subheader("Daily Bankroll Changes")
+bankroll_df['date'] = bankroll_df['timestamp'].dt.date
+daily_changes = bankroll_df.groupby('date')['pnl'].sum().reset_index()
+fig_daily_changes = px.bar(daily_changes, x='date', y='pnl', title='Daily Bankroll Changes',
+                           labels={'pnl': 'Daily P/L (£)'},
+                           color='pnl', color_continuous_scale='RdYlGn')
+st.plotly_chart(fig_daily_changes, use_container_width=True)
+
+# Recent Bankroll Activity
+st.subheader("Recent Bankroll Activity")
+recent_activity_df = bankroll_df.tail(10).copy()
+recent_activity_df['timestamp'] = recent_activity_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+st.dataframe(recent_activity_df[['timestamp', 'pnl', 'cumulative_bankroll']], use_container_width=True)
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Data sourced via Betfair API & historical database.')

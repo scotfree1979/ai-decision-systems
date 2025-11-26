@@ -1,0 +1,125 @@
+import requests
+import json
+import time
+from datetime import datetime, timedelta
+from risk_management import RiskManager
+from betfair_client import BetfairClient
+
+BETFAIR_ENDPOINT = "https://api.betfair.com/exchange/betting/rest/v1.0/"
+APP_KEY = "CZHojduNWa3kxWIn"
+
+def sanitize_headers(headers):
+    sanitized_headers = {}
+    for key, value in headers.items():
+        sanitized_headers[key] = value.encode('latin-1', 'ignore').decode('latin-1')
+    return sanitized_headers
+
+def fetch_markets(headers):
+    now = datetime.utcnow()
+    start_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time = (now + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    payload = {
+        "filter": {
+            "eventTypeIds": ["7"],
+            "marketCountries": ["GB", "IE"],
+            "marketTypeCodes": ["WIN"],
+            "marketStartTime": {"from": start_time, "to": end_time}
+        },
+        "maxResults": "10",
+        "marketProjection": ["RUNNER_METADATA", "MARKET_DESCRIPTION"],
+        "sort": "FIRST_TO_START"
+    }
+
+    response = requests.post(BETFAIR_ENDPOINT + "listMarketCatalogue/", headers=headers, data=json.dumps(payload)).json()
+    return response
+
+# Check signals based on drift criteria and Betfair fire/ice signals
+def check_signals(market):
+    signals = []
+    for runner in market.get('runners', []):
+        metadata = runner.get('metadata', {})
+        if 'runnerName' in runner and ('FIRE' in metadata or 'ICE' in metadata):
+            drift_signal = 'FIRE' if 'FIRE' in metadata else 'ICE'
+            signals.append({
+                'marketId': market['marketId'],
+                'selectionId': runner['selectionId'],
+                'runnerName': runner['runnerName'],
+                'signalType': drift_signal,
+                'timeDetected': datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                'strength': 1
+            })
+    return signals
+
+# Place lay bet at determined odds
+def place_scalp_bet(headers, market_id, selection_id, stake, lay_odds):
+    lay_payload = {
+        "marketId": market_id,
+        "instructions": [{
+            "selectionId": selection_id,
+            "side": "LAY",
+            "orderType": "LIMIT",
+            "limitOrder": {"size": stake, "price": lay_odds, "persistenceType": "PERSIST"}
+        }]
+    }
+    lay_response = requests.post(BETFAIR_ENDPOINT + "placeOrders/", headers=headers, data=json.dumps(lay_payload)).json()
+
+    lay_bet_id = lay_response['instructionReports'][0].get('betId')
+
+    matched = False
+    for attempt in range(10):
+        status_payload = {"betIds": [lay_bet_id]}
+        bet_status = requests.post(BETFAIR_ENDPOINT + "listCurrentOrders/", headers=headers, data=json.dumps(status_payload)).json()
+
+        if bet_status['currentOrders'][0]['sizeMatched'] >= 0.01:
+            matched = True
+            break
+        print("⏳ Waiting for lay bet to match...")
+        time.sleep(2)
+
+    if not matched:
+        print("⚠️ Lay bet not matched. Cancelling lay bet.")
+        cancel_payload = {"marketId": market_id, "instructions": [{"betId": lay_bet_id}]}
+        requests.post(BETFAIR_ENDPOINT + "cancelOrders/", headers=headers, data=json.dumps(cancel_payload))
+        return lay_response, {"status": "Cancelled, Lay unmatched"}
+
+    return lay_response, {"status": "Lay matched"}
+
+def run_scalping_engine(headers, active_bets):
+    headers = sanitize_headers(headers)
+    betfair_client = BetfairClient(headers)
+    risk_manager = RiskManager(betfair_client)
+
+    while True:
+        markets = fetch_markets(headers)
+        for market in markets:
+            signals = check_signals(market)
+            current_prices = betfair_client.get_current_prices(market['marketId'])
+            market_start_time = market['marketStartTime']
+            minutes_to_off = (datetime.strptime(market_start_time, "%Y-%m-%dT%H:%M:%S.%fZ") - datetime.utcnow()).total_seconds() / 60
+
+            for signal in signals:
+                print(f"🚩 Signal detected: {signal['runnerName']} in market {signal['marketId']} ({signal['signalType']})")
+                lay_odds = current_prices.get(signal['runnerName'], 2.0)
+                dynamic_stake = risk_manager.calculate_stake(signal)
+                lay_response, status = place_scalp_bet(headers, signal['marketId'], signal['selectionId'], dynamic_stake, lay_odds)
+
+                if status['status'] == "Lay matched":
+                    risk_manager.track_trade(
+                        bet_id=lay_response['instructionReports'][0]['betId'],
+                        market_id=signal['marketId'],
+                        selection_id=signal['selectionId'],
+                        odds=lay_odds,
+                        stake=dynamic_stake,
+                        bet_type='LAY',
+                        liability=(lay_odds - 1) * dynamic_stake,
+                        status='matched',
+                        result='pending',
+                        timestamp=datetime.utcnow()
+                    )
+
+            risk_manager.check_open_trades(market['marketId'], current_prices)
+            risk_manager.hedge_before_race(market['marketId'], minutes_to_off, current_prices)
+
+        print("🔄 Checking markets again in 60 seconds...")
+        time.sleep(60)

@@ -1,0 +1,63 @@
+from core.api_hijacker import list_market_book
+import time
+import sqlite3
+import datetime
+from core.betfair_api import get_session as get_trading_session
+
+DATABASE_PATH = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db'
+
+def live_bet_monitor_loop(trading_session):
+    print("🔍 Live Bet Monitor loop started.")
+    while True:
+        monitor_bets_in_db(trading_session)
+        time.sleep(60)  # Check every 60 seconds
+
+def log_settlement_to_strategy_logs(betfair_bet_id, status):
+    print(f"🎯 Betfair Bet ID {betfair_bet_id} settled as {status}")
+
+def monitor_bets_in_db(trading_session):
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT betfair_bet_id, market_id 
+        FROM Bets 
+        WHERE bet_outcome = 'Pending' 
+          AND betfair_bet_id IS NOT NULL 
+          AND betfair_bet_id != ''
+    """)
+    open_bets = cursor.fetchall()
+
+    for betfair_bet_id, market_id in open_bets:
+        current_orders = trading_session.betting.list_current_orders(bet_ids=[betfair_bet_id]).orders
+
+        if current_orders:
+            order = current_orders[0]
+            status = order.status
+
+            if status == "EXECUTION_COMPLETE":
+                settlement_timestamp = datetime.datetime.now().isoformat()
+                outcome = 'WON' if order.side == 'BACK' else 'LOST'
+                pnl = calculate_pnl(betfair_bet_id, outcome, cursor)
+
+                cursor.execute("""
+                    UPDATE Bets
+                    SET status = ?, settlement_timestamp = ?, bet_outcome = ?, pnl = ?, result = ?
+                    WHERE betfair_bet_id = ?
+                """, ("settled", settlement_timestamp, outcome, pnl, outcome.lower(), betfair_bet_id))
+
+                log_settlement_to_strategy_logs(betfair_bet_id, outcome)
+                print(f"🏁 Betfair Bet ID {betfair_bet_id} settled as {outcome} with P&L {pnl} at {settlement_timestamp}")
+
+            elif status == 'EXECUTABLE':
+                matched_timestamp = datetime.datetime.now().isoformat()
+                cursor.execute("UPDATE Bets SET status = ?, matched_timestamp = ? WHERE betfair_bet_id = ?", ("matched", matched_timestamp, betfair_bet_id))
+                print(f"✅ Betfair Bet ID {betfair_bet_id} matched at {matched_timestamp}")
+
+    conn.commit()
+    conn.close()
+
+
+if __name__ == "__main__":
+    trading_session = get_trading_session()
+    live_bet_monitor_loop(trading_session)

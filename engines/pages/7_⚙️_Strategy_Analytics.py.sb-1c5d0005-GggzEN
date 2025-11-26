@@ -1,0 +1,45 @@
+## ⚙️ System Health Page
+
+Here's the complete Streamlit code snippet for your System Health analytics page:
+
+```python
+import streamlit as st
+import pandas as pd
+
+# Placeholder Data (replace with real-time system health data retrieval)
+system_health_metrics = {
+    "API Status": "Operational",
+    "Average Response Time (ms)": 120,
+    "Total Requests": 1520,
+    "Error Rate (%)": 0.5
+}
+
+uptime_log = pd.DataFrame({
+    "Timestamp": pd.date_range(start="2025-05-12 00:00", periods=24, freq="H"),
+    "Status": ["Up"] * 22 + ["Down"] * 2
+}).set_index("Timestamp")
+
+# Page Title
+st.title("⚙️ System Health")
+
+# Key System Health Metrics
+st.subheader("System Metrics")
+cols = st.columns(len(system_health_metrics))
+for i, (metric, value) in enumerate(system_health_metrics.items()):
+    cols[i].metric(label=metric, value=value)
+
+# System Uptime Monitoring
+st.subheader("System Uptime (Last 24 Hours)")
+st.dataframe(uptime_log, use_container_width=True)
+
+# Error Rate Visualization
+st.subheader("Error Rate (%)")
+st.bar_chart({"Error Rate (%)": [system_health_metrics["Error Rate (%)"], 100 - system_health_metrics["Error Rate (%)"]]}, width=200, height=300)
+```
+
+### Integration Instructions:
+
+* Replace placeholder data with real-time system monitoring data.
+* Implement caching for real-time metrics.
+
+Please integrate this and confirm to proceed to your next listed page!

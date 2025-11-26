@@ -1,0 +1,246 @@
+import os
+import sys
+import logging
+from datetime import datetime, timedelta
+from random import choice
+from queue import Queue
+import threading
+import time
+import requests
+import json
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True
+)
+
+signal_queue = Queue()
+race_runners = [8, 10, 15, 9, 18, 12, 14, 10, 11, 13]
+TOTAL_PNL = 0
+
+bot_signal_queues = {
+    "OGHeadTrader": Queue(),
+    "OGPreoff": Queue(),
+    "OGInPlay": Queue()
+}
+
+def generate_test_markets():
+    base_time = datetime.utcnow()
+    markets = []
+    runner_id = 1000
+    for i in range(10):
+        race_time = base_time + timedelta(minutes=15 * i)
+        market_id = f"1.TEST{i+1}"
+        runners = [{"selectionId": runner_id + j} for j in range(race_runners[i % len(race_runners)])]
+        market = {
+            "marketId": market_id,
+            "marketName": f"WIN R{i+1}",
+            "marketStatus": "OPEN",
+            "marketStartTime": race_time.isoformat(),
+            "event": {
+                "countryCode": "GB",
+                "name": f"Test Race {i+1}",
+                "openDate": race_time.isoformat()
+            },
+            "runners": runners
+        }
+        runner_id += race_runners[i % len(race_runners)]
+        markets.append(market)
+    return markets
+
+strategy_combos = [
+    ("Ladder Lays", "20min"),
+    ("Ladder Lays", "20min"),
+    ("Scalping (Lay to Back)", "10min"),
+    ("Scalping (Back to Lay)", "10min"),
+    ("Scalping (Lay to Back)", "10min"),
+    ("Scalping (Back to Lay)", "10min"),
+    ("Green-Up", "5min"),
+    ("Green-Up", "5min"),
+    ("Green-Up", "5min"),
+    ("In-Play", "inplay"),
+    ("In-Play", "inplay")
+]
+
+def process_signal(signal):
+    if signal.get("strategy_name") == "Basic Lay" and signal.get("time_session") == "20min":
+        signal["strategy_name"] = "Ladder Lays"
+    if signal.get("strategy_name") == "Green-Up":
+        signal["bot_name"] = "OGHeadTrader"
+    return signal
+
+def update_matched_bets(signal):
+    signal.update({"matched_timestamp": datetime.utcnow().isoformat()})
+    status = signal['status'].upper()
+    logging.info(f"📥 [{status}] {signal['strategy_name']} | {signal['selectionId']} | Odds: {signal['odds']} | Matched: £{signal['matched_liability']:.2f} | Unmatched: £{signal['unmatched_liability']:.2f}")
+
+def bet_worker(signal):
+    odds = signal.get("odds", 0)
+    stake = signal.get("stake", 0)
+    liability = round((odds - 1) * stake, 2)
+    if odds > 20 or liability > 40:
+        logging.warning(f"❌ Rejected | Market: {signal['marketId']} | Selection: {signal['selectionId']} | Reason: {'Odds > 20' if odds > 20 else 'Liability > 40'}")
+        return 0
+
+    matched = choice([True, False, False])
+    if matched:
+        signal["matched_liability"] = liability
+        signal["unmatched_liability"] = 0
+        signal["status"] = "placed"
+        profit = round(stake, 2)
+    else:
+        signal["matched_liability"] = 0
+        signal["unmatched_liability"] = liability
+        signal["status"] = "retry"
+        profit = 0
+
+    update_matched_bets(signal)
+    return profit
+
+def launch_protocol():
+    with signal_queue.mutex:
+        signal_queue.queue.clear()
+    for q in bot_signal_queues.values():
+        with q.mutex:
+            q.queue.clear()
+    logging.info("✅ System boot sequence complete.")
+
+def run_test_mode():
+    global TOTAL_PNL
+    logging.info("🧪 TEST MODE — Simulating 10 race markets with full strategy set...")
+    test_markets = generate_test_markets()
+    valid_markets = [m for m in test_markets if m["marketStatus"] == "OPEN"]
+
+    for i, market in enumerate(valid_markets):
+        market_id = market["marketId"]
+        runners = market["runners"]
+        race_name = market["event"]["name"]
+        race_pnl = 0
+        logging.info(f"\nRACE {i+1} – {race_name}")
+
+        for idx, (strategy, timing) in enumerate(strategy_combos):
+            runner = runners[idx % len(runners)]
+            selection_id = runner["selectionId"]
+            fire = choice([True, False])
+            ice = choice([True, False])
+            odds = round(2.0 + (idx % 6) * 0.5, 2)
+            liability = round((odds - 1) * 5.0, 2)
+            signal = {
+                "marketId": market_id,
+                "selectionId": selection_id,
+                "odds": odds,
+                "stake": 5.0,
+                "strategy_name": strategy,
+                "bot_name": "OGHeadTrader" if timing != "inplay" else "OGInPlay",
+                "session_token": "TEST_TOKEN",
+                "time_session": timing,
+                "signal_type": f"{timing} signal",
+                "original_signal_type": "upgrade_test",
+                "timestamp": datetime.utcnow().isoformat(),
+                "source": "upgrade_test",
+                "detail": f"test sim {timing}",
+                "customerOrderRef": f"TEST-{selection_id}-{strategy[:3].upper()}",
+                "market_name": market["marketName"],
+                "event_name": race_name,
+                "meta": {"fire": fire, "ice": ice},
+                "horse": f"TestHorse_{selection_id}"
+            }
+            logging.info(f"🐎 {selection_id} | {strategy:<25} | Fire: {'🔥' if fire else ' '} | Ice: {'❄️' if ice else ' '} | Odds: {odds} | Stake: £5 | Liab: £{liability:.2f}")
+            processed = process_signal(signal)
+            if processed:
+                race_pnl += bet_worker(processed)
+
+        TOTAL_PNL += race_pnl
+        logging.info(f"\n🟩 GREEN-UP | Race {i+1} Complete")
+        logging.info(f"💰 Race {i+1} PnL: £{race_pnl:.2f}")
+        logging.info(f"🏇 RACE {i+1} STARTED | 🏁 FINISHED")
+
+    logging.info(f"\n====================")
+    logging.info(f"🏁 TOTAL TEST PnL across 10 races: £{TOTAL_PNL:.2f}")
+    logging.info(f"📊 Average PnL per race: £{(TOTAL_PNL/10):.2f}")
+    logging.info("🧪 Test run complete.")
+
+def log_system_initialization():
+    messages = [
+        "✅ Market Monitor Initialized",
+        "✅ Signal Monitor Active",
+        "✅ Risk Manager Engaged",
+        "✅ Budget Manager Online",
+        "✅ Bot Queues Live",
+        "✅ Thread Launch Confirmed"
+    ]
+    for msg in messages:
+        logging.info(msg)
+
+def upgrade_monitor():
+    """
+    🧠 UPGRADE MONITOR
+    Calls wrap_run_monitor() every 60s and logs the feed
+    """
+    logging.warning("🐛 DEBUG: upgrade_monitor from upgrade_20250523.py is running")
+    log_system_initialization()
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+    while True:
+        try:
+            from upgrade.upgrade_20250522 import wrap_run_monitor
+            markets = None  # Let wrap_run_monitor fetch internally
+            wrap_run_monitor(signal_queue, session_token, markets)
+            logging.info("🔁 wrap_run_monitor() completed successfully")
+        except Exception as e:
+            logging.error(f"🛑 Unhandled exception during upgrade_monitor: {e}")
+            logging.warning("🧠 Please consult AI for assistance with this error stack.")
+        logging.info("🔄 [Upgrade] Run Monitor Cycle Complete")
+        time.sleep(60)
+
+if __name__ == "__main__":
+    if os.path.basename(sys.argv[0]) == "upgrade_20250523.py":
+        run_test_mode()
+else:
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+    logging.info("⏳ Initializing session from environment...")
+    time.sleep(3)
+    logging.info("🔄 Performing keep-alive...")
+
+        from risk_manager import risk_manager
+    from budget_manager import budget_manager, fetch_budget
+    from signal_monitor import signal_monitor_thread
+    from bet_placer import bet_worker
+    from bot_launcher import launch_bot_family
+    from toggles import TOGGLES
+
+    fetch_budget()
+    launch_protocol()
+
+    launch_bot_family(
+        signal_queues=bot_signal_queues,
+        headers={
+            "X-Application": os.environ.get("APP_KEY", "NO_KEY"),
+            "X-Authentication": session_token,
+            "Content-Type": "application/json"
+        },
+        risk_mgr=risk_manager,
+        bot_assignments={
+            "OGHeadTrader": "HeadTraderBot",
+            "OGPreoff": "PreOffBot",
+            "OGInPlay": "OGInPlayBot"
+        },
+        bot_budget_limits={},
+        toggles=TOGGLES,
+        budget_mgr=budget_manager
+    )
+
+    threading.Thread(target=upgrade_monitor, daemon=True).start()
+    threading.Thread(target=signal_monitor_thread, daemon=True).start()
+    threading.Thread(target=bet_worker, daemon=True).start()
+
+    while True:
+        logging.info("⏰ [Loop] System idle... waiting for incoming signals.")
+        time.sleep(60)
+    launch_protocol()
+    threading.Thread(target=upgrade_monitor, daemon=True).start()
+    while True:
+        logging.info("⏰ [Loop] System idle... waiting for incoming signals.")
+        time.sleep(60)

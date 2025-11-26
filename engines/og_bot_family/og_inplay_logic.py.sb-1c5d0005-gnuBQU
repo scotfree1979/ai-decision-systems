@@ -1,0 +1,25 @@
+def inplay_loop(risk_manager, signal_queue):
+    print("🔄 In-play loop started, waiting for signals...")
+
+    while True:
+        signal = signal_queue.get()
+        print(f"📡 In-play signal received: {signal}")
+
+        market_id, selection_id, odds, stake, num_runners, signal_type = parse_signal(signal)
+        approved = risk_manager.approve_trade(
+            bot_name="OGInPlayBot",
+            market_id=market_id,
+            selection_id=selection_id,
+            odds=odds,
+            stake=stake,
+            num_runners=num_runners,
+            signal_type=signal_type
+        )
+
+        if approved:
+            print(f"✅ In-play trade approved: Market {market_id}, Odds {odds}")
+            execute_trade(market_id, selection_id, odds, stake)
+        else:
+            print(f"❌ In-play trade rejected: Market {market_id}, Odds {odds}")
+
+        time.sleep(1)

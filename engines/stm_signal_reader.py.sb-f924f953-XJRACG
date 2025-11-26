@@ -1,0 +1,102 @@
+# risk_manager.py (Final Explicit Risk Manager with Scalping and Liability Adjustments)
+
+import logging
+from datetime import datetime
+
+class RiskManager:
+    def __init__(self, max_liability_per_race, max_daily_loss_per_bot, global_max_exposure,
+                 max_concurrent_races, stop_loss_threshold, profit_lock_threshold, budget_manager=None):
+        
+        self.max_liability_per_race = max_liability_per_race
+        self.max_daily_loss_per_bot = max_daily_loss_per_bot
+        self.global_max_exposure = global_max_exposure
+        self.max_concurrent_races = max_concurrent_races
+        self.stop_loss_threshold = stop_loss_threshold
+        self.profit_lock_threshold = profit_lock_threshold
+        self.budget_manager = budget_manager
+        self.active_races = {
+            "OGHeadTrader": 0,
+            "OGPreoff": 0,
+            "OGInPlay": 0
+        }
+        self.max_active_races_per_bot = 3
+        self.allowed_high_liability_signals = ['Pre-off Scalping Bets', 'Rapid In-Play Scalping']
+
+    def evaluate_signal(self, signal):
+        bot_name = signal['bot_name']
+        odds = signal['odds']
+        stake = signal['stake']
+        time_session = signal.get('time_session', 'anytime')
+        signal_type = signal.get('signal_type')
+        anchor_odds = signal.get('anchor_odds')
+        market_start_time = signal.get('market_start_time')
+        market_status = signal.get('market_status', 'ACTIVE')
+
+        liability = stake * (odds - 1)
+
+        # Special handling for scalping signals
+        if signal_type in self.allowed_high_liability_signals:
+            if odds <= 11.0:
+                logging.info(f"✅ Scalping bet allowed (signal: {signal_type}, odds: {odds}, liability: £{liability:.2f})")
+                return signal
+            else:
+                logging.warning(f"❌ Scalping odds too high ({odds}). Rejected.")
+                return None
+
+        # Explicit Odds Checks
+        if odds >= 20.0:
+            logging.warning(f"❌ Odds too high ({odds}). Rejected.")
+            return None
+        if anchor_odds and abs(odds - anchor_odds) > 5:
+            logging.warning(f"❌ Unrealistic odds jump ({anchor_odds} to {odds}). Rejected.")
+            return None
+
+        # Liability per Bet Check
+        if time_session == 'race_start':
+            adjusted_liability_limit = self.max_liability_per_race * 0.8
+        elif time_session == 'post_20_min':
+            adjusted_liability_limit = self.max_liability_per_race * 0.9
+        else:
+            adjusted_liability_limit = self.max_liability_per_race
+
+        if liability > adjusted_liability_limit:
+            logging.warning(f"❌ Liability (£{liability:.2f}) exceeds session limit (£{adjusted_liability_limit:.2f}). Rejected.")
+            return None
+
+        # Time-to-Race Check
+        if market_start_time:
+            race_start_time = datetime.strptime(market_start_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+            if (race_start_time - datetime.utcnow()).total_seconds() < 30:
+                logging.warning("❌ Too close to race start. Rejected.")
+                return None
+
+        # Concurrent Race Check
+        if self.active_races.get(bot_name, 0) >= self.max_active_races_per_bot:
+            logging.warning(f"❌ {bot_name} reached active race limit. Rejected.")
+            return None
+
+        # Event-Related Checks
+        if market_status == 'SUSPENDED':
+            logging.warning("❌ Market suspended. Rejected.")
+            return None
+        if signal.get('selection_status') == 'NON_RUNNER':
+            logging.warning("❌ Selection is a non-runner. Rejected.")
+            return None
+
+        # Data Integrity Checks
+        required_fields = ['marketId', 'selectionId', 'odds', 'stake', 'bot_name', 'time_session']
+        if not all(signal.get(field) for field in required_fields):
+            logging.warning("❌ Missing essential signal data. Rejected.")
+            return None
+
+        logging.info(f"✅ Signal APPROVED (Risk Checks Passed): {bot_name}, Odds: {odds}, Liability: £{liability:.2f}")
+        return signal
+
+    def increment_active_races(self, bot_name):
+        self.active_races[bot_name] = self.active_races.get(bot_name, 0) + 1
+        logging.info(f"🔄 {bot_name} active races increased to {self.active_races[bot_name]}.")
+
+    def decrement_active_races(self, bot_name):
+        if self.active_races.get(bot_name, 0) > 0:
+            self.active_races[bot_name] -= 1
+            logging.info(f"🔄 {bot_name} active races decreased to {self.active_races[bot_name]}.")

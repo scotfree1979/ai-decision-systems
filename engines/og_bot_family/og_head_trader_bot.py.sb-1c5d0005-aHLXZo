@@ -1,0 +1,131 @@
+# og_head_trader_bot.py - Enhanced with Orchestration Logging and Debugging
+import time
+from datetime import datetime
+import logging
+from risk_manager import RiskManager
+from upgrade_import_patch import place_basic_lay_bet as place_pre_off_lay_bet, place_basic_lay_bet as place_in_play_lay_bet
+from .og_inplay_bot import OGInPlayBot
+from .og_preoff_bot import PreOffBot
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class HeadTraderBot:
+    def __init__(self, risk_manager, historical_data=None, headers=None, signal_queues=None, budget_manager=None):
+        self.risk_manager = risk_manager
+        self.historical_data = historical_data or {}
+        self.headers = headers or {}
+        self.signal_queues = signal_queues or {}
+        self.budget_manager = budget_manager
+        self.horses_traded = set()
+
+    def orchestrate_bots(self):
+        logging.info('🧠 OGHeadTrader Bot: Starting orchestration...')
+
+        try:
+            inplay_bot = OGInPlayBot(
+            risk_manager=self.risk_manager,
+            budget_manager=self.budget_manager,
+            headers=self.headers,
+            signal_queue=self.signal_queues.get("OGInPlay")
+        )
+            logging.info('✅ OGInPlayBot initialized.')
+
+            preoff_bot = PreOffBot(
+            risk_manager=self.risk_manager,
+            budget_manager=self.budget_manager,
+            headers=self.headers,
+            signal_queue=self.signal_queues.get("OGPreoff")
+        )
+            logging.info('✅ PreOffBot initialized.')
+
+            preoff_bot.start_loop()
+            logging.info('🔁 PreOffBot loop started.')
+
+            inplay_bot.start_loop()
+            logging.info('🔁 OGInPlayBot loop started.')
+
+            logging.info('🎯 OGHeadTrader Bot: Bots running smoothly.')
+
+        except Exception as e:
+            logging.error(f"❌ Error in orchestrate_bots: {e}")
+
+    def log_event(self, message):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_message = f"[{timestamp}] {message}"
+        print(log_message)
+
+    def analyze_market(self, market_data, market_id, headers, is_in_play=False):
+        for horse in market_data:
+            best_odds, best_strategy = self.optimize_odds_and_strategy(horse)
+            if best_strategy and horse['name'] not in self.horses_traded:
+                if self.risk_manager.can_trade(best_strategy):
+                    self.execute_trade(horse, best_strategy, best_odds, market_id, headers, is_in_play)
+                    self.share_insights(horse['name'], best_odds)
+
+    def optimize_odds_and_strategy(self, horse):
+        historical_performance = self.historical_data.get(horse['name'], {})
+        optimal_strategy = None
+        optimal_odds = horse['current_odds']
+
+        for strategy, data in historical_performance.items():
+            if data['success_rate'] > 0.6 and horse['current_odds'] >= data['average_profitable_odds']:
+                optimal_strategy = strategy
+                optimal_odds = data['average_profitable_odds']
+
+        return optimal_odds, optimal_strategy
+
+    def execute_trade(self, horse, strategy_name, odds, market_id, headers, is_in_play):
+        liability_pct = 0.20 if 'lay' in strategy_name.lower() else 0.10
+        liability = self.risk_manager.max_liability_per_race * liability_pct
+
+        if self.risk_manager.verify_limits(liability):
+            self.horses_traded.add(horse['name'])
+            bet_type = 'Lay' if 'lay' in strategy_name.lower() else 'Back'
+
+            self.log_event(f"🚨 {bet_type} Placed | Horse: '{horse['name']}' | Strategy: '{strategy_name}'\n"
+                           f"- Optimized Odds: {odds:.2f}\n"
+                           f"- Liability/Stake: £{liability:.2f}")
+
+            if is_in_play:
+                place_in_play_lay_bet(horse['selection_id'], odds, liability, market_id, headers)
+            else:
+                place_pre_off_lay_bet(horse['selection_id'], odds, liability, market_id, headers)
+
+            self.risk_manager.insert_trade_to_db(
+                horse_name=horse['name'], odds=odds, liability=liability,
+                bet_type=bet_type, strategy_name=strategy_name, bot_name='OGHeadTrader'
+            )
+
+            self.risk_manager.update_global_exposure(liability)
+            self.risk_manager.check_race_liability(liability)
+
+    def share_insights(self, horse_name, optimal_odds):
+        self.log_event(f"🔄 Sharing optimal odds for '{horse_name}' at {optimal_odds:.2f} with other bots")
+
+# Example usage test case
+if __name__ == "__main__":
+    historical_data = {
+        'Horse A': {
+            'Market Drifters': {'success_rate': 0.7, 'average_profitable_odds': 3.5},
+            'Late Surge Fade': {'success_rate': 0.65, 'average_profitable_odds': 2.8}
+        },
+        'Horse B': {
+            'Market Steamers': {'success_rate': 0.75, 'average_profitable_odds': 4.5},
+            'Fast Pace Collapse': {'success_rate': 0.60, 'average_profitable_odds': 3.2}
+        }
+    }
+
+    market_data = [
+        {'name': 'Drifter Test', 'selection_id': 12345, 'current_odds': 3.6},
+        {'name': 'Steamer Test', 'selection_id': 67890, 'current_odds': 4.6},
+        {'name': 'Favourite Test', 'selection_id': 11121, 'current_odds': 2.5},
+        {'name': 'Early Value Test', 'selection_id': 14151, 'current_odds': 5.5},
+    ]
+
+    risk_mgr = RiskManager(max_liability_per_race=50, max_daily_loss_per_bot=150, global_max_exposure=300)
+    head_trader_bot = HeadTraderBot(risk_mgr, historical_data)
+
+    market_id = '1.23456789'  # Example market ID
+    headers = {"X-Application": "app_key", "X-Authentication": "session_token", "content-type": "application/json"}
+
+    head_trader_bot.analyze_market(market_data, market_id, headers, is_in_play=False)

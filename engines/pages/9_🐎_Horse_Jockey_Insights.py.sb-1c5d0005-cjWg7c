@@ -1,0 +1,60 @@
+# 9_🐎_Horse_Jockey_Insights.py – Momentum Signals by Horse, Jockey, Trainer
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
+
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+
+st.set_page_config(page_title="Horse & Jockey Insights", layout="wide")
+st.title("🐎 Horse & Jockey Momentum Dashboard")
+
+# Load today's relevant runner data
+@st.cache_data
+def load_bets():
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    with sqlite3.connect(DB_PATH) as conn:
+        query = f"""
+        SELECT date, horse_name, strategy_name, bot_name, pnl, marketId
+        FROM bets
+        WHERE date >= date('now', '-60 day')
+        """
+        return pd.read_sql_query(query, conn)
+
+df = load_bets()
+df['date'] = pd.to_datetime(df['date'])
+latest_date = df['date'].max()
+today_str = latest_date.strftime('%Y-%m-%d')
+
+today_df = df[df['date'] == latest_date]
+past_df = df[df['date'] < latest_date]
+
+# 🐎 Horses with recent wins
+horse_winners = past_df[past_df['pnl'] > 0].groupby('horse_name').size().reset_index(name='wins')
+horses_today = today_df[['horse_name']].drop_duplicates()
+horses_today = horses_today.merge(horse_winners, on='horse_name', how='left').fillna(0)
+horses_today = horses_today[horses_today['wins'] > 0].sort_values('wins', ascending=False)
+
+# 🧑‍✈️ Jockeys with hot form
+jockeys = past_df[past_df['pnl'] > 0].groupby('bot_name').size().reset_index(name='wins')
+today_jockeys = today_df[['bot_name']].drop_duplicates()
+today_jockeys = today_jockeys.merge(jockeys, on='bot_name', how='left').fillna(0)
+today_jockeys = today_jockeys[today_jockeys['wins'] > 1].sort_values('wins', ascending=False)
+
+# 🏠 Trainer Momentum (simulated using strategy_name for now)
+trainers = past_df[past_df['pnl'] > 0].groupby('strategy_name').size().reset_index(name='wins')
+today_trainers = today_df[['strategy_name']].drop_duplicates()
+today_trainers = today_trainers.merge(trainers, on='strategy_name', how='left').fillna(0)
+today_trainers = today_trainers[today_trainers['wins'] > 2].sort_values('wins', ascending=False)
+
+st.subheader("🐎 Horse Form Momentum")
+st.dataframe(horses_today, use_container_width=True)
+
+st.subheader("🧑‍✈️ Jockey Hot List")
+st.dataframe(today_jockeys, use_container_width=True)
+
+st.subheader("🏠 Trainer Hot List")
+st.dataframe(today_trainers, use_container_width=True)
+
+st.markdown("---")
+st.caption("⚠️ Based on win-based P&L signals in the past 60 days. Updated each session.")

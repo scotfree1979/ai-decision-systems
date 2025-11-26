@@ -1,0 +1,160 @@
+# og_bot_family/og_preoff_bot.py
+
+import logging
+import sqlite3
+import pandas as pd
+from threading import Thread
+from datetime import datetime
+import bet_placer
+from .green_up import green_up
+
+class PreOffBot:
+    def __init__(self, risk_manager, budget_manager, headers, signal_queue):
+        self.risk_manager = risk_manager
+        self.budget_manager = budget_manager
+        self.headers = headers
+        self.signal_queue = signal_queue
+        self.DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/engines/bets.db"
+        self.active = True
+        logging.info('Pre-Off Bot: Initialized successfully with centralized Risk Manager, Budget Manager, headers, and signal queue.')
+
+    def fetch_recent_trades(self):
+    conn = sqlite3.connect(self.DB_PATH)
+    trades = pd.read_sql("""
+        SELECT horse_name AS horse, odds, result, timestamp
+        FROM bets
+        ORDER BY datetime(timestamp) DESC
+        LIMIT 10
+    """, conn)
+    conn.close()
+    return trades
+
+
+    def bot_loop(self):
+    logging.info('Pre-Off Bot: Continuous loop started explicitly.')
+    while self.active:
+        signal = self.signal_queue.get()
+        logging.info(f'Pre-Off Bot: Received signal explicitly: {signal}')
+
+        # Execute green-up explicitly at 5-minute signal
+        if signal.get('signal_type') == '5':
+            market_id = signal['marketId']
+            horses = signal['horses']
+            initial_stakes = signal['initial_stakes']
+            current_odds = signal['current_odds']
+            fire_ice_status = signal.get('fire_ice_status')
+
+            green_up(
+                self.headers,
+                market_id,
+                horses,
+                initial_stakes,
+                current_odds,
+                fire_ice_status
+            )
+            logging.info(f"Pre-Off Bot: Green-up executed explicitly for market {market_id}")
+        else:
+            recent_trades = self.fetch_recent_trades()
+            logging.info(f"Pre-Off Bot: Recent trades: \n{recent_trades.head()}")
+
+            market_data = recent_trades[['horse', 'odds', 'result']].values
+            bet_signals = self.preoff_strategy(market_data)
+
+            for bet_signal in bet_signals:
+                logging.info(f"Pre-Off Bot: Bet Signal: {bet_signal}")
+                approved_signal = self.risk_manager.evaluate_signal(bet_signal)
+
+                if not approved_signal:
+                    matched_liability, unmatched_liability, _ = self.budget_manager.get_bot_status_from_db("OGPreoff")
+                    approved_signal = self.budget_manager.handle_rejected_signal(
+                        bet_signal, matched_liability, unmatched_liability, "Budget limit reached"
+                    )
+
+                if approved_signal:
+                    try:
+                        bet_placer.enhanced_place_bet(  # Explicitly changed
+                            self.headers,
+                            approved_signal['marketId'],
+                            approved_signal['selectionId'],
+                            stake=approved_signal['stake'],
+                            odds=approved_signal['odds'],
+                            market_start_time=approved_signal.get('marketStartTime'),  # Explicitly added
+                            bet_type='LAY'
+                        )
+                        logging.info(f"Pre-Off Bot: Bet placed explicitly: {approved_signal['marketId']}")
+                    except Exception as e:
+                        logging.error(f'Pre-Off Bot: Error placing bet explicitly: {e}')
+
+                # Execute scalping bet explicitly if desired
+                try:
+                    bet_placer.scalping_bets(
+                        self.headers,
+                        approved_signal['marketId'],
+                        [(approved_signal['selectionId'], approved_signal['odds'])]
+                    )
+                    logging.info(f"Pre-Off Bot: Scalping bet executed explicitly for: {approved_signal['horse']}")
+                except Exception as e:
+                    logging.error(f'Pre-Off Bot: Error executing scalping bet explicitly: {e}')
+
+        self.signal_queue.task_done()
+
+
+    def bot_loop(self):
+        logging.info('Pre-Off Bot: Continuous loop started explicitly.')
+        while self.active:
+            signal = self.signal_queue.get()
+            logging.info(f'Pre-Off Bot: Received signal explicitly: {signal}')
+
+            # Execute green-up explicitly at 5-minute signal
+            if signal.get('signal_type') == '5':
+                market_id = signal['marketId']
+                horses = signal['horses']
+                initial_stakes = signal['initial_stakes']
+                current_odds = signal['current_odds']
+                fire_ice_status = signal.get('fire_ice_status')
+
+                green_up(
+                    self.headers,
+                    market_id,
+                    horses,
+                    initial_stakes,
+                    current_odds,
+                    fire_ice_status
+                )
+                logging.info(f"Pre-Off Bot: Green-up executed explicitly for market {market_id}")
+
+            recent_trades = self.fetch_recent_trades()
+            logging.info(f"Pre-Off Bot: Recent trades: \n{recent_trades.head()}")
+
+            market_data = recent_trades[['horse', 'odds', 'result']].values
+            bet_signals = self.preoff_strategy(market_data)
+
+            for bet_signal in bet_signals:
+                logging.info(f"Pre-Off Bot: Bet Signal: {bet_signal}")
+                approved_signal = self.risk_manager.evaluate_signal(bet_signal)
+
+                if not approved_signal:
+                    matched_liability, unmatched_liability, _ = self.budget_manager.get_bot_status_from_db("OGPreoff")
+                    approved_signal = self.budget_manager.handle_rejected_signal(
+                        bet_signal, matched_liability, unmatched_liability, "Budget limit reached"
+                    )
+
+                if approved_signal:
+                    bet_placer.place_pre_off_lay_bet(
+                        self.headers,
+                        approved_signal['marketId'],
+                        approved_signal['selectionId'],
+                        stake=approved_signal['stake'],
+                        odds=approved_signal['odds']
+                    )
+                    logging.info(f"Pre-Off Bot: Bet placed explicitly: {approved_signal['marketId']}")
+
+                # Execute scalping bet explicitly
+                bet_placer.scalping_bets(self.headers, bet_signal['marketId'], [(bet_signal['selectionId'], bet_signal['odds'])])
+                logging.info(f"Pre-Off Bot: Scalping bet executed explicitly for: {bet_signal['horse']}")
+
+            self.signal_queue.task_done()
+
+    def start_loop(self):
+        logging.info('Pre-Off Bot: Loop starting explicitly.')
+        Thread(target=self.bot_loop, daemon=True).start()

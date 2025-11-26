@@ -1,0 +1,122 @@
+###1 TRADE STRUCTURE SETUP
+# Group linked trades by signal: Entry, Hedge
+import time
+from collections import defaultdict
+from bet_core import place_bet, check_bet_matched, cancel_bet
+from upgrade_import_patch import get_session_token
+from price_math import get_tick_size
+from dbsave import save_bet_to_db
+
+# Throttle max 3 trades per selection per bot
+active_scalps = defaultdict(lambda: {"NextGen": 0, "SmartScalp": 0})
+
+def build_trade_group(signal):
+    suffix = signal.get("customerOrderRef", "SS_MANUAL")
+    return {
+        "entry": {
+            "side": "LAY" if signal["scalp_direction"] == "lay_to_back" else "BACK",
+            "odds": signal["odds"],
+            "stake": 10.0,
+            "ref": f"{suffix}_E"
+        },
+        "hedge": {
+            "side": "BACK" if signal["scalp_direction"] == "lay_to_back" else "LAY",
+            "ticks": signal.get("scalp_ticks", 2),
+            "ref": f"{suffix}_H"
+        },
+        "meta": {
+            "group_id": suffix,
+            "direction": signal["scalp_direction"],
+            "marketId": signal["marketId"],
+            "selectionId": signal["selectionId"]
+        }
+    }
+
+
+###2 SMART SCALPING LOGIC
+# Executes full trade chain using upgraded logic
+
+def execute_smart_scalp(signal):
+    group = build_trade_group(signal)
+    tick_size = get_tick_size(signal["odds"])
+    session_token = signal.get("session_token") or get_session_token()
+    marketId = signal["marketId"]
+    selectionId = signal["selectionId"]
+    bot_origin = signal.get("bot_origin", "SmartScalp")
+
+    if active_scalps[selectionId][bot_origin] >= 3:
+        print(f"⛔ Max scalps active from {bot_origin} on {selectionId}. Skipping.")
+        return
+
+    entry = group["entry"]
+    entry_id = place_bet(session_token, marketId, selectionId, entry["stake"], entry["odds"], entry["side"], entry["ref"])
+    if not entry_id:
+        print("❌ Entry failed")
+        return
+
+    save_bet_to_db(marketId, selectionId, entry["odds"], entry["stake"], entry["side"], entry["ref"], entry_id)
+    active_scalps[selectionId][bot_origin] += 1
+
+    for _ in range(10):
+        time.sleep(3)
+        if check_bet_matched(session_token, entry_id):
+            break
+    else:
+        cancel_bet(session_token, entry_id)
+        print("⚠️ Entry not matched – cancelled")
+        active_scalps[selectionId][bot_origin] -= 1
+        return
+
+    hedge = group["hedge"]
+    hedge_odds = round(entry["odds"] - hedge["ticks"] * tick_size, 2) if entry["side"] == "LAY" else round(entry["odds"] + hedge["ticks"] * tick_size, 2)
+
+    if entry["side"] == "LAY":
+        hedge_stake = round((entry["odds"] * entry["stake"]) / hedge_odds, 2)
+    else:
+        hedge_stake = round((entry["stake"] * hedge_odds) / entry["odds"], 2)
+
+    hedge_bet_id = place_bet(session_token, market_id, selection_id, hedge_stake, hedge_odds, hedge_side, hedge_ref)
+
+    if hedge_id:
+        save_bet_to_db(marketId, selectionId, hedge_odds, hedge_stake, hedge["side"], hedge["ref"], hedge_id)
+
+
+###3 AUTO STAKE SCALING
+# Dynamically increase base stake as bankroll grows
+
+def calculate_scaled_stake(base_stake, profit_bank):
+    increment = int(profit_bank / 100) * 2
+    return round(base_stake + increment, 2)
+
+
+###4 PROFIT ATTRIBUTION ENGINE
+# Market-level win/loss determination based on real outcome
+
+def resolve_market_pnl(marketId, winning_selection):
+    from database_hijack_monitor import fetch_trades_for_market
+
+    trades = fetch_trades_for_market(marketId)
+    pnl = 0.0
+    for trade in trades:
+        if trade["selectionId"] == winning_selection:
+            pnl += trade["back_win"] if trade["side"] == "BACK" else trade["lay_loss"]
+        else:
+            pnl += trade["lay_win"] if trade["side"] == "LAY" else -trade["back_stake"]
+    return pnl
+
+
+###5 IN-RUNNING STRATEGY EXTENSIONS
+# Layer logic for in-play lay detection, field runners, drifters
+
+def detect_inplay_lay_signals(signal):
+    odds = signal["odds"]
+    bracket = signal.get("market_bracket")
+    if bracket == "field" and odds >= 6.0:
+        return True
+    return False
+
+
+def execute_inplay_lay(signal):
+    signal["session_token"] = get_session_token()
+    ref = f"INPLAY_{signal['selectionId']}"
+    place_bet(signal["session_token"], signal["marketId"], signal["selectionId"], 4.0, signal["odds"], "LAY", ref)

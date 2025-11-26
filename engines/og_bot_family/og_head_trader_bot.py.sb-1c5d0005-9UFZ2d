@@ -1,0 +1,87 @@
+# ✅ og_head_trader_bot.py – Head Trader Bot + Signal Listener + Full Context Merge
+
+import threading
+import logging
+import sqlite3
+import pandas as pd
+from queue import Queue
+from datetime import datetime
+from bet_placer import (
+    place_basic_lay_bet,
+    place_ladder_lay_bet,
+    place_scalp_trade,
+    place_greenup_exit,
+    place_inplay_lay_bet
+)
+from og_bot_family.og_preoff_bot import PreOffBot
+from og_bot_family.og_inplay_bot import OGInPlayBot
+
+
+class HeadTraderBot:
+    def __init__(self, risk_manager, budget_manager, headers, bot_signal_queues):
+        self.risk_manager = risk_manager
+        self.budget_manager = budget_manager
+        self.headers = headers
+        self.bot_signal_queues = bot_signal_queues
+        self.bot_signal_queue = self.bot_signal_queues["OGHeadTrader"]
+        self.DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/engines/bets.db"
+        logging.info('OGHeadTrader Bot: Initialized with Risk Manager, Budget Manager, and Signal Queues.')
+
+    def fetch_recent_trades(self):
+        conn = sqlite3.connect(self.DB_PATH)
+        trades = pd.read_sql("SELECT horse, odds, result FROM bets ORDER BY timestamp DESC LIMIT 10", conn)
+        conn.close()
+        return trades
+
+    def orchestrate_bots(self):
+        logging.info('OGHeadTrader Bot: Starting orchestration.')
+
+        og_inplay_bot = OGInPlayBot(
+            self.risk_manager, self.budget_manager, self.headers, self.bot_signal_queues
+        )
+        og_preoff_bot = PreOffBot(
+            self.risk_manager, self.budget_manager, self.headers, self.bot_signal_queues
+        )
+
+        threading.Thread(target=og_preoff_bot.start_loop, daemon=True).start()
+        threading.Thread(target=og_inplay_bot.start_loop, daemon=True).start()
+
+        logging.info('OGHeadTrader Bot: Bots running smoothly.')
+
+        def head_signal_loop():
+            while True:
+                try:
+                    signal = self.bot_signal_queue.get()
+                    logging.info(f"📥 [OGHeadTrader] Received signal: {signal}")
+                except Exception as e:
+                    logging.critical(f"🔥 [OGHeadTrader] Signal loop failed: {e}")
+                    raise
+
+                logging.info(f"📥 [OGHeadTrader] Received signal: {signal}")
+
+                if signal.get("status") == "approved":
+                    bet_type = signal.get("bet_type", "")
+
+                    if bet_type == "BASIC":
+                        place_basic_lay_bet(signal)
+                        logging.info(f"✅ Lay bet placed for market {signal['marketId']}")
+                    elif bet_type == "LADDER":
+                        place_ladder_lay_bet(signal)
+                        logging.info(f"🪜 Ladder lay executed for market {signal['marketId']}")
+                    elif bet_type == "SCALP":
+                        place_scalp_trade(signal)
+                        logging.info(f"✅ Scalping initiated for market {signal['marketId']}")
+                    elif bet_type == "GREENUP":
+                        place_greenup_exit(signal)
+                        logging.info(f"✅ Green-Up executed for market {signal['marketId']}")
+                    elif bet_type == "INPLAY":
+                        place_inplay_lay_bet(signal)
+                        logging.info(f"🏇 In-play lay triggered for market {signal['marketId']}")
+                else:
+                    logging.warning(
+                        f"⛔ [OGHeadTrader] Skipped non-approved signal: {signal.get('customerOrderRef')} | status: {signal.get('status')}"
+                    )
+
+                self.bot_signal_queue.task_done()
+
+        threading.Thread(target=head_signal_loop, daemon=True).start()

@@ -1,0 +1,75 @@
+        try:
+            from gui.dashboard_data import update_live_matched_odds
+            update_live_matched_odds()
+        except Exception as e:
+            print(f"[Step4] live matched-odds warn: {e}")
+# === PATCH END ===
+        from engines.risk import budget_manager
+        budget_manager.start_watcher()
+
+        # ── Stage 3: start Mastery feedback scheduler (runs every 60 s) ──
+        try:
+            from engines.mastery.feedback_scheduler import start as _start_feedback_sched
+            _start_feedback_sched(60)
+            print("[feedback_scheduler] started (interval=60s)")
+        except Exception as _e:
+            print(f"[feedback_scheduler] start warn: {_e}")
+# === PATCH END ===
+
+        # --- Launch OddsService background thread (writes odds_current) ---
+        try:
+            import threading, time
+            from engines.odds import odds_service
+
+            def _odds_writer_loop():
+                """Continuously refresh autoscalp_gui.db.odds_current"""
+                while True:
+                    try:
+                        odds_service.tick_update_for_scope(inplay_window_min=15)
+                    except Exception as e:
+                        print(f"[ODDS_SERVICE] warn: {e}")
+                    time.sleep(15)   # run every ~15 s
+
+            t = threading.Thread(target=_odds_writer_loop,
+                                 name="OddsServiceWriter", daemon=True)
+            t.start()
+            print("[ODDS_SERVICE] background writer started (15-sec cadence)")
+        except Exception as e:
+            print(f"[ODDS_SERVICE] launch failed: {e}")
+
+        # --- Launch Market Data background thread (fills autoscalp_gui.db.market_data) ---
+        try:
+            import threading, time
+            from engines.indicators import market_data
+            from engines.upgrade_import_patch import get_session_token  # type: ignore
+
+            def _market_data_loop():
+                while True:
+                    try:
+                        tok = (get_session_token() or "").strip()
+                        if tok:
+                            mkt = market_data.fetch_market_catalogue(
+                                tok, projection=["RUNNER_DESCRIPTION"]
+                            )
+                            if mkt:
+                                market_data.insert_market_data(mkt)
+                                print(f"[MARKET_DATA] updated {mkt.get('marketId')} "
+                                      f"with {len(mkt.get('runners') or [])} runners")
+                    except Exception as e:
+                        print(f"[MARKET_DATA] error: {e}")
+                    time.sleep(300)  # every 5 minutes
+
+            t = threading.Thread(target=_market_data_loop,
+                                 name="MarketDataThread", daemon=True)
+            t.start()
+            print("[MARKET_DATA] background thread started (5-min cadence)")
+        except Exception as e:
+            print(f"[MARKET_DATA] launch failed: {e}")
+
+        # --- Launch Overwatcher ---
+        try:
+            from engines.live.overwatcher import start_overwatcher
+            start_overwatcher(hz=2, stop_ticks_default=4)
+            print("[OVERWATCHER] started (hz=2, stop_ticks=4)")
+        except Exception as e:
+            print(f"[OVERWATCHER] failed to launch: {e}")

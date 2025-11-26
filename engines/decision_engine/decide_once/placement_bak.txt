@@ -1,0 +1,913 @@
+# engines/decision_engine/decide_once/placement.py
+from __future__ import annotations
+
+# --- diag: confirm active module + DB path (prints once) ---------------------
+try:
+    from engines.config_paths import autoscalp_db as _adb_path
+    print(f"[DECIDE] placement module = {__file__}")
+    print(f"[DECIDE] autoscalp_db     = {_adb_path()}")
+except Exception:
+    pass
+
+
+from engines.decision_engine.decide_once.helpers import is_today_in_scope
+
+from typing import Optional
+import json
+from .helpers import (
+    queue_order,
+    place_decision,
+    place_companion_hedge,
+    set_order_status,
+    mark_last_child_placed,
+    status_once,
+)
+
+import sqlite3, datetime, json  # at module top
+
+# ==== near top of placement.py, after imports ====
+def _i(v, d=0):
+    try: return int(v)
+    except Exception: return int(d)
+
+def _f(v, d=0.0):
+    try: return float(v)
+    except Exception: return float(d)
+
+
+def _resolve_parent_id(mid, sid, customer_ref=None):
+    """Resolve newly created parent order_id from customer_ref or latest row."""
+    con = _adb(); con.row_factory = sqlite3.Row
+    try:
+        if customer_ref:
+            r = con.execute("SELECT id FROM orders WHERE customer_ref=? LIMIT 1", (str(customer_ref),)).fetchone()
+            if r: return int(r["id"])
+        r = con.execute("""
+            SELECT id FROM orders
+            WHERE marketId=? AND selectionId=? AND mode='LIVE' AND (hedge_of IS NULL OR hedge_of='')
+            ORDER BY id DESC LIMIT 1
+        """, (str(mid), str(sid))).fetchone()
+        return int(r["id"]) if r else None
+    except Exception:
+        return None
+    finally:
+        try: con.close()
+        except Exception: pass
+
+# --- safe access for sqlite3.Row or dict -------------------------------------
+def _rget(row, key, default=None):
+    """
+    Safe getter that works for sqlite3.Row (row['k']) and dict (row.get('k')).
+    Never raises; returns default when key absent.
+    """
+    try:
+        # sqlite3.Row path
+        if hasattr(row, "keys"):
+            return row[key] if key in row.keys() else default
+        # dict path
+        if isinstance(row, dict):
+            return row.get(key, default)
+    except Exception:
+        pass
+    return default
+
+
+def _adb():
+    """Return a connection to AUTO_DB (autoscalp_gui.db)."""
+    try:
+        from engines.autoscalp_db import autoscalp_db as _ADB
+        return _ADB()
+    except Exception:
+        import os
+        ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+        return sqlite3.connect(os.path.join(ROOT, "data", "autoscalp_gui.db"))
+
+# --- safe access for sqlite3.Row or dict -------------------------------------
+def _rget(row, key, default=None):
+    """
+    Safe getter that works for sqlite3.Row (row['k']) and dict (row.get('k')).
+    Never raises; returns default when key absent.
+    """
+    try:
+        # sqlite3.Row path
+        if hasattr(row, "keys"):
+            return row[key] if key in row.keys() else default
+        # dict path
+        if isinstance(row, dict):
+            return row.get(key, default)
+    except Exception:
+        pass
+    return default
+
+
+import datetime, json, sqlite3
+
+# ✅ Use the shared connection helper that points at autoscalp_gui.db
+from .helpers import open_auto_db as _adb
+
+def _write_decision(*,
+                    run_id,
+                    mid,
+                    sid,
+                    outcome,
+                    why,
+                    letter,
+                    open_before=None,
+                    proposed_odds=None,
+                    proposed_stake=None,
+                    order_id=None) -> None:
+    """
+    Insert one row into autoscalp_gui.db:decisions.
+    Safe to call for both 'placed' and 'not_placed' outcomes.
+    """
+    decided_at = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    meta = {"placement_outcome": outcome, "why": why}
+    if open_before is not None:
+        meta["cap_state"] = {"open_before": int(open_before), "cap_limit": 3}
+    con = None
+    try:
+        con = _adb()  # sqlite3.Connection to autoscalp_gui.db
+        con.execute("""
+            INSERT INTO decisions(
+                run_id, marketId, selectionId, decided_at,
+                signal_type, blueprint_match, confidence, scalp_direction,
+                proposed_odds, proposed_stake, notes, meta_json, order_id, why
+            ) VALUES (?,?,?,?,NULL,NULL,NULL,NULL,?,?,?,?,?,?)
+        """, (
+            run_id, str(mid), str(sid), decided_at,
+            proposed_odds, proposed_stake,
+            (letter or "")[:1],
+            json.dumps(meta, separators=(",", ":")),
+            order_id,
+            str(why or "")
+        ))
+        con.commit()
+        try:
+            print(f"[DECISIONS] outcome={outcome} why={why} mid={mid} sid={sid} letter={letter}")
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            if con: con.rollback()
+        finally:
+            print(f"[DECIDE][ERR] insert decisions failed: {e}")
+    finally:
+        try:
+            if con: con.close()
+        except Exception:
+            pass
+
+# RangeGate (soft dependency)
+try:
+    from range_gate import assess_letters_for_plan as _rg_assess
+except Exception:
+    _rg_assess = None
+
+try:
+    from .helpers import record_decision_meta as _record_meta
+except Exception:
+    _record_meta = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public helper: allow other modules (lanes) to log a "skip" decision
+def log_decision_skip(*,
+                      run_id: str | None,
+                      marketId: str | int,
+                      selectionId: str | int,
+                      letter: str | None,
+                      why: str,
+                      proposed_odds: float | None = None,
+                      proposed_stake: float | None = None,
+                      order_id: int | None = None) -> None:
+    try:
+        _write_decision(
+            run_id=run_id,
+            mid=str(marketId),
+            sid=str(selectionId),
+            outcome="not_placed",
+            why=str(why),
+            letter=(letter or "?"),
+            proposed_odds=proposed_odds,
+            proposed_stake=proposed_stake,
+            order_id=order_id,
+        )
+    except Exception as _e:
+        try:
+            print(f"[DECISIONS] skip-log warn mid={marketId} sid={selectionId}: {_e}")
+        except Exception:
+            pass
+
+
+
+
+# ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 SEARCH: ^def place_from_plan\(name: str, plan: dict, ctx: dict\) -> Optional\[int\]:
+# ⛏️ ACTION: within this function insert the pending-claim + finalize logic
+# ============================================================
+# helper near top of file (once):
+# ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 SEARCH: ^def _insert_pending_parent\(
+# ⛏️ ACTION: insert if missing (new helper)
+# ============================================================
+def _insert_pending_parent(
+    *,
+    name: str,
+    mid: str,
+    sid: str,
+    letter: str,
+    side: str,
+    plan: dict,
+    ctx: dict,
+    cor: str,
+) -> int | None:
+    """
+    Pre-claim a slot for caps by inserting a PENDING parent row with a CustomerOrderRef (COR).
+    Stamps role=strategy name and source=letter to eliminate UNKNOWN strategy artifacts.
+    Returns the new row id (or the existing one if COR already exists).
+    """
+    import sqlite3
+    try:
+        con = _adb(); con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO orders (
+                run_id, decision_id, customerOrderRef,
+                marketId, selectionId, mode, side,
+                entry_odds, entry_stake,
+                entry_status, status,
+                role, source,
+                opened_at, notes
+            )
+            VALUES (
+                (SELECT COALESCE((SELECT id FROM runs ORDER BY id DESC LIMIT 1), 0)), NULL, ?,
+                ?, ?, ?, ?,
+                ?, ?,
+                'PENDING', 'PENDING',
+                ?, ?,
+                datetime('now','utc'), TRIM(COALESCE(?, ''))
+            )
+        """, (
+            str(cor),
+            str(mid), str(sid), str(ctx.get("mode") or "LIVE"), str(side),
+            float(plan.get("px", 0.0)), float(plan.get("size", 0.0)),
+            str(name), str(letter),
+            f"pre-claim {letter}"
+        ))
+        con.commit()
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        # Same COR already present: re-use that row id
+        try:
+            r = con.execute("SELECT id FROM orders WHERE customerOrderRef=? LIMIT 1", (str(cor),)).fetchone()
+            return int(r["id"]) if r else None
+        except Exception:
+            return None
+    except Exception:
+        try: con.rollback()
+        except Exception: pass
+        return None
+    finally:
+        try: con.close()
+        except Exception: pass
+
+
+
+
+# ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 SEARCH: def _cap_ok(mid: str, sid: str, letter: str) -> tuple[bool, Optional[int]]:
+# ============================================================
+def _cap_ok(mid: str, sid: str, letter: str) -> tuple[bool, Optional[int]]:
+    """Shim into decide_once.caps. Returns (ok, open_before). Blocks on any cap breach."""
+    try:
+        from engines.decision_engine.decide_once.caps import cap_ok
+    except Exception:
+        # local-relative fallback
+        from .caps import cap_ok  # type: ignore
+
+    try:
+        ok, reason, metrics = cap_ok(str(mid), str(sid), str(letter))
+        # Keep return contract: (ok, open_before)
+        return (ok, int(metrics.get("open_per_letter")) if metrics and "open_per_letter" in metrics else None)
+    except Exception as e:
+        # SAFE FAIL: block if we cannot verify caps
+        try:
+            print(f"[NO-PLACE][CAP][PlacementError] cap_check_failed err={e} mid={mid} sid={sid} letter={letter}")
+        except Exception:
+            pass
+        return (False, None)
+
+
+def _stamp_parent(parent_id: int, letter: str):
+    """Stamp the created parent with its letter."""
+    con = _adb(); con.row_factory = sqlite3.Row
+    try:
+        con.execute("UPDATE orders SET source=? WHERE id=?", (letter, int(parent_id)))
+        con.commit()
+    except Exception:
+        try: con.rollback()
+        except Exception: pass
+    finally:
+        try: con.close()
+        except Exception: pass
+
+
+# add near the top of place_from_plan (right above _latest_px)
+def _latest_px_from_odds_current(mid, sid):
+    con = _adb(); con.row_factory = sqlite3.Row
+    try:
+        r = con.execute("""
+            SELECT ltp FROM odds_current
+             WHERE marketId=? AND selectionId=?
+             ORDER BY datetime(updated_ts) DESC
+             LIMIT 1
+        """, (mid, sid)).fetchone()
+        return float(r["ltp"]) if r and r["ltp"] is not None else None
+    finally:
+        try: con.close()
+        except Exception: pass
+
+def _latest_px_from_oc_series(mid, sid):
+    try:
+        from engines.config_paths import connect_db
+        bdb = connect_db(ro=True); bdb.row_factory = sqlite3.Row
+        r = bdb.execute("""
+            SELECT odd FROM oc_series
+             WHERE marketId=? AND selectionId=?
+             ORDER BY datetime(snapshot_ts) DESC
+             LIMIT 1
+        """, (mid, sid)).fetchone()
+        bdb.close()
+        return float(r["odd"]) if r and r["odd"] is not None else None
+    except Exception:
+        return None
+
+# --- add near top of file if not present ---
+import math
+
+
+# ------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 SEARCH: ^def place_from_plan\(name: str, plan: dict, ctx: dict\) -> Optional\[int\]:
+#            (inside this function; we inject three small helpers + 2 calls)
+# ─────────────────────────────────────────────────────────────────────────────
+def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
+    """
+    Canonicalize IDs (camelCase), ensure a usable price, enforce CAP=3 per (runner, letter, mode),
+    place via router, and ALWAYS write a decision row (blocked or placed) with linked order_id.
+    """
+    from engines.live.live_router import place_parent_and_hedge
+    import sqlite3
+
+    # --- normalize odds keys so plan always has anchor_price + px -------------
+    if "anchor_price" not in plan:
+        if "anchor_odd" in plan:
+            plan["anchor_price"] = plan["anchor_odd"]
+        elif "entry_odds" in plan:
+            plan["anchor_price"] = plan["entry_odds"]
+
+    if "px" not in plan:
+        if "price" in plan:
+            plan["px"] = plan["price"]
+        elif "ltp" in plan:
+            plan["px"] = plan["ltp"]
+        elif "price_now" in plan:
+            plan["px"] = plan["price_now"]
+
+
+    # ---- canonical IDs + letter --------------------------------------------
+    plan = dict(plan or {})
+    ctx  = dict(ctx  or {})
+
+    def _canon_ids(d: dict) -> tuple[Optional[str], Optional[str]]:
+        if not isinstance(d, dict): return None, None
+        mid = d.get("marketId") or d.get("market_id") or d.get("mid") or d.get("MarketId")
+        sid = d.get("selectionId") or d.get("selection_id") or d.get("sid") or d.get("SelectionId")
+        return (str(mid) if mid is not None else None,
+                str(sid) if sid is not None else None)
+
+    mid, sid = _canon_ids(plan)
+    if mid is None or sid is None:
+        cmid, csid = _canon_ids(ctx)
+        mid = mid or cmid
+        sid = sid or csid
+
+    if mid is None or sid is None:
+        decision_why = "blocked: missing marketId/selectionId"
+        if plan and plan.get("plan_why"):
+            decision_why += f" | {plan['plan_why']}"
+
+        _write_decision(
+            run_id=ctx.get("run_id"), mid=mid, sid=sid,
+            outcome="not_placed",
+            why=decision_why,
+            letter=(plan.get("letter") or ctx.get("letter") or name)
+        )
+        return None
+
+
+    # ---- FINAL PLAN SANITIZE (no None for numeric fields) -------------------
+    def _zi(v, d=0):
+        try: return int(v)
+        except Exception: return int(d)
+
+    def _zf(v, d=0.0):
+        try: return float(v)
+        except Exception: return float(d)
+
+    # Required/commonly-compared numerics
+    plan["target_ticks"] = max(1, _zi(plan.get("target_ticks"), 1))
+    plan["hedge_ticks"]  = max(1, _zi(plan.get("hedge_ticks", plan["target_ticks"]), plan["target_ticks"]))
+    plan["stop_ticks"]   = max(0, _zi(plan.get("stop_ticks"), 0))
+    plan["timeout_sec"]  = max(1, _zi(plan.get("timeout_sec"), 45))
+    plan["size"]         = max(2.0, _zf(plan.get("size"), 2.0))
+    plan["px"]           = _zf(plan.get("px"), _zf(ctx.get("odds"), 0.0))
+
+    # Optional ladder-only field: drop if None so no one compares it
+    if plan.get("pyramid_add_at") is None:
+        plan.pop("pyramid_add_at", None)
+    else:
+        plan["pyramid_add_at"] = _zi(plan["pyramid_add_at"], 0)
+
+
+    # write back canonical IDs
+    plan["marketId"] = mid;  ctx["marketId"] = mid
+    plan["selectionId"] = sid; ctx["selectionId"] = sid
+
+    # derive letter (single uppercase) BEFORE any CAP
+    letter = (str(plan.get("letter") or ctx.get("letter") or name or "A")[:1]).upper()
+    # ── RangeGate final guard (letter/time/range/bias) ─────────────────────
+    if _rg_assess:
+        try:
+            _stub = {"marketId": mid, "selectionId": sid, "px": float(plan.get("px", 0.0) or 0.0)}
+            _rg = _rg_assess(_stub, ctx, letters=[letter]) or {}
+            _v = _rg.get(letter)
+        except Exception:
+            _v = None
+        if _v and not _v.get("can_fire", False):
+            needs = _v.get("needs") or []
+            reason = "range_gate:" + (",".join(needs) if needs else (_v.get("why") or "blocked"))
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed", why=reason, letter=letter)
+            try:
+                if _record_meta:
+                    _record_meta(ctx.get("run_id"), mid, sid, {
+                        "why": reason, "needs": needs,
+                        "window": _v.get("window"), "bias": _v.get("bias"),
+                        "range": _v.get("range"), "dir": _v.get("direction"),
+                        "conf": _v.get("conf"),
+                    })
+            except Exception:
+                pass
+            return None
+    # ───────────────────────────────────────────────────────────────────────
+
+    plan["letter"] = letter
+
+    # ---- bias + rotation gates ---------------------------------------------
+    from engines.odds.trend_analyzer.direction_service import ensure_direction_in_plan, choose_bias
+    from engines.decision_engine.strategies.common import apply_bias_to_plan
+    from engines.decision_engine.decide_once.helpers import rotation_ok
+
+    # First, guarantee direction/edge on the plan itself
+    try:
+        ensure_direction_in_plan(plan, ctx)
+    except Exception:
+        pass
+
+    # Normalize 'edge' from direction when missing
+    d_now = (plan.get("direction") or "").upper()
+    if d_now in ("LAY->BACK", "BACK->LAY") and not plan.get("edge"):
+        plan["edge"] = "B2L" if d_now == "BACK->LAY" else "L2B"
+
+    # If the strategy already gave us a concrete direction, **do not** re-gate with bias.
+    # Otherwise fall back to bias gate from (anchor, price).
+    shaped = None
+    has_concrete_dir = d_now in ("LAY->BACK", "BACK->LAY")
+    bias_decision = None  # bind a local so later code can safely check
+
+    if has_concrete_dir:
+        shaped = [plan]
+    else:
+        # ✅ Hybrid: prefer plan, then ctx, then fallbacks for bias calculation
+        anchor = (plan.get("anchor_price")
+                  or ctx.get("anchor_price")
+                  or plan.get("entry_odds"))
+        price  = (plan.get("last_price_traded")
+                  or plan.get("ltp")
+                  or plan.get("px"))
+
+        bias_decision = choose_bias(anchor=anchor, price=price, trend=ctx.get("trend"))
+
+        # ✅ Guard: if no clear direction, skip trade
+        if not bias_decision or not getattr(bias_decision, "direction", None):
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed",
+                            why="blocked: no clear direction (bias)", letter=letter)
+            try:
+                print(f"[PLACE-DBG] skip mid={mid} sid={sid} why=no-bias-direction anchor={anchor} price={price}")
+            except Exception:
+                pass
+            return None
+
+        shaped = apply_bias_to_plan(
+            [plan],
+            bias_decision,
+            exposure=_f(ctx.get("exposure", plan.get("exposure")), 0.0),
+        )
+        if not shaped:
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed",
+                            why=f"bias_block: {getattr(bias_decision,'reason', 'unspecified')}", letter=letter)
+            try:
+                print(f"[PLACE-DBG] skip mid={mid} sid={sid} why=bias_block dir={getattr(bias_decision,'direction',None)}")
+            except Exception:
+                pass
+            return None
+
+
+    # ---- SANITIZE ONCE (critical) ----
+    plan = shaped[0]
+    direction    = str(plan.get("direction", "")).upper()
+    hedge_ticks  = _i(plan.get("target_ticks"), 1)
+    size         = _f(plan.get("size", ctx.get("size_cap")), 2.0)
+
+
+    # context-derived bits used in guards
+    exposure = _f(ctx.get("exposure", plan.get("exposure")), 0.0)
+
+    # ✅ always compute minutes-to-off on the fly
+    try:
+        from engines.decision_engine.orchestrator import _compute_minutes_to_off, _current_source
+        mto, win = _compute_minutes_to_off(str(mid), source=_current_source())
+        minutes_to_off = float(mto) if mto is not None else 1e9
+        ctx["minutes_to_off"] = minutes_to_off
+        if win:
+            ctx["tto_window"] = win
+    except Exception as e:
+        minutes_to_off = 1e9
+        # 🔧 DEBUG: tell us which markets are missing schedule data
+        print(f"[debug] minutes_to_off fallback → 1e9 (mid={mid}, sid={sid}, err={e})")
+
+    fav_rank = _i(ctx.get("fav_rank"), 999)
+
+
+    # ---- PRE-OFF: RangeGate owns timing. Only block once in-play. ----------
+    if minutes_to_off <= 0:
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed", why="preoff_gate:in_play", letter=letter)
+        return None
+
+
+
+    # Hedge-funds gate: only relevant/risky for BACK->LAY (child is a LAY with liability).
+    # For LAY->BACK, child is a BACK stake — typically not funds-constraining.
+    try:
+        from engines.decision_engine.decide_once.daily_config import fetch_available_budget
+        avail_budget = float(fetch_available_budget() or 0.0)
+    except Exception:
+        avail_budget = 0.0  # fail-closed on funds gate for safety
+
+    # Conservative worst-case child liability for B2L:
+    # assume child LAY at (roughly) entry price; add small buffer.
+    if str(plan.get("direction","")).upper() == "BACK->LAY":
+        px_f   = float(plan.get("px", 0.0) or 0.0)
+        size_f = float(plan.get("size", 0.0) or 0.0)
+        worst_child_liab = max(0.0, (px_f - 1.0) * size_f) * 1.10  # +10% buffer
+        if avail_budget < worst_child_liab:
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed",
+                            why=f"funds_gate:b2l_child_liab need={worst_child_liab:.2f} avail={avail_budget:.2f}",
+                            letter=letter)
+            return None
+
+
+    # Re-apply bias only if we actually computed one above
+    if bias_decision is not None:
+        shaped = apply_bias_to_plan([plan], bias_decision, exposure=exposure)
+        if not shaped:
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed",
+                            why=f"bias_block: {getattr(bias_decision,'reason','unspecified')}", letter=letter)
+            return None
+        plan = shaped[0]
+    else:
+        # keep the already-shaped plan (strategy gave a concrete direction)
+        plan = shaped[0]
+
+
+    ok_rot, why_rot = rotation_ok(market_id=mid, selection_id=sid,
+                                  letter=letter, mode=ctx.get("mode"))
+    if not ok_rot:
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed",
+                        why=f"rotation_block: {why_rot}", letter=letter)
+        return None
+
+    # require an entry plan
+    if plan.get("enter") is not True:
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed", why="skip: no-plan-or-enter=false", letter=letter)
+        return None
+
+
+    # ---- resolve price ------------------------------------------------------
+
+    if plan.get("px") is None:
+        con = _adb(); con.row_factory = sqlite3.Row
+        try:
+            r = con.execute(
+                """SELECT anchor_odd, oc1
+                     FROM inbound_oc_cache
+                    WHERE marketId=? AND selectionId=?
+                 ORDER BY datetime(COALESCE(last_sync_ts,'')) DESC, id DESC
+                    LIMIT 1""",
+                (mid, sid)
+            ).fetchone()
+            if r:
+                px = r["oc1"] if r["oc1"] is not None else r["anchor_odd"]
+                if px is not None:
+                    plan["px"] = float(px)
+        finally:
+            try: con.close()
+            except Exception: pass
+
+    if plan.get("px") is None:
+        px = _latest_px_from_odds_current(mid, sid)
+        if px is not None: plan["px"] = float(px)
+
+    if plan.get("px") is None:
+        px = _latest_px_from_oc_series(mid, sid)
+        if px is not None: plan["px"] = float(px)
+
+    if plan.get("px") is None and plan.get("entry_odds") is not None:
+        plan["px"] = float(plan["entry_odds"])
+
+    if plan.get("px") is None:
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed",
+                        why="blocked: no px available (cache miss)", letter=letter)
+        return None
+
+    # Centralized ACTIVE/PASSIVE/IGNORED classification + per-letter policy
+    try:
+        from engines.market_monitor import monitor as marketmon
+    except Exception:
+        marketmon = None
+
+    try:
+        if marketmon:
+            # ensure snapshot exists (lanes usually refreshed already)
+            marketmon.ensure_for_markets([mid], max_runners=8)
+            cls = marketmon.classify(mid, sid, odds=float(plan["px"]))
+            band = cls.get("band", "UNKNOWN")
+            is_fav = bool(cls.get("is_fav"))
+            plan["band"] = band
+            plan["is_fav"] = is_fav
+            if not marketmon.allowed_for_letter(letter, band):
+                _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                                outcome="not_placed",
+                                why=f"band_block: letter={letter} band={band} px={float(plan['px']):.2f} fav={is_fav}",
+                                letter=letter)
+                return None
+        else:
+            # fallback if monitor missing — mirror monitor.BANDS exactly
+            pxv = float(plan["px"])
+            try:
+                from engines.market_monitor import monitor as marketmon
+                lo  = float(marketmon.BANDS.get("ACTIVE_MIN", 1.50))
+                hi  = float(marketmon.BANDS.get("ACTIVE_MAX", 8.00))
+                hi2 = float(marketmon.BANDS.get("PASSIVE_MAX", 12.00))
+            except Exception:
+                lo, hi, hi2 = 1.50, 8.00, 12.00
+            if pxv < lo:
+                band = "PASSIVE"
+            elif pxv <= hi:
+                band = "ACTIVE"
+            elif pxv < hi2:
+                band = "PASSIVE"
+            else:
+                band = "IGNORED"
+            plan["band"] = band
+            plan["is_fav"] = False
+            if band == "IGNORED" and letter in ("A","P"):
+                _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                                outcome="not_placed",
+                                why=f"band_block_fallback: letter={letter} band={band} px={pxv:.2f}",
+                                letter=letter)
+                return None
+    except Exception as e:
+        # fail-open but annotate
+        plan.setdefault("band", "UNKNOWN")
+        plan.setdefault("is_fav", False)
+
+    # ---- A-letter flip on fresh PASSIVE->ACTIVE steam -----------------------
+    try:
+        # Only touch A, and only when ACTIVE, and only when we have a real px
+        if letter == "A" and plan.get("band") == "ACTIVE":
+            px = float(plan.get("px", 0.0))
+            if px > 0.0 and px < 8.0:
+                # Prefer true anchor if we have it; fall back to entry_odds or px
+                anchor = (plan.get("anchor_price")
+                          or ctx.get("anchor_price")
+                          or plan.get("entry_odds")
+                          or px)
+                try:
+                    from engines.odds.trend_analyzer.direction_service import choose_bias
+                    b = choose_bias(anchor=anchor, price=px, trend=ctx.get("trend"))
+                except Exception:
+                    b = None
+
+                # Flip only on strong steam (B2L) signal
+                # (conf ≥ 0.70; tune threshold as needed)
+                if b and getattr(b, "direction", None) == "B2L" and float(getattr(b, "conf", 0.0)) >= 0.70:
+                    plan["direction"] = "BACK->LAY"
+                    plan["edge"] = "B2L"
+                    plan["why"] = (plan.get("why","") + " | A:flip_on_steam").strip()
+    except Exception:
+        pass
+
+    # ---- Direction harmonizer: enforce bias, allow only explicit flips ----
+    # 1) collect flip signals (P->A, favourite change)
+    try:
+        from engines.market_monitor import monitor as marketmon
+        sig = marketmon.signals_for_runner(mid, sid, float(plan["px"]))
+    except Exception:
+        sig = {"p2a_recent": False, "new_fav_recent": False, "lost_fav_recent": False, "is_fav_now": False}
+
+    # 2) compute simple bias from anchor vs price (journey)—steam=B2L, drift=L2B
+    anchor = (plan.get("anchor_price") or ctx.get("anchor_price") or plan.get("entry_odds"))
+    try:
+        anchor_f = float(anchor) if anchor is not None else None
+    except Exception:
+        anchor_f = None
+    price_f = float(plan["px"])
+    bias_dir = None
+    if anchor_f is not None:
+        if price_f < anchor_f: bias_dir = "B2L"  # steam
+        elif price_f > anchor_f: bias_dir = "L2B"  # drift
+
+    # 3) ensure plan has a concrete direction; default to bias if missing
+    plan_dir = (plan.get("direction") or "").upper()
+    if plan_dir not in ("BACK->LAY","LAY->BACK"):
+        plan_dir = "BACK->LAY" if bias_dir == "B2L" else "LAY->BACK"
+        plan["direction"] = plan_dir
+        plan["edge"] = "B2L" if plan_dir == "BACK->LAY" else "L2B"
+
+    # 4) explicit overrides (the ONLY times we flip against bias)
+    override = None
+    if sig.get("p2a_recent") or sig.get("new_fav_recent"):
+        override = "B2L"      # force BACK->LAY
+    elif sig.get("lost_fav_recent"):
+        override = "L2B"      # force LAY->BACK
+
+    if override:
+        plan["direction"] = "BACK->LAY" if override == "B2L" else "LAY->BACK"
+        plan["edge"]      = override
+        ctx["bias_override"] = True
+    else:
+        # 5) enforce: direction must match bias (unless no bias)
+        if bias_dir == "B2L" and plan["direction"] != "BACK->LAY":
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed", why="bias_mismatch:B2L", letter=letter)
+            return None
+        if bias_dir == "L2B" and plan["direction"] != "LAY->BACK":
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed", why="bias_mismatch:L2B", letter=letter)
+            return None
+
+    # ---- B2L allow-list by letter (BTL is rare & whitelisted) --------------
+    if str(plan.get("direction","")).upper() == "BACK->LAY":
+        # Only allow when the letter explicitly represents a BTL-capable strategy.
+        ALLOW_B2L_LETTERS = set(("B", "G", "X"))
+        if letter not in ALLOW_B2L_LETTERS:
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed",
+                            why=f"b2l_not_allowed_for_letter:{letter}", letter=letter)
+            return None
+
+
+    # -----------------------------------------------------------------------
+
+
+# ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 SEARCH: # ---- PRE-INSERT HARD CAP (letter + market-scoped global) ----
+# ⛏️ ACTION: replace from that comment down to just before "from datetime import datetime"
+# ============================================================
+    # ---- DATE GUARD (never place into tomorrow) ----------------------------
+    try:
+        if not is_today_in_scope(mid):
+            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                            outcome="not_placed", why="date_guard:not_today", letter=letter)
+            return None
+    except Exception:
+        # fail-closed: if we cannot prove it's today, don't place
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed", why="date_guard:error", letter=letter)
+        return None
+
+    # ---- PRE-INSERT HARD CAP (letter + market-scoped global) ---------------
+    from engines.decision_engine.decide_once.caps import cap_ok
+    _side = "LAY" if str(plan.get("direction","")).upper().startswith("LAY") else "BACK"
+    ok_cap, cap_reason, cap_metrics = cap_ok(mid, sid, letter, side=_side)
+    n_before = int(cap_metrics.get("open_per_letter")) if cap_metrics and "open_per_letter" in cap_metrics else None
+
+    if not ok_cap:
+        _write_decision(
+            run_id=ctx.get("run_id"), mid=mid, sid=sid,
+            outcome="not_placed",
+            why=(cap_reason or "cap_block"),
+            letter=letter,
+            open_before=n_before,
+        )
+        try:
+            print(f"[NO-PLACE][CAP] {cap_reason} mkt={mid} sel={sid} letter={letter} side={_side}")
+        except Exception:
+            pass
+        return None
+
+    # ---- PRE-CLAIM CAP SLOT (PENDING) with COR ----------------------------
+    import uuid, sqlite3
+    cor = f"{letter}-{uuid.uuid4().hex[:10]}"
+    plan["customerOrderRef"] = cor  # pass to router
+
+    pending_id = _insert_pending_parent(
+        name=name, mid=mid, sid=sid, letter=letter, side=_side,
+        plan=plan, ctx=ctx, cor=cor
+    )
+    if pending_id is None:
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed", why="cap_preclaim_failed", letter=letter,
+                        open_before=n_before)
+        return None
+
+    # --- PASS STAMP (pre-router) -------------------------------------------
+    from engines.decision_engine.decide_once.caps import pass_no_for
+    pno = pass_no_for(mid, sid, letter)
+    plan["pass_no"] = int(pno)
+    try:
+        print(f"[PASS][Placement] {letter}{pno} mid={mid} sid={sid}")
+    except Exception:
+        pass
+
+    # ---- LIVE router call --------------------------------------------------
+    bet_id, cref = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
+    if not cref:
+        # if router doesn’t echo, we still know the authoritative COR
+        cref = cor
+
+    if bet_id or cref:
+        # success: upgrade PENDING → PLACED using COR (authoritative)
+        try:
+            con = _adb(); con.row_factory = sqlite3.Row
+            con.execute("""
+              UPDATE orders
+                 SET entry_bet_id=COALESCE(?, entry_bet_id),
+                     customer_ref=COALESCE(?, customer_ref),
+                     entry_status='PLACED', status='PLACED'
+               WHERE customerOrderRef=?""",
+               (str(bet_id) if bet_id else None, str(cref), str(cor)))
+            con.commit()
+        except Exception:
+            try: con.rollback()
+            except Exception: pass
+        finally:
+            try: con.close()
+            except Exception: pass
+
+        parent_id = pending_id  # we just upgraded this row
+        _write_decision(
+            run_id=ctx.get("run_id"), mid=mid, sid=sid,
+            outcome="placed", why="ok", letter=letter,
+            open_before=n_before,
+            proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
+            order_id=parent_id,
+        )
+        return bet_id or parent_id  # prefer bet_id if present
+    else:
+        # failure: free the slot immediately (won't count to caps)
+        try:
+            con = _adb(); con.row_factory = sqlite3.Row
+            con.execute("""
+              UPDATE orders
+                 SET entry_status='FAILED', status='FAILED',
+                     closed_at=datetime('now','utc'),
+                     notes = TRIM(COALESCE(notes,'') || ' fail')
+               WHERE customerOrderRef=?""", (str(cor),))
+            con.commit()
+        except Exception:
+            try: con.rollback()
+            except Exception: pass
+        finally:
+            try: con.close()
+            except Exception: pass
+
+        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                        outcome="not_placed", why="router_fail", letter=letter,
+                        open_before=n_before)
+        return None
+    # ─────────────────────────────────────────────────────────────────────────

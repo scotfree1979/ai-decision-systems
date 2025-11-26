@@ -1,0 +1,179 @@
+# ===============================================================
+# AUTO SCALP — NARRATIVE OPERATING MANUAL v1
+# 📆 CREATED: 2025-11-03Z
+# ===============================================================
+# PURPOSE
+# Canonical content framework for the AutoScalp Video Promotion system.
+# Guides scripting, proof, UBS structure, hooks, and storytelling flow.
+# Always check this file before generating or recording any content.
+# ===============================================================
+
+
+# ===============================================================
+# 1️⃣ BUILD TIMELINE — THE 9-MONTH ARC
+# ===============================================================
+
+ACT I — GENESIS (V1–V3)
+UBS focus: L.O.S.E. + R.I.S.K.  |  Theme: From chaos to control.
+
+| Version | Era | Core Build | Pain Points | Tone | Analogy Cue |
+|----------|-----|-------------|--------------|------|--------------|
+| V1 — The Spark | Birth | First DBs & CLI loop | Crashes / schema gaps | Naïve → frustrated | "Building a plane mid-flight." |
+| V2 — The Groundwork | Structuring | GUI + Control Center v1 | Race conditions / frozen threads | Overwhelm → clarity | "Assembling an engine while it’s running." |
+| V3 — The Chaos Window | Transition | Step 1-4 pipeline | Cap rotation / risk overruns | Raw → resilient | "Forging steel in open flame." |
+
+ACT II — REFINEMENT (V4–V5)
+UBS focus: B.A.N.K. + D.A.T.A. + S.C.A.L.P.  |  Theme: Discipline creates freedom.
+
+| Version | Era | Core Build | Pain Points | Tone | Analogy Cue |
+|----------|-----|-------------|--------------|------|--------------|
+| V4 — The Discipline Phase | Structure | Budget Manager / bank state | Math bugs / liability drift | Rational → focused | "Tightening every bolt on an overheated machine." |
+| V5 — The Stability Engine | Performance | Replay + Mastery seeds | DB locks / duplication | Relief → momentum | "Finally hearing the hum of balance." |
+
+ACT III — EXPANSION (V6–V7)
+UBS focus: M.A.S.T.E.R. + C.O.N.T.R.O.L. + I.N.T.E.L.  |  Theme: Turning precision into rhythm.
+
+| Version | Era | Core Build | Pain Points | Tone | Analogy Cue |
+|----------|-----|-------------|--------------|------|--------------|
+| V6 — The Intelligence Layer | Insight | Playbooks + Reinforcement | Cross-DB joins / scaling | Analytical → driven | "Reading the market like sheet music." |
+| V7 — The Dashboard Renaissance | Visualization | Mastery Dashboard V7 | UI sync / cache load | Calm → mastery | "Hearing music in data." |
+
+
+# ===============================================================
+# 2️⃣ UBS CUE GRIDS — GUIDED FREE FLOW
+# ===============================================================
+
+Each UBS acronym provides four-to-six cue words to guide improvisation.
+
+L.O.S.E. — Learn • Observe • Stabilise • Evolve  
+R.I.S.K. — Refine • Identify • Secure • Know  
+E.D.G.E. — Detect • Defend • Guide • Execute  
+B.A.N.K. — Budget • Assess • Navigate • Keep  
+D.A.T.A. — Define • Analyse • Test • Adapt  
+S.C.A.L.P. — Scan • Calculate • Align • Leverage • Persist  
+M.A.S.T.E.R. — Measure • Adapt • Simulate • Train • Evolve • Reinforce  
+C.O.N.T.R.O.L. — Calm • Observe • Neutralise • Time • Rebalance • Lead
+
+
+# ===============================================================
+# 3️⃣ LANGUAGE TRANSITION PLAN — UBS ROLL-IN SCHEDULE
+# ===============================================================
+
+Phase 1 — Hidden (Days 1–30)  
+ UBS terms implied only through stories and analogies.  
+ Tag: # UBS: Hidden
+
+Phase 2 — Emerging (Days 31–60)  
+ Dedicated “UBS Origin” video introduces all pillars.  
+ Casual references appear; subtle on-screen glyphs.  
+ Tag: # UBS: Emerging
+
+Phase 3 — Fluent (Days 61–90+)  
+ UBS becomes native vocabulary; previous videos referenced for context.  
+ Tag: # UBS: Fluent
+
+
+# ===============================================================
+# 4️⃣ REAL-WORLD HOOK SYSTEM (v2) + TEMPORAL HOOK LAYER
+# ===============================================================
+
+Structure:  
+1️⃣ Real-World Trigger — specific, named event  
+2️⃣ Emotional Spike  — universal reaction  
+3️⃣ Concept Bridge   — pivot into UBS theme
+
+Example:  
+“Storm Melissa ripped through half the coast this week — houses gone, lives scattered.  
+Everyone saw destruction.  
+But sometimes loss is just tuition in disguise.”
+
+Rotation plan:  
+• Market Days → economic shocks  
+• Off Days → tech / social trends  
+• Transition Days → sports events  
+• Milestone Days → seasonal or world events
+
+
+# ===============================================================
+# 5️⃣ ANALOGY + C.A.M. LAYER — COMPREHENSION, ANALOGY, MEMORY
+# ===============================================================
+
+Purpose: translate complex ideas into emotional understanding.
+
+Rules:  
+• ≤ 1 analogy every 60–90 seconds  
+• Mix analogy → fact → pause → metaphor  
+• Archetypes per UBS pillar (e.g., L.O.S.E. = forge; R.I.S.K. = tightrope; etc.)
+
+C.A.M. block syntax:
+
+[CONCEPT] short statement  
+[C.A.M.] concise analogy  
+[FREE FLOW] improv expansion
+
+
+# ===============================================================
+# 6️⃣ PROOF ARCHITECTURE SYSTEM (v1)
+# ===============================================================
+
+Proof types: Empirical | Emotional | Comparative | Social | Process  
+Visual formats: screenshots, recordings, side-by-sides, metric cards.
+
+Transparency Framework → everything logged = everything shown.  
+Map data → visuals → script call-outs.  
+Folder structure:  
+ /proof/screenshots/ weekly  
+ /proof/videos/ weekly  
+ /proof/reports/ quarterly  
+ /proof/testimonials/ as available
+
+
+# ===============================================================
+# 7️⃣ JAPSCRIPT MASTER TEMPLATE — VIDEO STRUCTURE
+# ===============================================================
+
+0:00–0:05  🔥 Temporal Hook  
+0:05–0:25  🎯 Opening Statement  
+0:25–1:30  🌊 UBS Free Flow (using cue grid)  
+1:30–1:50  🔮 Analogy + Loop Closure  
+1:50–1:55  📊 Proof Insert  
+1:55–2:00  🚀 CTA
+
+Symbols used in scripts:  
+🎯 [SAY THIS] | 🌊 [FREE FLOW] | 🔮 [C.A.M.] | 📊 [PROOF]
+
+
+# ===============================================================
+# 8️⃣ LANGUAGE + HOOK AUTOMATION
+# ===============================================================
+
+• Dynamic hook placeholder → # HOOK: dynamic  
+• Weekly trend update for market / social topics  
+• Evergreen hook fallback bank maintained separately
+
+
+# ===============================================================
+# 9️⃣ FUTURE EXTENSIONS
+# ===============================================================
+
+• Automated proof snapshot exporter (/proof/latest.png)  
+• UBS video release cadence scheduler  
+• Analogy resonance tracking (viewer retention heatmap)  
+• Social proof insertion schedule
+
+
+# ===============================================================
+# 🔟 CONTEXT-CHECK WORKFLOW
+# ===============================================================
+
+Before writing any new content or video:
+
+1. Read this manual fully.  
+2. Identify current version (V1–V7) + UBS pillar.  
+3. Select hook type and proof stage.  
+4. Generate script using the Japscript template.  
+5. Cross-verify metrics and proof assets before final recording.
+
+# ===============================================================
+# END OF FILE
+# ===============================================================

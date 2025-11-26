@@ -1,0 +1,327 @@
+# upgrade/nextgen_trading.py
+
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+
+import time
+import logging
+import threading
+import sqlite3
+from datetime import datetime
+import requests
+import json
+from upgrade_import_patch import get_session_token
+from price_math import get_tick_size
+from bet_core import place_bet, check_bet_matched, cancel_bet
+from utils.api_tools import fetch_live_odds
+from collections import defaultdict
+
+_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_suffix_index = 0
+active_scalps = defaultdict(int)
+
+runner_trades = []
+
+from upgrade.Group3_Strategy_Upgrade import execute_smart_scalp
+
+APP_KEY = "CZHojduNWa3kxWIn"  # Replace with your real app key
+
+def get_matched_amount(session_token, bet_id):
+    try:
+        response = requests.post(
+            "https://api.betfair.com/exchange/betting/rest/v1.0/listCurrentOrders/",
+            headers={
+                "X-Authentication": session_token,
+                "X-Application": APP_KEY,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps({"betIds": [bet_id]})
+        )
+        result = response.json()
+        orders = result.get("currentOrders", [])
+        if orders:
+            return float(orders[0].get("sizeMatched", 0))
+    except Exception as e:
+        print(f"⚠️ Error checking matched amount: {e}")
+    return 0.0
+
+def _next_suffix():
+    global _suffix_index
+    from config_paths import DB_PATH
+
+    if _suffix_index == 0:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            refs = conn.execute(
+                "SELECT customerOrderRef FROM bets WHERE customerOrderRef LIKE '__%'"
+            ).fetchall()
+            max_found = 0
+            for row in refs:
+                try:
+                    prefix = row["customerOrderRef"].split("_")[0]
+                    a, b, num = prefix[0], prefix[1], prefix[2:]
+                    base = (ord(a) - 65) * 26 * 1000 + (ord(b) - 65) * 1000 + int(num)
+                    max_found = max(max_found, base)
+                except:
+                    continue
+            _suffix_index = max_found + 1
+
+    code = _suffix_index
+    _suffix_index += 1
+
+    a_index = (code // 1000) // 26
+    b_index = (code // 1000) % 26
+
+    if a_index >= len(_letters) or b_index >= len(_letters):
+        raise ValueError("💥 _next_suffix() exhausted code space — increase letter base or reset")
+
+    return f"{_letters[a_index]}{_letters[b_index]}{code % 1000:03}"
+
+def save_bet_to_db(market_id, selection_id, odds, stake, side, ref, bet_id):
+    try:
+        with sqlite3.connect("scalper.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO bets (marketId, selectionId, odds, stake, side, customerOrderRef, betfair_bet_id, placed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                market_id, selection_id, odds, stake, side, ref, bet_id, datetime.utcnow().isoformat()
+            ))
+            conn.commit()
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to save bet to DB: {e}")
+
+BREAKOUT_CONFIRM_TICKS = 2  # Number of ticks outside the range to confirm trend
+
+
+def launch_nextgen_thread(signal):
+    try:
+        signal = dict(signal)
+        signal["customerOrderRef"] = f"SS_{_next_suffix()}"
+
+        direction = signal.get("scalp_direction")
+        if not direction:
+            odds = signal.get("odds")
+            anchor = signal.get("anchor_odd") or odds
+            signal["scalp_direction"] = "lay_to_back" if odds > anchor else "back_to_lay"
+
+        odds = signal.get("odds")
+        selection_id = signal.get("selectionId")
+
+        if odds is None or odds > 20:
+            print(f"🚫 [NEXTGEN] Odds too high ({odds}). Skipping scalp.")
+            return
+
+        if active_scalps[selection_id] >= 3:
+        print(f"🚫 [NEXTGEN] Too many active scalps on runner {selection_id}. Skipping.")
+        return
+
+        # ✅ Range-based logic
+        range_low = signal.get("range_low")
+        range_high = signal.get("range_high")
+        scalp_ticks = signal.get("scalp_ticks", 2)
+        tick_size = get_tick_size(odds)
+
+        if range_low is None or range_high is None:
+            print(f"⚠️ [NEXTGEN] Missing range boundaries. Skipping scalp.")
+            return
+
+        if direction == "lay_to_back":
+            ticks_to_top = (range_high - odds) / tick_size
+            if ticks_to_top >= scalp_ticks:
+                pass  # Safe to enter
+            elif odds > range_high + BREAKOUT_CONFIRM_TICKS * tick_size:
+                pass  # Confirmed breakout
+            else:
+                print(f"⏸️ [NEXTGEN] Odds too close to or inside range for lay_to_back. Waiting.")
+                return
+
+        elif direction == "back_to_lay":
+            ticks_to_bottom = (odds - range_low) / tick_size
+            if ticks_to_bottom >= scalp_ticks:
+                pass  # Safe to enter
+            elif odds < range_low - BREAKOUT_CONFIRM_TICKS * tick_size:
+                pass  # Confirmed breakout
+            else:
+                print(f"⏸️ [NEXTGEN] Odds too close to or inside range for back_to_lay. Waiting.")
+                return
+
+    except Exception as e:
+        print(f"❌ Failed to prepare signal for SmartScalp: {e}")
+        return
+
+    def run_old_smart_scalp():
+        try:
+            execute_smart_scalp(signal)
+        except Exception as e:
+            print(f"❌ SmartScalp error: {e}")
+
+    def run_nextgen_scalp_wrapper():
+        try:
+            run_nextgen_scalp(dict(signal))
+        except Exception as e:
+            print(f"❌ NextGenScalp error: {e}")
+
+    threading.Thread(target=run_old_smart_scalp, name="SmartScalpThread", daemon=True).start()
+    threading.Thread(target=run_nextgen_scalp_wrapper, name="NextGenScalpThread", daemon=True).start()
+    print(f"🚀 Launched SmartScalp + NextGenScalp for selectionId: {signal.get('selectionId')}")
+
+def run_nextgen_scalp(signal):
+    selection_id = signal.get("selectionId")
+    odds = signal.get("odds")
+
+    # ✅ Frequency and Odds Throttle
+    if odds is None or odds > 20:
+        print(f"🚫 [NEXTGEN] Odds too high ({odds}). Skipping scalp.")
+        return
+
+    if active_scalps[selection_id] >= 3:
+        print(f"🚫 [NEXTGEN] Too many active scalps on runner {selection_id}. Skipping.")
+        return
+
+    active_scalps[selection_id] += 1
+
+    print("\n[NEXTGEN] 🚀 Starting next-gen scalp engine...")
+    print(f"[NEXTGEN] Runner: {selection_id} | Odds: {odds} | Stake: £10.00 (forced)")
+
+    try:
+        session_token = get_session_token()
+        market_id = signal.get("marketId")
+        stake = 10.0  # Enforced stake override
+        ticks = signal.get("scalp_ticks", 2)
+
+        direction = signal.get("scalp_direction", "lay_to_back")
+        tick_size = get_tick_size(odds)
+        signal["tick_size"] = tick_size
+
+        if direction == "lay_to_back":
+            entry_side = "LAY"
+            hedge_side = "BACK"
+            hedge_odds = round(odds - (ticks * tick_size), 2)
+        else:
+            entry_side = "BACK"
+            hedge_side = "LAY"
+            hedge_odds = round(odds + (ticks * tick_size), 2)
+
+        suffix = _next_suffix()
+        base_ref = f"NG_{suffix}"
+        if len(base_ref) > 28:
+            base_ref = base_ref[:28]
+
+        entry_ref = f"{base_ref}_E"
+        hedge_ref = f"{base_ref}_H"
+
+        entry_bet_id = place_bet(session_token, market_id, selection_id, stake, odds, entry_side, entry_ref)
+        if not entry_bet_id:
+            active_scalps[selection_id] -= 1
+            return
+
+        save_bet_to_db(market_id, selection_id, odds, stake, entry_side, entry_ref, entry_bet_id)
+
+        matched_so_far = 0.0
+
+        for i in range(10):
+            time.sleep(1)
+            matched_now = get_matched_amount(session_token, entry_bet_id)
+            new_matched = round(matched_now - matched_so_far, 2)
+
+            if new_matched >= 0.01:
+                matched_so_far += new_matched
+                print(f"[NEXTGEN] ✅ New matched: £{new_matched:.2f} (Total matched: £{matched_so_far:.2f})")
+
+                if entry_side == "LAY":
+                    hedge_stake = round((odds * new_matched) / hedge_odds, 2)
+                else:
+                    hedge_stake = round((new_matched * hedge_odds) / odds, 2)
+
+                hedge_sub_ref = f"{hedge_ref}_P{i}"
+                hedge_bet_id = place_bet(session_token, market_id, selection_id, hedge_stake, hedge_odds, hedge_side, hedge_sub_ref, persistence_type="PERSIST")
+
+                if hedge_bet_id:
+                    save_bet_to_db(market_id, selection_id, hedge_odds, hedge_stake, hedge_side, hedge_sub_ref, hedge_bet_id)
+
+        if matched_so_far == 0:
+            print("[NEXTGEN] ❌ No match after timeout. Cancelling entry.")
+            cancel_bet(session_token, entry_bet_id)
+
+        active_scalps[selection_id] -= 1
+
+    except Exception as e:
+        print(f"💥 [NEXTGEN] Crash: {e}")
+        active_scalps[selection_id] -= 1
+
+# -----------------------------
+# 🔍 RANGE SNAPSHOT TESTING TOOL
+# -----------------------------
+
+def fetch_runner_odds(session_token, market_id):
+    try:
+        response = requests.post(
+            "https://api.betfair.com/exchange/betting/rest/v1.0/listMarketBook/",
+            headers={
+                "X-Authentication": session_token,
+                "X-Application": APP_KEY,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps({
+                "marketIds": [market_id],
+                "priceProjection": {
+                "priceData": ["EX_BEST_OFFERS", "EX_TRADED"],
+                "exBestOffersOverrides": { "bestPricesDepth": 3 },
+                "virtualise": True
+            }
+            })
+        )
+        result = response.json()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"⚠️ Error fetching runner odds: {e}")
+        return None
+
+from get_markets import get_markets_and_insert
+
+from upgrade_import_patch import set_session_token
+
+if __name__ == "__main__":
+    print("🔐 Please enter your Betfair session token:")
+    token = input("Session Token: ").strip()
+    set_session_token(token)
+    session_token = get_session_token()
+    markets = get_markets_and_insert()
+
+    if not markets or not isinstance(markets[0], dict):
+        print("❌ No valid markets returned. Exiting.")
+        exit()
+
+    for market in markets:
+        market_id = market.get("marketId")
+        runners = market.get("runners", [])
+        print(f"\n📈 Market ID: {market_id}")
+
+        book = fetch_runner_odds(session_token, market_id)
+        if not book:
+            continue
+
+        for runner_data in book.get("runners", []):
+            selection_id = runner_data.get("selectionId")
+
+            back = runner_data.get("ex", {}).get("availableToBack", [])
+            lay = runner_data.get("ex", {}).get("availableToLay", [])
+
+            top_back = back[0]["price"] if back else None
+            top_lay = lay[0]["price"] if lay else None
+
+            traded = runner_data.get("ex", {}).get("tradedVolume", [])
+
+            if traded:
+                total_matched = sum(pt["size"] for pt in traded)
+                weighted_anchor = sum(pt["price"] * pt["size"] for pt in traded) / total_matched
+                tick_size = get_tick_size(weighted_anchor)
+                range_low = round(weighted_anchor - 2 * tick_size, 2)
+                range_high = round(weighted_anchor + 2 * tick_size, 2)
+                print(f"🐎 Runner ID: {selection_id} | Back: {top_back} | Lay: {top_lay} | Anchor: {weighted_anchor:.2f} | Matched Volume: {int(total_matched)} | Range: [{range_low} - {range_high}]")
+            else:
+                print(f"🐎 Runner ID: {selection_id} | Back: {top_back} | Lay: {top_lay} | No matched volume data")

@@ -1,0 +1,1 @@
+rm .test_start_time.txt

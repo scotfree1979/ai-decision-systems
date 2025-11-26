@@ -1,0 +1,1089 @@
+# ✅ UPGRADE 20250525 – PART 1: Core Config, Safe Time, Odds Fetch, and Clock
+
+# 🔒 SYSTEM DESIGN NOTE:
+# This upgrade module controls only the flow of database automation (timing, snapshots, row creation).
+# It does NOT make business logic decisions. All trading logic (sizing, entry/exit, GreenUp, etc.)
+# lives in external modules like bet_core.py, green_up.py, and the bot family files.
+# This design ensures separation of logic and timing, so business strategy can evolve independently.
+
+# -----------------------------
+# ✅ LOGGING CONFIGURATION
+# -----------------------------
+
+# ✅ Core Imports – shared across all modules
+import os
+import sys
+import logging
+import sqlite3
+import time
+import json
+import requests
+import threading
+from datetime import datetime, timedelta, timezone
+from daily_config import TEST_MODE
+
+
+def get_racing_post_metadata(selection_id):
+    try:
+        meta = {
+            "rp_horse_name": f"RP_Horse_{selection_id}",
+            "rp_racecourse": "Hamilton",
+            "rp_off_time": "2025-05-28T14:00:00Z",
+            "rp_distance": "1m 2f",
+            "rp_type": "Handicap",
+            "rp_rating": 86,
+            "rp_weight": "9-7",
+            "rp_trainer": "Charlie Johnston",
+            "rp_jockey": "Joe Fanning"
+        }
+        return meta
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch RP metadata for runner {selection_id}: {e}")
+        return {}
+
+# -----------------------------
+# ✅ MODULE EXPORTS (for upgrade_import_patch)
+# -----------------------------
+__all__ = [
+    "get_simulated_now",
+    "get_time_segment",
+    "fetch_live_odds",
+    "get_racing_post_metadata",
+    "DB_PATH",
+    "APP_KEY",
+    "TEST_MODE"
+]
+
+# -----------------------------
+# ✅ SIMULATED CLOCK FUNCTION
+# -----------------------------
+
+def get_simulated_now():
+    if not TEST_MODE:
+        try:
+            response = requests.get("http://worldtimeapi.org/api/timezone/Etc/UTC", timeout=2)
+            if response.status_code == 200:
+                external = response.json().get("utc_datetime")
+                if external:
+                    return datetime.fromisoformat(external.replace("Z", "+00:00"))
+        except Exception as e:
+            logging.warning(f"⚠️ External UTC fallback failed, reverting to system clock: {e}")
+        return datetime.utcnow().replace(tzinfo=timezone.utc)
+    elapsed_real = (datetime.utcnow() - TEST_START_TIME).total_seconds()
+    simulated_minutes = (elapsed_real / (SIMULATED_DURATION_MIN * 60)) * SIMULATED_TOTAL_MINUTES
+    return (TEST_START_TIME + timedelta(minutes=simulated_minutes)).replace(tzinfo=timezone.utc)
+
+# -----------------------------
+# ✅ SEGMENTED TIME WINDOW CHECK
+# -----------------------------
+
+def get_time_segment(minutes_to_off):
+    if 78 <= minutes_to_off <= 82:
+        return "time_80"
+    elif 58 <= minutes_to_off <= 62:
+        return "time_60"
+    elif 38 <= minutes_to_off <= 42:
+        return "time_40"
+    elif 18 <= minutes_to_off <= 22:
+        return "time_20"
+    else:
+        return None
+
+# -----------------------------
+# ✅ LIVE ODDS FETCH (with safety)
+# -----------------------------
+
+def fetch_live_odds(session_token, market_id, selection_id):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": APP_KEY,
+        "X-Authentication": session_token,
+        "Content-Type": "application/json"
+    }
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketBook",
+            "params": {
+                "marketIds": [market_id],
+                "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
+            },
+            "id": 1
+        }
+    ])
+    try:
+        response = requests.post(url, headers=headers, data=payload)
+        if response.status_code != 200:
+            logging.error(f"❌ API error {response.status_code}: {response.text}")
+            return None
+
+        json_data = response.json()
+        if not json_data or not isinstance(json_data, list):
+            logging.error(f"❌ Invalid Betfair response format: {json_data}")
+            return None
+
+        market_book = json_data[0]
+        runners = market_book.get("runners", [])
+        if not runners:
+            logging.warning(f"⚠️ No runners returned for market {market_id}. Market may be closed or malformed.")
+            return None
+
+        for runner in runners:
+            if runner.get("selectionId") == selection_id:
+                lay = runner.get("ex", {}).get("availableToLay", [])
+                if lay:
+                    price = lay[0].get("price")
+                    logging.debug(f"📊 Fetched odds: Runner {selection_id} in market {market_id} | Best Lay: {price}")
+                    return price
+                else:
+                    logging.warning(f"⚠️ No lay prices available for runner {selection_id} in market {market_id}")
+                    return None
+
+        logging.warning(f"⚠️ Runner {selection_id} not found in market {market_id}. Available: {[r.get('selectionId') for r in runners]}")
+        return None
+
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch odds for market {market_id}, selection {selection_id}: {e}")
+        return None
+
+# ✅ MAIN RUNNER – THREAD ENTRY (FULL STEP SEQUENCE)
+
+def main():
+    logging.info("🚀 Starting Automation Engine")
+
+    # STEP 1: Load core launch protocol + seed logic
+    launch_protocol()
+
+    # STEP 2: Run Monitor – fetch markets + enrich DB rows
+    run_monitor()
+
+    # STEP 3: Begin continuous threads AFTER DB is populated
+    threading.Thread(target=market_monitor_signals, name="MarketMonitor", daemon=True).start()
+    threading.Thread(target=signal_monitor, name="SignalMonitor", daemon=True).start()
+    threading.Thread(target=risk_manager, name="RiskManager", daemon=True).start()
+    threading.Thread(target=budget_manager, name="BudgetManager", daemon=True).start()
+    threading.Thread(target=bet_settlement_monitor, name="BetSettler", daemon=True).start()
+
+    # STEP 4: Enable main loop (heartbeat + enrichment cycle)
+    while True:
+        logging.info("🔄 Looping through enrichment cycle...")
+        keep_alive()
+        time.sleep(60)
+
+# -----------------------------
+# ✅ SAFE SCHEMA VALIDATION (TEST_MODE ONLY)
+# -----------------------------
+
+def validate_bets_table():
+    if not TEST_MODE:
+        logging.info("🛑 Skipping bets table validation in live mode.")
+        return
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DROP TABLE IF EXISTS bets;")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bets (
+                marketId TEXT,
+                selectionId INTEGER,
+                stake REAL,
+                odds REAL,
+                bet_type TEXT,
+                placed_at TEXT,
+                status TEXT,
+                matched_liability REAL,
+                unmatched_liability REAL,
+                pnl REAL,
+                liability REAL,
+                result TEXT,
+                timestamp TEXT,
+                matched_timestamp TEXT,
+                betfair_bet_id TEXT,
+                horse_name TEXT,
+                strategy_name TEXT,
+                signal_type TEXT,
+                bot_name TEXT,
+                date TEXT,
+                time_signal TEXT,
+                can_accept_liability TEXT,
+                time_session TEXT,
+                race_name TEXT,
+                market_name TEXT,
+                event_name TEXT,
+                anchor_odd REAL,
+                odds_check_1 REAL,
+                odds_check_2 REAL,
+                odds_check_3 REAL,
+                odds_check_4 REAL,
+                odds_check_5 REAL,
+                odds_check_6 REAL,
+                customerOrderRef TEXT PRIMARY KEY,
+                bet_settled TEXT,
+                marketStartTime TEXT,
+                meta_json TEXT,
+                test_mode TEXT
+            );
+        """)
+        conn.commit()
+        logging.info("✅ Bets table created (TEST_MODE)")
+
+# ✅ UPGRADE 20250525 – PART 3: run_monitor()
+
+import sqlite3
+import os
+import json
+import logging
+import time
+import requests
+import threading
+from datetime import datetime, timedelta, timezone
+from daily_config import SESSION_TOKEN, APP_KEY, TEST_MODE
+from utils.api_tools import fetch_live_odds
+
+# -----------------------------
+# ✅ CORE CONFIGURATION – TEST_MODE + SIM CLOCK (100 min compressed to 5 real min)
+# -----------------------------
+
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+SIMULATED_DURATION_MIN = 5       # 🕒 Real time duration
+SIMULATED_TOTAL_MINUTES = 100    # 🕒 Simulated minutes for countdown
+TEST_CLOCK_PATH = "./.test_start_time.txt"
+TEST_START_TIME = None
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+
+def load_or_set_test_start_time():
+    global TEST_START_TIME
+    if not TEST_MODE:
+        return
+    try:
+        if os.path.exists(TEST_CLOCK_PATH):
+            with open(TEST_CLOCK_PATH, "r") as f:
+                TEST_START_TIME = datetime.fromisoformat(f.read().strip())
+                logging.info(f"⏱️ Loaded persistent TEST_START_TIME: {TEST_START_TIME.isoformat()}")
+        else:
+            TEST_START_TIME = datetime.utcnow()
+            with open(TEST_CLOCK_PATH, "w") as f:
+                f.write(TEST_START_TIME.isoformat())
+            logging.info(f"📦 Saved new TEST_START_TIME: {TEST_START_TIME.isoformat()}")
+    except Exception as e:
+        logging.warning(f"❌ Failed to handle TEST_START_TIME persistence: {e}")
+        TEST_START_TIME = datetime.utcnow()
+
+if TEST_MODE:
+    load_or_set_test_start_time()
+
+# -----------------------------
+# ✅ SIMULATED CLOCK FUNCTION – Aligns with TEST_MODE = true
+# -----------------------------
+
+def get_simulated_now():
+    if not TEST_MODE:
+        try:
+            response = requests.get("http://worldtimeapi.org/api/timezone/Etc/UTC", timeout=2)
+            if response.status_code == 200:
+                external = response.json().get("utc_datetime")
+                if external:
+                    return datetime.fromisoformat(external.replace("Z", "+00:00"))
+        except Exception as e:
+            logging.warning(f"⚠️ UTC fallback failed, using system clock: {e}")
+        return datetime.utcnow().replace(tzinfo=timezone.utc)
+
+    elapsed_real_seconds = (datetime.utcnow() - TEST_START_TIME).total_seconds()
+    scaled_sim_minutes = (elapsed_real_seconds / (SIMULATED_DURATION_MIN * 60)) * SIMULATED_TOTAL_MINUTES
+    return (TEST_START_TIME + timedelta(minutes=scaled_sim_minutes)).replace(tzinfo=timezone.utc)
+
+# -----------------------------
+# ✅ MARKET FETCHING – WITH STRUCTURE VALIDATION
+# -----------------------------
+
+def fetch_market_data():
+    logging.info("📡 Fetching live WIN markets with 7+ runners...")
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+
+    from_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    to_time = from_time + timedelta(hours=23, minutes=59)
+
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": APP_KEY,
+                "X-Authentication": session_token,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketCountries": ["GB", "IE"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": from_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "to": to_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "sort": "FIRST_TO_START",
+                        "maxResults": "50"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+
+        markets = response.json()[0].get("result", []) if response.status_code == 200 else []
+        filtered = [m for m in markets if len(m.get("runners", [])) >= 7]
+        logging.info(f"🎯 Filter complete: {len(filtered)} markets ready")
+        return filtered
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+
+# -----------------------------
+# ✅ RUN MONITOR – FULL RESTORE INCLUDING INLINE INSERT CHECKS
+# -----------------------------
+
+def run_monitor():
+    logging.info("📜 Starting run_monitor() – tracking all countdowns")
+
+    while True:
+        now = get_simulated_now()
+        session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+
+        if not TEST_MODE:
+            markets = fetch_market_data()
+            if markets:
+                with sqlite3.connect(DB_PATH) as conn:
+                    cursor = conn.cursor()
+                    for market in markets:
+                        market_id = market["marketId"]
+                        market_name = market["marketName"]
+                        market_start = market["marketStartTime"]
+                        event = market["event"]
+                        event_name = event["name"]
+
+                        dt = datetime.fromisoformat(market_start.replace("Z", "+00:00"))
+                        minutes_to_off = (dt - now).total_seconds() / 60
+                        clock_string = f"🕒 [Clock] {event_name} | {market_name} → Off at {dt.strftime('%H:%M')} | {int(minutes_to_off)} min to off"
+                        logging.info(clock_string)
+
+                        for runner in market["runners"]:
+                            selection_id = runner["selectionId"]
+                            runner_name = runner["runnerName"]
+
+                            time_signal = "upcoming"
+                            for upper, lower, tag in [(80, 60, "time_80"), (60, 40, "time_60"), (40, 20, "time_40"),
+                                                      (20, 10, "time_20"), (10, 5, "time_10"), (5, 2, "time_5"), (2, -1, "time_0")]:
+                                if lower < minutes_to_off <= upper:
+                                    time_signal = tag
+                                    break
+
+                            cursor.execute("SELECT 1 FROM bets WHERE marketId = ? AND selectionId = ?", (market_id, selection_id))
+                            exists = cursor.fetchone()
+                            if exists:
+                                continue
+
+                            try:
+                                odds = fetch_live_odds(session_token, market_id, selection_id)
+                                if odds is None:
+                                    continue
+                                cursor.execute("""
+                                    INSERT INTO bets (
+                                        marketId, selectionId, horse_name, event_name, market_name, marketStartTime,
+                                        status, date, time_signal, test_mode, odds, anchor_odd, odds_check_1
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    market_id, selection_id, runner_name, event_name, market_name, market_start,
+                                    "pending", now.strftime("%Y-%m-%d"), time_signal, 0,
+                                    odds, odds, odds
+                                ))
+                            except Exception as e:
+                                logging.warning(f"⚠️ Failed to insert seed market: {market_id} / {selection_id} | {e}")
+
+                    conn.commit()
+                    logging.info(f"✅ Seeded {len(markets)} live markets into bets table.")
+
+        time.sleep(60)
+
+# ✅ Ensure continuous loop in thread
+
+def start_run_monitor():
+    threading.Thread(target=run_monitor, name="RunMonitorLoop", daemon=True).start()
+
+# ✅ UPGRADE 20250525 – PART 4: market_monitor_signals()
+
+import sqlite3
+import logging
+import json
+import time
+import threading
+from datetime import datetime
+from volatility_check import real_time_volatility_check  # 🧠 new module logic
+from utils.api_tools import fetch_live_odds  # ✅ ensure this is available
+
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+
+SIGNAL_TYPES = [
+    'Market Drifter Signal', 'Market Steamer Signal', 'Drifter Recovery Signal', 'Late Surge Fade Signal',
+    'Odds Spike Reversal Signal', 'Early Value Signal', 'Favourite Vulnerability Signal', 'Volume Surge Signal',
+    'Market Inefficiency Signal', 'Multiple Beacon Confirmation Signal', 'Historical Edge Signal',
+    'Fast Pace Collapse Signal', 'Early Leader Stamina Doubt Signal'
+]
+
+# -----------------------------
+# ✅ SIGNAL DETECTION LOGIC
+# -----------------------------
+def detect_signal(anchor_odds, current_odds, volatility_meta):
+    signals = []
+    change = ((1 / current_odds) - (1 / anchor_odds)) / (1 / anchor_odds) * 100
+
+    if change >= 7.5:
+        signals.append('Market Steamer Signal')
+    elif change <= -7.5:
+        signals.append('Market Drifter Signal')
+
+    if current_odds >= anchor_odds + 3:
+        signals.append('Odds Spike Reversal Signal')
+    if current_odds <= anchor_odds - 2:
+        signals.append('Late Surge Fade Signal')
+    if anchor_odds * 1.2 >= current_odds > anchor_odds:
+        signals.append('Drifter Recovery Signal')
+
+    if volatility_meta.get('volume_spike'):
+        signals.append('Volume Surge Signal')
+    if volatility_meta.get('odds_discrepancy'):
+        signals.append('Market Inefficiency Signal')
+    if volatility_meta.get('beacon_combo'):
+        signals.append('Multiple Beacon Confirmation Signal')
+    if volatility_meta.get('fav_weakening'):
+        signals.append('Favourite Vulnerability Signal')
+    if volatility_meta.get('early_value'):
+        signals.append('Early Value Signal')
+    if volatility_meta.get('pace_collapse'):
+        signals.append('Fast Pace Collapse Signal')
+    if volatility_meta.get('stamina_doubt'):
+        signals.append('Early Leader Stamina Doubt Signal')
+
+    return signals
+
+# -----------------------------
+# ✅ PART 4: market_monitor_signals()
+# -----------------------------
+def market_monitor_signals():
+    time.sleep(10)  # ⏱️ Delay start to ensure database seeding completes first
+    while True:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM bets
+                    WHERE status = 'awaiting_signal'
+                """)
+                rows = cursor.fetchall()
+                col_names = [desc[0] for desc in cursor.description]
+
+                inserted = 0
+                for row in rows:
+                    bet = dict(zip(col_names, row))
+
+                    if not bet['anchor_odd'] or not bet['odds_check_6']:
+                        try:
+                            meta = json.loads(bet['meta_json']) if bet['meta_json'] else {}
+                            bet['anchor_odd'] = bet['anchor_odd'] or meta.get('anchor_odd', 0)
+                            bet['odds_check_6'] = bet['odds_check_6'] or meta.get('odds_check_6', 0)
+                        except Exception as meta_err:
+                            continue
+
+                    live_odds = bet['odds_check_6']
+                    if bet.get('test_mode') == '1':
+                        try:
+                            meta = json.loads(bet['meta_json']) if bet['meta_json'] else {}
+                            live_odds = meta.get('live_odds', bet['odds_check_6'])
+                        except Exception:
+                            pass
+                    else:
+                        fetched_odds = fetch_live_odds(os.environ.get("SESSION_TOKEN", ""), bet['marketId'], bet['selectionId'])
+                        if fetched_odds:
+                            live_odds = fetched_odds
+
+                    volatility_meta = real_time_volatility_check(bet['marketId'], bet['selectionId'], live_odds)
+                    signal_list = detect_signal(bet['anchor_odd'], live_odds, volatility_meta)
+                    if not signal_list:
+                        continue
+
+                    for signal in signal_list:
+                        signal_code = signal.replace(" ", "")[0:3].upper()
+                        time_code = bet['time_signal'][-2:] if bet['time_signal'] else "XX"
+                        suffix = f"_S{signal_code}{time_code}"
+                        base = bet['customerOrderRef'][:32 - len(suffix)]
+                        new_ref = f"{base}{suffix}"
+
+                        cursor.execute("SELECT COUNT(*) FROM bets WHERE customerOrderRef = ?", (new_ref,))
+                        if cursor.fetchone()[0] > 0:
+                            continue
+
+                        bet['status'] = 'signal_assigned'
+                        bet['signal_type'] = signal
+                        bet['strategy_name'] = signal
+                        bet['timestamp'] = datetime.utcnow().isoformat()
+                        bet['customerOrderRef'] = new_ref
+                        bet['odds'] = live_odds
+
+                        fields = list(bet.keys())
+                        values = [bet[field] for field in fields]
+
+                        cursor.execute(f"""
+                            INSERT INTO bets ({', '.join(fields)})
+                            VALUES ({', '.join(['?'] * len(fields))})
+                        """, values)
+                        inserted += 1
+
+                conn.commit()
+                if inserted > 0:
+                    logging.info(f"🚀 Signal assignment complete. Inserted {inserted} new rows.")
+
+        except Exception as e:
+            logging.error(f"❌ Error in market_monitor_signals loop: {e}")
+        
+        time.sleep(20)  # 🔁 add delay to reduce spam
+
+def start_market_monitor():
+    threading.Thread(target=market_monitor_signals, name="MarketMonitor", daemon=True).start()
+
+# 🔄 market_monitor_signals now runs continuously with delayed start and quiet logging
+
+# ✅ UPGRADE 20250525 – PART 5: Signal Enrichment + Bot Duplication
+
+# already defined earlier in this file
+from signal_monitor import bot_signal_queues
+# ✅ Direct mapping (local to this module for build stability)
+SIGNAL_BOT_MAPPING = {
+    "Market Drifter Signal": ["OGHeadTrader", "OGPreoff"],
+    "Market Steamer Signal": ["OGHeadTrader", "OGPreoff"],
+    "Scalp Lay Signal": ["OGInPlay"],
+    "GreenUp 5-Minute Signal": ["OGInPlay"],
+    "Volume Surge Signal": ["OGHeadTrader"],
+    "Market Inefficiency Signal": ["OGHeadTrader"],
+    "Favourite Vulnerability Signal": ["OGPreoff"],
+    "Early Value Signal": ["OGPreoff"],
+    "Fast Pace Collapse Signal": ["OGInPlay"],
+    "Drifter Recovery Signal": ["OGInPlay"],
+    "Late Surge Fade Signal": ["OGInPlay"],
+    "Odds Spike Reversal Signal": ["OGInPlay"],
+    "Historical Edge Signal": ["OGHeadTrader"],
+    "Early Leader Stamina Doubt Signal": ["OGInPlay"],
+    "Multiple Beacon Confirmation Signal": ["OGHeadTrader"]
+}
+
+# -----------------------------
+# ✅ SIGNAL MONITOR: Enrich + Route to Bot Queues
+# -----------------------------
+
+def signal_monitor():
+    logging.info("🧠 Running signal_monitor() to enrich signal_assigned rows")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM bets WHERE status = 'signal_assigned'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            signal_type = row[17]
+            bot_targets = SIGNAL_BOT_MAPPING.get(signal_type, [])
+            if not bot_targets:
+                logging.warning(f"⚠️ No bots mapped for signal type: {signal_type}")
+                continue
+
+            market_id = row[0]
+            selection_id = row[1]
+            horse_name = row[15]
+            time_signal = row[20]
+            original_ref = row[33]
+            market_start = row[35]
+            event_name = row[25]
+            race_name = row[23]
+
+            # Assign stake based on time window or mark as greenup
+            if time_signal == "time_20":
+                stake = 10.0
+                strategy_name = signal_type.lower().replace(" ", "_")
+            elif time_signal == "time_10":
+                stake = 20.0
+                strategy_name = signal_type.lower().replace(" ", "_")
+            elif time_signal == "time_5":
+                stake = None
+                strategy_name = "greenup"
+            elif time_signal == "time_0":
+                stake = 5.0
+                strategy_name = signal_type.lower().replace(" ", "_")
+            else:
+                logging.warning(f"⚠️ Unrecognized time_signal: {time_signal}")
+                continue
+
+            for bot_name in bot_targets:
+                new_ref = f"{original_ref[:28]}_{bot_name[:3].upper()}"
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO bets (
+                            marketId, selectionId, stake, odds, bet_type, placed_at, status,
+                            matched_liability, unmatched_liability, pnl, liability, result,
+                            timestamp, matched_timestamp, betfair_bet_id, horse_name,
+                            strategy_name, signal_type, bot_name, date, time_signal,
+                            can_accept_liability, time_session, race_name, market_name, event_name,
+                            anchor_odd, odds_check_1, odds_check_2, odds_check_3, odds_check_4,
+                            odds_check_5, odds_check_6, customerOrderRef, bet_settled,
+                            marketStartTime, meta_json, test_mode
+                        )
+                        SELECT
+                            marketId, selectionId, ?, odds, bet_type, placed_at, 'fully_enriched',
+                            matched_liability, unmatched_liability, pnl, liability, result,
+                            ?, matched_timestamp, betfair_bet_id, horse_name,
+                            ?, signal_type, ?, date, time_signal,
+                            can_accept_liability, time_session, race_name, market_name, event_name,
+                            anchor_odd, odds_check_1, odds_check_2, odds_check_3, odds_check_4,
+                            odds_check_5, odds_check_6, ?, bet_settled,
+                            marketStartTime, meta_json, test_mode
+                        FROM bets WHERE customerOrderRef = ?
+                    """, (
+                        stake, now.isoformat(), strategy_name, bot_name, new_ref, original_ref
+                    ))
+
+                    signal = {
+                        "marketId": market_id,
+                        "selectionId": selection_id,
+                        "horse_name": horse_name,
+                        "time_signal": time_signal,
+                        "signal_type": signal_type,
+                        "strategy_name": strategy_name,
+                        "bot_name": bot_name,
+                        "customerOrderRef": new_ref,
+                        "timestamp": now.isoformat(),
+                        "marketStartTime": market_start,
+                        "event_name": event_name,
+                        "race_name": race_name,
+                        "stake": stake,
+                        "test_mode": row[37]
+                    }
+
+                    if bot_name in bot_signal_queues:
+                        bot_signal_queues[bot_name].put(signal)
+                        logging.info(f"✅ Signal routed to {bot_name}: {new_ref}")
+                    else:
+                        logging.warning(f"🚫 Unknown bot queue: {bot_name}")
+
+                except Exception as e:
+                    logging.error(f"❌ Failed to enrich + dispatch signal {original_ref} → {bot_name}: {e}")
+
+        conn.commit()
+
+# ✅ UPGRADE 20250525 – PART 6: Risk Manager (Status & Timestamp)
+
+# already defined earlier in this file
+
+
+# -----------------------------
+# ✅ RISK MANAGER: Pass-through Validation
+# -----------------------------
+
+def risk_manager():
+    logging.info("🔍 Running risk_manager() to timestamp & evaluate fully_enriched rows")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT marketId, selectionId, customerOrderRef
+            FROM bets
+            WHERE status = 'fully_enriched'
+        """)
+        rows = cursor.fetchall()
+
+        for market_id, selection_id, ref in rows:
+            try:
+                cursor.execute("""
+                    UPDATE bets SET
+                        status = 'risk_evaluated',
+                        timestamp = ?
+                    WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                """, (now.isoformat(), market_id, selection_id, ref))
+
+                logging.info(f"🔐 Risk evaluated → {ref}")
+            except Exception as e:
+                logging.error(f"❌ Risk manager update failed for {ref}: {e}")
+
+        conn.commit()
+
+# ✅ UPGRADE 20250525 – PART 7: Budget Manager + Queue Dispatch
+
+# already defined earlier in this file
+from signal_monitor import bot_signal_queues
+from budget_manager import BudgetManager
+
+# -----------------------------
+# ✅ BUDGET MANAGER: Approve & Queue Signals
+# -----------------------------
+
+def budget_manager():
+    logging.info("💰 Running budget_manager() to evaluate budget + queue approved signals")
+    now = get_simulated_now()
+    live_budget_mgr = BudgetManager(DB_PATH)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM bets WHERE status = 'risk_evaluated'")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            signal = {
+                "marketId": row[0],
+                "selectionId": row[1],
+                "stake": row[2],
+                "odds": row[3],
+                "bet_type": row[4],
+                "placed_at": row[5],
+                "status": row[6],
+                "matched_liability": row[7],
+                "unmatched_liability": row[8],
+                "pnl": row[9],
+                "liability": row[10],
+                "result": row[11],
+                "timestamp": row[12],
+                "matched_timestamp": row[13],
+                "betfair_bet_id": row[14],
+                "horse_name": row[15],
+                "strategy_name": row[16],
+                "signal_type": row[17],
+                "bot_name": row[18],
+                "date": row[19],
+                "time_signal": row[20],
+                "can_accept_liability": row[21],
+                "time_session": row[22],
+                "race_name": row[23],
+                "market_name": row[24],
+                "event_name": row[25],
+                "anchor_odd": row[26],
+                "odds_check_1": row[27],
+                "odds_check_2": row[28],
+                "odds_check_3": row[29],
+                "odds_check_4": row[30],
+                "odds_check_5": row[31],
+                "odds_check_6": row[32],
+                "customerOrderRef": row[33],
+                "bet_settled": row[34],
+                "marketStartTime": row[35],
+                "meta_json": row[36],
+                "test_mode": row[37]
+            }
+
+            try:
+                result = live_budget_mgr.evaluate_budget(signal)
+                new_status = "approved" if result else "rejected"
+
+                cursor.execute("""
+                    UPDATE bets SET status = ?, timestamp = ?
+                    WHERE customerOrderRef = ?
+                """, (new_status, now.isoformat(), signal["customerOrderRef"]))
+
+                if result:
+                    if signal["bot_name"] in bot_signal_queues:
+                        bot_signal_queues[signal["bot_name"]].put(signal)
+                        logging.info(f"✅ Sent to {signal['bot_name']} queue → {signal['customerOrderRef']}")
+                    else:
+                        logging.warning(f"🚫 No bot queue found: {signal['bot_name']}")
+                else:
+                    logging.warning(f"❌ Signal rejected: {signal['customerOrderRef']}")
+
+            except Exception as e:
+                logging.error(f"❌ Budget check failed for {signal['customerOrderRef']}: {e}")
+
+        conn.commit()
+
+# ✅ UPGRADE 20250525 – PART 9: Bet Placer Dispatcher by Strategy
+
+# already defined earlier in this file
+from scalping_engine import (
+    calculate_ladder_bets,
+    place_lay_strategy,  # <-- replaces previous scalp entry
+    manage_bet_hedging,
+    penny_logic
+)
+from green_up import green_up
+from bet_core import place_bet
+# already defined earlier in this file
+from price_math import get_tick_size
+
+import sqlite3
+
+# -----------------------------
+# ✅ STRATEGY-BASED DISPATCHER FOR SIGNALS
+# -----------------------------
+
+# 🔁 Updated HEAD TRADER control for time_5: now uses Pre-off + Head Trader book context
+# Note: strategy_name 'greenup' at time_5 must be routed through head trader scope
+
+def dispatch_bet_by_strategy(signal):
+    strategy = signal.get("strategy_name")
+    ref = signal.get("customerOrderRef")
+
+    if strategy == "ladder":
+        logging.info(f"🪜 Routing to ladder strategy for {ref}")
+        _dispatch_ladder_bet(signal)
+
+    elif strategy == "scalp":
+        logging.info(f"⚡ Routing to scalp strategy for {ref}")
+        _dispatch_scalp_bet(signal)
+
+    elif strategy == "greenup":
+        logging.info(f"🟩 Routing to greenup strategy via Head Trader (time_5 + pre-off sync) for {ref}")
+        _dispatch_greenup(signal)
+        logging.info(f"🟩 Routing to greenup strategy for {ref}")
+        _dispatch_greenup(signal)
+
+    elif strategy == "fillkill":
+        logging.info(f"🩻 Routing to in-play fill/kill for {ref}")
+        _dispatch_fill_kill(signal)
+
+    else:
+        logging.warning(f"⚠️ Unknown strategy_name: {strategy} on signal {ref}")
+
+# -----------------------------
+# ✅ LADDER STRATEGY LOGIC (Top 4 Fancy Horses)
+# -----------------------------
+
+def _dispatch_ladder_bet(signal):
+    session_token = signal.get("session_token")
+    market_id = signal.get("marketId")
+    selection_id = signal.get("selectionId")
+    odds = signal.get("odds")
+    stake = signal.get("stake") or 2.0
+
+    ladder_orders = calculate_ladder_bets(selection_id, odds, stake)
+    for bet in ladder_orders:
+        place_bet(session_token, market_id, selection_id, bet['stake'], bet['odds'], "LAY", bet['ref'])
+
+# -----------------------------
+# ✅ SCALPING STRATEGY ENTRY
+# -----------------------------
+
+def _dispatch_scalp_bet(signal):
+    try:
+        # Determine direction: lay_to_back (drifting) or back_to_lay (steaming)
+        anchor_odd = signal.get("anchor_odd")
+        odds_check_3 = signal.get("odds_check_3")
+
+        if anchor_odd and odds_check_3:
+            anchor_prob = 1 / float(anchor_odd)
+            current_prob = 1 / float(odds_check_3)
+            change_pct = ((current_prob - anchor_prob) / anchor_prob) * 100
+            direction = "back_to_lay" if change_pct > 0 else "lay_to_back"
+        else:
+            direction = "lay_to_back"  # fallback default
+
+        signal["scalp_direction"] = direction
+        place_lay_strategy(signal, tag="Scalp")
+        # If direction is back_to_lay, modify bet_type to BACK before passing to bet_placer
+        if direction == "back_to_lay":
+            signal["bet_type"] = "BACK"
+        else:
+            signal["bet_type"] = "LAY"
+    except Exception as e:
+        logging.error(f"❌ Scalping execution failed: {e}")
+
+# -----------------------------
+# ✅ GREENUP STRATEGY CALL
+# -----------------------------
+
+def _dispatch_greenup(signal):
+    session_token = signal.get("session_token")
+    market_id = signal.get("marketId")
+    try:
+        green_up(session_token, market_id, target_profit=15.0)
+    except Exception as e:
+        logging.error(f"❌ GreenUp failed: {e}")
+
+# -----------------------------
+# ✅ IN-PLAY FILL & KILL LOGIC
+# -----------------------------
+
+# -----------------------------
+# ✅ FILL & KILL + MATCH LOGIC (pre-defined execution control)
+# -----------------------------
+
+def _dispatch_fill_kill(signal):
+    try:
+        manage_bet_hedging(signal)
+        penny_logic(signal)
+    except Exception as e:
+        logging.error(f"❌ Fill/Kill logic failed: {e}")
+
+# ✅ UPGRADE 20250525 – PART 10: Main Execution Block + Orchestration
+
+# ⚠️ Removed internal self-imports to prevent circular import issues
+# All functions below are already defined within this module
+
+import threading
+import time
+
+# -----------------------------
+# ✅ MAIN RUNNER – THREAD ENTRY
+# -----------------------------
+
+def main():
+    logging.info("🚀 Starting Automation Engine")
+
+    # Step 1: Initial Load
+    launch_protocol()
+    backfill_missed_windows()
+
+    # Step 2: Start Threads
+    threading.Thread(target=loop_runner, name="RunMonitorLoop", daemon=True).start()
+    threading.Thread(target=bet_settlement_monitor, name="BetSettler", daemon=True).start()
+
+    # Step 3: Monitor Cycles
+    while True:
+        market_monitor_signals()
+        signal_monitor()
+        risk_manager()
+        budget_manager()
+        time.sleep(15)  # Main loop cycle delay
+
+# -----------------------------
+# ✅ CONTINUOUS CLOCK LOOP FOR TIME SEGMENTS
+# -----------------------------
+
+def loop_runner():
+    while True:
+        run_monitor()
+        time.sleep(60)
+
+# -----------------------------
+# ✅ START THE ENGINE (IF SCRIPTED)
+# -----------------------------
+
+if __name__ == "__main__":
+    main()
+
+# ✅ UPGRADE 20250525 – PART 11: Bet Settlement Monitor
+
+# already defined earlier in this file
+from bet_core import check_bet_matched
+import sqlite3
+import time
+
+# -----------------------------
+# ✅ BET SETTLEMENT CHECK LOOP
+# -----------------------------
+
+def bet_settlement_monitor():
+    logging.info("🕵️‍♂️ [BetSettler] Starting match-check loop for placed bets")
+
+    def get_open_bets():
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT customerOrderRef, betfair_bet_id, marketId, selectionId
+                FROM bets
+                WHERE status = 'placed' AND betfair_bet_id IS NOT NULL
+            """)
+            return cur.fetchall()
+
+    while True:
+        open_bets = get_open_bets()
+
+        for ref, bet_id, market_id, selection_id in open_bets:
+            session_token = os.environ.get("SESSION_TOKEN")
+            try:
+                if check_bet_matched(session_token, bet_id):
+                    with sqlite3.connect(DB_PATH) as conn:
+                        conn.execute("""
+                            UPDATE bets SET status = 'matched', matched_timestamp = ?
+                            WHERE customerOrderRef = ?
+                        """, (get_simulated_now().isoformat(), ref))
+                        conn.commit()
+                    logging.info(f"✅ [BetSettler] Matched: {ref} / {bet_id}")
+            except Exception as e:
+                logging.warning(f"⚠️ Bet match check failed for {ref}: {e}")
+
+        time.sleep(60)  # Check every minute
+
+# ✅ FINAL COPY – SAFE LAUNCH PROTOCOL with FULL THREAD SEQUENCE
+
+import threading
+
+# -----------------------------
+# ✅ SAFE LAUNCH PROTOCOL – PART 3 to 4 HANDOVER
+# -----------------------------
+
+def launch_protocol():
+    logging.info("\U0001F680 Starting upgrade_20250525 Launch Protocol")
+    validate_bets_table()  # ✅ Create bets table if needed
+
+    # ✅ Step 1 – Fetch Markets and Log to DB if needed
+    run_monitor()  # Includes internal checks for seed/duplication
+
+    # ✅ Step 2 – Detect signals and duplicate into signal_assigned
+    market_monitor_signals()
+
+    # ✅ Step 3 – Enrich signals with anchor/tracking odds
+    signal_monitor()
+
+    # ✅ Step 4 – Evaluate risk logic + prepare approvals
+    risk_manager()
+
+    # ✅ Step 5 – Final budget check + assign placeable bets
+    budget_manager()
+
+    # ✅ Step 6 – Execute matched lay bets via Betfair
+    bet_placer()
+
+    # ✅ Step 7 – Monitor settlements + results updates
+    bet_settlement_monitor()
+
+    logging.info("🔁 Full upgrade launch complete. Live trading automation now active.")
+
+# -----------------------------
+# ✅ THREAD ENTRY – LIVE EXECUTION (if called standalone)
+# -----------------------------
+
+def main():
+    logging.info("\U0001F680 Starting Automation Engine")
+
+    # Step 1: Launch Protocol initiates full pipeline (seed + signal + execution)
+    launch_protocol()
+
+    # Step 2: Background thread runner
+    threading.Thread(target=loop_runner, name="RunMonitorLoop", daemon=True).start()
+    threading.Thread(target=bet_settlement_monitor, name="BetSettler", daemon=True).start()
+
+    # Step 3: Loop through cycles – triggers enrichment layers
+    while True:
+        market_monitor_signals()
+        signal_monitor()
+        risk_manager()
+        budget_manager()
+        time.sleep(15)
+
+# -----------------------------
+# ✅ LOOP RUNNER – Monitor clock and re-trigger updates
+# -----------------------------
+
+def loop_runner():
+    while True:
+        run_monitor()
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
+
+

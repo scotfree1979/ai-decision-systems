@@ -1,0 +1,87 @@
+# =============================================
+# 🧠 og_brain_logic.py – Master Execution Logic for Bet Placement
+# =============================================
+
+import logging
+import time
+import sqlite3
+from datetime import datetime
+from queue import Empty
+
+from config_paths import DB_PATH
+from upgrade_import_patch import (
+    bot_signal_queues,
+    place_basic_lay_bet,
+    place_ladder_lay_bet,
+    place_greenup_exit,
+    place_inplay_lay_bet,
+    place_scalp_trade,
+    manage_bet_hedging,
+    penny_logic,
+    get_market_book
+)
+from volatility_check import real_time_volatility_check
+from price_math import calculate_tick_distance
+
+# ✅ Configurable Constants
+MAX_INPLAY_LAYS_PER_HORSE = 4
+MAX_TOTAL_LAYS_PER_RACE = 16
+MIN_TICK_SPREAD = 10
+RELAY_COOLDOWN_SECONDS = 15
+
+# 🧠 Internal Tracker for In-Play Lay State
+inplay_lays = {}
+
+# =============================================
+# ✅ Memory & Learning Model Placeholders
+# =============================================
+
+brain_insights = {}
+brain_memory = {
+    "daily_signals": [],
+    "executed_bets": [],
+    "error_log": []
+}
+
+# 🧠 Core Handler
+
+def place_bets_from_brain():
+    logging.info("🧠 OG Brain: Live execution started")
+    while True:
+        for bot_name, queue in bot_signal_queues.items():
+            try:
+                signal = queue.get_nowait()
+                market_id = signal['marketId']
+                selection_id = signal['selectionId']
+                strategy = signal['strategy_name']
+                bet_type = signal['bet_type']
+
+                brain_memory["daily_signals"].append(signal)
+
+                if bet_type == "LADDER":
+                    logging.info(f"🧠 [Brain] LADDER strategy received for {selection_id} in {market_id}")
+
+                elif bet_type == "GREENUP":
+                    logging.info(f"🧠 [Brain] GREENUP signal observed for {selection_id} in {market_id} (Handled by bot)")
+
+                elif bet_type == "SCALP":
+                    odds = signal.get("odds")
+                    anchor = signal.get("anchor_odd")
+                    drift = calculate_tick_distance(anchor, odds)
+                    logging.info(f"🧠 [Brain] SCALP strategy detected: drift = {drift} ticks")
+
+                elif bet_type == "INPLAY":
+                    logging.info(f"🧠 [Brain] INPLAY signal queued for {selection_id} in {market_id}")
+
+                else:
+                    logging.warning(f"⚠️ Unknown bet_type: {bet_type} for {signal.get('customerOrderRef')}")
+
+                brain_memory["executed_bets"].append(signal)
+
+            except Empty:
+                continue
+            except Exception as e:
+                brain_memory["error_log"].append(str(e))
+                logging.error(f"❌ OG Brain Error: {e}")
+
+        time.sleep(1)

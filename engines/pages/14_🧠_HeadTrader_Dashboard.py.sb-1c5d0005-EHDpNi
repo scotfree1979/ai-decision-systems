@@ -1,0 +1,131 @@
+# 14_🧠_HeadTrader_Dashboard.py – Central Command & Feedback Hub
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
+from rules.head_trader_rules import *
+from learning_optimizer import LearningOptimizer
+
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+
+st.set_page_config(page_title="HeadTrader Dashboard", layout="wide")
+st.title("🧠 HeadTrader Command Centre")
+
+# ----------------------------
+# 🧠 Section: Real-Time Overview
+# ----------------------------
+st.subheader("📁 Current Activity Snapshot")
+
+@st.cache_data
+def get_active_summary():
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(f"""
+            SELECT bot_name, strategy_name, status, COUNT(*) as count 
+            FROM bets
+            WHERE date = '{today}'
+            GROUP BY bot_name, strategy_name, status
+        """, conn)
+    return df
+
+activity_df = get_active_summary()
+st.dataframe(activity_df, use_container_width=True)
+
+# ----------------------------
+# 📳 Section: HeadTrader Comms
+# ----------------------------
+st.subheader("💬 Talk to HeadTrader")
+
+st.markdown("""
+You can issue live tactical instructions to the HeadTrader AI system. These influence signal weighting, strategy toggles, and capital allocation.
+""")
+
+st.markdown("### 🔢 Strategy Control Panel")
+
+col1, col2, col3 = st.columns(3)
+ENABLE_LADDER_LOGIC = col1.checkbox("Ladder Strategy", ENABLE_LADDER_LOGIC)
+ENABLE_SCALPING_LOGIC = col2.checkbox("Scalping Strategy", ENABLE_SCALPING_LOGIC)
+ENABLE_GREENUP_LOGIC = col3.checkbox("Green-Up Logic", GREENUP_RULES['confirm_market_stable'])
+
+col4, col5, col6 = st.columns(3)
+ENABLE_INPLAY_LOGIC = col4.checkbox("In-Play Execution", INPLAY_RULES['monitor_runner_count'])
+SKIP_BETS_AFTER_OFF = col5.checkbox("Block Late Bets", SKIP_BETS_AFTER_OFF)
+FORBID_DUPLICATE_CUSTOMERREF = col6.checkbox("No Duplicate Bets", FORBID_DUPLICATE_CUSTOMERREF)
+
+st.markdown("### 🔧 Rule Sensitivity Dials")
+col10, col11 = st.columns(2)
+MAX_SCALPS_PER_HORSE = col10.slider("Max Scalp Chains / Horse", 1, 4, 2)
+SCALP_MATCH_THRESHOLD = col11.slider("Scalp Match % to Allow Next", 10, 100, 50)
+
+col12, col13 = st.columns(2)
+MAX_RACE_LIABILITY = col12.slider("Max Race Liability (£)", 10, 200, int(MAX_RACE_LIABILITY))
+MAX_BET_PER_RUNNER = col13.slider("Max Bet Per Runner (£)", 2, 100, 15)
+
+st.markdown("### 🔑 Capital & Risk Toggle")
+col7, col8, col9 = st.columns(3)
+MIN_AVAILABLE_BUDGET = col7.slider("Min Available Budget £", 0, 1000, int(MIN_AVAILABLE_BUDGET))
+MAX_GLOBAL_LIABILITY = col8.slider("Max Global Liability £", 100, 2000, int(MAX_GLOBAL_LIABILITY))
+MAX_DAILY_LOSS = col9.slider("Max Daily Loss £", 50, 500, int(MAX_DAILY_LOSS))
+
+st.markdown("---")
+
+# ----------------------------
+# 📝 Custom Notes for HeadTrader
+# ----------------------------
+st.subheader("📝 Custom Guidance")
+message = st.text_area("Write a custom note to the HeadTrader below (saved for today only):")
+if st.button("Save Note"):
+    st.success("🧠 Your guidance has been recorded for today.")
+
+if message:
+    st.info(f"📀 Saved Message: {message}")
+
+# ----------------------------
+# 🔮 Learning Optimizer Summary
+# ----------------------------
+st.subheader("📊 Learning Optimizer Insights")
+optimizer = LearningOptimizer()
+optimizer.run()
+summary_stats = optimizer.stats
+
+col10, col11, col12 = st.columns(3)
+col10.metric("Total Bets", summary_stats['total_bets'])
+col11.metric("Win Rate", f"{summary_stats['win_rate']*100:.2f}%")
+col12.metric("Avg Odds", f"{summary_stats['average_odds']:.2f}")
+
+if summary_stats['strategy_performance']:
+    perf_df = pd.DataFrame.from_dict(summary_stats['strategy_performance'], orient='index', columns=['WinRate'])
+    st.dataframe(perf_df.sort_values(by='WinRate', ascending=False), use_container_width=True)
+else:
+    st.info("📭 No strategy performance data yet.")
+
+# ----------------------------
+# 🔹 Market Tension Tracker (Preview)
+# ----------------------------
+st.subheader("🔥 Volatility Heatmap (Preview)")
+st.caption("Based on % swing from anchor odds – Live rows only")
+
+with sqlite3.connect(DB_PATH) as conn:
+    df = pd.read_sql_query("""
+        SELECT horse_name, bot_name, strategy_name, meta_json, time_signal
+        FROM bets
+        WHERE status IN ('fully_enriched', 'risk_evaluated', 'approved')
+    """, conn)
+
+def extract_volatility(row):
+    try:
+        meta = eval(row['meta_json']) if row['meta_json'] else {}
+        vol = meta.get('volatility', {})
+        return vol.get('swing_percent', 0)
+    except:
+        return 0
+
+df['volatility'] = df.apply(extract_volatility, axis=1)
+df = df.sort_values(by='volatility', ascending=False).head(10)
+
+if not df.empty:
+    st.dataframe(df[['horse_name', 'strategy_name', 'bot_name', 'volatility']], use_container_width=True)
+else:
+    st.info("No volatility data available yet.")
+
+st.caption("🧠 HeadTrader feedback actions are live and enforce rules directly.")

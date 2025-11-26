@@ -1,0 +1,276 @@
+# signal_memory_engine.py
+
+from collections import defaultdict, deque
+import time
+import sqlite3
+from datetime import datetime
+# 📘 Load from dynamic blueprint export
+from known_blueprints import KNOWN_BLUEPRINT_PATTERNS
+from config_paths import DB_PATH
+
+def save_signal_snapshot_to_live_bets(signal):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS live_signals (
+                    marketId TEXT,
+                    selectionId INTEGER,
+                    odds REAL,
+                    range_low REAL,
+                    range_high REAL,
+                    tick_pattern TEXT,
+                    confidence REAL,
+                    drift REAL,
+                    spread REAL,
+                    position_ratio REAL,
+                    volatility REAL,
+                    signal_type TEXT,
+                    timestamp TEXT
+                )
+            """)
+            cursor.execute("""
+                INSERT INTO live_signals (
+                    marketId, selectionId, odds, range_low, range_high, tick_pattern,
+                    confidence, drift, spread, position_ratio, volatility, signal_type, timestamp
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                signal.get("marketId"),
+                signal.get("selectionId"),
+                signal.get("odds"),
+                signal.get("range_low"),
+                signal.get("range_high"),
+                signal.get("tick_pattern"),
+                signal.get("confidence"),
+                signal.get("drift", 0.0),
+                signal.get("spread", 0),
+                signal.get("position_ratio"),
+                signal.get("volatility", 0.0),
+                signal.get("signal_type", "None"),
+                datetime.utcnow().isoformat()
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ Failed to save signal snapshot: {e}")
+
+class SignalMemoryEngine:
+    def __init__(self, max_history=12):
+        self.memory = defaultdict(lambda: {
+            "odds_history": deque(maxlen=max_history),
+            "last_updated": None,
+            "range_exits": 0,
+            "range_exit_start": None,
+            "direction_bias": "flat",
+            "anchor_odd": None,
+            "range_low": None,
+            "range_high": None,
+            "entry_opportunities": 0,
+            "oc_snapshots": {},
+            "last_oc_breakout": None,
+            "tick_pattern": "flat",
+            "position": None
+        })
+        self.session_active = True
+        self.starting_balance = 1000.0
+        self.current_balance = 1000.0
+        self.halt_triggered = False
+        self.trade_log = []
+        self.clean_exit_log = []
+        self.current_stake = 10.0
+        self.open_bets = defaultdict(list)
+        self.unmatched_signals = {}
+
+    def start_new_session(self, balance=1000.0):
+        self.session_active = True
+        self.starting_balance = balance
+        self.current_balance = balance
+        self.halt_triggered = False
+        self.trade_log = []
+        self.clean_exit_log = []
+        self.current_stake = 10.0
+        self.open_bets.clear()
+        self.unmatched_signals.clear()
+        self.memory.clear()
+
+    def get_adaptive_stake(self):
+        return self.current_stake if hasattr(self, "current_stake") else 10.0
+
+    def track_unmatched_signal(self, signal):
+        key = (signal.get("marketId"), signal.get("selectionId"))
+        save_signal_snapshot_to_live_bets(signal)
+        if key not in self.unmatched_signals:
+            self.unmatched_signals[key] = []
+        self.unmatched_signals[key].append({
+            "odds": signal.get("odds"),
+            "confidence": signal.get("confidence"),
+            "tick_pattern": signal.get("tick_pattern"),
+            "timestamp": time.time(),
+            "scalp_direction": signal.get("scalp_direction"),
+            "range_low": signal.get("range_low"),
+            "range_high": signal.get("range_high")
+        })
+
+    def should_halt_trading(self):
+        if not self.session_active:
+            self.halt_triggered = True
+            return True
+        if self.current_balance < self.starting_balance * 0.75:
+            self.halt_triggered = True
+            return True
+        if sum(len(v) for v in self.open_bets.values()) >= 10:
+            return True
+        return False
+
+    def enrich(self, signal):
+        key = (signal.get("marketId"), signal.get("selectionId"))
+        runner = self.memory.get(key)
+        if not runner:
+            return signal
+        signal["tick_pattern"] = runner.get("tick_pattern")
+        signal["direction_bias"] = runner.get("direction_bias")
+        signal["range_low"] = runner.get("range_low")
+        signal["range_high"] = runner.get("range_high")
+        anchor = runner.get("anchor_odd")
+        oc_snaps = runner.get("oc_snapshots", {})
+        latest_label = sorted(oc_snaps.keys())[-1] if oc_snaps else None
+        latest_oc = oc_snaps.get(latest_label) if latest_label else None
+        if anchor and latest_oc:
+            move_type = runner.get("tick_pattern", "flat")
+            direction = signal.get("scalp_direction")
+            pattern_key = f"{runner['direction_bias']}→{latest_label}→{move_type}→{direction}"
+            if pattern_key in KNOWN_BLUEPRINT_PATTERNS:
+                signal["blueprint_match"] = pattern_key
+        return signal
+
+    def update(self, market_id, selection_id, current_odds, range_low, range_high, anchor_odd=None):
+        key = (market_id, selection_id)
+        runner = self.memory[key]
+        runner["odds_history"].append(current_odds)
+        runner["last_updated"] = time.time()
+        if anchor_odd:
+            runner["anchor_odd"] = anchor_odd
+        if len(runner["odds_history"]) == 1:
+            runner["oc_snapshots"]["OC1"] = current_odds
+        elif len(runner["odds_history"]) == 2:
+            runner["oc_snapshots"]["OC2"] = current_odds
+        elif len(runner["odds_history"]) == 3:
+            runner["oc_snapshots"]["OC3"] = current_odds
+        elif len(runner["odds_history"]) == 4:
+            runner["oc_snapshots"]["OC4"] = current_odds
+        elif len(runner["odds_history"]) == 5:
+            runner["oc_snapshots"]["OC5"] = current_odds
+        elif len(runner["odds_history"]) == 6:
+            runner["oc_snapshots"]["OC6"] = current_odds
+        historical_points = [runner["anchor_odd"]] if runner["anchor_odd"] else []
+        historical_points += list(runner["odds_history"])
+        historical_points = [o for o in historical_points if o is not None]
+        if historical_points:
+            runner["range_low"] = min(historical_points)
+            runner["range_high"] = max(historical_points)
+        if current_odds > range_high:
+            runner["last_oc_breakout"] = {"type": "above", "value": current_odds, "source": f"OC{len(runner['odds_history'])}"}
+        elif current_odds < range_low:
+            runner["last_oc_breakout"] = {"type": "below", "value": current_odds, "source": f"OC{len(runner['odds_history'])}"}
+        if len(runner["odds_history"]) >= 3:
+            deltas = [runner["odds_history"][i+1] - runner["odds_history"][i] for i in range(len(runner["odds_history"]) - 1)]
+            if all(d < 0 for d in deltas):
+                runner["direction_bias"] = "steam"
+                runner["tick_pattern"] = "steamed"
+            elif all(d > 0 for d in deltas):
+                runner["direction_bias"] = "drift"
+                runner["tick_pattern"] = "drifted"
+            elif any(abs(d) >= 2 for d in deltas):
+                runner["direction_bias"] = "volatile"
+                runner["tick_pattern"] = "volatile"
+            else:
+                runner["direction_bias"] = "flat"
+                runner["tick_pattern"] = "flat"
+        if current_odds < range_low or current_odds > range_high:
+            if not runner["range_exit_start"]:
+                runner["range_exit_start"] = time.time()
+            runner["range_exits"] += 1
+        else:
+            runner["range_exit_start"] = None
+            runner["entry_opportunities"] += 1
+
+    def is_trend_forming(self, market_id, selection_id, direction, odds, range_high, range_low):
+        key = (market_id, selection_id)
+        runner = self.memory.get(key)
+        if not runner:
+            return False
+        odds_history = list(runner.get("odds_history", []))
+        if len(odds_history) < 3:
+            return False
+        deltas = [odds_history[i+1] - odds_history[i] for i in range(len(odds_history) - 1)]
+        if direction == "lay_to_back" and all(d > 0 for d in deltas):
+            return True
+        elif direction == "back_to_lay" and all(d < 0 for d in deltas):
+            return True
+        return False
+
+    def detect_blueprint_match(self, market_id, selection_id, odds, direction, range_low, range_high):
+        key = (market_id, selection_id)
+        runner = self.memory.get(key)
+        if not runner:
+            return None
+        anchor = runner.get("anchor_odd")
+        oc_snaps = runner.get("oc_snapshots", {})
+        bias = runner.get("direction_bias")
+        if not anchor or not oc_snaps:
+            return None
+        latest_label = sorted(oc_snaps.keys())[-1] if oc_snaps else ""
+        latest_oc = oc_snaps.get(latest_label)
+        if not latest_oc:
+            return None
+        move_type = runner.get("tick_pattern", "flat")
+        pattern_key = f"{bias}→{latest_label}→{move_type}→{direction}"
+        known = get_known_blueprint_patterns()
+        return pattern_key if pattern_key in known else None
+
+    def get_daily_summary(self):
+        return {
+            "total_tracked_runners": len(self.memory),
+            "trades_logged": len(self.trade_log),
+            "clean_exits": sum(self.clean_exit_log),
+            "halt_triggered": self.halt_triggered,
+            "final_balance": self.current_balance,
+            "initial_balance": self.starting_balance,
+            "open_bets": sum(len(v) for v in self.open_bets.values())
+        }
+
+    def check_market_crossovers(self, market_id, horses):
+        try:
+            sorted_runners = sorted([
+                h for h in horses if isinstance(h.get("odds"), (float, int))
+            ], key=lambda h: h["odds"])
+            for pos, h in enumerate(sorted_runners):
+                sel_id = h.get("selectionId")
+                odds = h.get("odds")
+                key = (market_id, sel_id)
+                mem = self.memory[key]
+                prev_pos = mem.get("position")
+                if prev_pos is not None and pos > prev_pos and pos <= 3:
+                    print(f"📉 [CROSSOVER] Runner {sel_id} dropped to lower market position (#{prev_pos} → #{pos}) in {market_id}")
+                mem["position"] = pos
+        except Exception as e:
+            print(f"⚠️ Crossover detection failed: {e}")
+
+    def can_place_more_bets(self, market_id, selection_id):
+        key = (market_id, selection_id)
+        return len(self.open_bets[key]) < 3
+
+    def register_open_bet(self, market_id, selection_id, bet_type):
+        key = (market_id, selection_id)
+        self.open_bets[key].append(bet_type)
+
+    def cleanup_closed_trade(self, market_id, selection_id):
+        key = (market_id, selection_id)
+        self.open_bets[key] = [b for b in self.open_bets[key] if b != "closed"]
+
+# 🔁 Singleton instance
+signal_memory = SignalMemoryEngine()
+
+# 📘 Export known blueprints for simulation and matching
+def get_known_blueprint_patterns():
+    return KNOWN_BLUEPRINT_PATTERNS

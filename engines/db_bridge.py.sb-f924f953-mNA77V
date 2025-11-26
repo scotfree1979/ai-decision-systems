@@ -1,0 +1,90 @@
+# =============================================
+# ✅ upgrade_import_patch.py – Consolidated Patch Imports for Final Upgrade Flow
+# =============================================
+
+import logging
+from queue import Queue
+
+#---------
+# ✅ Shared Queues
+#---------
+signal_queue = Queue()
+bot_signal_queues = {
+    "OGHeadTrader": Queue(),
+    "OGPreoff": Queue(),
+    "OGInPlay": Queue()
+}
+
+#---------
+# ✅ Final Upgrade 20250525 Core Functions (except overridden)
+#---------
+from upgrade.upgrade_20250525 import (
+    signal_monitor,
+    risk_manager,
+    budget_manager,
+    bet_settlement
+)
+
+#---------
+# ✅ New Upgrade Route (override active logic)
+#---------
+from upgrade.upgrade_20250602_flow_01 import (
+    get_markets,
+    validate_bets_table,
+    insert_bets_from_markets,
+    enrich_with_racing_post,
+    launch_upgrade_clock_controller,
+    run_monitor,
+    market_monitor_signals,
+)
+
+#---------
+# ✅ Bot Logic
+#---------
+from green_up import green_up
+
+from bet_placer import (
+    place_basic_lay_bet,
+    place_ladder_lay_bet,
+    place_greenup_exit,
+    place_inplay_lay_bet,
+    place_scalp_trade
+)
+
+#---------
+# ✅ Scalping Strategy Integration (new in v2)
+#---------
+from scalping_engine import (
+    place_lay_strategy,
+    manage_bet_hedging,
+    penny_logic,
+    calculate_ladder_bets
+)
+
+#---------
+# ✅ Legacy Compatibility from v22 / head_trader
+#---------
+from upgrade.upgrade_20250522 import get_market_book
+from upgrade.upgrade_head_trader import UpgradeHeadTrader
+
+#---------
+# ✅ Bot Loader and Strategy Dispatcher
+#---------
+head_trader = UpgradeHeadTrader()
+
+#---------
+# 🔁 Global Access for Strategy Handlers
+#---------
+globals()['place_basic_lay_bet'] = place_basic_lay_bet
+globals()['place_scalp_trade'] = place_scalp_trade
+globals()['place_ladder_bet'] = place_ladder_lay_bet
+globals()['green_up'] = green_up
+globals()['place_inplay_lay_bet'] = place_inplay_lay_bet
+globals()['place_lay_strategy'] = place_lay_strategy
+globals()['get_market_book'] = get_market_book
+globals()['head_trader'] = head_trader
+
+#---------
+# ✅ Live Control Flag
+#---------
+enable_upgrade_control = True

@@ -1,0 +1,36 @@
+## Step 4: 🕒 Recent Trades Page
+
+Here's the complete Streamlit code snippet for your Recent Trades analytics page:
+
+```python
+import streamlit as st
+import pandas as pd
+
+# Placeholder Data (replace with real data retrieval)
+recent_trades = pd.DataFrame({
+    "Time": ["10:15", "10:45", "11:00", "11:30", "12:00"],
+    "Bot": ["Bot A", "Bot B", "Bot C", "Bot A", "Bot D"],
+    "Horse": ["Lightning", "Thunder", "Storm", "Rain", "Sunshine"],
+    "Profit/Loss (£)": [25, -15, 35, 50, -20],
+    "Outcome": ["Win", "Loss", "Win", "Win", "Loss"]
+})
+
+# Page Title
+st.title("🕒 Recent Trades")
+
+# Recent Trades Table
+st.subheader("Latest Trades Overview")
+st.dataframe(recent_trades, use_container_width=True)
+
+# Trades Performance Breakdown
+st.subheader("Trades Performance Breakdown")
+performance_summary = recent_trades.groupby("Outcome").size().reset_index(name='Counts')
+st.bar_chart(performance_summary.set_index("Outcome"))
+```
+
+### Integration Instructions:
+
+* Replace placeholder data with real-time trade logs from your database.
+* Implement caching to ensure optimized and efficient performance.
+
+Please integrate this and confirm to proceed to the next page!

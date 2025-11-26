@@ -1,0 +1,83 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+
+# Page Configuration
+st.set_page_config(page_title="Data Export", layout="wide")
+st.title('📤 Data Export')
+
+# Load Historical Betting Data from Database
+def load_full_betting_data():
+    conn = sqlite3.connect('/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db')
+    query = "SELECT * FROM bets ORDER BY timestamp DESC"
+    return pd.read_sql(query, conn)
+
+# Load Data
+betting_data_df = load_full_betting_data()
+
+# Data Preview
+st.subheader("Data Preview")
+st.dataframe(betting_data_df.head(100), use_container_width=True)
+
+# Export Data to CSV
+st.subheader("Export Betting Data")
+csv = betting_data_df.to_csv(index=False).encode('utf-8')
+st.download_button(
+    label="📥 Download Data as CSV",
+    data=csv,
+    file_name='betting_data_export.csv',
+    mime='text/csv',
+)
+
+# Export Filtered Data
+st.subheader("Export Filtered Data")
+columns = st.multiselect("Select Columns to Export", options=betting_data_df.columns.tolist(), default=betting_data_df.columns.tolist())
+
+if columns:
+    filtered_csv = betting_data_df[columns].to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Filtered Data as CSV",
+        data=filtered_csv,
+        file_name='filtered_betting_data_export.csv',
+        mime='text/csv',
+    )
+else:
+    st.info("Please select at least one column to export.")
+
+# Export Data by Date Range
+st.subheader("Export Data by Date Range")
+
+# Ensure 'timestamp' is properly formatted and handle potential NaT values
+betting_data_df['timestamp'] = pd.to_datetime(betting_data_df['timestamp'], errors='coerce')
+betting_data_df = betting_data_df.dropna(subset=['timestamp'])
+
+# Default start and end dates for date selection
+default_start_date = betting_data_df['timestamp'].min().date()
+default_end_date = betting_data_df['timestamp'].max().date()
+
+col1, col2 = st.columns(2)
+with col1:
+    start_date = st.date_input("Start Date", default_start_date)
+with col2:
+    end_date = st.date_input("End Date", default_end_date)
+
+# Filter data based on date range selection
+if start_date and end_date:
+    date_filtered_df = betting_data_df[
+        (betting_data_df['timestamp'].dt.date >= start_date) &
+        (betting_data_df['timestamp'].dt.date <= end_date)
+    ]
+    date_filtered_csv = date_filtered_df.to_csv(index=False).encode('utf-8')
+
+    st.download_button(
+        label="📥 Download Data by Date Range as CSV",
+        data=date_filtered_csv,
+        file_name=f'betting_data_{start_date}_to_{end_date}.csv',
+        mime='text/csv',
+    )
+
+# Footer
+st.markdown('---')
+
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Data sourced from historical database.')

@@ -1,0 +1,66 @@
+import logging
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# ✅ Session Management Logs
+def log_session_management(activity_type, error_message=""):
+    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    messages = {
+        "session_start": f"🚀 [Session] Starting new session at {timestamp}",
+        "session_alive_success": f"✅ [Session] Session keep-alive successful at {timestamp}",
+        "session_alive_fail": f"❌ [Session] Session keep-alive failed: {error_message}",
+        "session_end": f"🛑 [Session] Ending session at {timestamp}",
+        "budget_fetched": f"💰 [Budget Sync] Budget fetched at {timestamp} — £{error_message}"
+    }
+    logging.info(messages.get(activity_type, f"❓ Unknown session activity: {activity_type}"))
+
+# ✅ Bot Heartbeat Log
+def log_heartbeat(active_bots):
+    heartbeat_timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    logging.info(f"💓 [Heartbeat] All bots alive: {', '.join(active_bots)} at {heartbeat_timestamp}")
+
+# ✅ Market Operations Log
+def log_market_operations(activity_type, details="", error_message=""):
+    messages = {
+        "market_fetch_success": f"📥 [Market Fetch] Success: {details}",
+        "market_fetch_fail": f"❌ [Market Fetch] FAILED — {error_message}",
+        "market_store_success": f"📦 [Market Store] Success: {details}",
+        "market_store_fail": f"❌ [Market Store] FAILED — {error_message}",
+    }
+    logging.info(messages.get(activity_type, f"❓ Unknown market op: {activity_type}"))
+
+# ✅ Signal Processing Log
+def log_signal_processing(activity_type, details=""):
+    messages = {
+        "signal_generated": f"📡 [Signal] Generated: {details}",
+        "signal_processed": f"✅ [Signal] Processed: {details}",
+        "signal_dropped": f"⚠️ [Signal] Dropped or rejected: {details}"
+    }
+    logging.info(messages.get(activity_type, f"❓ Unknown signal event: {activity_type}"))
+
+# ✅ Risk & Budget Log
+def log_risk_management(activity_type, strategy_name, details=""):
+    messages = {
+        "risk_approval": f"✅ [Risk] APPROVED ({strategy_name}) — {details}",
+        "risk_rejection": f"❌ [Risk] REJECTED ({strategy_name}) — {details}",
+        "budget_approval": f"💰 [Budget] APPROVED ({strategy_name}) — {details}",
+        "budget_rejection": f"❌ [Budget] REJECTED ({strategy_name}) — {details}"
+    }
+    logging.info(messages.get(activity_type, f"❓ Unknown risk event: {activity_type}"))
+
+# ✅ Bet + DB Ops
+def log_bet_and_db_operations(operation_type, bet_id=None, details=None):
+    messages = {
+        "bet_attempt": f"📥 [Bet Attempt] Market: {details['market_id']}, Runner: {details['selection_id']}, Stake: {details['stake']}, Odds: {details['odds']}",
+        "bet_placed": f"✅ [Bet Placed] Bet ID: {bet_id}, Details: {details}",
+        "bet_settled": f"🏁 [Bet Settled] Runner: {details['runner']}, PnL: {details['pnl']}",
+        "db_record_success": f"💾 [DB] Record saved: {details}",
+        "db_record_fail": f"❌ [DB] Record failed: {details}"
+    }
+    logging.info(messages.get(operation_type, f"❓ Unknown bet/db op: {operation_type}"))
+
+# ✅ Error Logs
+def log_error_handling(error_type, error_detail):
+    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    logging.error(f"🔴 [Error] {error_type}: {error_detail} @ {timestamp}")

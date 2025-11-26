@@ -1,0 +1,12 @@
+from sqlite_utils import Database
+from rich import print
+import os
+
+db_path = os.path.join("data", "bets.db")
+db = Database(db_path)
+
+print("\n[bold green]OC Snapshot Coverage:[/bold green]")
+for band in range(8):
+    count = db["oc_snapshots"].count_where("band = ?", [f"OC{band}"])
+    status = "[green]✅" if count > 0 else "[red]❌"
+    print(f"OC{band} → {status} ({count} rows)")

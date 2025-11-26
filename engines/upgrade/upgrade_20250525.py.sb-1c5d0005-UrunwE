@@ -1,0 +1,281 @@
+# upgrade_20250525.py (Structure Only – No Inserts Yet)
+
+import os
+import sys
+import logging
+from datetime import datetime, timedelta
+import time
+import sqlite3
+import threading
+from queue import Queue
+import requests
+import json
+
+# --- EXTERNAL MODULES (used later in time steps and placement) ---
+from signal_monitor import process_signal, signal_queue, bot_signal_queues
+from og_bot_family.og_head_trader_bot import HeadTraderBot
+from upgrade.upgrade_20250522 import wrap_run_monitor  # legacy, imported correctly from folder
+
+# --- UPCOMING BET PLACEMENT UTILS ---
+from bet_placer import place_basic_lay_bet, place_ladder_lay_bet
+from scalping_engine import place_scalp_trade
+
+# --- ODDS SNAPSHOT / ANCHOR SUPPORT ---
+
+# Set up shared paths
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config_paths import DB_PATH
+
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True
+)
+
+# -----------------------------
+# 🧪 TEST MODE CONFIGURATION
+# -----------------------------
+TEST_MODE = False  # Set to False for live usage
+SIMULATED_DURATION_MIN = 5  # 5 real minutes
+SIMULATED_TOTAL_MINUTES = 85  # includes in-play phase
+TEST_START_TIME = datetime.utcnow()
+
+def get_simulated_now():
+    if not TEST_MODE:
+        return datetime.utcnow()
+    elapsed_real = (datetime.utcnow() - TEST_START_TIME).total_seconds()
+    simulated_minutes = (elapsed_real / (SIMULATED_DURATION_MIN * 60)) * SIMULATED_TOTAL_MINUTES
+    return TEST_START_TIME + timedelta(minutes=simulated_minutes)
+
+# -----------------------------
+# ✅ UPGRADE MONITOR – FULL SYSTEM FLOW
+# -----------------------------
+
+import upgrade.upgrade_20250523 as legacy
+legacy.upgrade_monitor = lambda: None
+
+def launch_protocol():
+    logging.info("🚀 Starting upgrade_20250525 Launch Protocol")
+    validate_bets_table()
+
+    markets = fetch_markets()
+    log_runners_to_db(markets)
+
+    if markets:
+        from upgrade.upgrade_20250522 import wrap_run_monitor
+        wrap_run_monitor(signal_queue, os.environ["SESSION_TOKEN"], markets)
+    else:
+        logging.info("🟡 No valid markets returned – skipping signal dispatch.")
+    else:
+        logging.info("🟡 No valid markets returned – skipping signal dispatch.")
+
+
+def upgrade_monitor():
+    logging.info("🧼 upgrade_monitor() is deprecated – full flow now controlled by launch_protocol()"); return
+    else:
+        logging.info("🟡 No markets passed to wrap_run_monitor – test mode running with no data.")
+    else:
+        logging.info("🟡 No markets passed to wrap_run_monitor – test mode running with no data.")
+
+# -----------------------------
+# ✅ DB TABLE SCHEMA CREATION
+# -----------------------------
+def validate_bets_table():
+    logging.info("🧱 Validating bets table structure...")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bets (
+                marketId TEXT,
+                selectionId INTEGER,
+                time_signal TEXT,
+                customerOrderRef TEXT,
+                timestamp TEXT,
+                date TEXT,
+                status TEXT,
+                event_name TEXT,
+                race_name TEXT,
+                marketStartTime TEXT,
+                odds_check_6 REAL,
+                odds_check_1 REAL,
+                anchor_odd REAL,
+                time_80 TEXT,
+                time_60 TEXT,
+                time_40 TEXT,
+                time_20 TEXT,
+                time_10 TEXT,
+                time_5 TEXT,
+                time_0 TEXT,
+                odds REAL,
+                strategy_name TEXT,
+                signal_type TEXT,
+                bot_name TEXT,
+                bet_type TEXT,
+                PRIMARY KEY (marketId, selectionId, customerOrderRef)
+            )
+        """)
+        conn.commit()
+
+# -----------------------------
+# 📡 Fetch Markets (Simulated or Live)
+# -----------------------------
+def fetch_market_data():
+    logging.info("📡 Fetching live WIN markets with 7+ runners...")
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": "CZHojduNWa3kxWIn",
+                "X-Authentication": session_token,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketCountries": ["GB", "IE"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "maxResults": "200"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+
+        raw_markets = response.json()[0].get("result", []) if response.status_code == 200 else []
+        valid = [m for m in raw_markets if len(m.get("runners", [])) >= 7]
+        logging.info(f"🎯 Filter complete: {len(valid)} markets ready")
+        return valid
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+
+def fetch_markets():
+    if TEST_MODE:
+        logging.info("🧪 TEST MODE ACTIVE – Dummy Data Injected – Need Data")
+        return []
+    else:
+        return fetch_market_data()
+
+    logging.info("📡 Fetching live WIN markets with 7+ runners...")
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": "CZHojduNWa3kxWIn",
+                "X-Authentication": os.environ["SESSION_TOKEN"],
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z"),
+                                "to": (datetime.utcnow() + timedelta(days=2)).strftime("%Y-%m-%dT00:00:00Z")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "sort": "FIRST_TO_START",
+                        "maxResults": "30"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+
+        markets = response.json()[0].get("result", []) if response.status_code == 200 else []
+        valid = [m for m in markets if len(m.get("runners", [])) >= 7]
+        logging.info(f"🎯 Filter complete: {len(valid)} markets ready")
+        return valid
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+
+# -----------------------------
+# 📝 Insert Runners to DB
+# -----------------------------
+def log_runners_to_db(markets):
+    logging.info("📝 Logging runners to DB with status 'pending'...")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        for market in markets:
+            market_id = market["marketId"]
+            race_name = market["marketName"]
+            event_name = market["event"]["name"]
+            market_start = market["marketStartTime"]
+
+            for runner in market["runners"]:
+                selection_id = runner["selectionId"]
+                runner_name = runner["runnerName"]
+                customer_order_ref = f"{market_id[-5:]}_{selection_id}"
+                timestamp = datetime.utcnow().isoformat()
+
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO bets (
+                            marketId, selectionId, horse_name, time_signal, customerOrderRef,
+                            timestamp, date, status, event_name, race_name, marketStartTime,
+                            odds_check_6, odds_check_1, anchor_odd,
+                            time_60, time_40, time_20, time_10, time_5, time_0,
+                            odds, strategy_name, signal_type, bot_name, bet_type
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        market_id,
+                        selection_id,
+                        runner_name,
+                        "time_80",
+                        customer_order_ref,
+                        timestamp,
+                        datetime.utcnow().strftime('%Y-%m-%d'),
+                        "pending",
+                        event_name,
+                        race_name,
+                        market_start,
+                        None, None, None,
+                        None, None, None, None, None, None,
+                        None, None, None, None, None
+                    ))
+                        selection_id,
+                        runner_name,
+    }
+  ]
+}
+                        customer_order_ref,
+                        timestamp,
+                        datetime.utcnow().strftime('%Y-%m-%d'),
+                        "pending",
+                        event_name,
+                        race_name,
+                        market_start,
+                        None, None, None,
+                        "time_80", None, None, None, None, None, None,
+                        None, None, None, None, None
+                    ))
+                except Exception as e:
+                    logging.error(f"❌ Failed to insert runner {runner_name}: {e}")
+
+        conn.commit()
+# These would be defined below as needed
+

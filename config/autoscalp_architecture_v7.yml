@@ -1,0 +1,228 @@
+# autoscalp_architecture_v7.yml
+version: "7.1"
+name: "AutoScalp Mastery Architecture"
+description: "Unified intelligence stack linking Playbooks, Blueprints, Form, Overwatcher, and Mastery."
+
+layers:
+
+  FRONT_END_OPERATIONS:
+    summary: >
+      User-facing execution layer — interfaces, dashboards, and control utilities.
+    components:
+      - name: Control Center
+        role: "Manual orchestration of Build / Train / Deploy tasks."
+        outputs: ["rebuild_playbooks()", "train_mastery_v7()", "emit_snapshot()"]
+      - name: Mastery Dashboard
+        role: "Unified GUI for market monitoring and model metrics."
+        tabs:
+          - Live Markets: "Real-time drift/steam, WOM, volatility"
+          - Intelligence Summary: "Bias, timing, synergy"
+          - Events Feed: "Stop-loss, micro-lay, MLM"
+          - Form Book: "Runner form, last wins, confidence bias"
+          - Training Health: "Epoch progress, hedges, win-rate"
+      - name: CLI Interface
+        role: "Alternative orchestration via Step1–4 terminal flow."
+
+  INTELLIGENCE_ENGINE:
+    summary: >
+      Cognitive layer — processes all event, form, and market data into learning signals.
+    subsystems:
+
+      MasteryEngine:
+        inputs: ["mastery_outcomes_raw", "mastery_posteriors"]
+        processes: ["train_mastery_v7.py", "posteriors.update_after_outcome()"]
+        outputs: ["models/mastery_v7_policy.pkl", "data/posteriors/mastery_snapshot_v7.json"]
+
+      Playbooks:
+        inputs: ["orders", "decisions", "plan_ledger", "markets_schedule"]
+        sources: ["bets.db", "settlements.db"]
+        outputs: ["playbooks_settled", "playbooks_diagnostics", "playbooks_insights"]
+        enrichments: ["segment_key from blueprints"]
+        ingest_target: "mastery_outcomes_raw (source='PLAYBOOKS_LIVE')"
+
+      Blueprints:
+        purpose: "Historical OC pattern library (drift/steam/pingpong/flat)."
+        data_sources: ["oc_series", "inbound_oc_cache"]
+        outputs: ["data/blueprints/blueprint_signals_*.json", "blueprint_meta_summary.json"]
+
+      FormBook:
+        table: "runner_form_canonical"
+        fields: ["form_runs", "form_wins", "win_rate", "avg_pnl", "last_seen"]
+        purpose: "Per-runner statistical history; informs bias and liability scaling."
+
+      Overwatcher:
+        modules: ["enforce_stop_losses()", "evaluate_liability_cap()", "start_micro_scalper_diag()"]
+        event_types: ["stop_loss_breached", "liability_signal", "mlm_enforced"]
+        integration: "Emits into event_sink for Mastery ingestion."
+
+      IntelligenceViews:
+        purpose: "Feature layer for training and dashboard analytics."
+        views:
+          - v_market_sentiment: "Drift/steam classification + volatility bands"
+          - v_weight_of_money: "Live WOM ratio and state (BACK_DOM/LAY_DOM/BALANCED)"
+          - volatility_meta: "Average volatility and range_low/high"
+          - trend_features: "slope_ppm, tick_vel_3s_up, momentum_class"
+          - bias_summary: "bias_value, bias_dir, bias_conf"
+          - v_mastery_intel_v7: "Unified all-in-one intelligence dataset"
+
+  PROCESS_AUTOMATION:
+    summary: >
+      Continuous improvement layer — retrains models, rebuilds playbooks, and refines processes.
+    components:
+
+      PlaybooksRebuild:
+        tasks:
+          - "Rebuild from bets.db + settlements.db"
+          - "Verify schema consistency and tagging"
+          - "Re-ingest into mastery_outcomes_raw"
+          - "Regenerate v_mastery_live and v_playbooks_all"
+
+      MasteryOutcomeRawRebuild:
+        purpose: "Ensure unified tagging and structure for all learning sources."
+        tags:
+          PLAYBOOKS_LIVE: "Live settled trades"
+          REPLAY: "Replay-generated simulations"
+          V7_TRAIN: "Training engine inserts"
+          LIVE: "Real-time market outcomes"
+        validation: "Cross-source balance and schema hash verification"
+
+      ProcessIntelligence:
+        inputs: ["schema logs", "event summaries", "training reports"]
+        outputs: ["process_summary.json", "process_report.txt"]
+        features:
+          - "Impact clustering (schema/performance/UI/model)"
+          - "Confidence + impact scoring"
+          - "Automatic sprint suggestion generator"
+
+      AutomationOrchestrator:
+        schedule:
+          - "Daily: Playbooks rebuild"
+          - "Nightly: Mastery training (7-day × 50-epoch)"
+          - "Post-train: Snapshot + schema audit"
+        persistence: "Writes summary to mastery_state"
+
+      HumanInTheLoop:
+        purpose: "Combine human intuition with system metrics to refine next sprint."
+        process:
+          - "Review process_report.txt → confirm or reprioritise"
+          - "System merges updates into SPRINT_V{n+1}.py"
+          - "Dashboard reflects latest sprint readiness state"
+
+data_lineage:
+  description: >
+    Tracks how data moves through AutoScalp — from raw orders and event logs,
+    through Playbooks, Mastery, and Training, to the final model snapshot.
+
+  sources:
+    - name: Live Trading Data
+      origin: "Betfair Streaming API / Live Feeds"
+      outputs: ["orders", "odds_current", "inbound_oc_cache"]
+      consumed_by: ["Playbooks Builder", "Overwatcher", "Micro-Scalper"]
+
+    - name: Event Logs
+      origin: "event_sink (CIS Unified Emitter)"
+      outputs: ["events", "mastery_cache", "training_events"]
+      consumed_by: ["MasteryEngine", "PlaybooksRebuild", "TrainingAnalytics"]
+
+  transforms:
+
+    - step: Playbooks_Builder
+      input_tables: ["orders", "decisions", "plan_ledger", "markets_schedule", "settlements.db"]
+      output_tables:
+        - playbooks_settled
+        - playbooks_diagnostics
+        - playbooks_insights
+        - playbooks_learning
+      emits:
+        - segment_key: "Blueprint surface/distance classification"
+        - replay_variants: "Synthetic replay-mode data for reinforcement training"
+      next_stage: Mastery_Outcomes_Raw
+
+    - step: Mastery_Outcomes_Raw
+      description: "Unifies all learning sources into a single canonical training table."
+      input_tables:
+        - playbooks_settled
+        - playbooks_learning
+        - mastery_feedback
+        - replay_reports_ingested
+      output_table: mastery_outcomes_raw
+      tagging_rules:
+        PLAYBOOKS_LIVE: "Settled trades from live playbooks"
+        PLAYBOOKS_REPLAY: "Synthetic replay data"
+        LIVE: "Real-time market outcomes"
+        V7_TRAIN: "Rows inserted by training process"
+      next_stage: Mastery_Posteriors
+
+    - step: Mastery_Posteriors_Update
+      description: "Applies Bayesian update logic from posteriors.update_after_outcome()."
+      input_tables: ["mastery_outcomes_raw"]
+      output_table: mastery_posteriors
+      process:
+        - "Increment alpha/beta counts per letter & band"
+        - "Update fill rates and MAE stats"
+        - "Recalculate bias_score and expected_value"
+      next_stage: Training_Sandbox
+
+    - step: Training_Sandbox_Builder
+      description: "Constructs a lightweight training dataset for model retraining."
+      input_views:
+        - v_mastery_v7
+        - v_timing_features_v7
+        - runner_form_canonical
+        - v_market_sentiment
+        - trend_features
+      joins:
+        - "Left join by (marketId, selectionId)"
+        - "Add form metrics (form_runs, win_rate, avg_pnl)"
+        - "Add volatility & sentiment fields"
+        - "Add timing features (pre_vol, inplay_vol, drift_speed, etc.)"
+      output_table: mastery_v7_training
+      next_stage: Training_Model_Fit
+
+    - step: Training_Model_Fit
+      description: "Fits the RandomForest model and updates posterior priors."
+      input_table: mastery_v7_training
+      algorithm: "RandomForestClassifier"
+      target: "action"
+      sample_weighting:
+        - base_weight: "weight"
+        - synergy_score: "form_bias + bias_conf × recency_decay"
+      outputs:
+        - model_file: "models/mastery_v7_policy.pkl"
+        - snapshot_json: "data/posteriors/mastery_snapshot_v7_*.json"
+      next_stage: Mastery_State
+
+    - step: Mastery_State_Update
+      description: "Stores model metadata and version tracking."
+      input: ["model_path", "training_metrics"]
+      table: mastery_state
+      fields:
+        - trained_on
+        - version
+        - thresholds_json
+        - goal_alignment
+        - schema_hash
+      next_stage: Dashboard_Visualisation
+
+  consumers:
+
+    - name: Dashboard
+      reads:
+        - v_mastery_intel_v7
+        - v_mastery_live
+        - v_playbooks_all
+        - mastery_state
+      features:
+        - Live KPI tiles
+        - Form book tab
+        - Training health charts
+        - Goal alignment index
+      writes: []
+
+    - name: Control Center
+      triggers:
+        - build_playbooks()
+        - train_mastery_v7()
+        - rebuild_mastery_outcomes_raw()
+      observes: ["process_report.txt", "process_summary.json"]
+

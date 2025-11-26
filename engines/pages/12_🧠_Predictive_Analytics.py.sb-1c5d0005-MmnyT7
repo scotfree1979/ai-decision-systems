@@ -1,0 +1,47 @@
+## 📉 Predictive Analytics Page
+
+Here's the complete Streamlit code snippet for your Predictive Analytics page:
+
+```python
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+# Placeholder Data (replace with actual predictive analytics data retrieval)
+predictive_data = pd.DataFrame({
+    "Date": pd.date_range(start="2025-05-01", periods=30),
+    "Predicted P/L (£)": np.random.uniform(-200, 500, size=30),
+    "Actual P/L (£)": np.random.uniform(-150, 450, size=30)
+}).set_index("Date")
+
+# Page Title
+st.title("📉 Predictive Analytics")
+
+# Predicted vs Actual P/L
+st.subheader("Predicted vs Actual P/L")
+st.line_chart(predictive_data)
+
+# Error Metrics
+predictive_data["Error (£)"] = predictive_data["Actual P/L (£)"] - predictive_data["Predicted P/L (£)"]
+st.subheader("Prediction Error Analysis")
+st.bar_chart(predictive_data["Error (£)"])
+
+# Insights and Recommendations
+average_error = predictive_data["Error (£)"].mean()
+st.subheader("Insights")
+st.write(f"Average Prediction Error (£): {average_error:.2f}")
+
+if average_error > 0:
+    st.warning("Predictions tend to underestimate actual performance.")
+elif average_error < 0:
+    st.warning("Predictions tend to overestimate actual performance.")
+else:
+    st.success("Predictions are highly accurate.")
+```
+
+### Integration Instructions:
+
+* Replace placeholder data with actual predictive and performance data.
+* Use appropriate caching strategies to maintain smooth performance.
+
+Please integrate this and confirm completion or any further adjustments needed!

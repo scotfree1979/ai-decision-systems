@@ -1,0 +1,144 @@
+# betfair_api.py (Clean Integration with Anchor Odds and Enhanced Logging)
+
+import requests
+import logging
+from datetime import datetime, timedelta
+from enhanced_real_time_bot_feed import log_session_management
+from queue import PriorityQueue
+from itertools import count
+import json
+from anchor_odds_logic import integrate_with_market_monitor, fetch_anchor_odds, explicitly_store_runner_details_in_db, generate_customer_order_ref
+
+# Global settings explicitly defined
+APP_KEY = "CZHojduNWa3kxWIn"
+SESSION_TOKEN = None
+DB_PATH = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db'
+
+def store_session_token(token):
+    global SESSION_TOKEN
+    SESSION_TOKEN = token
+
+# Explicit manual token entry
+def manual_session_token():
+    global SESSION_TOKEN
+    if SESSION_TOKEN is None:
+        SESSION_TOKEN = input("🔐 Enter your Betfair session token: ").strip()
+    return SESSION_TOKEN
+
+def get_headers():
+    token = manual_session_token()
+    if not token:
+        logging.error("🔴 No session token available, manual input required.")
+    return {
+        "X-Application": APP_KEY,
+        "X-Authentication": token,
+        "Content-Type": "application/json"
+    }
+
+class BetfairAPI:
+    def __init__(self):
+        self.headers = get_headers()
+        self.queue = PriorityQueue()
+        self.counter = count()
+
+    def add_request(self, priority, method, params, req_id):
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": req_id
+        }
+        self.queue.put((priority, next(self.counter), payload))
+
+    def send_batch(self):
+        url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+        batch_payload = []
+        while not self.queue.empty():
+            _, _, payload = self.queue.get()
+            batch_payload.append(payload)
+
+        try:
+            response = requests.post(url, headers=self.headers, data=json.dumps(batch_payload), timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logging.error(f"🔴 API batch request failed: {e}")
+            return None
+
+    def fetch_markets(self):
+        today = datetime.utcnow().strftime('%Y-%m-%dT00:00:00Z')
+        tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
+        params = {
+            "filter": {
+                "eventTypeIds": ["7"],
+                "marketStartTime": {"from": today, "to": tomorrow}
+            },
+            "maxResults": "10",
+            "sort": "FIRST_TO_START",
+            "marketProjection": ["RUNNER_METADATA", "MARKET_START_TIME"]
+        }
+        self.add_request(priority=2, method="SportsAPING/v1.0/listMarketCatalogue", params=params, req_id=2)
+
+    def process_market_catalogue(self, response):
+        try:
+            for market_catalogue in response[0]['result']:
+                market_id = market_catalogue['marketId']
+                market_start_time = market_catalogue['marketStartTime']
+
+                for runner in market_catalogue['runners']:
+                    selection_id = runner['selectionId']
+                    horse_name = runner['runnerName']
+
+                    # Explicit anchor odds fetch
+                    anchor_odd = fetch_anchor_odds(market_id, selection_id, self.headers)
+
+                    customerOrderRef = generate_customer_order_ref(
+                        market_id, selection_id, datetime.utcnow().date().isoformat()
+                    )
+
+                    integrate_with_market_monitor(
+                        marketId=market_id,
+                        selectionId=selection_id,
+                        stake=0,
+                        odds=anchor_odd,
+                        bet_type='LAY',
+                        placed_at=datetime.utcnow().isoformat(),
+                        status='pending',
+                        matched_liability=0,
+                        unmatched_liability=0,
+                        pnl=0,
+                        liability=0,
+                        result='',
+                        timestamp=datetime.utcnow().isoformat(),
+                        matched_timestamp='',
+                        betfair_bet_id='',
+                        horse_name=horse_name,
+                        strategy_name='',
+                        bot_name='',
+                        date=datetime.utcnow().date().isoformat(),
+                        horse=horse_name,
+                        can_accept_liability=1,
+                        time_session='',
+                        race_name=market_catalogue.get('marketName', ''),
+                        market_name=market_catalogue.get('marketName', ''),
+                        event_name='',
+                        anchor_odd=anchor_odd,
+                        odds_check_1=0,
+                        odds_check_2=0,
+                        odds_check_3=0,
+                        odds_check_4=0,
+                        odds_check_5=0,
+                        odds_check_6=0,
+                        customerOrderRef=customerOrderRef,
+                        race_start_time=market_start_time
+                    )
+
+                    # Explicitly store runner details
+                    explicitly_store_runner_details_in_db(
+                        market_id, selection_id, horse_name, anchor_odd, market_start_time
+                    )
+
+                logging.info(f"✅ Successfully integrated market data explicitly for market ID {market_id}")
+
+        except Exception as e:
+            logging.error(f"🔴 Explicit error integrating market data: {e}")

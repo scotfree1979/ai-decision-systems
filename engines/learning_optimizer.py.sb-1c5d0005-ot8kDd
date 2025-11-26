@@ -1,0 +1,95 @@
+# dashboard.py
+import time
+import threading
+import os
+import sqlite3
+from datetime import datetime, timedelta
+
+DATABASE_PATH = 'bets.db'
+
+# Database interaction functions
+def fetch_total_liability():
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(liability) FROM bets WHERE status='matched' AND result='pending'")
+        result = cursor.fetchone()[0]
+        return result if result else 0.0
+
+def fetch_active_race_count():
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(DISTINCT market_id) FROM bets WHERE result='pending'")
+        result = cursor.fetchone()[0]
+        return result
+
+def fetch_urgent_race_count(minutes=4):
+    urgent_time = datetime.now() + timedelta(minutes=minutes)
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(DISTINCT market_id) FROM bets
+            WHERE result='pending' AND timestamp <= ?
+        """, (urgent_time.strftime('%Y-%m-%d %H:%M:%S'),))
+        result = cursor.fetchone()[0]
+        return result
+
+# Terminal management function
+def clear_terminal():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+# Dashboard display function
+def display_dashboard():
+    clear_terminal()
+    print(f"{'='*10} Scalper Live Dashboard {'='*10}")
+    print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    liability = fetch_total_liability()
+    active_races = fetch_active_race_count()
+    urgent_races = fetch_urgent_race_count()
+
+    print(f"\nTotal Current Liability: £{liability:.2f}")
+    print(f"Open Active Races: {active_races}")
+    print(f"Urgent Races (within 4 min): {urgent_races}")
+    print(f"\nQuick Commands:")
+    print(f"[H] Hedge all positions | [C] Close all positions | [Q] Quit Dashboard")
+    print(f"{'='*42}")
+
+# Dashboard refresh loop
+def dashboard_loop(refresh_interval=30):
+    while True:
+        display_dashboard()
+        time.sleep(refresh_interval)
+
+# Hedge positions function (integration required)
+def hedge_all_positions():
+    # TODO: Integrate actual logic to hedge all active positions
+    print("[Integration Required] Hedge positions functionality not yet implemented.")
+
+# Close positions function (integration required)
+def close_all_positions():
+    # TODO: Integrate actual logic to close all active positions
+    print("[Integration Required] Close positions functionality not yet implemented.")
+
+# Command interface handling user inputs
+def command_interface():
+    while True:
+        cmd = input("\nEnter Command: ").strip().lower()
+        if cmd == 'h':
+            hedge_all_positions()
+        elif cmd == 'c':
+            close_all_positions()
+        elif cmd == 'q':
+            print("Exiting dashboard...")
+            os._exit(0)
+        else:
+            print("Invalid command. Please enter 'H', 'C', or 'Q'.")
+
+# Main function to initialize dashboard
+def start_dashboard():
+    dashboard_thread = threading.Thread(target=dashboard_loop, daemon=True)
+    dashboard_thread.start()
+    command_interface()
+
+# Integration entry point
+if __name__ == "__main__":
+    start_dashboard()

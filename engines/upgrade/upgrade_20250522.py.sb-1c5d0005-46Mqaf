@@ -1,0 +1,102 @@
+# ULTIMATE PATCH – PART 1: SETUP & VALID MARKET FILTER
+import logging
+import json
+import requests
+import time
+import datetime
+from bet_core import place_bet, calculate_tick, round_to_valid_odds, green_up
+def get_market_book(session_token, market_id):
+    headers = {
+        'X-Authentication': session_token,
+        'Content-Type': 'application/json'
+    }
+    payload = [{
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listMarketBook",
+        "params": {
+            "marketIds": [market_id],
+            "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
+        },
+        "id": 1
+    }]
+    response = requests.post("https://api.betfair.com/exchange/betting/json-rpc/v1", headers=headers, data=json.dumps(payload)).json()
+    return response[0]['result'][0] if 'result' in response[0] else None
+
+
+def place_basic_lay_bet(signal):
+    from upgrade.upgrade_20250522 import place_basic_lay_bet as basic_lay
+    basic_lay(signal)
+
+def place_ladder_lay_bet(signal):
+    from upgrade.upgrade_20250522 import place_ladder_lay_bet as ladder_lay
+    ladder_lay(signal)
+
+def place_scalp_trade(signal, direction='lay_to_back'):
+    from upgrade.upgrade_20250522 import place_scalp_trade as scalp
+    scalp(signal, direction)
+
+def place_greenup_exit(signal):
+    from upgrade.upgrade_20250522 import place_greenup_exit as greenup
+    greenup(signal)
+
+def evaluate_signal(signal):
+    from upgrade.upgrade_20250522 import evaluate_signal as core_eval
+    return core_eval(signal)
+
+def wrap_run_monitor(signal_queue, session_token, markets):
+    if not markets:
+        logging.warning("⚠️ [Upgrade] No markets passed to wrap_run_monitor.")
+        return
+
+    valid_markets = [
+        m for m in markets
+        if m.get('marketType') == 'WIN'
+        and len(m.get('runners', [])) >= 7
+        and m.get('event', {}).get('countryCode') in ['GB', 'IE']
+        and m.get('event', {}).get('openDate', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+        and m.get('marketStartTime', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+        and not any(bad in m.get('marketName', '') for bad in ['Distance', 'Tote', 'Odds'])
+    ]
+
+    if not valid_markets:
+        logging.warning("⚠️ [Upgrade] No valid WIN markets with 7+ runners found.")
+        return
+
+# ULTIMATE PATCH – PART 2: LOOP & MARKET EXTRACTION
+    for market in valid_markets:
+        time.sleep(1)
+        signal_market_id = market['marketId']
+        signal_selection_id = market['runners'][0]['selectionId']
+
+# ULTIMATE PATCH – PART 3: GET ODDS
+        book = get_market_book(session_token, signal_market_id)
+        best_odds = None
+        for runner in book['runners']:
+            if runner['selectionId'] == signal_selection_id and runner['ex']['availableToLay']:
+                best_odds = runner['ex']['availableToLay'][0]['price']
+                break
+        if not best_odds:
+            logging.warning("⚠️ No lay odds available. Fallback to 3.0.")
+            best_odds = 3.0
+
+# ULTIMATE PATCH – PART 4: SIGNAL BUILD & DISPATCH
+        signal = {
+            'type': 'heartbeat',
+            'signal_type': 'Market Drifter Signal',
+            'marketId': signal_market_id,
+            'selectionId': signal_selection_id,
+            'strategy_name': 'Basic Lay',
+            'stake': 5.0,
+            'odds': best_odds,
+            'bot_name': 'OGHeadTrader',
+            'session_token': session_token,
+            'timestamp': datetime.datetime.utcnow().isoformat(),
+            'source': 'upgrade.wrap_run_monitor',
+            'detail': 'heartbeat',
+            'time_session': 'anytime',
+            'market_name': market.get('marketName'),
+            'event_name': market.get('event', {}).get('name')
+        }
+
+        signal_queue.put(signal)
+        logging.info(f"⏱ [Upgrade Monitor] Locked signal emitted: {signal}")

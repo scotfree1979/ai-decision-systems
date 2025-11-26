@@ -1,0 +1,128 @@
+import sqlite3
+import time
+import json
+from datetime import datetime
+from signal_memory_engine import signal_memory
+
+from config_paths import DB_PATH
+
+# ✅ STM Writer Module
+# File: upgrade/memory/stm_writer.py
+
+import sqlite3
+from datetime import datetime
+from config_paths import DB_PATH
+
+
+def write_signal_to_stm(signal):
+    """
+    Write a signal dictionary to the stm_live_signals table.
+    This provides a persistent record of all live signal attempts.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO stm_live_signals (
+                    marketId, selectionId, odds, range_low, range_high,
+                    tick_pattern, direction_bias, confidence, drift,
+                    spread, position_ratio, volatility, signal_type, stake,
+                    session_token, timestamp, customerOrderRef,
+                    blueprint_match, scalp_direction, scalp_ticks, forced, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                signal.get("marketId"),
+                signal.get("selectionId"),
+                signal.get("odds"),
+                signal.get("range_low"),
+                signal.get("range_high"),
+                signal.get("tick_pattern"),
+                signal.get("direction_bias"),
+                signal.get("confidence"),
+                signal.get("drift"),
+                signal.get("spread"),
+                signal.get("position_ratio"),
+                signal.get("volatility"),
+                signal.get("signal_type"),
+                signal.get("stake"),
+                signal.get("session_token"),
+                signal.get("timestamp", datetime.utcnow().isoformat()),
+                signal.get("customerOrderRef"),
+                signal.get("blueprint_match"),
+                signal.get("scalp_direction"),
+                signal.get("scalp_ticks"),
+                int(signal.get("forced", False)),
+                signal.get("status")
+            ))
+            conn.commit()
+            print(f"🧠 [STM] Signal saved: {signal.get('selectionId')} in {signal.get('marketId')}")
+    except Exception as e:
+        print(f"⚠️ [STM] Failed to write signal: {e}")
+
+
+# Example usage from SignalMemoryEngine:
+# from upgrade.memory.stm_writer import write_signal_to_stm
+# write_signal_to_stm(signal)
+
+
+def write_stm_signals():
+    written_refs = set()
+
+    while True:
+        try:
+            signals = signal_memory.unmatched_signals
+
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+
+                for (market_id, selection_id), entries in signals.items():
+                    for s in entries[-2:]:  # write latest 2 for safety
+                        ref = f"{market_id}-{selection_id}-{round(s.get('odds', 0), 2)}-{s.get('timestamp', 0)}"
+                        if ref in written_refs:
+                            continue
+
+                        written_refs.add(ref)
+
+                        cursor.execute("""
+                            INSERT INTO stm_live_signals (
+                                marketId, selectionId, odds, range_low, range_high,
+                                tick_pattern, direction_bias, confidence, drift, spread,
+                                position_ratio, volatility, signal_type, stake, session_token,
+                                timestamp, customerOrderRef, blueprint_match,
+                                scalp_direction, scalp_ticks, forced, status
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            market_id,
+                            selection_id,
+                            s.get("odds"),
+                            s.get("range_low"),
+                            s.get("range_high"),
+                            s.get("tick_pattern"),
+                            s.get("direction_bias"),
+                            s.get("confidence"),
+                            s.get("drift", 0.0),
+                            s.get("spread", 0.0),
+                            s.get("position_ratio"),
+                            s.get("volatility"),
+                            s.get("signal_type"),
+                            s.get("stake"),
+                            s.get("session_token"),
+                            datetime.utcnow().isoformat(),
+                            s.get("customerOrderRef"),
+                            s.get("blueprint_match"),
+                            s.get("scalp_direction"),
+                            s.get("scalp_ticks"),
+                            int(s.get("forced", False)),
+                            s.get("status")
+                        ))
+                conn.commit()
+
+            print(f"📥 STM Writer logged signals: {len(written_refs)} total")
+
+        except Exception as e:
+            print(f"⚠️ STM writer error: {e}")
+
+        time.sleep(10)
+
+if __name__ == "__main__":
+    write_stm_signals()

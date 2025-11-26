@@ -1,0 +1,87 @@
+# -----------------------------
+# 💰 BUDGET MANAGER FINAL APPROVAL STAGE
+# -----------------------------
+def budget_manager():
+    import sqlite3
+    from upgrade.Final_Flow_Update import DB_PATH, get_simulated_now, bot_signal_queues
+    from upgrade_import_patch import budget_manager as live_budget_mgr
+
+    logging.info("💰 Running budget manager for risk-evaluated signals")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM bets WHERE status = 'risk_evaluated'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            try:
+                signal = {
+                    "marketId": row[0],
+                    "selectionId": row[1],
+                    "horse_name": row[2],
+                    "time_signal": row[3],
+                    "customerOrderRef": row[4],
+                    "timestamp": row[5],
+                    "bot_name": row[18],
+                    "strategy_name": row[15],
+                    "signal_type": row[16],
+                    "stake": row[14],
+                    "odds": row[13]
+                }
+
+                result = live_budget_mgr.evaluate_budget(signal)
+
+                new_status = "approved" if result else "rejected"
+
+                cursor.execute("""
+                    UPDATE bets SET status = ?, timestamp = ?
+                    WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                """, (new_status, now.isoformat(), signal["marketId"], signal["selectionId"], signal["customerOrderRef"]))
+
+                if result and signal["bot_name"] in bot_signal_queues:
+                    bot_signal_queues[signal["bot_name"]].put(signal)
+                    logging.info(f"✅ Sent to bot queue: {signal['bot_name']} [{signal['customerOrderRef']}]")
+                else:
+                    logging.warning(f"🚫 Signal {signal['customerOrderRef']} not approved or bot unknown")
+
+            except Exception as e:
+                logging.error(f"❌ Budget manager failed for signal {row[4]}: {e}")
+
+        conn.commit()
+
+
+# -----------------------------
+# 🧮 RISK MANAGER EVALUATION STAGE
+# -----------------------------
+def risk_manager():
+    import sqlite3
+    from datetime import datetime
+    from upgrade.Final_Flow_Update import DB_PATH, get_simulated_now
+
+    logging.info("🔍 Running risk manager stage for fully_enriched signals")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM bets WHERE status = 'fully_enriched'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            market_id, selection_id, horse_name, time_signal, ref = row[0], row[1], row[2], row[3], row[4]
+
+            try:
+                cursor.execute("""
+                    UPDATE bets
+                    SET status = 'risk_evaluated', timestamp = ?
+                    WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                """, (now.isoformat(), market_id, selection_id, ref))
+                logging.info(f"🔐 Risk manager flagged {ref} as risk_evaluated")
+            except Exception as e:
+                logging.error(f"❌ Risk manager failed to update {ref}: {e}")
+
+        conn.commit()

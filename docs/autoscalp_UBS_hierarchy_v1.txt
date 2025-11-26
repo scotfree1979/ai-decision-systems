@@ -1,0 +1,112 @@
+# ===============================================================
+# AutoScalp UBS Hierarchy v1 — Unified Breakdown System Map
+# ===============================================================
+# Project: AutoScalp Decision Intelligence Platform
+# Version: 1.0
+# Date: 2025-11-03
+# Author: AutoScalp Core (MK + GPT-5)
+# Purpose: Canonical UBS reference for all narrative, content,
+#          and Japscript integration workflows.
+# ===============================================================
+
+## LEVEL 1 — Overarching System
+I.N.T.E.L. — Interpret • Navigate • Test • Evolve • Leverage
+Summary: The master operating philosophy.
+Meaning: Intelligence learns by testing, adapts by evolving, and proves itself through leverage.
+
+---
+
+## LEVEL 2 — Core Pillars + Internal Systems
+
+### 1️⃣ L.O.S.E. — Tuition Through Failure
+Cycle: Learn → Observe → Stabilise → Evolve
+Triad: Fail • Find • Form
+Equation: Loss = Tuition ÷ Ego
+Mottos:
+  - "Loss teaches what luck hides."
+  - "You pay to see the truth."
+Tone: Raw · Transparent · Foundational
+
+### 2️⃣ R.I.S.K. — Controlled Exposure
+Equation: Edge ÷ Exposure = Survival Ratio
+Triad: Test • Tighten • Trust
+Polarity: Confidence ↔ Complacency
+Mottos:
+  - "Never risk what you can’t measure."
+  - "Survival is the first profit."
+Tone: Precise · Disciplined · Rational
+
+### 3️⃣ E.D.G.E. — Adaptive Advantage
+Alliteration Cluster: Detect • Defend • Decide • Deploy
+Equation: Adaptation > Anticipation
+Mottos:
+  - "Find the edge. Guard it. Repeat."
+  - "Adaptation beats prediction."
+Tone: Confident · Tactical · Fast
+
+### 4️⃣ B.A.N.K. — Capital Discipline
+Dualities: Budget ↔ Boldness · Accuracy ↔ Aggression
+Cycle: Allocate → Execute → Reassess → Repeat
+Mottos:
+  - "Capital breathes in ratios."
+  - "Bank isn’t money — it’s structure."
+Tone: Measured · Grounded · Strategic
+
+### 5️⃣ D.A.T.A. — Information Discipline
+Recursive Loop: Define → Analyse → Test → Adapt → (Loop)
+Triad: Sort • Simplify • Signal
+Mottos:
+  - "Data refines itself."
+  - "Truth repeats when the noise fades."
+Tone: Analytical · Clean · Logical
+
+### 6️⃣ S.C.A.L.P. — Execution Engine
+Five-Gear Model: Scan → Calculate → Align → Leverage → Persist
+Triad: Speed • Stability • Sync
+Equation: Execution = Precision × Timing
+Mottos:
+  - "Speed without accuracy is noise."
+  - "Persistence turns process into power."
+Tone: Focused · Technical · Mechanical
+
+### 7️⃣ M.A.S.T.E.R. — Learning Architecture
+Ladder Model: Measure → Adapt → Simulate → Train → Evolve → Reinforce
+Triad: Record • Reflect • Refine
+Equation: Progress = Practice ÷ Time
+Mottos:
+  - "Repetition builds reflection."
+  - "Mastery isn’t progress — it’s proof."
+Tone: Wise · Patient · Systematic
+
+### 8️⃣ C.O.N.T.R.O.L. — Operational Balance
+Polarity Framework: Calm vs. Chaos / Objective vs. Urgent / Logic vs. Emotion
+Triad: Pause • Plan • Proceed
+Mottos:
+  - "Control is rhythm, not restraint."
+  - "Balance keeps the edge sharp."
+Tone: Calm · Assured · Guardian
+
+---
+
+## LEVEL 3 — Integration Matrix
+| Level | Role | Feeds Into |
+|--------|------|------------|
+| I.N.T.E.L. | Overarching operating system | Everything |
+| Core UBS Pillars | Pillar frameworks | Storyboard + Anchor Flow |
+| Micro-systems | Triads, Equations, Laws, Mottos | Anchor bullets + Script prompts |
+| Japscript | Narrative structure | Daily video rhythm |
+| Anchor Flow | Freeform delivery scaffolding | Spoken performance |
+| Headline + Image Brief | Visual & title identity | Designer output |
+
+---
+
+## USAGE GUIDE
+- Every content piece declares its UBS pillar internally.
+- The Script and Anchor Flow pull from its micro-systems.
+- Audience absorbs the language through repetition.
+- UBS hierarchy can expand without disrupting structure.
+- Always cross-reference this file before writing new content.
+
+# ===============================================================
+# END OF FILE
+# ===============================================================

@@ -1,0 +1,50 @@
+# ✅ upgrade_head_trader.py – Enhanced with Strategy Risk Adjustments
+import logging
+import threading
+from datetime import datetime
+from optimizer.learning_optimizer import LearningOptimizer
+
+class UpgradeHeadTrader:
+    def __init__(self):
+        self.strategy_profile = {}
+        self.last_optimizer_run = None
+        self.optimizer = LearningOptimizer()
+        self.watchdog_thread = threading.Thread(target=self._watchdog, daemon=True)
+        self.watchdog_thread.start()
+
+    def run_daily_optimizer(self):
+        logging.info("🧠 [UpgradeHeadTrader] Running Learning Optimizer...")
+        self.optimizer.run()
+        self.strategy_profile = self.optimizer.stats.get("strategy_performance", {})
+        self.last_optimizer_run = datetime.utcnow()
+
+    def get_strategy_insights(self):
+        """Return the latest optimizer insights for use in the dashboard."""
+        return {
+            "last_run": self.last_optimizer_run,
+            "strategy_profile": self.strategy_profile,
+            "recommendations": self.adjust_risk_weights()
+        }
+
+    def adjust_risk_weights(self):
+        """
+        Based on strategy win rates, generate actions:
+        - If win_rate > 0.6: Recommend increasing confidence/exposure
+        - If win_rate < 0.2: Recommend decreasing confidence or pausing
+        - Else: Maintain current status
+        """
+        actions = {}
+        for strategy, win_rate in self.strategy_profile.items():
+            if win_rate > 0.6:
+                actions[strategy] = "📈 Boost exposure (win rate {:.0%})".format(win_rate)
+            elif win_rate < 0.2:
+                actions[strategy] = "⚠️ Consider reducing or pausing (win rate {:.0%})".format(win_rate)
+            else:
+                actions[strategy] = "🔁 Maintain current settings (win rate {:.0%})".format(win_rate)
+        return actions
+
+    def _watchdog(self):
+        while True:
+            thread_names = [t.name for t in threading.enumerate()]
+            logging.info(f"🐶 [Watchdog] Active Threads: {thread_names}")
+            time.sleep(1800)  # Check every 30 minutes

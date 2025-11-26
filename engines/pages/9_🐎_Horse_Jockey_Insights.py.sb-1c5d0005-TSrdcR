@@ -1,0 +1,67 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import sqlite3
+
+# Page Configuration
+st.set_page_config(page_title="Horse & Jockey Insights", layout="wide")
+st.title('🐎 Horse & Jockey Insights')
+
+# Load Historical Horse & Jockey Data from Database
+def load_horse_jockey_data():
+    conn = sqlite3.connect('/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db')
+    query = """
+    SELECT horse_name, jockey_name, timestamp, odds, pnl
+    FROM bets
+    WHERE horse_name IS NOT NULL AND jockey_name IS NOT NULL
+    ORDER BY timestamp DESC
+    """
+    return pd.read_sql(query, conn)
+
+horse_jockey_df = load_horse_jockey_data()
+horse_jockey_df['timestamp'] = pd.to_datetime(horse_jockey_df['timestamp'])
+
+# Overview Table
+st.subheader("Recent Horse & Jockey Performances")
+st.dataframe(horse_jockey_df.head(50), use_container_width=True)
+
+# Top Performing Horses
+st.subheader("Top Performing Horses by Profit")
+top_horses = horse_jockey_df.groupby('horse_name')['pnl'].sum().reset_index().sort_values(by='pnl', ascending=False).head(10)
+fig_top_horses = px.bar(top_horses, x='horse_name', y='pnl', title='Top Horses by Total Profit',
+                        labels={'pnl': 'Total Profit (£)', 'horse_name': 'Horse'},
+                        color='pnl', color_continuous_scale='RdYlGn')
+st.plotly_chart(fig_top_horses, use_container_width=True)
+
+# Top Performing Jockeys
+st.subheader("Top Performing Jockeys by Profit")
+top_jockeys = horse_jockey_df.groupby('jockey_name')['pnl'].sum().reset_index().sort_values(by='pnl', ascending=False).head(10)
+fig_top_jockeys = px.bar(top_jockeys, x='jockey_name', y='pnl', title='Top Jockeys by Total Profit',
+                         labels={'pnl': 'Total Profit (£)', 'jockey_name': 'Jockey'},
+                         color='pnl', color_continuous_scale='RdYlGn')
+st.plotly_chart(fig_top_jockeys, use_container_width=True)
+
+# Odds Distribution for Horses
+st.subheader("Odds Distribution for Horses")
+fig_horse_odds = px.histogram(horse_jockey_df, x='odds', color='horse_name', nbins=50,
+                              title='Odds Distribution by Horse',
+                              labels={'odds': 'Odds'}, opacity=0.7)
+st.plotly_chart(fig_horse_odds, use_container_width=True)
+
+# Odds vs Profitability Analysis
+st.subheader("Odds vs Profitability Analysis")
+fig_odds_profitability = px.scatter(horse_jockey_df, x='odds', y='pnl', color='horse_name',
+                                    title='Odds vs Profitability (Colored by Horse)',
+                                    labels={'odds': 'Odds', 'pnl': 'Profit/Loss (£)'})
+st.plotly_chart(fig_odds_profitability, use_container_width=True)
+
+# Horse & Jockey Performance Timeline
+st.subheader("Performance Timeline")
+performance_timeline = horse_jockey_df.groupby(['timestamp', 'horse_name']).agg({'pnl': 'sum'}).reset_index()
+fig_performance_timeline = px.line(performance_timeline, x='timestamp', y='pnl', color='horse_name',
+                                   title='Horse Performance Over Time', markers=True)
+st.plotly_chart(fig_performance_timeline, use_container_width=True)
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Data sourced from historical database.')

@@ -1,0 +1,45 @@
+# ===== Dashboard Script (dashboard_terminal.py) =====
+import os
+import time
+import threading
+from datetime import datetime
+
+DATABASE_PATH = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db'
+
+# Include only the necessary database functions here
+import sqlite3
+
+def clear_terminal():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def fetch_total_liability():
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(liability) FROM bets WHERE status='matched' AND result='pending'")
+        result = cursor.fetchone()[0]
+        return result if result else 0.0
+
+def fetch_pl():
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(stake * (odds - 1)) FROM bets WHERE status='matched' AND result='won'")
+        result = cursor.fetchone()[0]
+        return result if result else 0.0
+
+def display_dashboard_loop(refresh_interval=10):
+    while True:
+        clear_terminal()
+        print(f"{'='*30} Real-Time Scalper Dashboard {'='*30}")
+        print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("-"*80)
+
+        print(f"📌 BOT PERFORMANCE | Current P/L: £{fetch_pl():.2f} | Liability: £{fetch_total_liability():.2f}")
+
+        print("-"*80)
+        print("Dashboard focused purely on quick updates and performance overview.")
+        print("-"*80)
+
+        time.sleep(refresh_interval)
+
+if __name__ == '__main__':
+    display_dashboard_loop()

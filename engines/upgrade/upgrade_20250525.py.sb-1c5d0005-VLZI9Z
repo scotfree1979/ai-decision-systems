@@ -1,0 +1,86 @@
+# ✅ UPGRADE 20250525 – PART 1: Core Config, Safe Time, Odds Fetch, and Clock
+
+import os
+import logging
+import sqlite3
+import time
+import requests
+import json
+from datetime import datetime, timedelta, timezone
+
+# ✅ Configuration
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+APP_KEY = "CZHojduNWa3kxWIn"
+TEST_MODE = False
+SIMULATED_DURATION_MIN = 5      # How long the simulated day runs (real time)
+SIMULATED_TOTAL_MINUTES = 85    # How long we simulate from T-minus to race start
+TEST_START_TIME = datetime.utcnow()
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+
+# ✅ Export Controls
+__all__ = [
+    "get_simulated_now",
+    "in_session_window",
+    "fetch_live_odds",
+    "DB_PATH",
+    "APP_KEY",
+    "TEST_MODE"
+]
+
+# ✅ Time Utility – UTC-aware, simulates countdown logic
+
+def get_simulated_now():
+    if not TEST_MODE:
+        return datetime.utcnow().replace(tzinfo=timezone.utc)
+    elapsed_real = (datetime.utcnow() - TEST_START_TIME).total_seconds()
+    simulated_minutes = (elapsed_real / (SIMULATED_DURATION_MIN * 60)) * SIMULATED_TOTAL_MINUTES
+    return (TEST_START_TIME + timedelta(minutes=simulated_minutes)).replace(tzinfo=timezone.utc)
+
+# ✅ Time Match Window – used in run_monitor()
+
+def in_session_window(minutes_to_off, target):
+    return (target - 2) <= minutes_to_off <= (target + 2)
+
+# ✅ Odds Fetcher – safe, structure-validated
+
+def fetch_live_odds(session_token, market_id, selection_id):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": APP_KEY,
+        "X-Authentication": session_token,
+        "Content-Type": "application/json"
+    }
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketBook",
+            "params": {
+                "marketIds": [market_id],
+                "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
+            },
+            "id": 1
+        }
+    ])
+    try:
+        response = requests.post(url, headers=headers, data=payload).json()
+
+        if not response or not isinstance(response, list):
+            logging.error(f"❌ Invalid Betfair response format: {response}")
+            return None
+
+        market_book = response[0]
+        runners = market_book.get("runners", [])
+        if not runners:
+            logging.error(f"❌ No runners in response for market {market_id}")
+            return None
+
+        for runner in runners:
+            if runner.get("selectionId") == selection_id:
+                lay = runner.get("ex", {}).get("availableToLay", [])
+                if lay:
+                    return lay[0].get("price")
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch odds for {market_id}/{selection_id}: {e}")
+
+    return None

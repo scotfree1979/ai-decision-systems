@@ -1,0 +1,20 @@
+from reload_watcher import start_reload_watcher
+import time
+import scalper_module  # ✅ now safe to import and call
+
+if __name__ == "__main__":
+    print("🚀 Running tool with hot reload...")
+    observer = start_reload_watcher()
+
+    try:
+        scalper_module.start_scalper_session()
+    except Exception as e:
+        print(f"❌ Tool crashed: {e}")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("🛑 Exiting...")
+        observer.stop()
+        observer.join()

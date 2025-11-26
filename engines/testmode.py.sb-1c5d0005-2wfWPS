@@ -1,0 +1,133 @@
+# core/bet_placer.py (Enhanced Version with Robust Debugging, Odds Monitoring, and Optimized Session Management)
+
+import requests
+import time
+import threading
+from datetime import datetime
+import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def log_event(event_type, message, market_id=None, runner_id=None, odds=None):
+    event_message = f"[{event_type}]"
+    if market_id:
+        event_message += f" Market: {market_id}"
+    if runner_id:
+        event_message += f" | Runner: {runner_id}"
+    if odds:
+        event_message += f" | Odds: {odds}"
+    event_message += f" | {message}"
+    logging.info(event_message)
+
+# ... rest of your bet_placer.py code
+
+
+
+
+BETFAIR_ENDPOINT = "https://api.betfair.com/exchange/betting/rest/v1.0/"
+APP_KEY = "CZHojduNWa3kxWIn"
+USERNAME = "quickwallets@gmail.com"
+PASSWORD = "MR5049mr!!!"
+
+headers = {"X-Application": APP_KEY, "Content-Type": "application/json"}
+
+# Optimized automated session token management (checks every 5 minutes)
+def refresh_session_token(interval=300):
+    global headers
+    login_url = "https://identitysso-cert.betfair.com/api/login"
+    payload = {"username": USERNAME, "password": PASSWORD}
+
+    while True:
+        response = requests.post(login_url, data=payload)
+        login_response = response.json()
+
+        if login_response.get('status') == 'SUCCESS':
+            session_token = login_response['token']
+            headers["X-Authentication"] = session_token
+            print("🔑 Session Token Refreshed")
+        else:
+            print("🚫 Session Token Refresh Failed", login_response)
+
+        time.sleep(interval)
+
+# Start session token refresh thread
+threading.Thread(target=refresh_session_token, daemon=True).start()
+
+# Place a persistent lay bet (Pre-off logic)
+def place_pre_off_lay_bet(runner, odds, stake, market_id):
+    lay_payload = {
+        "marketId": market_id,
+        "instructions": [{
+            "selectionId": runner,
+            "side": "LAY",
+            "orderType": "LIMIT",
+            "limitOrder": {"size": stake, "price": odds, "persistenceType": "PERSIST"}
+        }]
+    }
+
+    lay_response = requests.post(BETFAIR_ENDPOINT + "placeOrders/", headers=headers, json=lay_payload).json()
+    print("🔍 Betfair Response:", lay_response)
+    if lay_response.get('status') == 'SUCCESS':
+        report = lay_response['instructionReports'][0]
+        print(f"✅ Pre-off Lay Bet Placed: Runner {runner}, Odds {odds}, Stake {stake}, Status: {report.get('status')}, Bet ID: {report.get('betId')}")
+    else:
+        print(f"🚫 Failed Pre-off Lay Bet: Runner {runner}, Error: {lay_response.get('errorCode')}")
+
+# Enhanced continuous odds monitoring and placement (Fill-and-Fill logic with market check)
+def place_in_play_lay_bet(runner_id, odds, stake, market_id, headers, max_attempts=1):
+    lay_payload = {
+        "marketId": market_id,
+        "instructions": [{
+            "selectionId": runner_id,
+            "side": "LAY",
+            "orderType": "LIMIT",
+            "limitOrder": {
+                "size": stake,
+                "price": odds,
+                "persistenceType": "FILL_OR_KILL"
+            }
+        }],
+        "customerRef": f"{market_id}_{runner_id}_{datetime.utcnow().timestamp()}"  # Unique ID
+    }
+
+    response = requests.post(BETFAIR_ENDPOINT + "placeOrders/", headers=headers, json=lay_payload).json()
+
+    if response.get('status') == 'SUCCESS':
+        report = response['instructionReports'][0]
+        if report.get('status') == 'SUCCESS':
+            log_event("BET_MATCHED", f"Runner matched successfully", market_id, runner_id, odds)
+            return True
+        else:
+            error_detail = report.get('errorCode', 'No detail')
+            log_event("UNMATCHED", f"Bet unmatched: {error_detail}", market_id, runner_id, odds)
+            return False
+    else:
+        faultcode = response.get('faultcode', 'Unknown')
+        detail = response.get('detail', {})
+        log_event("ERROR", f"Bet Error: {faultcode} | Detail: {detail}", market_id, runner_id, odds)
+        return False
+
+
+
+
+
+# Place a back bet (Hedging and Profit-taking, managed by Risk Manager)
+def place_back_bet(runner, odds, stake, market_id):
+    back_payload = {
+        "marketId": market_id,
+        "instructions": [{
+            "selectionId": runner,
+            "side": "BACK",
+            "orderType": "LIMIT",
+            "limitOrder": {"size": stake, "price": odds, "persistenceType": "PERSIST"}
+        }]
+    }
+
+    back_response = requests.post(BETFAIR_ENDPOINT + "placeOrders/", headers=headers, json=back_payload).json()
+    print("🔍 Betfair Response:", back_response)
+    if back_response.get('status') == 'SUCCESS':
+        report = back_response['instructionReports'][0]
+        print(f"✅ Back Bet Placed (Risk Manager Only): Runner {runner}, Odds {odds}, Stake {stake}, Status: {report.get('status')}, Bet ID: {report.get('betId')}")
+    else:
+        print(f"🚫 Failed Back Bet: Runner {runner}, Error: {back_response.get('errorCode')}")

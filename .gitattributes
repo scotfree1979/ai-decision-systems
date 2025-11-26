@@ -1,0 +1,4 @@
+blueprint_signals_*.json filter=lfs diff=lfs merge=lfs -text
+engines/blueprint_signals_*.json filter=lfs diff=lfs merge=lfs -text
+data/blueprints/blueprint_signals_*.json filter=lfs diff=lfs merge=lfs -text
+*.json filter=lfs diff=lfs merge=lfs -text

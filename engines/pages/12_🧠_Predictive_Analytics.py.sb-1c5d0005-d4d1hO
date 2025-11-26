@@ -1,0 +1,86 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import sqlite3
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+X = X.replace([np.inf, -np.inf], np.nan).dropna()
+y = y[X.index]  # ensure target aligns with clean features
+model.fit(X, y)
+
+# Page Configuration
+st.set_page_config(page_title="Predictive Analytics", layout="wide")
+st.title('🔮 Predictive Analytics')
+
+# Load Historical Data for Predictive Analysis
+def load_historical_data():
+    conn = sqlite3.connect('/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db')
+    query = """
+    SELECT timestamp, odds, stake, pnl
+    FROM bets
+    ORDER BY timestamp ASC
+    """
+    return pd.read_sql(query, conn)
+
+historical_df = load_historical_data()
+historical_df['timestamp'] = pd.to_datetime(historical_df['timestamp'])
+
+# Feature Engineering for Predictive Model
+historical_df['hour'] = historical_df['timestamp'].dt.hour
+historical_df['day_of_week'] = historical_df['timestamp'].dt.dayofweek
+
+# Predictive Model Preparation
+X = historical_df[['odds', 'stake', 'hour', 'day_of_week']]
+y = historical_df['pnl']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+model = LinearRegression()
+model.fit(X_train, y_train)
+predictions = model.predict(X_test)
+
+# Model Performance Visualization
+st.subheader("Predictive Model Performance")
+prediction_df = pd.DataFrame({'Actual': y_test, 'Predicted': predictions})
+fig_predictions = px.scatter(prediction_df, x='Actual', y='Predicted',
+                             title='Actual vs Predicted Profit/Loss',
+                             trendline='ols', labels={'Actual': 'Actual PnL (£)', 'Predicted': 'Predicted PnL (£)'})
+st.plotly_chart(fig_predictions, use_container_width=True)
+
+# Model Performance Metrics
+st.subheader("Model Performance Metrics")
+r2_score = model.score(X_test, y_test)
+st.metric("R² Score", f"{r2_score:.2%}")
+
+# Feature Importance Analysis
+st.subheader("Feature Importance Analysis")
+feature_importance = pd.DataFrame({
+    'Feature': X.columns,
+    'Coefficient': model.coef_
+}).sort_values(by='Coefficient', ascending=False)
+
+fig_feature_importance = px.bar(feature_importance, x='Feature', y='Coefficient',
+                                title='Feature Importance in Predicting Profit/Loss',
+                                color='Coefficient', color_continuous_scale='Viridis')
+st.plotly_chart(fig_feature_importance, use_container_width=True)
+
+# Future Prediction Example
+st.subheader("Simulate Future Bet Outcomes")
+
+with st.form("prediction_form"):
+    input_odds = st.number_input("Odds", min_value=1.01, max_value=100.0, value=2.0)
+    input_stake = st.number_input("Stake (£)", min_value=0.01, max_value=1000.0, value=10.0)
+    input_hour = st.slider("Hour of Day", min_value=0, max_value=23, value=12)
+    input_day_of_week = st.selectbox("Day of Week", options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], index=0)
+    submitted = st.form_submit_button("Predict Outcome")
+
+    if submitted:
+        day_index = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].index(input_day_of_week)
+        prediction_input = np.array([[input_odds, input_stake, input_hour, day_index]])
+        predicted_pnl = model.predict(prediction_input)[0]
+        st.write(f"### Predicted Profit/Loss: £{predicted_pnl:.2f}")
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Predictive model trained on historical betting data.')

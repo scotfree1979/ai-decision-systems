@@ -1,0 +1,68 @@
+# ✅ api_tools.py – Shared API Functions (Updated to Scrape Odds from Betfair Public Site)
+
+import json
+import requests
+import logging
+import os
+import time
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+
+# -----------------------------
+# ✅ SCRAPE ODDS FROM BETFAIR PUBLIC URL
+# -----------------------------
+
+def scrape_odds_from_betfair_url(market_url):
+    try:
+        response = requests.get(market_url, headers={"User-Agent": "Mozilla/5.0"})
+        if response.status_code != 200:
+            logging.error(f"❌ HTTP error {response.status_code} when fetching: {market_url}")
+            return []
+
+        soup = BeautifulSoup(response.content, "html.parser")
+        runners_data = []
+
+        for runner_div in soup.select('[data-testid="runner-card"]'):
+            name_tag = runner_div.select_one('[data-testid="runner-name"]')
+            back_tag = runner_div.select_one('[data-testid="price-back"]')
+            lay_tag = runner_div.select_one('[data-testid="price-lay"]')
+
+            runner_name = name_tag.text.strip() if name_tag else "Unknown"
+            back_price = back_tag.text.strip() if back_tag else "-"
+            lay_price = lay_tag.text.strip() if lay_tag else "-"
+
+            runners_data.append({
+                "runner": runner_name,
+                "back": back_price,
+                "lay": lay_price
+            })
+
+        return runners_data
+
+    except Exception as e:
+        logging.error(f"❌ Failed to scrape odds from Betfair: {e}")
+        return []
+
+
+# -----------------------------
+# ✅ STANDALONE TEST TOOL (SCRAPER)
+# -----------------------------
+
+def test_scrape_odds():
+    print("\n🔧 Starting Betfair Web Odds Scraper...")
+    url = "https://www.betfair.com/exchange/plus/horse-racing/market/1.244276381"
+    print(f"🌐 Scraping odds from: {url}")
+    
+    print("🕒 Starting 2-minute live scrape...")
+    start_time = time.time()
+    while time.time() - start_time < 120:
+        print("\n📊 Live Odds Snapshot:")
+        runners = scrape_odds_from_betfair_url(url)
+        for r in runners:
+            print(f"📌 {r['runner']} | Back: {r['back']} | Lay: {r['lay']}")
+        print("⏱ Waiting 10 seconds...")
+        time.sleep(10)
+
+
+if __name__ == "__main__":
+    test_scrape_odds()

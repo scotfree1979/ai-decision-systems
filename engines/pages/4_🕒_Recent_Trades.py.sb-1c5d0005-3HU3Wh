@@ -1,0 +1,27 @@
+# 4_🕒_Recent_Trades.py
+import streamlit as st
+import sqlite3
+import pandas as pd
+from datetime import datetime
+
+DB_PATH = 'data/bets.db'
+
+st.title("🕒 Recent Trades")
+
+@st.cache_data
+def fetch_recent_trades():
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query("""
+            SELECT strategy_name, confidence, stake, status, rejection_reason, placed_at 
+            FROM bets 
+            ORDER BY placed_at DESC LIMIT 50
+        """, conn)
+    return df
+
+df = fetch_recent_trades()
+
+if df.empty:
+    st.warning("No recent trades available.")
+else:
+    df['placed_at'] = pd.to_datetime(df['placed_at'])
+    st.dataframe(df, use_container_width=True)

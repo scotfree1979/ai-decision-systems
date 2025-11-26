@@ -1,0 +1,506 @@
+# === CANVAS SECTION STARTS HERE ===
+
+# -----------------------------
+# ✅ upgrade_20250602_flow_01 – Build Plan Overview (Corrected)
+# -----------------------------
+# This is the accurate end-to-end flow based on real working logic, no name drift.
+# All table names, function names, and thread names reflect actual system structure.
+# ✅ The main table is 'bets' in 'bets.db' — no 'markets' table is used.
+
+# -----------------------------
+# 🧠 EXECUTION PLAN – FINAL STRUCTURE
+# -----------------------------
+# STEP 0: Fetch Markets        → get_markets() ✅
+# STEP 1: Start Run Monitor    → run_monitor_loop() ✅
+# STEP 2: Signal Monitor       → market_monitor_signals() ⏳
+# STEP 3: Signal Enrichment    → enrich with meta_json + volatility snapshot ⏳
+# STEP 4: Signal Filter        → apply_filters_to_runner() ⏳
+# STEP 5: Bot Assignment       → assign_bot_to_signal() ⏳
+# STEP 6: Risk Manager         → risk_manager() ⏳
+# STEP 7: Budget Manager       → budget_manager() ⏳
+# STEP 8: Bet Placement        → place_lay_bet() or place_test_bet() ⏳
+# STEP 9: Post-Race Evaluation → bet_settlement() + watchdog + lifecycle_cleaner() ⏳
+
+# 🧠 Notes:
+# - ✅ All bets, signals, enrichments write to `bets` table in `bets.db`
+# - ⛔ No other tables like `markets` exist or will be created
+# - ✅ Every upgrade part must align with the above sequence
+
+# -----------------------------
+# ✅ Upgrade 20250602 – Part 0: Clock Countdown Loop (No Signal Injection)
+# -----------------------------
+
+# ❌ from upgrade.upgrade_20250522 import get_time_to_off  # ⚠️ Not available – commented out
+
+# ✅ Defined locally to fix broken import
+def get_time_to_off(start_time):
+    from datetime import datetime
+    return int((start_time - datetime.utcnow()).total_seconds() / 60)
+
+SNAPSHOT_DATA = {}  # ✅ This must be filled with market_id: {"start_time": datetime} entries
+
+# 🕒 CLOCK-ONLY COUNTDOWN LOOP
+
+def run_clock_only():
+    import time
+    import logging
+    from datetime import datetime
+
+    logging.info("🕒 [Live Clock] Starting countdown loop...")
+    while True:
+        for market_id, snapshot in SNAPSHOT_DATA.items():
+            try:
+                start_time = snapshot.get("start_time")
+                if not start_time:
+                    continue
+                minutes_to_off = get_time_to_off(start_time)
+                logging.info(f"🕒 [Clock] {market_id}: {minutes_to_off} minutes to off")
+            except Exception as e:
+                logging.error(f"❌ [Clock Error] {market_id}: {e}")
+        time.sleep(60)
+
+# -----------------------------
+# ✅ Core Fetch – get_markets()
+# -----------------------------
+# ✅ CHANGE: Define and enable `get_markets()` to fetch GB/IE with >= 7 runners for today + tomorrow
+
+import requests
+import json
+from datetime import datetime, timedelta
+
+def get_markets():
+    import os
+    from daily_config import APP_KEY, SESSION_TOKEN
+    import logging
+    import requests
+    import json
+    from datetime import datetime, timedelta
+    global SNAPSHOT_DATA  # <-- Add this to update SNAPSHOT_DATA directly
+
+    logging.info("📡 Fetching live WIN markets with 7+ runners...")
+    session_token = os.environ.get("SESSION_TOKEN", SESSION_TOKEN)
+
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": APP_KEY,
+                "X-Authentication": session_token,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketCountries": ["GB", "IE"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z"),
+                                "to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "sort": "FIRST_TO_START",
+                        "maxResults": "50"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+
+        markets = response.json()[0].get("result", []) if response.status_code == 200 else []
+        filtered = [m for m in markets if len(m.get("runners", [])) >= 7]
+        logging.info(f"🎯 Filter complete: {len(filtered)} markets ready")
+
+        # ✅ Populate SNAPSHOT_DATA with start times
+        for market in filtered:
+            try:
+                market_id = market["marketId"]
+                start_time = datetime.fromisoformat(market["marketStartTime"].replace("Z", "+00:00"))
+                SNAPSHOT_DATA[market_id] = {"start_time": start_time}
+            except Exception as e:
+                logging.warning(f"⚠️ Could not parse start time for {market.get('marketId')}: {e}")
+
+        return filtered
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+
+# -----------------------------
+# ✅ Upgrade 20250602 – Part 1: Validate Bets Table (38-Field Schema Fix)
+# -----------------------------
+# ✅ IMPLEMENTED: Ensures the bets table includes all required fields
+# - Drops and rebuilds table if schema mismatch detected
+
+import sqlite3
+import logging
+from config_paths import DB_PATH
+
+REQUIRED_COLUMNS = {
+    "marketId", "selectionId", "stake", "odds", "bet_type", "placed_at", "status",
+    "matched_liability", "unmatched_liability", "pnl", "liability", "result", "timestamp",
+    "matched_timestamp", "betfair_bet_id", "horse_name", "strategy_name", "signal_type",
+    "bot_name", "date", "time_signal", "can_accept_liability", "time_session", "race_name",
+    "market_name", "event_name", "anchor_odd", "odds_check_1", "odds_check_2", "odds_check_3",
+    "odds_check_4", "odds_check_5", "odds_check_6", "customerOrderRef", "bet_settled",
+    "marketStartTime", "meta_json", "test_mode"
+}
+
+def validate_bets_table():
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(bets)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if columns != REQUIRED_COLUMNS:
+            logging.warning("⚠️ Schema mismatch detected. Rebuilding bets table...")
+            cursor.execute("DROP TABLE IF EXISTS bets")
+            cursor.execute("""
+                CREATE TABLE bets (
+                    marketId TEXT,
+                    selectionId INTEGER,
+                    stake REAL,
+                    odds REAL,
+                    bet_type TEXT,
+                    placed_at TEXT,
+                    status TEXT,
+                    matched_liability REAL,
+                    unmatched_liability REAL,
+                    pnl REAL,
+                    liability REAL,
+                    result TEXT,
+                    timestamp TEXT,
+                    matched_timestamp TEXT,
+                    betfair_bet_id TEXT,
+                    horse_name TEXT,
+                    strategy_name TEXT,
+                    signal_type TEXT,
+                    bot_name TEXT,
+                    date TEXT,
+                    time_signal TEXT,
+                    can_accept_liability TEXT,
+                    time_session TEXT,
+                    race_name TEXT,
+                    market_name TEXT,
+                    event_name TEXT,
+                    anchor_odd REAL,
+                    odds_check_1 REAL,
+                    odds_check_2 REAL,
+                    odds_check_3 REAL,
+                    odds_check_4 REAL,
+                    odds_check_5 REAL,
+                    odds_check_6 REAL,
+                    customerOrderRef TEXT PRIMARY KEY,
+                    bet_settled TEXT,
+                    marketStartTime TEXT,
+                    meta_json TEXT,
+                    test_mode TEXT
+                )
+            """)
+            conn.commit()
+            logging.info("✅ Bets table rebuilt with correct schema.")
+        else:
+            logging.info("✅ Bets table already has correct schema.")
+# -----------------------------
+# ✅ Upgrade 20250602 – Part 2a: Insert Bets From Markets
+# -----------------------------
+# ✅ IMPLEMENTED: Adds each runner into bets table with 38-field awareness
+# - Defaults: status = 'pending', test_mode = '0'
+
+def insert_bets_from_markets(markets):
+    logging.info("📥 Inserting runners into bets table...")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        for market in markets:
+            for runner in market.get("runners", []):
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO bets (
+                            marketId, selectionId, horse_name, status, test_mode, marketStartTime
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        market["marketId"],
+                        runner["selectionId"],
+                        runner["runnerName"],
+                        "pending",
+                        "0",
+                        market["marketStartTime"]
+                    ))
+                except Exception as e:
+                    logging.error(f"❌ Failed to insert runner row: {e}")
+        conn.commit()
+        logging.info("✅ Runner rows inserted.")
+# -----------------------------
+# ✅ Racing Post Meta Fetcher – enrich_with_racing_post()
+# -----------------------------
+# ✅ Injects meta_json into awaiting_signal rows (trainer, jockey, etc.)
+
+import json
+import sqlite3
+import logging
+import time
+from config_paths import DB_PATH
+
+def get_racing_post_meta(market_id, selection_id):
+    # 🧠 Dummy data for now — replace this with real Racing Post scraper or API call
+    return {
+        "jockey": "John Doe",
+        "trainer": "Jane Smith",
+        "rpr": 87,
+        "days_since_run": 14,
+        "course_form": "2-1-3"
+    }
+
+def enrich_with_racing_post():
+    logging.info("🧠 [Thread] enrich_with_racing_post launched")
+    while True:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT marketId, selectionId 
+                    FROM bets 
+                    WHERE meta_json IS NULL AND status = 'awaiting_signal'
+                """)
+                rows = cursor.fetchall()
+
+                for market_id, selection_id in rows:
+                    meta = get_racing_post_meta(market_id, selection_id)
+                    if not meta:
+                        continue
+
+                    cursor.execute("""
+                        UPDATE bets SET meta_json = ? 
+                        WHERE marketId = ? AND selectionId = ? AND meta_json IS NULL
+                    """, (json.dumps(meta), market_id, selection_id))
+
+                    logging.info(f"✅ Meta injected for {market_id}-{selection_id}: {meta.get('jockey')} / {meta.get('trainer')}")
+                conn.commit()
+        except Exception as e:
+            logging.error(f"❌ enrich_with_racing_post exception: {e}")
+        time.sleep(30)
+
+# -----------------------------
+# ✅ Upgrade 20250602 – Part 2b: RunMonitor with Countdown + Racing Post Meta
+# -----------------------------
+# ✅ IMPLEMENTED: Countdown loop that uses clock
+# ✅ RacingPost Enrichment runs after clock starts
+# - Signals triggered at 10/5/0
+# - Meta JSON (trainer/jockey) populated per runner
+
+import time
+import logging
+import json
+import sqlite3
+import os
+from datetime import datetime
+from threading import Thread
+from config_paths import DB_PATH
+
+# -----------------------------
+# ✅ STEP 1: Run Monitor – CLOCK Countdown + Signal Triggers
+# -----------------------------
+
+def get_simulated_now():
+    from datetime import datetime
+    return datetime.utcnow()
+
+def get_time_to_off(start_time):
+    return int((start_time - get_simulated_now()).total_seconds() / 60)
+
+def run_monitor():
+    logging.info("🕒 [Thread] run_monitor launched")
+
+    while True:
+        try:
+            logging.info("🔁 [Monitor] Entered main loop")
+            now = get_simulated_now()
+            logging.info(f"🕒 [Clock Tick] Current UTC time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+
+                logging.info("🔍 [DB] About to select pending rows...")
+                cursor.execute("SELECT * FROM bets WHERE status = 'pending'")
+                rows = cursor.fetchall()
+
+                logging.info(f"📦 [DB] Retrieved {len(rows)} pending runner rows to evaluate")
+
+                for row in rows:
+                    market_id = row[0]
+                    selection_id = row[1]
+                    runner_name = row[15] if row[15] else "Unknown"
+                    market_start = datetime.fromisoformat(row[35].replace("Z", "+00:00"))
+                    minutes_to_off = (market_start - now).total_seconds() / 60
+
+                    if minutes_to_off < -5:
+                        cursor.execute("""
+                            UPDATE bets SET status = 'ended', time_signal = 'ended' 
+                            WHERE marketId = ? AND selectionId = ?
+                        """, (market_id, selection_id))
+                        continue
+
+                    if minutes_to_off > 85 and row[20] != 'time_80':
+                        cursor.execute("""
+                            UPDATE bets SET time_signal = NULL 
+                            WHERE marketId = ? AND selectionId = ?
+                        """, (market_id, selection_id))
+                        continue
+
+                    logging.info(f"⏱️ [Runner Clock] {runner_name} – Off at {market_start.strftime('%H:%M')} UTC – T-{int(minutes_to_off)} mins")
+
+                    for time_mark, signal_tag in zip([80, 60, 40, 20, 10, 5, 0],
+                                                    ["time_80", "time_60", "time_40", "time_20", "time_10", "time_5", "time_0"]):
+                        gap = 20 if time_mark >= 20 else 5
+                        if abs(minutes_to_off - time_mark) > gap:
+                            continue
+
+                        customer_order_ref = f"{market_id[-5:]}_{selection_id}_{time_mark}"[:32]
+                        cursor.execute("SELECT 1 FROM bets WHERE customerOrderRef = ?", (customer_order_ref,))
+                        exists = cursor.fetchone()
+
+                        odds = 1.01
+
+                        if time_mark in [80, 60, 40]:
+                            if not exists:
+                                try:
+                                    cursor.execute("""
+                                        INSERT INTO bets (
+                                            marketId, selectionId, horse_name, time_signal, customerOrderRef, timestamp,
+                                            date, status, odds, anchor_odd, marketStartTime
+                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (
+                                        market_id, selection_id, runner_name, signal_tag, customer_order_ref,
+                                        datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d"),
+                                        "pending", odds, odds, market_start.isoformat()
+                                    ))
+                                    logging.info(f"➕ Inserted {signal_tag} row for {runner_name} @ {odds}")
+                                except Exception:
+                                    logging.exception(f"❌ Failed to insert {signal_tag} for {runner_name}:")
+                            else:
+                                try:
+                                    odds_field = {
+                                        80: "odds_check_6",
+                                        60: "odds_check_5",
+                                        40: "odds_check_4"
+                                    }[time_mark]
+                                    cursor.execute(f"""
+                                        UPDATE bets SET odds = ?, anchor_odd = ?, {odds_field} = ?, timestamp = ?, time_signal = ?
+                                        WHERE customerOrderRef = ?
+                                    """, (odds, odds, odds, datetime.utcnow().isoformat(), signal_tag, customer_order_ref))
+                                    logging.info(f"🔁 Updated {signal_tag} row for {runner_name} @ {odds}")
+                                except Exception:
+                                    logging.exception(f"❌ Failed to update odds at {signal_tag} for {runner_name}:")
+
+                        if time_mark == 20 and not exists:
+                            try:
+                                cursor.execute("""
+                                    UPDATE bets SET time_signal = ?, timestamp = ?
+                                    WHERE marketId = ? AND selectionId = ? AND status = 'pending'
+                                """, (signal_tag, datetime.utcnow().isoformat(), market_id, selection_id))
+                                logging.info(f"🟡 Marked {runner_name} as {signal_tag}")
+                            except Exception:
+                                logging.exception(f"❌ Failed to mark time_20 for {runner_name}:")
+
+                        if time_mark in [10, 5, 0] and not exists:
+                            try:
+                                cursor.execute("""
+                                    SELECT * FROM bets WHERE marketId = ? AND selectionId = ? AND time_signal = 'time_20'
+                                """, (market_id, selection_id))
+                                base_row = cursor.fetchone()
+
+                                if base_row:
+                                    cursor.execute("""
+                                        INSERT INTO bets (
+                                            marketId, selectionId, horse_name, time_signal, customerOrderRef,
+                                            timestamp, date, status, odds, anchor_odd, marketStartTime, meta_json
+                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (
+                                        market_id, selection_id, base_row[15], signal_tag, customer_order_ref,
+                                        datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d"),
+                                        "awaiting_signal", odds, odds, base_row[35], base_row[36]
+                                    ))
+                                    logging.info(f"🧨 Duplicated {signal_tag} row for {runner_name} from time_20")
+                            except Exception:
+                                logging.exception(f"❌ Failed to duplicate signal row {signal_tag} for {runner_name}:")
+
+                conn.commit()
+
+        except Exception:
+            logging.exception("❌ run_monitor exception:")
+        time.sleep(60)
+
+
+# -----------------------------
+# ✅ STEP 2: Meta Injector – Fill in trainer/jockey data from Racing Post
+# -----------------------------
+def enrich_with_racing_post():
+    logging.info("🧠 [Thread] enrich_with_racing_post launched")
+    while True:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT marketId, selectionId 
+                    FROM bets 
+                    WHERE meta_json IS NULL AND status = 'awaiting_signal'
+                """)
+                rows = cursor.fetchall()
+
+                for market_id, selection_id in rows:
+                    meta = get_racing_post_meta(market_id, selection_id)
+                    if not meta:
+                        continue
+                    cursor.execute("""
+                        UPDATE bets SET meta_json = ? 
+                        WHERE marketId = ? AND selectionId = ? AND meta_json IS NULL
+                    """, (json.dumps(meta), market_id, selection_id))
+                    logging.info(f"✅ Meta injected for {market_id}-{selection_id}: {meta.get('jockey')} / {meta.get('trainer')}")
+
+                conn.commit()
+        except Exception as e:
+            logging.error(f"❌ enrich_with_racing_post exception: {e}")
+        time.sleep(30)
+
+# -----------------------------
+# ✅ Thread Launcher
+# -----------------------------
+#def launch_monitor_and_meta():
+#    Thread(target=run_monitor, daemon=True).start()
+#    Thread(target=enrich_with_racing_post, daemon=True).start()
+#    logging.info("🚀 [System] RunMonitor + Meta Enrichment started")
+
+# -----------------------------
+# ✅ Upgrade 20250602 – Part 3: Signal Routing & Trigger Bot
+# -----------------------------
+# ⏳ TODO: Inject signals at time_20, 10, 5, 0
+# - Insert `strategy_name`, `status=signal_assigned` into `bets` table
+# - Route to appropriate queue
+
+# -----------------------------
+# ✅ Upgrade 20250602 – Part 4: Risk & Budget Check Logic
+# -----------------------------
+# ⏳ TODO: Create `risk_manager()` and `budget_manager()` with the following:
+# - Reject invalid odds or exposure
+# - Forward for logging + bet placement
+
+# -----------------------------
+# ✅ Upgrade 20250602 – Clock Launcher (Thread-Safe Integration)
+# -----------------------------
+
+def launch_upgrade_clock_controller():
+    import threading
+    get_markets()
+    threading.Thread(target=run_clock_only, daemon=True).start()
+
+# -----------------------------
+# ✅ Upgrade 20250602 – EXECUTION ENTRYPOINT
+# -----------------------------
+
+# 🔄 This remains here for direct execution/testing but is no longer used in production context.
+if __name__ == "__main__":
+    launch_upgrade_clock_controller()
+

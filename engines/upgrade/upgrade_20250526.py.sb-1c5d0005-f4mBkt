@@ -1,0 +1,256 @@
+# -----------------------------
+# 💰 BUDGET MANAGER FINAL APPROVAL STAGE
+# -----------------------------
+def budget_manager():
+    import sqlite3
+    from upgrade.upgrade_20250525 import DB_PATH, get_simulated_now
+    from signal_monitor import bot_signal_queues
+    from budget_manager import BudgetManager
+    live_budget_mgr = BudgetManager(DB_PATH)
+
+    logging.info("💰 Running budget manager for risk-evaluated signals")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM bets WHERE status = 'risk_evaluated'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            try:
+                # Updated mapping based on confirmed 38-column schema
+                signal = {
+                    "marketId": row[0],
+                    "selectionId": row[1],
+                    "stake": row[2],
+                    "odds": row[3],
+                    "bet_type": row[4],
+                    "placed_at": row[5],
+                    "status": row[6],
+                    "matched_liability": row[7],
+                    "unmatched_liability": row[8],
+                    "pnl": row[9],
+                    "liability": row[10],
+                    "result": row[11],
+                    "timestamp": row[12],
+                    "matched_timestamp": row[13],
+                    "betfair_bet_id": row[14],
+                    "horse_name": row[15],
+                    "strategy_name": row[16],
+                    "signal_type": row[17],
+                    "bot_name": row[18],
+                    "date": row[19],
+                    "time_signal": row[20],
+                    "can_accept_liability": row[21],
+                    "time_session": row[22],
+                    "race_name": row[23],
+                    "market_name": row[24],
+                    "event_name": row[25],
+                    "anchor_odd": row[26],
+                    "odds_check_1": row[27],
+                    "odds_check_2": row[28],
+                    "odds_check_3": row[29],
+                    "odds_check_4": row[30],
+                    "odds_check_5": row[31],
+                    "odds_check_6": row[32],
+                    "customerOrderRef": row[33],
+                    "bet_settled": row[34],
+                    "marketStartTime": row[35],
+                    "meta_json": row[36],
+                    "test_mode": row[37]
+                }
+
+                result = live_budget_mgr.evaluate_budget(signal)
+                new_status = "approved" if result else "rejected"
+
+                cursor.execute("""
+                    UPDATE bets SET status = ?, timestamp = ?
+                    WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                """, (new_status, now.isoformat(), signal["marketId"], signal["selectionId"], signal["customerOrderRef"]))
+
+                if result and signal["bot_name"] in bot_signal_queues:
+                    bot_signal_queues[signal["bot_name"]].put(signal)
+                    logging.info(f"✅ Sent to bot queue: {signal['bot_name']} [{signal['customerOrderRef']}]")
+                else:
+                    logging.warning(f"🚫 Signal {signal['customerOrderRef']} not approved or bot unknown")
+
+            except Exception as e:
+                logging.error(f"❌ Budget manager failed for signal {row[0]}: {e}")
+
+        conn.commit()
+
+
+# -----------------------------
+# 📡 MARKET MONITOR SIGNALS STAGE
+# -----------------------------
+def market_monitor_signals():
+    import sqlite3
+    import logging
+    from upgrade.upgrade_20250525 import DB_PATH, get_simulated_now
+
+    logging.info("📡 Running market_monitor_signals for awaiting_signal rows")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM bets
+            WHERE status = 'awaiting_signal'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            signal = {
+                "marketId": row[0],
+                "selectionId": row[1],
+                "horse_name": row[15],
+                "time_signal": row[20],
+                "customerOrderRef": row[33]
+            }
+
+            signal_type = None
+            if signal["time_signal"] == "time_20":
+                signal_type = "Market Drifter Signal"
+            elif signal["time_signal"] == "time_10":
+                signal_type = "Scalp Lay Signal"
+            elif signal["time_signal"] == "time_5":
+                signal_type = "GreenUp 5-Minute Signal"
+            elif signal["time_signal"] == "time_0":
+                signal_type = "InPlay Signal"
+
+            if signal_type:
+                try:
+                    cursor.execute("""
+                        UPDATE bets
+                        SET signal_type = ?, status = 'signal_assigned'
+                        WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                    """, (
+                        signal_type,
+                        signal["marketId"],
+                        signal["selectionId"],
+                        signal["customerOrderRef"]
+                    ))
+                    logging.info(f"📌 Assigned {signal_type} to {signal['horse_name']} [{signal['marketId']} / {signal['customerOrderRef']}]")
+                except Exception as e:
+                    logging.error(f"❌ Failed to assign signal_type for {signal['customerOrderRef']}: {e}")
+
+        conn.commit()
+
+
+# -----------------------------
+# 🧠 SIGNAL MONITOR STAGE
+# -----------------------------
+def signal_monitor():
+    import sqlite3
+    import logging
+    from datetime import datetime
+    from upgrade.upgrade_20250525 import DB_PATH, get_simulated_now
+    from market_monitor_signals import SIGNAL_BOT_MAPPING
+
+    logging.info("🧠 Enriching and routing signal_assigned records")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM bets WHERE status = 'signal_assigned'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            signal = {
+                "marketId": row[0],
+                "selectionId": row[1],
+                "horse_name": row[15],
+                "time_signal": row[20],
+                "customerOrderRef": row[33],
+                "signal_type": row[17],
+                "event_name": row[25],
+                "race_name": row[23],
+                "marketStartTime": row[35]
+            }
+
+            bots = SIGNAL_BOT_MAPPING.get(signal["signal_type"], [])
+            if not bots:
+                logging.warning(f"⚠️ No bot targets found for signal type: {signal['signal_type']}")
+                continue
+
+            stake = 10.0 if signal["time_signal"] == "time_20" else 20.0 if signal["time_signal"] == "time_10" else 5.0 if signal["time_signal"] == "time_0" else None
+
+            for bot in bots:
+                new_ref = f"{signal['customerOrderRef']}_{bot[:3].upper()}"[:32]
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO bets (
+                            marketId, selectionId, stake, odds, bet_type, placed_at, status,
+                            matched_liability, unmatched_liability, pnl, liability, result,
+                            timestamp, matched_timestamp, betfair_bet_id, horse_name,
+                            strategy_name, signal_type, bot_name, date, time_signal,
+                            can_accept_liability, time_session, race_name, market_name, event_name,
+                            anchor_odd, odds_check_1, odds_check_2, odds_check_3, odds_check_4,
+                            odds_check_5, odds_check_6, customerOrderRef, bet_settled,
+                            marketStartTime, meta_json, test_mode
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        signal["marketId"], signal["selectionId"], stake, None, None, None, "fully_enriched",
+                        None, None, None, None, None,
+                        now.isoformat(), None, None, signal["horse_name"],
+                        signal["signal_type"], signal["signal_type"], bot, now.strftime('%Y-%m-%d'), signal["time_signal"],
+                        None, None, signal["race_name"], None, signal["event_name"],
+                        None, None, None, None, None,
+                        None, None, new_ref, None,
+                        signal["marketStartTime"], None, None
+                    ))
+                    logging.info(f"✅ Enriched + routed signal for {signal['horse_name']} to {bot}: {new_ref}")
+                except Exception as e:
+                    logging.error(f"❌ Enrichment failed for {signal['customerOrderRef']} → {bot}: {e}")
+
+        conn.commit()
+
+
+# -----------------------------
+# 🧮 RISK MANAGER EVALUATION STAGE
+# -----------------------------
+def risk_manager():
+    import sqlite3
+    from datetime import datetime
+    from upgrade.upgrade_20250525 import DB_PATH, get_simulated_now
+
+    logging.info("🔍 Running risk manager stage for fully_enriched signals")
+    now = get_simulated_now()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM bets WHERE status = 'fully_enriched'
+        """)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            signal = {
+                "marketId": row[0],
+                "selectionId": row[1],
+                "horse_name": row[15],
+                "time_signal": row[20],
+                "customerOrderRef": row[33]
+            }
+
+            try:
+                cursor.execute("""
+                    UPDATE bets
+                    SET status = 'risk_evaluated', timestamp = ?
+                    WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                """, (
+                    now.isoformat(),
+                    signal["marketId"],
+                    signal["selectionId"],
+                    signal["customerOrderRef"]
+                ))
+                logging.info(f"🔐 Risk manager flagged {signal['customerOrderRef']} as risk_evaluated")
+            except Exception as e:
+                logging.error(f"❌ Risk manager failed to update {signal['customerOrderRef']}: {e}")
+
+        conn.commit()

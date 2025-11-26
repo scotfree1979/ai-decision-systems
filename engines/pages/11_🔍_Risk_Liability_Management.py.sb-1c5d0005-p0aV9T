@@ -1,0 +1,38 @@
+# 11_🔍_Risk_Liability_Management.py
+import streamlit as st
+import sqlite3
+import pandas as pd
+
+st.title("🔍 Risk & Liability Management")
+
+DB_PATH = 'data/bets.db'
+
+# Simulated runtime constraints
+strategy_caps = {
+    'Green-Up': 100,
+    'Basic Lay': 200,
+    'Drifter': 150
+}
+risk_limit = 500
+
+@st.cache_data
+def fetch_current_exposure():
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query("""
+            SELECT strategy_name, SUM(stake) as total_exposure
+            FROM bets WHERE status='placed'
+            GROUP BY strategy_name
+        """, conn)
+    return df
+
+df = fetch_current_exposure()
+total = df['total_exposure'].sum() if not df.empty else 0
+
+st.metric("Total Risk Exposure", f"£{total:.2f}", delta=f"Limit: £{risk_limit}")
+
+if not df.empty:
+    df['cap'] = df['strategy_name'].map(strategy_caps)
+    df['over_cap'] = df['total_exposure'] > df['cap']
+    st.dataframe(df)
+else:
+    st.info("No active exposures to show.")

@@ -1,0 +1,1196 @@
+### 📊 DASHBOARD METRICS REFACTOR – SEGMENTED KPI OVERVIEW
+
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
+import pytz
+import requests
+import json
+import os
+from config_paths import DB_PATH
+from upgrade_import_patch import get_session_token, set_session_token
+from daily_config import fetch_available_budget
+from database_hijack_monitor import enqueue_read
+from streamlit_autorefresh import st_autorefresh
+from known_blueprints import KNOWN_BLUEPRINT_PATTERNS
+
+# ✅ Auto-refresh intervals
+st.set_page_config(page_title="📈 GhostTrader v6.0", layout="wide")
+st_autorefresh(interval=1000, key="refresh_top")
+st.title("📊 GhostTrader Performance Dashboard")
+
+# ===============================
+# 🔐 Session Token Control
+# ===============================
+if 'token_applied' not in st.session_state:
+    st.session_state['token_applied'] = False
+
+session_token = get_session_token()
+
+if not session_token:
+    st.error("❌ No session token found. Please enter it below.")
+    with st.form("token_form"):
+        manual_token = st.text_input("🔑 Enter Session Token", key="manual_token")
+        submitted = st.form_submit_button("Submit Token")
+        if submitted and manual_token:
+            set_session_token(manual_token)
+            st.session_state['token_applied'] = True
+            st.success("✅ Session token applied.")
+            st.rerun()
+else:
+    st.success("✅ Session token is active.")
+
+# ===============================
+# 💸 Matched Stake Fetcher
+# ===============================
+def fetch_total_matched_stake():
+    try:
+        session_token = get_session_token()
+        if not session_token:
+            return 0.0
+        headers = {
+            'X-Application': 'CZHojduNWa3kxWIn',
+            'X-Authentication': session_token,
+            'Content-Type': 'application/json'
+        }
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listCurrentOrders",
+            "params": {},
+            "id": 1
+        }
+        response = requests.post("https://api.betfair.com/exchange/betting/json-rpc/v1", headers=headers, json=payload)
+        data = response.json()
+        matched = [float(order['sizeMatched']) for order in data.get('result', {}).get('currentOrders', []) if order['sizeMatched'] > 0]
+        return sum(matched)
+    except Exception as e:
+        print(f"⚠️ Failed to fetch matched stake: {e}")
+        return 0.0
+
+# ===============================
+# 📅 DATE FILTER CONTROL
+# ===============================
+
+st.subheader("📅 Date Filter")
+
+if 'selected_range' not in st.session_state:
+    st.session_state['selected_range'] = "Today"
+
+if 'custom_start_date' not in st.session_state:
+    st.session_state['custom_start_date'] = datetime.utcnow().date() - timedelta(days=1)
+
+if 'custom_end_date' not in st.session_state:
+    st.session_state['custom_end_date'] = datetime.utcnow().date()
+
+date_filter = st.radio("Select Date Range", ["Today", "Yesterday", "Last 7 Days", "Custom"], index=["Today", "Yesterday", "Last 7 Days", "Custom"].index(st.session_state['selected_range']))
+
+if date_filter != st.session_state['selected_range']:
+    st.session_state['selected_range'] = date_filter
+
+end_date = datetime.utcnow().replace(tzinfo=pytz.UTC)
+start_date = end_date
+
+if date_filter == "Today":
+    start_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+elif date_filter == "Yesterday":
+    start_date = (end_date - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = start_date + timedelta(days=1)
+elif date_filter == "Last 7 Days":
+    start_date = end_date - timedelta(days=7)
+elif date_filter == "Custom":
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state['custom_start_date'] = st.date_input("Start Date", value=st.session_state['custom_start_date'])
+    with col2:
+        st.session_state['custom_end_date'] = st.date_input("End Date", value=st.session_state['custom_end_date'])
+    start_date = datetime.combine(st.session_state['custom_start_date'], datetime.min.time()).replace(tzinfo=pytz.UTC)
+    end_date = datetime.combine(st.session_state['custom_end_date'], datetime.max.time()).replace(tzinfo=pytz.UTC)
+
+# ===============
+# ⏰ CLOCK TIMERS
+# ===============
+
+now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
+db = sqlite3.connect(DB_PATH)
+bets_df = pd.read_sql_query("SELECT * FROM bets", db)
+db.close()
+
+bets_df["marketStartTime"] = pd.to_datetime(bets_df["marketStartTime"], utc=True, errors="coerce")
+valid_today = bets_df[bets_df["marketStartTime"].dt.date == now_utc.date()]
+next_race_time = valid_today["marketStartTime"].min()
+time_to_next_race = (next_race_time - now_utc).total_seconds() if pd.notnull(next_race_time) else None
+
+oc_ready_time = None
+oc_check_cols = ["odds_check_1", "odds_check_2", "odds_check_3", "odds_check_4"]
+oc_df = valid_today.dropna(subset=oc_check_cols)
+if not oc_df.empty:
+    oc_ready_time = oc_df["marketStartTime"].min()
+time_to_oc_ready = (oc_ready_time - now_utc).total_seconds() if oc_ready_time else None
+
+col_time1, col_time2, col_time3, col_time4 = st.columns(4)
+col_time1.metric("🕒 Time to Next Race", str(timedelta(seconds=int(time_to_next_race))) if time_to_next_race else "N/A")
+col_time2.metric("✅ First OC Enriched", str(timedelta(seconds=int(time_to_oc_ready))) if time_to_oc_ready else "N/A")
+col_time3.metric("🌍 UTC Time", now_utc.strftime("%H:%M:%S"))
+col_time4.metric("💻 Local Time", datetime.now().strftime("%H:%M:%S"))
+
+# =========================
+# 📦 Load Data
+# =========================
+
+@st.cache_data
+def load_bets():
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT * FROM bets", conn)
+    conn.close()
+    df["marketStartTime"] = pd.to_datetime(df["marketStartTime"], utc=True, errors="coerce")
+    return df[(df["marketStartTime"] >= start_date) & (df["marketStartTime"] <= end_date)]
+
+data = load_bets()
+
+# =========================
+# 📊 KPI CALCULATIONS
+# =========================
+
+NEXTGEN_START_BAL = 500
+HEADTRADER_START_BAL = 500
+
+
+def calculate_metrics(df, name, starting_balance=None):
+    df = df.copy()
+
+    # Use fallback if 'status' or 'pnl' missing
+    df["status"] = df.get("status", "unknown")
+    df["pnl"] = pd.to_numeric(df.get("pnl", 0.0), errors="coerce").fillna(0.0)
+    df["result"] = df.get("result", "")
+    df["confidence"] = pd.to_numeric(df.get("confidence", 0.0), errors="coerce").fillna(0.0)
+    df["signal_type"] = df.get("signal_type", "")
+
+    settled = df[df["status"] == "settled"]
+    pnl = round(settled["pnl"].sum(), 2)
+    win_pct = round(len(settled[settled["result"] == "won"]) / len(settled) * 100, 2) if len(settled) else 0.0
+    avg_conf = round(df["confidence"].mean(), 2)
+    entry_signals = (df["signal_type"] == "entry").sum()
+    exit_signals = (df["signal_type"] == "exit").sum()
+    balance = starting_balance + pnl if starting_balance is not None else None
+
+    return {
+        "name": name,
+        "signals": len(df),
+        "settled": len(settled),
+        "pnl": pnl,
+        "win_pct": win_pct,
+        "avg_conf": avg_conf,
+        "entry_signals": entry_signals,
+        "exit_signals": exit_signals,
+        "balance": balance
+    }
+
+
+main_metrics = calculate_metrics(data, "📉 System")
+nextgen_metrics = calculate_metrics(data[data["bot_name"] == "NextGen"], "🤖 NextGen", NEXTGEN_START_BAL)
+headtrader_metrics = calculate_metrics(data[data["bot_name"] == "OGHeadTrader"], "🧠 HeadTrader", HEADTRADER_START_BAL)
+
+# =========================
+# 💡 Display Metrics
+# =========================
+
+def show_metrics(metrics):
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric(f"{metrics['name']} Signals", metrics['signals'])
+    col2.metric(f"{metrics['name']} Settled", metrics['settled'])
+    col3.metric(f"{metrics['name']} P&L", f"£{metrics['pnl']}")
+    col4.metric(f"{metrics['name']} Win %", f"{metrics['win_pct']}%")
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric(f"{metrics['name']} Avg Confidence", f"{metrics['avg_conf']}")
+    col6.metric(f"{metrics['name']} Entry Signals", metrics['entry_signals'])
+    col7.metric(f"{metrics['name']} Exit Signals", metrics['exit_signals'])
+    if metrics.get("balance") is not None:
+        col8.metric(f"{metrics['name']} Balance", f"£{metrics['balance']}")
+
+st.divider()
+st.subheader("📉 System Overview")
+show_metrics(main_metrics)
+
+st.divider()
+st.subheader("🤖 NextGen Bot")
+show_metrics(nextgen_metrics)
+
+st.divider()
+st.subheader("🧠 HeadTrader Bot")
+show_metrics(headtrader_metrics)
+
+st.divider()
+st.success("✅ Dashboard metrics loaded.")
+
+# ===============================
+# 📈 TAB 0: Overview
+# ===============================
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
+import pytz
+from known_blueprints import KNOWN_BLUEPRINT_PATTERNS
+#from utils.helpers import load_latest_runner_trades
+
+# =========================
+# 🧭 DEFINE TABS EARLY TO AVOID NameError
+# =========================
+TABS = ["📈 Overview", "📘 Tracker", "🔁 Playback", "🧠 Signal Eval", "🔥 Confidence", "📦 Runner Explorer", "🧬 Memory", "🛠 Playbooks", "⚙️ Control"]
+tabs = st.tabs(TABS)
+
+# =========================
+# 📈 TAB 0: Overview (with countdown fixes)
+# =========================
+with tabs[0]:
+    now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
+    local_time = datetime.now()
+
+    db = sqlite3.connect("bets.db")
+    bets_df = pd.read_sql_query("SELECT * FROM bets", db)
+    db.close()
+
+    bets_df["marketStartTime"] = pd.to_datetime(bets_df["marketStartTime"], utc=True, errors="coerce")
+    bets_df = bets_df.dropna(subset=["marketStartTime"])
+    bets_df["minutes_to_off"] = (bets_df["marketStartTime"] - now_utc).dt.total_seconds() / 60
+    bets_df["meta_json"] = bets_df["meta_json"].fillna("{}").apply(eval)
+    bets_df["anchor_odds"] = bets_df["meta_json"].apply(lambda x: x.get("anchor_odd"))
+    bets_df["swing_pct"] = bets_df["meta_json"].apply(lambda x: x.get("volatility_swing_pct"))
+    bets_df["status_flag"] = bets_df["meta_json"].apply(lambda x: x.get("flag", "❓"))
+
+    runner_trades = load_latest_runner_trades()
+    signal_df = pd.DataFrame(runner_trades)
+
+    if not {"marketId", "selectionId"}.issubset(signal_df.columns):
+        st.error("❌ Signal data is missing required keys ('marketId', 'selectionId'). Check the JSON structure.")
+        st.stop()
+
+    merged_df = pd.merge(
+        signal_df,
+        bets_df[["marketId", "selectionId", "marketStartTime", "anchor_odds", "odds_check_1", "odds_check_2", "odds_check_3", "odds_check_4", "odds_check_5", "odds_check_6"]],
+        how="left",
+        on=["marketId", "selectionId"]
+    )
+
+    merged_df["marketStartTime"] = pd.to_datetime(merged_df["marketStartTime"], utc=True, errors="coerce")
+    signal_df_today = merged_df[merged_df["marketStartTime"].dt.date == now_utc.date()]
+
+    valid_today = bets_df[bets_df["marketStartTime"].dt.date == now_utc.date()]
+    next_race_time = valid_today["marketStartTime"].min()
+    time_to_next_race = (next_race_time - now_utc).total_seconds() if pd.notnull(next_race_time) else None
+
+    # ⏱ Fix OC Enrichment Time Based on Race - 80 minutes prior logic
+    first_oc_enriched_time = None
+    if pd.notnull(next_race_time):
+        first_oc_enriched_time = next_race_time - timedelta(minutes=80)
+        time_to_oc_ready = (first_oc_enriched_time - now_utc).total_seconds()
+    else:
+        time_to_oc_ready = None
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("🕒 Time to Next Race", str(timedelta(seconds=int(time_to_next_race))) if time_to_next_race else "N/A")
+    col2.metric("✅ First OC Enriched", str(timedelta(seconds=int(time_to_oc_ready))) if time_to_oc_ready else "N/A")
+    col3.metric("🌍 UTC Time", now_utc.strftime("%H:%M:%S"))
+    col4.metric("💻 Local Time", local_time.strftime("%H:%M:%S"))
+
+
+    total_runners = len(signal_df_today)
+    if "signal_type" in signal_df_today.columns:
+        entry_signals = (signal_df_today["signal_type"] == "entry").sum()
+        exit_signals = (signal_df_today["signal_type"] == "exit").sum()
+        volatile_signals = (signal_df_today["signal_type"] == "volatile").sum()
+        none_signals = (signal_df_today["signal_type"] == "none").sum()
+    else:
+        entry_signals = exit_signals = volatile_signals = none_signals = 0
+
+    blueprints = signal_df_today["blueprint_match"].sum() if "blueprint_match" in signal_df_today.columns else 0
+    avg_conf = signal_df_today["confidence"].mean() if "confidence" in signal_df_today.columns else 0.0
+
+    oc_cols = ["anchor_odds", "odds_check_1", "odds_check_2", "odds_check_3", "odds_check_4", "odds_check_5", "odds_check_6"]
+    signal_df_today["OC Fields"] = signal_df_today[oc_cols].apply(lambda r: sum(pd.notnull(r)), axis=1)
+    high_eval = (signal_df_today["OC Fields"] >= 6).sum()
+
+    k1, k2, k3 = st.columns(3)
+    k4, k5, k6 = st.columns(3)
+    k1.metric("🏇 Runners Evaluated", total_runners)
+    k2.metric("🟢 Entry Signals", entry_signals)
+    k3.metric("🔴 Exit Signals", exit_signals)
+    k4.metric("⚡ Volatile", volatile_signals)
+    k5.metric("🧩 Blueprint Matches", blueprints)
+    k6.metric("📈 Avg Confidence", f"{avg_conf:.1f}%" if total_runners > 0 else "N/A")
+
+    st.metric("🧪 High Eval (OC ≥ 6)", high_eval)
+
+    st.subheader("📈 Confidence Band Chart")
+    bins = [60, 65, 70, 75, 80, 100]
+    labels = ["60–64%", "65–69%", "70–74%", "75–79%", "80%+"]
+    signal_df_today["band"] = pd.cut(signal_df_today["confidence"], bins=bins, labels=labels, right=False)
+    band_counts = signal_df_today["band"].value_counts().sort_index()
+    st.bar_chart(band_counts)
+
+    st.subheader("📥 Latest Signals (Time Buckets + OC Tracking + Eval Flag)")
+    table_df = signal_df_today.copy()
+    table_df["Eval"] = table_df["OC Fields"].apply(
+        lambda x: "✅" if x >= 6 else "⚠️" if x >= 3 else "❌"
+    )
+
+    def color_rows(row):
+        if row["Eval"] == "✅":
+            return ["background-color: #d4edda"] * len(row)
+        elif row["Eval"] == "⚠️":
+            return ["background-color: #fff3cd"] * len(row)
+        else:
+            return ["background-color: #f8d7da"] * len(row)
+
+    styled = table_df[[
+        "runner", "marketId", "selectionId", "signal_type", "confidence", "tick_pattern", "trend_ticks",
+        "entry", "exit", "anchor_odds", "marketStartTime", "OC Fields", "Eval"
+    ]].sort_values("marketStartTime", ascending=False).head(25).style.apply(color_rows, axis=1)
+
+    st.write(styled)
+
+
+# ===============================
+# 📘 TAB 1: Blueprint Tracker
+# ===============================
+
+import streamlit as st
+import pandas as pd
+import json
+import os
+from datetime import datetime
+from known_blueprints import KNOWN_BLUEPRINT_PATTERNS
+
+# ------------------------------
+# 📦 LOAD DATA
+# ------------------------------
+@st.cache_data
+def load_signals(date_str):
+    file_path = f"blueprint_signals_{date_str}.json"
+    if not os.path.exists(file_path):
+        st.error(f"File not found: {file_path}")
+        return pd.DataFrame()
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+
+    for row in data:
+        row.setdefault("signal_type", "none")
+        row.setdefault("blueprint_match", row.get("pattern_key") in KNOWN_BLUEPRINT_PATTERNS)
+        row.setdefault("trade_type", "")
+        row.setdefault("tick_pattern", "")
+        row.setdefault("position_ratio", None)
+        row.setdefault("marketStartTime", None)
+        row.setdefault("confidence", 0.0)
+
+    return pd.DataFrame(data)
+
+# ------------------------------
+# 🧠 INITIAL SETUP
+# ------------------------------
+st.title("📘 Blueprint Signal Tracker")
+today_str = datetime.today().strftime('%Y-%m-%d')
+df = load_signals(today_str)
+
+if df.empty:
+    st.stop()
+
+# Ensure required fields exist post-load
+df['confidence'] = pd.to_numeric(df['confidence'], errors='coerce').fillna(0.0)
+
+# ------------------------------
+# 🔍 SEARCH + FILTER TOOLBAR
+# ------------------------------
+st.sidebar.header("🔍 Filter Signals")
+signal_type_filter = st.sidebar.multiselect("Signal Type", options=df['signal_type'].unique(), default=df['signal_type'].unique())
+confidence_filter = st.sidebar.slider("Confidence Range", min_value=0.5, max_value=1.0, value=(0.6, 1.0), step=0.01)
+blueprint_toggle = st.sidebar.checkbox("📘 Blueprint Match Only", value=False)
+trade_type_filter = st.sidebar.multiselect("Trade Type", options=df['trade_type'].dropna().unique(), default=df['trade_type'].dropna().unique())
+tick_pattern_filter = st.sidebar.multiselect("Tick Pattern", options=df['tick_pattern'].dropna().unique())
+
+# Apply filters
+filtered_df = df.copy()
+filtered_df = filtered_df[
+    (filtered_df['confidence'] >= confidence_filter[0]) &
+    (filtered_df['confidence'] <= confidence_filter[1]) &
+    (filtered_df['signal_type'].isin(signal_type_filter)) &
+    (filtered_df['trade_type'].isin(trade_type_filter))
+]
+if blueprint_toggle:
+    filtered_df = filtered_df[filtered_df['blueprint_match'].notnull()]
+if tick_pattern_filter:
+    filtered_df = filtered_df[filtered_df['tick_pattern'].isin(tick_pattern_filter)]
+
+# ------------------------------
+# 📋 SIGNAL SNAPSHOT TABLE
+# ------------------------------
+st.subheader("📋 Top 100 Signals")
+def color_row(row):
+    if 'confidence' not in row:
+        return [''] * len(row)
+    if row['confidence'] >= 0.75:
+        return ['background-color: #d4edda'] * len(row)  # Green
+    elif 0.65 <= row['confidence'] < 0.75:
+        return ['background-color: #fff3cd'] * len(row)  # Yellow
+    else:
+        return ['background-color: #f8d7da'] * len(row)  # Red
+
+snapshot_cols = {
+    'runner': '🏇 Runner',
+    'blueprint_match': '📘 Blueprint Matched',
+    'signal_type': '🔁 Signal Type',
+    'confidence': '🌯 Confidence (%)',
+    'entry': '💸 Entry',
+    'exit': '→ Exit',
+    'trend_ticks': '🔺 Trend Size',
+    'tick_pattern': '📊 Tick Pattern',
+    'position_ratio': '📊 Position Ratio',
+    'source': '📦 Source',
+    'marketStartTime': '⏱ Market Time'
+}
+
+available_keys = [k for k in snapshot_cols.keys() if k in filtered_df.columns]
+styled_snapshot = filtered_df.head(100)[available_keys]
+renamed_snapshot = styled_snapshot.rename(columns={k: snapshot_cols[k] for k in available_keys})
+styled = renamed_snapshot.style.apply(color_row, axis=1)
+st.dataframe(styled)
+
+# ------------------------------
+# 📈 BLUEPRINT MATCH SUMMARY
+# ------------------------------
+st.subheader("📈 Blueprint Match Summary")
+if 'blueprint_match' in df.columns:
+    grouped = df[df['blueprint_match'].notnull()].groupby('blueprint_match')
+    summary_data = []
+    for name, group in grouped:
+        summary_data.append({
+            'pattern': name,
+            'count': len(group),
+            'avg_conf': round(group['confidence'].mean(), 2)
+        })
+    summary_df = pd.DataFrame(summary_data).sort_values(by='count', ascending=False)
+    for _, row in summary_df.iterrows():
+        st.markdown(f"📘 {row['pattern']}: {row['count']} runners | avg conf: {row['avg_conf']}")
+else:
+    st.info("No blueprint matches available in this dataset.")
+
+# ===============================
+# 🔁 TAB 2: Playback Engine
+# ===============================
+
+import streamlit as st
+import pandas as pd
+import json
+import time
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+# -------------------------
+# 🔁 Signal Playback Engine – Tab 2
+# -------------------------
+
+st.title("🔁 Signal Playback Engine")
+
+# -------------------------
+# 🗓 Date + Speed Controls
+# -------------------------
+st.sidebar.header("Simulation Controls")
+sim_date = st.sidebar.date_input("Select Date")
+speed = st.sidebar.slider("Playback Speed (sec/tick)", 0.01, 1.0, 0.1, 0.01)
+start_sim = st.sidebar.button("▶️ Start Simulation")
+
+# Load data paths
+csv_path = f"tickdata_{sim_date}.csv"
+json_path = f"blueprint_signals_{sim_date}.json"
+
+# -------------------------
+# 🔄 Load Simulation Data
+# -------------------------
+def load_tick_data():
+    return pd.read_csv(csv_path)
+
+def load_signals():
+    with open(json_path, "r") as f:
+        return json.load(f)
+
+# -------------------------
+# 📊 Visualization Setup
+# -------------------------
+plot_placeholder = st.empty()
+signal_feed = st.empty()
+tracker_table = st.empty()
+
+# -------------------------
+# 🔁 Simulation Engine
+# -------------------------
+def simulate_signals(tick_df, signals):
+    current_data = []
+    signal_log = []
+
+    for tick in tick_df.itertuples():
+        runner = tick.runner
+        market_id = tick.market_id
+        odds = tick.lay_odds
+        ts = tick.timestamp
+
+        # Append to chart
+        current_data.append((ts, odds))
+
+        # Match signal
+        matched = [s for s in signals if s['runner'] == runner and s['market_id'] == market_id]
+        fired = []
+
+        for sig in matched:
+            entry = sig.get('entry')
+            exit = sig.get('exit')
+            bp_match = sig.get('blueprint_match')
+            conf = sig.get('confidence')
+            pattern = sig.get('tick_pattern')
+
+            if abs(odds - entry) < 0.01 or abs(odds - exit) < 0.01:
+                fired.append({
+                    'runner': runner,
+                    'market_id': market_id,
+                    'odds': odds,
+                    'timestamp': ts,
+                    'type': 'ENTRY' if abs(odds - entry) < 0.01 else 'EXIT',
+                    'confidence': conf,
+                    'pattern': pattern,
+                    'bp_match': bp_match
+                })
+
+        # Display chart
+        ts_x, odds_y = zip(*current_data[-100:])
+        fig, ax = plt.subplots()
+        ax.plot(ts_x, odds_y, label=f"Lay Odds for {runner}")
+
+        for f in fired:
+            ax.axvline(f['timestamp'], color='red' if f['type'] == 'ENTRY' else 'blue', linestyle='--')
+
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Odds")
+        ax.legend()
+        plot_placeholder.pyplot(fig)
+
+        # Log signal
+        for f in fired:
+            signal_log.append(f)
+            signal_feed.markdown(f"**{f['timestamp']}** – {f['type']} signal for `{f['runner']}` @ {f['odds']} | Conf: {f['confidence']} | Pattern: {f['pattern']} | BP: {f['bp_match']}")
+
+        # Update tracker
+        tracker_df = pd.DataFrame(signal_log)
+        tracker_table.dataframe(tracker_df.tail(10), use_container_width=True)
+
+        time.sleep(speed)
+
+# -------------------------
+# ▶️ Run Simulation
+# -------------------------
+if start_sim:
+    try:
+        tick_df = load_tick_data()
+        signals = load_signals()
+        simulate_signals(tick_df, signals)
+    except Exception as e:
+        st.error(f"Simulation failed: {e}")
+
+
+# ===============================
+# 🧠 TAB 3: Signal Eval Feed
+# ===============================
+
+import streamlit as st
+import pandas as pd
+import time
+from datetime import datetime
+
+# ⛓️ Imports (adjust these to your project structure)
+from brain_headtrader import evaluate_signal
+from data.blueprints import runner_trades  # Optional if needed
+from memory_store import last_odds_map  # Simulated or live tick memory
+
+# -------------------------
+# 🔧 Tab 3 – Signal Evaluation Feed
+# -------------------------
+
+st.title("🧠 Signal Evaluation Feed")
+
+# --- Session state store for signal table and log ---
+if "signal_log" not in st.session_state:
+    st.session_state.signal_log = []
+if "signal_table" not in st.session_state:
+    st.session_state.signal_table = []
+
+# -------------------------
+# ⚙️ Control Panel
+# -------------------------
+col1, col2 = st.columns([1, 1])
+with col1:
+    run_once = st.button("🔁 Run Signal Evaluation Once")
+with col2:
+    auto_refresh = st.checkbox("🔄 Auto Refresh Every 10 Seconds")
+
+# -------------------------
+# 🧠 Evaluate Signal Handler
+# -------------------------
+def run_signal_evaluation():
+    output = evaluate_signal()  # This should return list of evaluated signals
+
+    for signal in output:
+        log_lines = []
+        runner = signal.get("runner")
+        market_id = signal.get("market_id")
+        signal_type = signal.get("signal_type")
+        confidence = signal.get("confidence", 0.0)
+        tick_pattern = signal.get("tick_pattern", "–")
+        drift = signal.get("drift", 0.0)
+        tick_range = signal.get("range_low", 0.0), signal.get("range_high", 0.0)
+        bracket = signal.get("bracket", "–")
+        blueprint = signal.get("blueprint_match", False)
+        status = signal.get("status", "pending")
+
+        # Logging line
+        if blueprint:
+            log_lines.append("📘 Blueprint matched")
+        log_lines.append(f"🔁 Tick Pattern: {tick_pattern}")
+        log_lines.append(f"🔺 Confidence: {confidence:.2f}")
+        if confidence >= 0.75:
+            log_lines.append(f"✅ Signal approved @ {signal.get('entry', '–')}")
+
+        # Log entry
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        st.session_state.signal_log.append((timestamp, runner, log_lines))
+
+        # Table update
+        display_conf = f"✅ {confidence:.2f}" if confidence >= 0.75 else (
+            f"⚠️ {confidence:.2f}" if confidence >= 0.65 else f"🟡 {confidence:.2f}"
+        )
+        display_status = "✅" if status == "approved" else ("⚠️" if status == "pending" else "🟡")
+
+        st.session_state.signal_table.insert(0, {
+            "Time": timestamp,
+            "Runner": runner,
+            "Market ID": market_id,
+            "Type": signal_type,
+            "Confidence": display_conf,
+            "Tick Pattern": tick_pattern,
+            "Drift %": f"{drift:.1f}%",
+            "Tick Range": f"{tick_range[0]}–{tick_range[1]}",
+            "Bracket": bracket,
+            "Blueprint?": "✅" if blueprint else "–",
+            "Status": display_status
+        })
+
+    # Limit display to most recent 15
+    st.session_state.signal_table = st.session_state.signal_table[:15]
+
+# -------------------------
+# 🔁 Trigger Evaluation
+# -------------------------
+if run_once:
+    run_signal_evaluation()
+
+if auto_refresh:
+    while True:
+        run_signal_evaluation()
+        time.sleep(10)
+        st.experimental_rerun()
+
+# -------------------------
+# 🧠 Evaluation Summary Table
+# -------------------------
+st.markdown("### 📊 Most Recent Signal Evaluations")
+if st.session_state.signal_table:
+    df = pd.DataFrame(st.session_state.signal_table)
+    st.dataframe(df, use_container_width=True)
+else:
+    st.info("No signals evaluated yet. Run the engine to see updates.")
+
+# -------------------------
+# 📡 Signal Log Panel
+# -------------------------
+st.markdown("### 📡 Signal Evaluation Log")
+with st.expander("📡 View Live Evaluation Log"):
+    for timestamp, runner, lines in reversed(st.session_state.signal_log[-40:]):
+        st.markdown(f"**[{timestamp}] {runner}**")
+        for line in lines:
+            st.markdown(f"- {line}")
+
+
+# ===============================
+# 🔥 TAB 4: Confidence Visualizer
+# ===============================
+
+# 📘 Tab 4 – 🔥 Confidence Visualizer
+# GhostTrader Dashboard v6.0 – Full Streamlit Implementation
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+# ------------------------
+# 🔧 CONFIGURABLE MOCK DATA SOURCES (replace with live runner_trades)
+# ------------------------
+from utils.signal_evaluator import calculate_confidence_components, get_signal_confidence_band
+
+mock_signals = [
+    {"runner": "Fast Blade", "confidence": 0.82},
+    {"runner": "Steel Dancer", "confidence": 0.69},
+    {"runner": "Rocket Sky", "confidence": 0.74},
+    {"runner": "Hidden Meteor", "confidence": 0.63},
+    {"runner": "Jungle Prince", "confidence": 0.88},
+    {"runner": "Speed Index", "confidence": 0.79},
+    {"runner": "Crimson Heat", "confidence": 0.71},
+    {"runner": "Royal Drift", "confidence": 0.67}
+]
+
+# ------------------------
+# 🎛️ SIDEBAR SIMULATOR CONTROLS
+# ------------------------
+st.sidebar.header("🛠️ Simulate Confidence")
+bracket = st.sidebar.selectbox("Market Bracket", ["favourite", "2nd", "3rd", "field"])
+tick_range = st.sidebar.slider("Tick Range", 5, 20, 10)
+blueprint_match = st.sidebar.checkbox("Blueprint Match")
+range_source = st.sidebar.radio("Range Used", ["anchor", "partial", "full"])
+breakout = st.sidebar.checkbox("Breakout (Above OC High / Below Low)")
+stop_loss = st.sidebar.checkbox("Stop Loss Triggered (≥3 Tick Reversal)")
+
+# ------------------------
+# 🔥 CALCULATE SIMULATED CONFIDENCE
+# ------------------------
+components = calculate_confidence_components(
+    bracket=bracket,
+    tick_range=tick_range,
+    blueprint_match=blueprint_match,
+    range_source=range_source,
+    breakout=breakout,
+    stop_loss=stop_loss
+)
+
+# ------------------------
+# 🎛️ STACKED COMPONENT DISPLAY
+# ------------------------
+st.subheader("🎛️ Confidence Breakdown")
+for label, value in components["stack"].items():
+    emoji = components["emojis"].get(label, "")
+    st.write(f"{emoji} {label}: ➝ {value:+.2f}")
+
+conf = components["total"]
+flag = "✅" if conf >= 0.75 else ("⚠️" if conf >= 0.65 else "🟡")
+st.markdown(f"## {flag} Final Confidence: **{conf:.2f}**")
+
+# ------------------------
+# 📊 CONFIDENCE DISTRIBUTION
+# ------------------------
+st.subheader("📊 Confidence Band Distribution")
+df = pd.DataFrame(mock_signals)
+df["band"] = df["confidence"].apply(get_signal_confidence_band)
+chart = px.histogram(df, x="band", color="band",
+                     category_orders={"band": ["60–64%", "65–69%", "70–74%", "75–79%", "80%+"]},
+                     title="Signal Confidence Distribution")
+st.plotly_chart(chart)
+
+# ------------------------
+# 📌 SELECTED RUNNER DISPLAY
+# ------------------------
+st.subheader("🔍 Sample Confidence by Runner")
+selected_runner = st.selectbox("Choose Runner", [s["runner"] for s in mock_signals])
+selected_conf = next(s["confidence"] for s in mock_signals if s["runner"] == selected_runner)
+st.metric("🔥 Confidence", f"{selected_conf:.2f}", delta="vs threshold 0.75")
+
+
+# ===============================
+# 📦 TAB 5: Runner State Explorer
+# ===============================
+
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+
+from utils.api.tools import fetch_live_odds
+from utils.odds.tick_patterns import get_tick_pattern_for_signal
+from utils.odds.volatility import get_volatility_meta
+from utils.helpers.classify import classify_market_position
+from memory.live_maps import last_odds_map, live_runner_map
+from database.blueprints import get_runner_blueprint_match
+
+# -----------------------------
+# 📦 RUNNER STATE EXPLORER – Tab 5
+# -----------------------------
+st.title("📦 Runner State Explorer")
+
+# -----------------------------
+# ⚙️ Refresh + Controls
+# -----------------------------
+if st.button("🔄 Refresh Live Odds"):
+    fetch_live_odds()
+
+cached_mode = st.toggle("Use Cached Data (last_odds_map)", value=True)
+
+# -----------------------------
+# 📋 RUNNER SNAPSHOT TABLE
+# -----------------------------
+snapshot_rows = []
+
+for market_id, runners in live_runner_map.items():
+    for selection_id, runner_data in runners.items():
+        name = runner_data.get("runner_name")
+        start_time = runner_data.get("market_start_time")
+        lay_price = runner_data.get("lay_price")
+
+        # 🌀 Tick Pattern
+        tick_pattern = get_tick_pattern_for_signal(selection_id)
+
+        # 🎯 Bracket
+        bracket = classify_market_position(market_id, selection_id)
+
+        # 📊 Volatility
+        vol_data = get_volatility_meta(market_id, selection_id)
+        drift_pct = vol_data.get("drift", "–")
+
+        # 🔁 Last 5 odds
+        last_odds = last_odds_map.get(selection_id, [])[-5:]
+
+        snapshot_rows.append({
+            "🏇 Runner": name,
+            "🏁 Market ID": market_id,
+            "🕒 Market Start Time": start_time,
+            "💸 Current Lay Odds": lay_price,
+            "🌀 Tick Pattern": tick_pattern,
+            "🎯 Bracket": bracket,
+            "📊 Drift %": f"{drift_pct}%" if drift_pct != "–" else "–",
+            "🔁 Last 5 Odds": str(last_odds)
+        })
+
+snapshot_df = pd.DataFrame(snapshot_rows)
+st.dataframe(snapshot_df, use_container_width=True)
+
+# -----------------------------
+# 📈 RUNNER DETAIL PANEL
+# -----------------------------
+st.markdown("---")
+st.subheader("📈 Runner Detail View")
+selected_runner = st.selectbox("Select Runner", snapshot_df["🏇 Runner"].unique())
+
+if selected_runner:
+    row = snapshot_df[snapshot_df["🏇 Runner"] == selected_runner].iloc[0]
+    selection_id = None
+
+    for market_runners in live_runner_map.values():
+        for sid, r in market_runners.items():
+            if r.get("runner_name") == selected_runner:
+                selection_id = sid
+                break
+
+    if selection_id:
+        odds_history = last_odds_map.get(selection_id, [])
+        ticks = list(range(len(odds_history)))
+
+        # Classify direction per tick
+        colors = []
+        for i in range(1, len(odds_history)):
+            if odds_history[i] < odds_history[i - 1]:
+                colors.append("red")  # 🔺 Came In
+            elif odds_history[i] > odds_history[i - 1]:
+                colors.append("blue")  # 🔻 Drifted
+            else:
+                colors.append("yellow")  # ⚡ No change
+        colors = ["gray"] + colors  # For the first point
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=ticks,
+            y=odds_history,
+            mode="markers+lines",
+            marker=dict(color=colors, size=8),
+            name="Lay Odds"
+        ))
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown(f"**OC Range:** {live_runner_map[row['🏁 Market ID']][selection_id].get('oc_range')}  ")
+        st.markdown(f"**Anchor Odds:** {live_runner_map[row['🏁 Market ID']][selection_id].get('anchor_odds')}  ")
+        st.markdown(f"**Current Odds:** {row['💸 Current Lay Odds']}  ")
+        st.markdown(f"**Tick Range:** {vol_data.get('tick_range')}  ")
+        st.markdown(f"**Drift %:** {row['📊 Drift %']}  ")
+        blueprint = get_runner_blueprint_match(selection_id)
+        st.markdown(f"**Blueprint Match:** {blueprint if blueprint else '❌ None'}")
+
+
+# -----------------------------
+# 🧾 INTEGRATION REPORT
+# -----------------------------
+st.markdown("---")
+st.subheader("🧾 Integration Report")
+st.markdown("""
+- **Table Source:** Built from `live_runner_map`, iterating over all markets and runners, enriched with `last_odds_map`, tick patterns, bracket classification, and volatility snapshots.
+- **Synchronization:**
+  - Odds pulled from `live_runner_map` and `last_odds_map`
+  - Tick pattern via `get_tick_pattern_for_signal(selection_id)`
+  - Volatility via `get_volatility_meta(market_id, selection_id)`
+  - Bracket via `classify_market_position()`
+- **Tick History Plotting:** Uses Plotly to plot odds from `last_odds_map` with color-coded direction arrows
+- **Recent Odds Change Detection:** Color logic classifies direction tick-by-tick to show drift/swing visually
+- **Optional Blueprint Match:** Pulled from `runner_trades` DB or memory snapshot via helper
+""")
+
+
+# ===============================
+# 🧬 TAB 6: Strategy Pattern Memory
+# ===============================
+
+import streamlit as st
+import pandas as pd
+from utils.known_blueprints import KNOWN_BLUEPRINT_PATTERNS
+from utils.helpers import load_runner_trades, send_to_playbook_engine
+from database import get_pattern_stats  # Optional if historical P&L or win rate tracking is enabled
+
+# --- Load Data ---
+runner_trades = load_runner_trades()  # Loaded from blueprint_signals_YYYY-MM-DD.json
+
+# --- Prepare Pattern Summary Table ---
+pattern_summary = []
+for pattern_key, pattern_seq in KNOWN_BLUEPRINT_PATTERNS.items():
+    matches = [r for r in runner_trades if r.get("pattern_key") == pattern_key]
+    count = len(matches)
+    avg_conf = round(sum(r.get("confidence", 0) for r in matches) / count, 3) if count else 0
+
+    # Optional: load historical stats
+    win_rate = None
+    total_pl = None
+    if 'get_pattern_stats' in globals():
+        stats = get_pattern_stats(pattern_key)
+        win_rate = stats.get("win_rate")
+        total_pl = stats.get("total_pl")
+
+    pattern_summary.append({
+        "Pattern Key": pattern_key,
+        "Sequence": " → ".join(pattern_seq),
+        "Today Matches": count,
+        "Avg Confidence": avg_conf,
+        "Win Rate": win_rate,
+        "Total P&L": total_pl
+    })
+
+summary_df = pd.DataFrame(pattern_summary)
+
+# --- UI ---
+st.title("🧬 Strategy Pattern Memory")
+st.markdown("This tab tracks known blueprint patterns and their real-time or historical performance.")
+
+# --- Pattern Table ---
+st.subheader("📘 Known Pattern Table")
+st.dataframe(summary_df.sort_values(by=["Today Matches", "Avg Confidence"], ascending=False), use_container_width=True)
+
+# --- Pattern Inspector ---
+st.subheader("🔍 Pattern Detail Inspector")
+selected_pattern = st.selectbox("Select a Pattern Key", summary_df["Pattern Key"])
+
+if selected_pattern:
+    selected_matches = [r for r in runner_trades if r.get("pattern_key") == selected_pattern]
+    detail_data = []
+    for r in selected_matches:
+        detail_data.append({
+            "Runner": r.get("runner"),
+            "Market ID": r.get("market_id"),
+            "Signal Type": r.get("signal_type"),
+            "Confidence": r.get("confidence"),
+            "Drift %": r.get("drift"),
+            "Entry": r.get("entry"),
+            "Exit": r.get("exit"),
+            "Result": r.get("result")  # optional from approved_signals or DB
+        })
+    st.dataframe(pd.DataFrame(detail_data), use_container_width=True)
+
+# --- Export Button ---
+st.subheader("📦 Export & Send to Playbooks")
+
+high_conf_patterns = [p for p in pattern_summary if p["Avg Confidence"] >= 0.7 and p["Today Matches"] >= 3]
+
+if st.button("🛠 Send to Playbook Engine"):
+    send_to_playbook_engine([p["Pattern Key"] for p in high_conf_patterns])
+    st.success("Patterns sent to playbook engine.")
+
+
+# ===============================
+# 🛠 TAB 7: Playbook Engine
+# ===============================
+
+# 🔧 Tab 7 – 🛠 Playbook Engine
+import streamlit as st
+import json
+import os
+
+# --- Load Data Sources ---
+from utils.pattern_loader import load_blueprint_patterns, enrich_with_signals
+from utils.file_paths import PLAYBOOKS_PATH
+
+# --- Load Patterns ---
+patterns = load_blueprint_patterns()  # from runner_trades or Tab 6 output
+patterns = enrich_with_signals(patterns)  # optional: inject confidence + sample size from approved_signals
+
+# --- Load Existing Playbooks ---
+if os.path.exists(PLAYBOOKS_PATH):
+    with open(PLAYBOOKS_PATH, 'r') as f:
+        playbooks = json.load(f)
+else:
+    playbooks = {}
+
+st.title("🛠 Playbook Engine")
+st.caption("Convert strong patterns into executable tactical strategies.")
+
+# --- Playbook Table View ---
+st.subheader("📘 Playbook Table View")
+
+# Filter for valid patterns only
+valid_patterns = [p for p in patterns if p['avg_confidence'] >= 0.5 and p.get('pattern_key')]
+
+def get_export_status(pattern_key):
+    return "✅" if pattern_key in playbooks else "❌"
+
+playbook_rows = []
+for p in valid_patterns:
+    row = {
+        "Pattern Key": p['pattern_key'],
+        "Signal Type": p.get('signal_type', 'entry'),
+        "Avg Confidence": round(p['avg_confidence'], 2),
+        "Entry Zone": "≤{:.2f}".format(p.get('entry_ratio', 0.25)),
+        "Exit Rule": p.get('exit_rule', 'trail 2 ticks'),
+        "Stake Strategy": p.get('stake_strategy', 'smart'),
+        "Risk Mode": p.get('risk_mode', 'cautious'),
+        "Sample Size": p.get('sample_size', 0),
+        "Exported": get_export_status(p['pattern_key'])
+    }
+    playbook_rows.append(row)
+
+selected = st.dataframe(playbook_rows, use_container_width=True)
+
+# --- Playbook Editor ---
+st.subheader("📋 Playbook Editor")
+selected_pattern = st.selectbox("Select a pattern to edit:", [p['pattern_key'] for p in valid_patterns])
+pattern_data = next((p for p in valid_patterns if p['pattern_key'] == selected_pattern), None)
+
+if pattern_data:
+    with st.form("edit_playbook"):
+        entry_zone = st.text_input("Entry Condition (e.g., ≤0.25)", value=f"≤{pattern_data.get('entry_ratio', 0.25):.2f}")
+        exit_rule = st.selectbox("Exit Rule", ["trail 2 ticks", "static TP", "volatility reversal"], index=0)
+        stake_strategy = st.selectbox("Stake Strategy", ["fixed", "smart", "double on breakout"], index=1)
+        risk_mode = st.selectbox("Risk Mode", ["cautious", "smart", "aggressive"], index=0)
+        notes = st.text_area("Notes", value=pattern_data.get('notes', ''))
+
+        submitted = st.form_submit_button("Save Playbook")
+        if submitted:
+            playbooks[selected_pattern] = {
+                "entry_zone": entry_zone,
+                "exit_rule": exit_rule,
+                "stake_strategy": stake_strategy,
+                "risk_mode": risk_mode,
+                "notes": notes,
+                "avg_confidence": round(pattern_data['avg_confidence'], 2),
+                "sample_size": pattern_data.get('sample_size', 0)
+            }
+            st.success(f"Playbook for pattern '{selected_pattern}' saved.")
+
+# --- Export Logic ---
+st.subheader("📤 Export Playbooks")
+if st.button("💾 Save Playbooks"):
+    filtered_playbooks = {
+        k: v for k, v in playbooks.items()
+        if v['avg_confidence'] >= 0.70 and v['sample_size'] >= 3
+    }
+    with open(PLAYBOOKS_PATH, 'w') as f:
+        json.dump(filtered_playbooks, f, indent=2)
+    st.success(f"✅ {len(filtered_playbooks)} playbooks exported to {PLAYBOOKS_PATH}")
+
+# --- Report Back ---
+st.markdown("""
+### 🧾 Export Summary
+- Total patterns converted: **{}**
+- Exported filename: `{}`
+- Fields included: `entry_zone`, `exit_rule`, `stake_strategy`, `risk_mode`, `notes`, `avg_confidence`, `sample_size`
+- Missing data fallback: Defaults set for exit_rule, stake_strategy, and risk_mode if not present
+""".format(len(playbooks), PLAYBOOKS_PATH))
+
+
+# ===============================
+# ⚙️ TAB 8: Control Panel
+# ===============================
+
+import streamlit as st
+from utils.optimizers import LearningOptimizer
+from utils.helpers import run_blueprint_simulation, build_playbooks, restart_headtrader, clear_signal_cache, refresh_bets_db_summary, clear_temp_files
+
+# ===============================
+# ⚙️ TAB 8: Control Panel
+# ===============================
+with tabs[8]:
+    st.title("⚙️ Control Panel")
+
+    if st.button("🔁 Generate Blueprint Signals"):
+        run_blueprint_simulation()
+        st.rerun()
+
+st.markdown("### ⚙️ System Actions")
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    if st.button("📘 Generate New Blueprint Signals"):
+        try:
+            count, path = run_blueprint_simulation()
+            st.success(f"✅ Generated {count} signals → {path}")
+        except Exception as e:
+            st.error(f"❌ Failed to generate blueprint signals: {e}")
+
+with col2:
+    if st.button("🧠 Optimize Strategy Confidence"):
+        try:
+            stats = LearningOptimizer().run()
+            st.success(f"✅ Optimized strategies. Bets analyzed: {stats.get('total_bets', 0)}")
+        except Exception as e:
+            st.error(f"❌ Optimizer failed: {e}")
+
+with col3:
+    if st.button("🛠 Build Playbooks from Blueprint Wins"):
+        try:
+            path = build_playbooks()
+            st.success(f"✅ Playbooks exported → {path}")
+        except Exception as e:
+            st.error(f"❌ Failed to export playbooks: {e}")
+
+st.markdown("### 🔁 Admin Tools")
+col4, col5, col6 = st.columns(3)
+
+with col4:
+    if st.button("🔁 Restart HeadTrader"):
+        try:
+            restart_headtrader()
+            st.success("✅ HeadTrader restarted.")
+        except Exception as e:
+            st.error(f"❌ Could not restart: {e}")
+
+with col5:
+    if st.button("📦 Clear Signal Cache"):
+        try:
+            clear_signal_cache()
+            st.success("✅ Cache cleared.")
+        except Exception as e:
+            st.error(f"❌ Failed to clear cache: {e}")
+
+with col6:
+    if st.button("🗃 Refresh Bets DB Summary"):
+        try:
+            refresh_bets_db_summary()
+            st.success("✅ Bets summary refreshed.")
+        except Exception as e:
+            st.error(f"❌ Refresh failed: {e}")
+
+st.markdown("### 🧼 File Management")
+if st.button("🧼 Clear Temporary Files"):
+    try:
+        clear_temp_files()
+        st.success("✅ Temporary files removed.")
+    except Exception as e:
+        st.error(f"❌ Could not delete temp files: {e}")
+
+# Paste optimizer, blueprint trigger, reset/cache actions here

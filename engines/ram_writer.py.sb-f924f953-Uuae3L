@@ -1,0 +1,64 @@
+# ✅ PHASE 1 – RAM WRITES MIGRATION
+# Replace memory_write[...] = {...} assignments with SQL UPSERT to ram_snapshots
+
+import sqlite3
+import json
+from datetime import datetime
+from config_paths import DB_PATH
+
+def upsert_ram_snapshot(market_id, selection_id, snapshot_dict):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+
+            # Prepare flattened fields
+            odds = snapshot_dict.get("odds")
+            tick_pattern = snapshot_dict.get("tick_pattern")
+            direction_bias = snapshot_dict.get("direction_bias")
+            anchor_odd = snapshot_dict.get("anchor_odd")
+            range_low = snapshot_dict.get("range_low")
+            range_high = snapshot_dict.get("range_high")
+            position_ratio = snapshot_dict.get("position_ratio")
+            volatility = snapshot_dict.get("volatility")
+            tick_trail = json.dumps(snapshot_dict.get("tick_trail", []))
+            oc_snapshots = json.dumps(snapshot_dict.get("oc_snapshots", {}))
+            position = snapshot_dict.get("position")
+            minutes_to_post = snapshot_dict.get("minutes_to_post")
+            tier = snapshot_dict.get("tier")
+            last_updated = snapshot_dict.get("last_updated") or datetime.utcnow().isoformat()
+            full_snapshot = json.dumps(snapshot_dict)
+
+            cursor.execute("""
+                INSERT INTO ram_snapshots (
+                    marketId, selectionId, odds, tick_pattern, direction_bias,
+                    anchor_odd, range_low, range_high, position_ratio, volatility,
+                    tick_trail, oc_snapshots, position, minutes_to_post, tier,
+                    last_updated, snapshot
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(marketId, selectionId)
+                DO UPDATE SET
+                    odds = excluded.odds,
+                    tick_pattern = excluded.tick_pattern,
+                    direction_bias = excluded.direction_bias,
+                    anchor_odd = excluded.anchor_odd,
+                    range_low = excluded.range_low,
+                    range_high = excluded.range_high,
+                    position_ratio = excluded.position_ratio,
+                    volatility = excluded.volatility,
+                    tick_trail = excluded.tick_trail,
+                    oc_snapshots = excluded.oc_snapshots,
+                    position = excluded.position,
+                    minutes_to_post = excluded.minutes_to_post,
+                    tier = excluded.tier,
+                    last_updated = excluded.last_updated,
+                    snapshot = excluded.snapshot
+            """, (
+                market_id, selection_id, odds, tick_pattern, direction_bias,
+                anchor_odd, range_low, range_high, position_ratio, volatility,
+                tick_trail, oc_snapshots, position, minutes_to_post, tier,
+                last_updated, full_snapshot
+            ))
+            conn.commit()
+            print(f"🧠 RAM SNAPSHOT SAVED → {market_id}:{selection_id}")
+    except Exception as e:
+        print(f"❌ Failed to upsert RAM snapshot for {market_id}:{selection_id}: {e}")

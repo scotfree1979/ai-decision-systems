@@ -1,0 +1,58 @@
+# ⏳ OGPreoff Bot Scalping & Penny-Matching Execution Logic
+from og_bot_family import og_inplay_bot
+
+
+def pre_off_scalping_strategy(horse_odds_history, current_odds, stake=10):
+    """
+    Executes pre-off scalping with penny-matching strategy for the 3rd and 4th favourite horses.
+
+    Parameters:
+    - horse_odds_history: dict containing historical odds movements.
+    - current_odds: dict containing current odds of horses.
+    - stake: int, the initial stake amount for scalping.
+
+    Returns:
+    - Dict containing lay and back bet placement details, including penny-matching.
+    """
+    trades = {}
+
+    # Identify the 3rd and 4th favourites based on current odds
+    sorted_horses = sorted(current_odds.items(), key=lambda x: x[1])[2:4]
+
+    for horse, odds in sorted_horses:
+        historic_odds = horse_odds_history.get(horse, [])
+
+        if historic_odds:
+            # Check if odds are drifting (increasing)
+            if odds > historic_odds[-1]:
+                lay_odds = odds
+                back_odds = odds + 0.04  # 2 ticks higher
+
+                # Penny-matching adjustment (Betfair minimum stake workaround)
+                penny_matched_stake = 2  # Betfair minimum stake
+                remaining_stake = stake - penny_matched_stake
+
+                trades[horse] = {
+                    'Lay Bet': {
+                        'Odds': lay_odds,
+                        'Initial Stake': penny_matched_stake,
+                        'Remaining Stake': remaining_stake
+                    },
+                    'Back Bet': {
+                        'Odds': back_odds,
+                        'Stake': stake
+                    },
+                    'Strategy': 'Scalp - Drift with Penny-Matching'
+                }
+            else:
+                trades[horse] = {'Action': 'No Trade - Stable or Shortening Odds'}
+        else:
+            trades[horse] = {'Action': 'No Historical Data'}
+
+    return trades
+
+# Example usage:
+# odds_history_example = {'Horse C': [4.2, 4.4], 'Horse D': [5.0, 4.8]}
+# current_odds_example = {'Horse A': 2.0, 'Horse B': 3.0, 'Horse C': 4.6, 'Horse D': 5.2}
+# pre_off_trades = pre_off_scalping_strategy(odds_history_example, current_odds_example)
+# print(pre_off_trades)

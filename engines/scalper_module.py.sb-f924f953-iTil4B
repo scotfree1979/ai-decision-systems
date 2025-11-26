@@ -1,0 +1,414 @@
+# ✅ scalper_module.py – FINAL SESSION TOKEN FIX
+
+import os
+import sys
+import time
+import json
+import requests
+import logging
+import sqlite3
+from datetime import datetime, timezone
+
+from upgrade_import_patch import get_session_token
+from signal_memory_engine import signal_memory
+
+# Prompt first
+session_token = get_session_token()
+
+# ✅ Inject early
+signal_memory.session_token = session_token
+
+# ✅ Now safe to launch reset
+signal_memory.maybe_reset_for_new_day()
+
+
+
+# 👇 Any additional logic, threads, loops, or syncs go here...
+
+# -----------------------------
+# Helper Unique CustomerOrderRef Builder
+# -----------------------------
+
+_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_suffix_index = 0  # ensure global is initialized only once
+
+def _next_suffix():
+    global _suffix_index
+    if _suffix_index == 0:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT customer_order_ref FROM scalping_bets WHERE customer_order_ref LIKE '__%'")
+                rows = cursor.fetchall()
+                max_found = 0
+                for row in rows:
+                    try:
+                        prefix = row["customer_order_ref"].split("_")[0]
+                        a, b, num = prefix[0], prefix[1], prefix[2:]
+                        base = (ord(a) - 65) * 26 * 1000 + (ord(b) - 65) * 1000 + int(num)
+                        max_found = max(max_found, base)
+                    except:
+                        continue
+                _suffix_index = max_found + 1
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to scan for existing customer_order_ref: {e}")
+            _suffix_index = 1
+
+    code = _suffix_index
+    _suffix_index += 1
+
+    a_index = (code // 1000) // 26
+    b_index = (code // 1000) % 26
+
+    if a_index >= len(_letters) or b_index >= len(_letters):
+        raise ValueError("💥 _next_suffix() exhausted code space — increase letter base or reset")
+
+    return f"{_letters[a_index]}{_letters[b_index]}{code % 1000:03}"
+
+# -----------------------------
+# ✅ Session Token Prompt (Manual Entry)
+# -----------------------------
+token = input("🔐 Enter your Betfair session token: ").strip()
+set_session_token(token)  # 🧠 Sets token globally for shared access
+upgrade_import_patch.SESSION_TOKEN = token  # 🧠 Backup global
+signal_memory.session_token = token         # ✅ Directly inject into memory engine
+
+
+# -----------------------------
+# 🔄 KeepAlive Handler
+# -----------------------------
+def keep_alive_loop():
+    def keep_alive():
+        try:
+            response = requests.post(
+                "https://identitysso.betfair.com/api/keepAlive",
+                headers={
+                    "X-Authentication": token,
+                    "X-Application": APP_KEY
+                }
+            )
+            if response.status_code == 200:
+                logging.info(f"✅ [Session] Keep-alive successful at {datetime.utcnow()}")
+            else:
+                logging.warning("⚠️ [Session] Keep-alive failed.")
+        except Exception as e:
+            logging.error(f"❌ [Session] Error keeping session alive: {e}")
+
+    import threading
+    def loop():
+        while True:
+            keep_alive()
+            time.sleep(60)
+
+    threading.Thread(target=loop, name="KeepAliveThread", daemon=True).start()
+
+# -----------------------------
+# 📁 SETUP
+# -----------------------------
+DB_PATH = "scalper.db"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+
+# -----------------------------
+# 🛠️ DATABASE INIT
+# -----------------------------
+def create_scalper_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scalping_bets (
+            user TEXT,
+            head_trader TEXT,
+            id INTEGER PRIMARY KEY,
+            market_id TEXT,
+            selection_id TEXT,
+            runner_name TEXT,
+            race_name TEXT,
+            venue TEXT,
+            market_start TEXT,
+
+            bet_type TEXT,
+            direction TEXT,
+
+            entry_odds REAL,
+            exit_odds REAL,
+            entry_side TEXT,
+            exit_side TEXT,
+
+            entry_stake REAL,
+            exit_stake REAL,
+
+            entry_bet_id TEXT,
+            exit_bet_id TEXT,
+
+            anchor_odds REAL,
+            volatility REAL,
+
+            pnl REAL,
+            status TEXT,
+            created_at TEXT,
+            settled_at TEXT,
+
+            customer_order_ref TEXT UNIQUE
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# -----------------------------
+# ⏱️ TIME TO OFF
+# -----------------------------
+def time_to_off(utc_start):
+    if isinstance(utc_start, str):
+        utc_start = datetime.fromisoformat(utc_start.replace("Z", "+00:00"))
+    return (utc_start - datetime.now(timezone.utc)).total_seconds() / 60.0
+
+# -----------------------------
+# 🤖 SCALP EXECUTION (INLINE)
+# -----------------------------
+def get_tick_size(odds):
+    if odds < 2.0:
+        return 0.01
+    elif odds < 3.0:
+        return 0.02
+    elif odds < 4.0:
+        return 0.05
+    elif odds < 6.0:
+        return 0.1
+    elif odds < 10.0:
+        return 0.2
+    elif odds < 20.0:
+        return 0.5
+    elif odds < 30.0:
+        return 1.0
+    elif odds < 50.0:
+        return 2.0
+    elif odds < 100.0:
+        return 5.0
+    else:
+        return 10.0
+
+def place_lay_strategy(signal):
+    from bet_core import place_bet, check_bet_matched, cancel_bet
+
+    session_token = signal.get("session_token")
+    marketId = signal.get("marketId")
+    runner_id = signal.get("selectionId")
+    odds = signal.get("odds")
+    stake = signal.get("stake") or 10.0
+    direction = signal.get("scalp_direction", "lay_to_back")
+
+    tick_size = get_tick_size(odds)
+
+    if direction == "back_to_lay":
+        entry_side = "BACK"
+        exit_side = "LAY"
+        hedge_odds = round(odds - 2 * tick_size, 2)
+    else:
+        entry_side = "LAY"
+        exit_side = "BACK"
+        hedge_odds = round(odds + 2 * tick_size, 2)
+
+    # Place entry bet
+    entry_bet_id = place_bet(session_token, marketId, runner_id, stake, odds, entry_side)
+    if not entry_bet_id:
+        logging.warning("❌ Entry bet failed. No scalp placed.")
+        return
+
+    # Wait for partial or full match
+    matched = False
+    for _ in range(10):  # check every 3s up to 30s
+        time.sleep(3)
+        matched = check_bet_matched(session_token, entry_bet_id)
+        if matched:
+            break
+
+    if not matched:
+        cancel_bet(session_token, entry_bet_id)
+        logging.warning("⚠️ Entry bet unmatched after timeout. Cancelled.")
+        return
+
+    # Place hedge bet after match
+    exit_bet_id = place_bet(session_token, marketId, runner_id, stake, hedge_odds, exit_side)
+    if not exit_bet_id:
+        logging.warning("❌ Hedge bet failed after entry matched.")
+    else:
+        place_bet_direct(session_token, marketId, runner_id, stake, odds, "LAY")
+        tick_size = get_tick_size(odds)
+        back_odds = round(odds + (2 * tick_size), 2)
+        place_bet_direct(session_token, marketId, runner_id, stake, back_odds, "BACK")
+
+
+# -----------------------------
+# 🚀 RUN AUTO SCALPER
+# -----------------------------
+def run_auto():
+    session_token = upgrade_import_patch.SESSION_TOKEN
+    markets = get_markets_and_insert()
+
+    for market in markets:
+        marketId = market["marketId"]
+        start_time = market.get("marketStartTime")
+        if time_to_off(start_time) > 20:
+            continue
+
+        for runner in market.get("runners", []):
+            selectionId = runner["selectionId"]
+            runnerName = runner["runnerName"]
+
+            odds = fetch_live_odds(session_token, marketId, selectionId)
+            if not odds or not odds.get("lay") or not odds.get("back"):
+                continue
+
+            profile = analyze_market_range({"selectionId": selectionId, "ex": {"availableToBack": [{"price": odds["back"]}], "availableToLay": [{"price": odds["lay"]}]}})
+            if not profile:
+                continue
+
+            direction = determine_scalp_direction(profile["anchor"], odds["lay"])
+            profile["direction"] = direction
+
+            if not should_enter_scalp(profile, odds["lay"]):
+                continue
+
+            stake = calculate_scalp_stake(active_scalps=0)
+            signal = {
+                "session_token": session_token,
+                "marketId": marketId,
+                "selectionId": selectionId,
+                "odds": odds["lay"],
+                "stake": stake,
+                "scalp_direction": direction
+            }
+            place_lay_strategy(signal)
+            logging.info(f"✅ Placed scalp on {runnerName} ({selectionId}) @ {odds['lay']} [{direction}]")
+
+            with sqlite3.connect(DB_PATH) as conn:
+                customer_order_ref = f"MANUAL_{_next_suffix()}"
+                conn.execute("""
+                    INSERT INTO scalping_bets (
+                        user, head_trader,
+                        market_id, selection_id, runner_name,
+                        bet_type, direction,
+                        entry_odds, entry_side, entry_stake,
+                        status, created_at, customer_order_ref
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    "user", "",
+                    marketId, selectionId, runnerName,
+                    "scalp", direction,
+                    odds, "LAY" if direction == "lay_to_back" else "BACK", stake,
+                    "placed", datetime.utcnow().isoformat(), customer_order_ref
+                ))
+# -----------------------------
+# 🚀 RUN MANUAL SCALPER
+# -----------------------------
+def manual_bet_entry():
+    import json
+
+    session_token = upgrade_import_patch.SESSION_TOKEN
+    all_markets = get_markets_and_insert()
+
+    # Filter GB/IE WIN markets with 7+ runners and sort by off time
+    today_races = [m for m in all_markets if len(m.get("runners", [])) >= 7]
+    today_races.sort(key=lambda x: x.get("marketStartTime"))
+
+    while True:
+        print("🎯 Next 5 Upcoming Races:")
+        for i, market in enumerate(today_races[:5], 1):
+            venue = market.get("event", {}).get("venue", "Unknown")
+            name = market.get("event", {}).get("name", "Race")
+            start_time = datetime.fromisoformat(market.get("marketStartTime").replace("Z", "+00:00"))
+            mins = round((start_time - datetime.now(timezone.utc)).total_seconds() / 60.0)
+            print(f"{i}. {venue} – {name} – {start_time.strftime('%H:%M')} (in {mins} mins)")
+
+        idx = input("🔢 Select a race (1–5) or 'q' to quit: ").strip()
+        if idx.lower() == 'q':
+            break
+        try:
+            idx = int(idx) - 1
+            selected_market = today_races[idx]
+        except:
+            print("❌ Invalid input. Try again.")
+            continue
+
+        marketId = selected_market["marketId"]
+        runners = selected_market.get("runners", [])
+
+        while True:
+            print("🐎 Runners:")
+            for i, r in enumerate(runners, 1):
+                odds_snapshot = fetch_live_odds(session_token, marketId, r['selectionId']) or {}
+                lay = odds_snapshot.get('lay')
+                back = odds_snapshot.get('back')
+                print(f"{i}. {r['runnerName']} (ID: {r['selectionId']}) – Lay: {lay}, Back: {back}")
+
+            r_idx = input("🎯 Select a runner (1–n) or 'b' to go back: ").strip()
+            if r_idx.lower() == 'b':
+                break
+            try:
+                r_idx = int(r_idx) - 1
+                selectionId = runners[r_idx]["selectionId"]
+                runnerName = runners[r_idx]["runnerName"]
+            except:
+                print("❌ Invalid input. Try again.")
+                continue
+
+            bet_type = input("🎮 Choose bet type (scalp, ladder, greenup, basic): ").strip().lower()
+            if bet_type != "scalp":
+                print(f"⚠️ '{bet_type}' bet type not yet implemented. Returning to runner selection.")
+                continue
+            dir_choice = input("🔁 Direction (L = lay_to_back, B = back_to_lay): ").strip().upper()
+            direction = "lay_to_back" if dir_choice == "L" else "back_to_lay"
+            odds = float(input("📉 Entry Odds: ").strip())
+            stake = float(input("💰 Stake: ").strip())
+
+            signal = {
+                "session_token": session_token,
+                "marketId": marketId,
+                "selectionId": selectionId,
+                "odds": odds,
+                "stake": stake,
+                "scalp_direction": direction
+            }
+            place_lay_strategy(signal)
+            logging.info(f"✅ Manual scalp placed @ {odds} ({direction})")
+
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("""
+                    INSERT INTO scalping_bets (marketId, selectionId, runnerName, strategy, layOdds, stake, status, createdAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (marketId, selectionId, runnerName, direction, odds, stake, "placed", datetime.utcnow().isoformat()))
+
+            again = input("➕ Place another trade? (y/n): ").strip().lower()
+            if again != 'y':
+                sys.exit()
+
+# -----------------------------
+# 🧃 MAIN
+# -----------------------------
+if __name__ == "__main__":
+    create_scalper_db()
+    keep_alive_loop()
+
+    mode = input("🧭 Launch auto mode? (y/n): ").strip().lower()
+    if mode == "y":
+        print("🤖 Starting Auto Scalping Mode...")
+        run_auto()
+        sys.exit()
+
+    coop = input("🤝 Start Co-op session with Head Trader? (y/n): ").strip().lower()
+    if coop == "y":
+        print("🧠 Launching Co-op session with Head Trader...")
+        from scalper_coop import run_coop_session, manual_bet_entry
+        run_coop_session()
+        # ✅ Start engine AFTER coop session connects
+        signal_memory.maybe_reset_for_new_day()
+        while True:
+            time.sleep(60)
+
+
+    manual = input("🎯 Launch Manual Scalp + Lay Testing Mode? (y/n): ").strip().lower()
+    if manual != "y":
+        print("❌ Session exited.")
+        sys.exit()
+    run_manual()
+    # else:"  # disabled dead branch

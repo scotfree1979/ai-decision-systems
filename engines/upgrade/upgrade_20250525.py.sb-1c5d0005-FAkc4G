@@ -1,0 +1,578 @@
+# ✅ Final Upgrade File – Part 1 of 2 (up to run_monitor with full odds + table patch)
+
+import os
+import logging
+import sqlite3
+from datetime import datetime, timedelta, timezone
+import time
+import requests
+import json
+from queue import Queue
+from signal_monitor import signal_queue, bot_signal_queues, process_signal
+from signal_utils import detect_signal
+
+# ✅ Configuration
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+APP_KEY = "CZHojduNWa3kxWIn"
+TEST_MODE = False
+SIMULATED_DURATION_MIN = 5
+SIMULATED_TOTAL_MINUTES = 85
+TEST_START_TIME = datetime.utcnow()
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+
+# ✅ Internal Clock
+
+def get_simulated_now():
+    if not TEST_MODE:
+        return datetime.utcnow()
+    elapsed_real = (datetime.utcnow() - TEST_START_TIME).total_seconds()
+    simulated_minutes = (elapsed_real / (SIMULATED_DURATION_MIN * 60)) * SIMULATED_TOTAL_MINUTES
+    return TEST_START_TIME + timedelta(minutes=simulated_minutes)
+
+# ✅ Odds Fetching
+
+def fetch_live_odds(session_token, market_id, selection_id):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": APP_KEY,
+        "X-Authentication": session_token,
+        "Content-Type": "application/json"
+    }
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketBook",
+            "params": {
+                "marketIds": [market_id],
+                "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
+            },
+            "id": 1
+        }
+    ])
+    try:
+        response = requests.post(url, headers=headers, data=payload).json()
+        for runner in response[0]['runners']:
+            if runner['selectionId'] == selection_id:
+                lay = runner['ex'].get('availableToLay')
+                if lay:
+                    return lay[0]['price']
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch odds for {market_id}/{selection_id}: {e}")
+    return None
+
+# ✅ Safer Schema Setup
+
+def validate_bets_table():
+    if not TEST_MODE:
+        logging.info("🛑 Skipping table reset in live mode.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DROP TABLE IF EXISTS bets;")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bets (
+                marketId TEXT,
+                selectionId INTEGER,
+                stake REAL,
+                odds REAL,
+                bet_type TEXT,
+                placed_at TEXT,
+                status TEXT,
+                matched_liability REAL,
+                unmatched_liability REAL,
+                pnl REAL,
+                liability REAL,
+                result TEXT,
+                timestamp TEXT,
+                matched_timestamp TEXT,
+                betfair_bet_id TEXT,
+                horse_name TEXT,
+                strategy_name TEXT,
+                signal_type TEXT,
+                bot_name TEXT,
+                date TEXT,
+                time_signal TEXT,
+                can_accept_liability TEXT,
+                time_session TEXT,
+                race_name TEXT,
+                market_name TEXT,
+                event_name TEXT,
+                anchor_odd REAL,
+                odds_check_1 REAL,
+                odds_check_2 REAL,
+                odds_check_3 REAL,
+                odds_check_4 REAL,
+                odds_check_5 REAL,
+                odds_check_6 REAL,
+                customerOrderRef TEXT PRIMARY KEY,
+                bet_settled TEXT,
+                marketStartTime TEXT,
+                meta_json TEXT,
+                test_mode TEXT
+            );
+        """)
+        conn.commit()
+
+# ✅ Market Fetch + Runner Insertion
+
+def fetch_market_data():
+    logging.info("📡 Fetching live WIN markets with 7+ runners...")
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": APP_KEY,
+                "X-Authentication": session_token,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketCountries": ["GB", "IE"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z"),
+                                "to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "sort": "FIRST_TO_START",
+                        "maxResults": "30"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+        markets = response.json()[0].get("result", []) if response.status_code == 200 else []
+        valid = [m for m in markets if len(m.get("runners", [])) >= 7]
+        logging.info(f"🎯 Filter complete: {len(valid)} markets ready")
+        return valid
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+
+def log_runners_to_db(markets):
+    logging.info("📜 Logging runners to DB with status 'pending'...")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        for market in markets:
+            market_id = market["marketId"]
+            race_name = market["marketName"]
+            event_name = market["event"]["name"]
+            market_start = market["marketStartTime"]
+            for runner in market["runners"]:
+                selection_id = runner["selectionId"]
+                runner_name = runner["runnerName"]
+                customer_order_ref = f"{market_id[-5:]}_{selection_id}_80"
+                timestamp = datetime.utcnow().isoformat()
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO bets (
+                            marketId, selectionId, horse_name, time_signal, customerOrderRef,
+                            timestamp, date, status, event_name, race_name, marketStartTime,
+                            odds_check_6, odds_check_1, anchor_odd, odds, strategy_name, signal_type, bot_name, bet_type
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        market_id, selection_id, runner_name, "time_80", customer_order_ref[:32],
+                        timestamp, datetime.utcnow().strftime('%Y-%m-%d'), "pending",
+                        event_name, race_name, market_start,
+                        None, None, None, None, None, None, None, None
+                    ))
+                except Exception as e:
+                    logging.error(f"❌ Failed to insert runner {runner_name}: {e}")
+        conn.commit()
+
+# ✅ Entry Point
+
+def launch_protocol():
+    logging.info("🚀 Starting upgrade_20250525 Launch Protocol")
+    validate_bets_table()
+    markets = fetch_market_data()
+    log_runners_to_db(markets)
+
+# -----------------------------
+# 🧭 RUN MONITOR – Odds Logging with Live Updates + Late Launch Backfill
+# -----------------------------
+
+def backfill_missed_windows():
+    logging.info("🧪 Running one-time backfill for missed time windows...")
+    now = get_simulated_now().replace(tzinfo=timezone.utc)
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT marketId, marketStartTime FROM bets")
+        market_data = cursor.fetchall()
+
+        for market_id, market_start in market_data:
+            try:
+                start_time = datetime.fromisoformat(market_start.replace("Z", "+00:00"))
+                minutes_to_off = (start_time - now).total_seconds() / 60
+            except Exception as e:
+                logging.error(f"❌ Time parse failed for {market_id}: {e}")
+                continue
+
+            # Only insert missed windows
+            for target_time in [60, 40, 20, 10, 5, 0]:
+                if minutes_to_off <= target_time:
+                    time_label = f"time_{target_time}"
+
+                    cursor.execute("""
+                        SELECT * FROM bets
+                        WHERE marketId = ? AND time_signal = 'time_80'
+                    """, (market_id,))
+                    base_rows = cursor.fetchall()
+
+                    for row in base_rows:
+                        ref = f"{market_id[-5:]}_{row[1]}_{target_time}"[:32]
+
+                        # Check if this snapshot already exists
+                        cursor.execute("""
+                            SELECT 1 FROM bets WHERE customerOrderRef = ?
+                        """, (ref,))
+                        if cursor.fetchone():
+                            continue
+
+                        latest_odds = fetch_live_odds(session_token, row[0], row[1])
+                        if latest_odds is None:
+                            continue
+
+                        odds_fields = [row[26], row[27], row[28], row[29], row[30], row[31], row[32]]
+                        index_map = {0: 32, 5: 27, 10: 28, 20: 29, 40: 30, 60: 31, 80: 32}
+                        if target_time in index_map:
+                            i = index_map[target_time] - 26
+                            odds_fields[i] = latest_odds
+
+                        timestamp = datetime.utcnow().isoformat()
+
+                        try:
+                            cursor.execute("""
+                                INSERT INTO bets (
+                                    marketId, selectionId, stake, odds, bet_type, placed_at, status,
+                                    matched_liability, unmatched_liability, pnl, liability, result,
+                                    timestamp, matched_timestamp, betfair_bet_id, horse_name,
+                                    strategy_name, signal_type, bot_name, date, time_signal,
+                                    can_accept_liability, time_session, race_name, market_name, event_name,
+                                    anchor_odd, odds_check_1, odds_check_2, odds_check_3, odds_check_4,
+                                    odds_check_5, odds_check_6, customerOrderRef, bet_settled,
+                                    marketStartTime, meta_json, test_mode
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                row[0], row[1], row[2], latest_odds, row[4], row[5], "awaiting_signal",
+                                row[7], row[8], row[9], row[10], row[11],
+                                timestamp, row[13], row[14], row[15],
+                                row[16], row[17], row[18], now.strftime('%Y-%m-%d'), time_label,
+                                row[21], row[22], row[23], row[24], row[25],
+                                odds_fields[0], odds_fields[1], odds_fields[2], odds_fields[3], odds_fields[4],
+                                odds_fields[5], odds_fields[6], ref, row[34],
+                                row[35], row[36], row[37]
+                            ))
+                            logging.info(f"🧩 Backfilled {time_label} for {row[15]} [{row[0]}] @ {latest_odds}")
+                        except Exception as e:
+                            logging.error(f"❌ Backfill insert failed for {row[1]}: {e}")
+
+        conn.commit()
+
+# Call once at launch
+backfill_missed_windows()
+
+def run_monitor():
+    logging.info("🧭 Running session window match for all supported time slots")
+    now = get_simulated_now().replace(tzinfo=timezone.utc)
+    session_token = os.environ.get("SESSION_TOKEN", "NO_TOKEN")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM bets WHERE time_signal = 'time_80'")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            market_id = row[0]
+            selection_id = row[1]
+            horse_name = row[15]
+            market_start = row[35]
+
+            try:
+                start_time = datetime.fromisoformat(market_start.replace("Z", "+00:00"))
+                minutes_to_off = (start_time - now).total_seconds() / 60
+            except Exception as e:
+                logging.error(f"❌ Time parse failed for {market_id}: {e}")
+                continue
+
+            for target_time in [60, 40, 20, 10, 5, 0]:
+                if not (target_time - 2) <= minutes_to_off <= (target_time + 2):
+                    continue
+
+                time_label = f"time_{target_time}"
+                ref = f"{market_id[-5:]}_{selection_id}_{target_time}"[:32]
+
+                # Check if this row already exists
+                cursor.execute("SELECT 1 FROM bets WHERE customerOrderRef = ?", (ref,))
+                exists = cursor.fetchone()
+
+                latest_odds = fetch_live_odds(session_token, market_id, selection_id)
+                if latest_odds is None:
+                    continue
+
+                odds_field_map = {
+                    60: 31,
+                    40: 30,
+                    20: 29,
+                    10: 28,
+                    5: 27,
+                    0: 26
+                }
+                odds_fields = [row[26], row[27], row[28], row[29], row[30], row[31], row[32]]
+                if target_time in odds_field_map:
+                    i = odds_field_map[target_time] - 26
+                    odds_fields[i] = latest_odds
+
+                timestamp = datetime.utcnow().isoformat()
+
+                if exists:
+                    try:
+                        cursor.execute(f"""
+                            UPDATE bets SET
+                                odds = ?,
+                                anchor_odd = ?,
+                                odds_check_1 = ?,
+                                odds_check_2 = ?,
+                                odds_check_3 = ?,
+                                odds_check_4 = ?,
+                                odds_check_5 = ?,
+                                odds_check_6 = ?,
+                                status = 'awaiting_signal',
+                                timestamp = ?
+                            WHERE customerOrderRef = ?
+                        """, (
+                            latest_odds, latest_odds,
+                            odds_fields[1], odds_fields[2], odds_fields[3],
+                            odds_fields[4], odds_fields[5], odds_fields[6],
+                            timestamp, ref))
+                        logging.info(f"🔄 Updated existing {time_label} row for {horse_name} [{market_id}] @ {latest_odds}")
+                    except Exception as e:
+                        logging.error(f"❌ Failed to update odds snapshot for {selection_id}: {e}")
+                else:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO bets (
+                                marketId, selectionId, stake, odds, bet_type, placed_at, status,
+                                matched_liability, unmatched_liability, pnl, liability, result,
+                                timestamp, matched_timestamp, betfair_bet_id, horse_name,
+                                strategy_name, signal_type, bot_name, date, time_signal,
+                                can_accept_liability, time_session, race_name, market_name, event_name,
+                                anchor_odd, odds_check_1, odds_check_2, odds_check_3, odds_check_4,
+                                odds_check_5, odds_check_6, customerOrderRef, bet_settled,
+                                marketStartTime, meta_json, test_mode
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            row[0], row[1], row[2], latest_odds, row[4], row[5], "awaiting_signal",
+                            row[7], row[8], row[9], row[10], row[11],
+                            timestamp, row[13], row[14], row[15],
+                            row[16], row[17], row[18], now.strftime('%Y-%m-%d'), time_label,
+                            row[21], row[22], row[23], row[24], row[25],
+                            odds_fields[0], odds_fields[1], odds_fields[2], odds_fields[3], odds_fields[4],
+                            odds_fields[5], odds_fields[6], ref, row[34],
+                            row[35], row[36], row[37]
+                        ))
+                        logging.info(f"➕ Created new {time_label} row for {horse_name} [{market_id}] @ {latest_odds}")
+                    except Exception as e:
+                        logging.error(f"❌ Failed to insert new odds snapshot for {selection_id}: {e}")
+
+        conn.commit()
+
+def fetch_live_odds(session_token, market_id, selection_id):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": APP_KEY,
+        "X-Authentication": session_token,
+        "Content-Type": "application/json"
+    }
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketBook",
+            "params": {
+                "marketIds": [market_id],
+                "priceProjection": {
+                    "priceData": ["EX_BEST_OFFERS"]
+                }
+            },
+            "id": 1
+        }
+    ])
+    try:
+        response = requests.post(url, headers=headers, data=payload).json()
+        for runner in response[0]['runners']:
+            if runner['selectionId'] == selection_id:
+                lay = runner['ex'].get('availableToLay')
+                if lay:
+                    return lay[0]['price']
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch odds for {market_id}/{selection_id}: {e}")
+    return None
+
+# -----------------------------
+# 📡 MARKET MONITOR SIGNALS STAGE (Full Detection Logic Restored)
+# -----------------------------
+def market_monitor_signals():
+    import sqlite3
+    import logging
+    
+    logging.info("📡 Running market_monitor_signals for awaiting_signal rows")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM bets WHERE status = 'awaiting_signal'")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            market_id = row[0]
+            selection_id = row[1]
+            horse_name = row[15]
+            time_signal = row[20]
+            customer_ref = row[33]
+            anchor_odd = row[26]
+            odds_check_1 = row[27]
+            odds_check_2 = row[28]
+            odds_check_3 = row[29]
+            odds_check_4 = row[30]
+            odds_check_5 = row[31]
+            odds_check_6 = row[32]
+
+            # Determine which odds value to compare to anchor
+            current_odds = None
+            if time_signal == "time_20":
+                current_odds = odds_check_3
+            elif time_signal == "time_10":
+                current_odds = odds_check_2
+            elif time_signal == "time_5":
+                current_odds = odds_check_1
+            elif time_signal == "time_0":
+                current_odds = anchor_odd
+
+            if current_odds is None or anchor_odd is None:
+                logging.info(f"⏩ Skipping {horse_name} due to missing odds snapshot.")
+                continue
+
+            signal_type = detect_signal(anchor_odd, current_odds)
+
+            if signal_type:
+                try:
+                    cursor.execute("""
+                        UPDATE bets
+                        SET signal_type = ?, status = 'signal_assigned'
+                        WHERE marketId = ? AND selectionId = ? AND customerOrderRef = ?
+                    """, (signal_type, market_id, selection_id, customer_ref))
+
+                    logging.info(f"📌 Signal Created: {signal_type} for {horse_name} [{market_id} / {customer_ref}]")
+                except Exception as e:
+                    logging.error(f"❌ Failed to assign signal_type for {customer_ref}: {e}")
+
+        conn.commit()
+
+# ✅ Final Upgrade File – Unified Logic from v25 and v26 (Part 2 of 2)
+
+# -----------------------------
+# 🧠 SIGNAL MONITOR STAGE (Enrichment + Bot Routing Fix)
+# -----------------------------
+SIGNAL_BOT_MAPPING = {
+    'Market Drifter Signal': ['OGPreoff', 'OGHeadTrader'],
+    'Market Steamer Signal': ['OGPreoff', 'OGHeadTrader'],
+    'Volume Surge Signal': ['OGHeadTrader'],
+    'Market Inefficiency Signal': ['OGHeadTrader']
+}
+
+def signal_monitor():
+    import sqlite3
+    import logging
+    from datetime import datetime
+    now = get_simulated_now().replace(tzinfo=timezone.utc)
+
+    logging.info("🧠 Enriching and routing signal_assigned records")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM bets WHERE status = 'signal_assigned'")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            signal = {
+                "marketId": row[0],
+                "selectionId": row[1],
+                "horse_name": row[15],
+                "time_signal": row[20],
+                "customerOrderRef": row[33],
+                "signal_type": row[17],
+                "event_name": row[25],
+                "race_name": row[23],
+                "marketStartTime": row[35],
+                "test_mode": row[37],
+                "anchor_odd": row[26],
+                "odds_check_1": row[27],
+                "odds_check_2": row[28],
+                "odds_check_3": row[29]
+            }
+
+            bots = SIGNAL_BOT_MAPPING.get(signal["signal_type"], [])
+            if not bots:
+                logging.warning(f"⚠️ No bot targets found for signal type: {signal['signal_type']}")
+                continue
+
+            # Determine odds for this signal type
+            if signal["time_signal"] == "time_20":
+                signal_odds = signal["odds_check_3"]
+            elif signal["time_signal"] == "time_10":
+                signal_odds = signal["odds_check_2"]
+            elif signal["time_signal"] == "time_5":
+                signal_odds = signal["odds_check_1"]
+            elif signal["time_signal"] == "time_0":
+                signal_odds = signal["anchor_odd"]
+            else:
+                signal_odds = None
+
+            stake = 10.0 if signal["time_signal"] == "time_20" else 20.0 if signal["time_signal"] == "time_10" else 5.0 if signal["time_signal"] == "time_0" else 2.0
+
+            for bot in bots:
+                new_ref = f"{signal['customerOrderRef']}_{bot[:3].upper()}"[:32]
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO bets (
+                            marketId, selectionId, stake, odds, bet_type, placed_at, status,
+                            matched_liability, unmatched_liability, pnl, liability, result,
+                            timestamp, matched_timestamp, betfair_bet_id, horse_name,
+                            strategy_name, signal_type, bot_name, date, time_signal,
+                            can_accept_liability, time_session, race_name, market_name, event_name,
+                            anchor_odd, odds_check_1, odds_check_2, odds_check_3, odds_check_4,
+                            odds_check_5, odds_check_6, customerOrderRef, bet_settled,
+                            marketStartTime, meta_json, test_mode
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        signal["marketId"], signal["selectionId"], stake, signal_odds, None, None, "fully_enriched",
+                        None, None, None, None, None,
+                        now.isoformat(), None, None, signal["horse_name"],
+                        signal["signal_type"], signal["signal_type"], bot, now.strftime('%Y-%m-%d'), signal["time_signal"],
+                        None, None, signal["race_name"], None, signal["event_name"],
+                        signal["anchor_odd"], signal["odds_check_1"], signal["odds_check_2"], signal["odds_check_3"], None,
+                        None, None, new_ref, None,
+                        signal["marketStartTime"], None, signal["test_mode"]
+                    ))
+                    logging.info(f"✅ Enriched + routed signal for {signal['horse_name']} to {bot}: {new_ref}")
+                except Exception as e:
+                    logging.error(f"❌ Enrichment failed for {signal['customerOrderRef']} → {bot}: {e}")
+
+        conn.commit()
+
+# ✅ Main Launch Block for upgrade_20250525.py (add this at the bottom of the file)
+
+if __name__ == "__main__":
+    logging.info("🚀 Starting Main Launch Sequence")
+    launch_protocol()
+    backfill_missed_windows()
+    run_monitor()

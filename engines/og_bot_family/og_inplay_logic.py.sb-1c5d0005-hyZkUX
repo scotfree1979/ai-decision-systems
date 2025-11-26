@@ -1,0 +1,9 @@
+import logging
+import time
+
+def inplay_loop():
+    logging.info('In-Play Loop active.')
+    while True:
+        logging.info('In-Play Loop checking markets...')
+        # Placeholder logic; implement actual logic later
+        time.sleep(30)  # run every 30 seconds

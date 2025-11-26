@@ -1,0 +1,84 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import sqlite3
+import requests
+import json
+
+# Page Configuration
+st.set_page_config(page_title="Bot Performance", layout="wide")
+st.title('🤖 Bot Performance')
+
+# Headers with session token from session state
+headers = {
+    "X-Application": "CZHojduNWa3kxWIn",
+    "X-Authentication": st.session_state.get('session_token', ''),
+    "Content-Type": "application/json"
+}
+
+# API Back-door methods
+def hijack_call(method, params=None):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    payload = {"jsonrpc": "2.0", "method": f"SportsAPING/v1.0/{method}", "params": params or {}, "id": 1}
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response.raise_for_status()
+    return response.json().get('result', {})
+
+# Load Historical Bot Performance Data from Database
+def load_bot_performance():
+    conn = sqlite3.connect('/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db')
+    query = "SELECT * FROM bot_performance"
+    return pd.read_sql(query, conn)
+
+bot_performance_df = load_bot_performance()
+
+# Bot Performance Metrics
+st.subheader("Bot Performance Overview")
+st.dataframe(bot_performance_df, use_container_width=True)
+
+# Bot Profitability Analysis
+st.subheader("Bot Profitability")
+fig_profit = px.bar(bot_performance_df, x='bot_name', y='total_profit', 
+                    title='Total Profit by Bot', color='total_profit',
+                    color_continuous_scale='RdYlGn')
+st.plotly_chart(fig_profit, use_container_width=True)
+
+# Bot Trades Executed
+st.subheader("Trades Executed by Bots")
+fig_trades = px.bar(bot_performance_df, x='bot_name', y='total_trades',
+                    title='Number of Trades by Bot', color='total_trades',
+                    color_continuous_scale='Blues')
+st.plotly_chart(fig_trades, use_container_width=True)
+
+# Bot Strike Rates
+st.subheader("Strike Rates (%)")
+bot_performance_df['strike_rate'] = (bot_performance_df['winning_trades'] / bot_performance_df['total_trades']) * 100
+fig_strike_rate = px.bar(bot_performance_df, x='bot_name', y='strike_rate',
+                         title='Bot Strike Rates (%)', color='strike_rate',
+                         color_continuous_scale='Viridis')
+st.plotly_chart(fig_strike_rate, use_container_width=True)
+
+# Recent Activity per Bot (Real-Time)
+st.subheader("Recent Bot Activity")
+active_bets = hijack_call("listCurrentOrders")
+active_bets_df = pd.DataFrame(active_bets.get('currentOrders', []))
+
+if not active_bets_df.empty:
+    bot_recent_activity = active_bets_df.groupby('customerOrderRef').agg({
+        'marketId': 'count',
+        'placedDate': 'max',
+        'status': lambda x: ', '.join(set(x))
+    }).reset_index().rename(columns={
+        'customerOrderRef': 'Bot Name',
+        'marketId': 'Active Bets',
+        'placedDate': 'Last Bet Time',
+        'status': 'Bet Status'
+    })
+
+    st.dataframe(bot_recent_activity, use_container_width=True)
+else:
+    st.info("No current bot activity detected.")
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Data sourced via Betfair API & historical database.')

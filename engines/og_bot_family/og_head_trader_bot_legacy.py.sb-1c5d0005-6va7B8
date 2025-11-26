@@ -1,0 +1,133 @@
+import logging
+import sqlite3
+import pandas as pd
+from queue import Queue
+from datetime import datetime
+from signal_monitor import bot_signal_queues
+from bet_placer import place_bet, execute_scalp, green_up
+from .og_inplay_bot import OGInPlayBot
+from .og_preoff_bot import PreOffBot
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class HeadTraderBot:
+    def __init__(self, risk_manager, budget_manager, headers):
+        self.risk_manager = risk_manager
+        self.budget_manager = budget_manager
+        self.headers = headers
+        self.DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/engines/bets.db"
+        logging.info('OGHeadTrader Bot: Initialized with centralized Risk Manager and Budget Manager.')
+
+    def fetch_recent_trades(self):
+        conn = sqlite3.connect(self.DB_PATH)
+        trades = pd.read_sql("SELECT horse, odds, result FROM bets ORDER BY timestamp DESC LIMIT 10", conn)
+        conn.close()
+        return trades
+
+    def og_head_trader_strategy(self, market_data):
+        threshold_odds = 5
+        recent_form_threshold = 0.6
+        bet_signals = []
+
+        for data in market_data:
+            horse_name, odds, recent_win_rate = data
+            if odds < threshold_odds and recent_win_rate > recent_form_threshold:
+                bet_signals.append({
+                    'horse': horse_name,
+                    'odds': odds,
+                    'signal_strength': 'strong',
+                    'reason': 'Strong form, favorable odds'
+                })
+            elif odds < threshold_odds:
+                bet_signals.append({
+                    'horse': horse_name,
+                    'odds': odds,
+                    'signal_strength': 'moderate',
+                    'reason': 'Favorable odds, form not exceptional'
+                })
+            else:
+                bet_signals.append({
+                    'horse': horse_name,
+                    'odds': odds,
+                    'signal_strength': 'weak',
+                    'reason': 'Odds higher than threshold'
+                })
+        return bet_signals
+
+    def orchestrate_bots(self):
+        logging.info('OGHeadTrader Bot: Starting orchestration.')
+
+        # Initialize subordinate bots explicitly with centralized Risk Manager and dedicated signal queues
+        inplay_bot = OGInPlayBot(self.risk_manager, self.budget_manager, self.headers, bot_signal_queues['OGInPlay'])
+        preoff_bot = PreOffBot(self.risk_manager, self.budget_manager, self.headers, bot_signal_queues['OGPreoff'])
+
+        # Start loops explicitly
+        preoff_bot.start_loop()
+        inplay_bot.start_loop()
+
+        logging.info('OGHeadTrader Bot: Bots running smoothly.')
+
+        # Main signal processing loop
+        while True:
+            signal = bot_signal_queues['OGHeadTrader'].get()
+            logging.info(f"[OGHeadTrader] Explicitly received signal: {signal}")
+
+            market_id = signal['marketId']
+            selection_id = signal['selectionId']
+            stake = signal['stake']
+            odds = signal['odds']
+            bet_type = signal['bet_type']
+            strategy_name = signal['strategy_name']
+            market_start_time = signal['marketStartTime']
+
+            if strategy_name == 'Basic Lay':
+                place_bet(self.headers, market_id, selection_id, stake, odds, bet_type)
+                logging.info(f"✅ Basic lay bet triggered by Head Trader for market {market_id}")
+
+            elif strategy_name == 'Scalping':
+                execute_scalp(self.headers, market_id, selection_id, stake, odds, bet_type, market_start_time)
+                logging.info(f"✅ Scalping initiated by Head Trader for market {market_id}")
+
+            elif strategy_name == 'Green-Up':
+                green_up(self.headers, market_id)
+                logging.info(f"✅ Green-Up executed by Head Trader for market {market_id}")
+
+            recent_trades = self.fetch_recent_trades()
+            logging.info(f"[OGHeadTrader] Recent trades: \n{recent_trades.head()}")
+
+            market_data = recent_trades[['horse', 'odds', 'result']].values
+            bet_signals = self.og_head_trader_strategy(market_data)
+
+            for bet_signal in bet_signals:
+                logging.info(f"[OGHeadTrader] Bet Signal: {bet_signal}")
+                approved_signal = self.risk_manager.evaluate_signal(bet_signal)
+
+                if not approved_signal:
+                    matched_liability, unmatched_liability, _ = self.budget_manager.get_bot_status_from_db("OGHeadTrader")
+                    approved_signal = self.budget_manager.handle_rejected_signal(
+                        bet_signal, matched_liability, unmatched_liability, "Budget limit reached"
+                    )
+
+                if approved_signal:
+                    place_bet(
+                        self.headers,
+                        approved_signal['marketId'],
+                        approved_signal['selectionId'],
+                        approved_signal['stake'],
+                        approved_signal['odds'],
+                        'LAY'
+                    )
+                    logging.info(f"[OGHeadTrader] Bet placed explicitly: {approved_signal['marketId']}")
+
+                    execute_scalp(
+                        self.headers, 
+                        approved_signal['marketId'], 
+                        approved_signal['selectionId'],
+                        approved_signal['stake'],
+                        approved_signal['odds'],
+                        'LAY',
+                        market_start_time
+                    )
+                    logging.info(f"[OGHeadTrader] Scalping bet executed explicitly for: {bet_signal['horse']}")
+
+            bot_signal_queues['OGHeadTrader'].task_done()

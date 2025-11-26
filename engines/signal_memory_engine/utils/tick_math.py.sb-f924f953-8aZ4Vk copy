@@ -1,0 +1,100 @@
+from signal_memory_engine.tracker import track_unmatched_signal
+from signal_memory_engine.ladder import (
+    _attempt_next_ladder_rung,
+    place_ladder_bet,
+    should_continue_ladder,
+    detect_trend_reversal
+)
+from signal_memory_engine.playbook import (
+    start_playbook,
+    finalise_playbook,
+    save_playbook_to_db,
+    record_matched_bet
+)
+from signal_memory_engine.runner import (
+    analyse_runner,
+    evaluate_signal_for_runner,
+    ingest_market_snapshot
+)
+from signal_memory_engine.blueprint_segments import (
+    detect_blueprint_match,
+    match_partial_segment,
+    attempt_partial_blueprint_match,
+    predict_next_segment
+)
+from signal_memory_engine.monitor import (
+    monitor_passive_trends,
+    monitor_in_play_trends,
+    monitor_pre_off_trends,
+    monitor_live_for_partial_blueprints
+)
+from signal_memory_engine.session import (
+    maybe_reset_for_new_day,
+    start_new_session,
+    setup_daily_logger,
+    _conflict_debug_watchdog
+)
+from signal_memory_engine.snapshot import (
+    build_final_runner_snapshot,
+    get_static_snapshot,
+    load_oc_snapshots_from_db
+)
+from signal_memory_engine.pnl import (
+    resolve_runner_pnl,
+    track_live_pattern_pnl,
+    load_pattern_pnl_from_playbooks,
+    refresh_pattern_pnl_from_api
+)
+from signal_memory_engine.reporting import generate_signal_status_report
+
+from signal_memory_engine.health import assess_signal_health
+from signal_memory_engine.flush import flush_inplay_odds_to_db
+from signal_memory_engine.enrich import enrich
+from signal_memory_engine.exit_early import should_force_exit_early
+from signal_memory_engine.afford import can_afford_bet
+from signal_memory_engine.faults import record_trade_fault
+
+from collections import defaultdict
+from datetime import datetime
+import threading
+import time
+
+
+class SignalMemoryEngine:
+    def __init__(self):
+        self.debug_signal_counter = 0
+        self._track_signal_counter = defaultdict(int)
+        self._last_track_reported = 0
+        self.live_inplay_odds = defaultdict(lambda: defaultdict(list))
+        self.live_markets = defaultdict(list)
+        self.active_tradable_markets = []
+        self.active_blueprints_today = set()
+        self.unmatched_lock = threading.Lock()
+        self.unmatched_signals = {}
+        self.active_ladders = {}
+        self.trade_log = []
+        self.clean_exit_log = []
+        self.live_playbooks = defaultdict(dict)
+        self.live_pattern_pnl = defaultdict(lambda: {"trades": 0, "net_pnl": 0.0})
+        self.open_bets = defaultdict(list)
+        self.session_active = True
+        self.session_date = datetime.utcnow().date()
+        self.starting_balance = 500.0
+        self.current_balance = 500.0
+        self.current_stake = 10.0
+        self.halt_triggered = False
+        self.passive_tick_tracker = defaultdict(lambda: defaultdict(list))
+        self.in_play_tick_tracker = defaultdict(lambda: defaultdict(list))
+        self._debug_logger = None
+        self._debug_log_path = None
+
+        maybe_reset_for_new_day(self)
+
+        threading.Thread(target=monitor_passive_trends, args=(self,), daemon=True).start()
+        threading.Thread(target=monitor_pre_off_trends, args=(self,), daemon=True).start()
+        threading.Thread(target=monitor_in_play_trends, args=(self,), daemon=True).start()
+        threading.Thread(target=monitor_live_for_partial_blueprints, args=(self,), daemon=True).start()
+        threading.Thread(target=generate_signal_status_report, args=(self,), daemon=True).start()
+        threading.Thread(target=_conflict_debug_watchdog, args=(self,), daemon=True).start()
+
+        print("🚀 SignalMemoryEngine fully initialized and monitoring started.")

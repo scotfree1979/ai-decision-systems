@@ -1,0 +1,42 @@
+# 14_🧠_HeadTrader_Dashboard.py
+import streamlit as st
+import threading
+import pandas as pd
+import sqlite3
+import json
+
+st.title("🧠 HeadTrader Dashboard")
+
+# Live runtime mocks
+head_trader_status = {
+    "threads": [t.name for t in threading.enumerate()],
+    "strategy_profile": {
+        "Green-Up": {"confidence": 1.2, "multiplier": 1.4},
+        "Basic Lay": {"confidence": 0.9, "multiplier": 1.1}
+    },
+    "optimizer_result": {
+        "latest_win_rate": 68.2,
+        "last_updated": "2025-05-22 18:00"
+    }
+}
+
+st.subheader("Runtime Threads")
+st.write(head_trader_status['threads'])
+
+st.subheader("Optimizer Result")
+st.json(head_trader_status['optimizer_result'])
+
+st.subheader("Strategy Profiles")
+st.json(head_trader_status['strategy_profile'])
+
+st.subheader("Latest Signal Evaluations")
+DB_PATH = 'data/bets.db'
+with sqlite3.connect(DB_PATH) as conn:
+    df = pd.read_sql_query("""
+        SELECT strategy_name, confidence, stake, status, rejection_reason, placed_at 
+        FROM bets ORDER BY placed_at DESC LIMIT 10
+    """, conn)
+    if df.empty:
+        st.info("No signal evaluations found.")
+    else:
+        st.dataframe(df)

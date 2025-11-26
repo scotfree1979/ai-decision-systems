@@ -1,0 +1,150 @@
+# upgrade/nextgen_trading.py
+
+import time
+import logging
+import threading
+import sqlite3
+from datetime import datetime
+from upgrade_import_patch import get_session_token, _next_suffix
+from price_math import get_tick_size
+from bet_core import place_bet, check_bet_matched, cancel_bet
+from utils.api_tools import fetch_live_odds
+
+# -----------------------------
+# ✅ Save bet to DB
+# -----------------------------
+def save_bet_to_db(market_id, selection_id, odds, stake, side, ref, bet_id):
+    try:
+        with sqlite3.connect("scalper.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO bets (marketId, selectionId, odds, stake, side, customerOrderRef, betfair_bet_id, placed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                market_id, selection_id, odds, stake, side, ref, bet_id, datetime.utcnow().isoformat()
+            ))
+            conn.commit()
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to save bet to DB: {e}")
+
+
+def launch_nextgen_thread(signal):
+    threading.Thread(target=run_nextgen_scalp, args=(signal,), daemon=True).start()
+
+
+def run_nextgen_scalp(signal):
+    """
+    Entry point for next-gen trading engine.
+    This replaces execute_signal() with persistent stop loss and hedge logic.
+    """
+    print("\n[NEXTGEN] 🚀 Starting next-gen scalp engine...")
+    print(f"[NEXTGEN] Runner: {signal.get('selectionId')} | Odds: {signal.get('odds')} | Stake: {signal.get('stake')}")
+
+    try:
+        session_token = get_session_token()
+        market_id = signal.get("marketId")
+        selection_id = signal.get("selectionId")
+        odds = signal.get("odds")
+        stake = signal.get("stake", 10.0)
+        ticks = signal.get("scalp_ticks", 2)
+        stop_ticks = signal.get("stop_ticks", 4)
+
+        direction = signal.get("scalp_direction", "lay_to_back")
+        tick_size = get_tick_size(odds)
+        signal["tick_size"] = tick_size
+
+        if direction == "lay_to_back":
+            entry_side = "LAY"
+            hedge_side = "BACK"
+            hedge_odds = round(odds - (ticks * tick_size), 2)
+        else:
+            entry_side = "BACK"
+            hedge_side = "LAY"
+            hedge_odds = round(odds + (ticks * tick_size), 2)
+
+        print(f"[NEXTGEN] Direction: {direction} | Entry: {entry_side} @ {odds} | Hedge: {hedge_side} @ {hedge_odds}")
+
+        # ✅ Generate short group ID
+        suffix = _next_suffix()
+        base_ref = f"NG_{suffix}"
+        if len(base_ref) > 28:
+            base_ref = base_ref[:28]
+
+        entry_ref = f"{base_ref}_E"
+        hedge_ref = f"{base_ref}_H"
+        stop_ref = f"{base_ref}_S"
+
+        # ✅ Place entry bet
+        entry_bet_id = place_bet(session_token, market_id, selection_id, stake, odds, entry_side, entry_ref)
+        if not entry_bet_id:
+            print("❌ [NEXTGEN] Entry bet failed. Aborting.")
+            return
+
+        print(f"✅ [NEXTGEN] Entry bet placed: {entry_bet_id}")
+        save_bet_to_db(market_id, selection_id, odds, stake, entry_side, entry_ref, entry_bet_id)
+
+        # ⏳ Wait for match
+        for _ in range(10):
+            time.sleep(3)
+            if check_bet_matched(session_token, entry_bet_id):
+                print("✅ [NEXTGEN] Entry matched!")
+                break
+        else:
+            print("⚠️ [NEXTGEN] Entry bet not matched. Cancelling.")
+            cancel_bet(session_token, entry_bet_id)
+            return
+
+        # 🔁 Trigger hedge
+        hedge_bet_id = place_bet(session_token, market_id, selection_id, stake, hedge_odds, hedge_side, hedge_ref, persistence="PERSIST")
+        if hedge_bet_id:
+            print(f"✅ [NEXTGEN] Hedge bet placed: {hedge_bet_id}")
+            save_bet_to_db(market_id, selection_id, hedge_odds, stake, hedge_side, hedge_ref, hedge_bet_id)
+        else:
+            print("❌ [NEXTGEN] Hedge bet placement failed.")
+
+        # 🛡️ Launch trailing stop monitor (non-blocking)
+        threading.Thread(target=monitor_stop_loss, args=(
+            signal, market_id, selection_id, stake, direction, tick_size, odds, stop_ref
+        ), daemon=True).start()
+
+    except Exception as e:
+        print(f"💥 [NEXTGEN] Crash: {e}")
+
+
+# -----------------------------
+# ✅ Monitor Stop Loss Logic
+# -----------------------------
+def monitor_stop_loss(signal, market_id, selection_id, stake, direction, tick_size, entry_odds, stop_ref):
+    session_token = get_session_token()
+    stop_ticks = signal.get("stop_ticks", 4)
+    trigger_odds = round(entry_odds + stop_ticks * tick_size, 2) if direction == "lay_to_back" else round(entry_odds - stop_ticks * tick_size, 2)
+    side = "BACK" if direction == "lay_to_back" else "LAY"
+
+    print(f"🛡️ [STOP] Monitoring for stop trigger at {trigger_odds} ({side})")
+
+    try:
+        for _ in range(50):  # ~150 seconds
+            odds_data = fetch_live_odds(session_token, market_id, selection_id)
+            if not odds_data:
+                time.sleep(3)
+                continue
+
+            current = odds_data.get("lay") if side == "LAY" else odds_data.get("back")
+            if not current:
+                time.sleep(3)
+                continue
+
+            if (direction == "lay_to_back" and current >= trigger_odds) or (direction == "back_to_lay" and current <= trigger_odds):
+                print(f"🛑 [STOP] Triggered at {current}. Placing stop-loss bet...")
+                stop_bet_id = place_bet(session_token, market_id, selection_id, stake, trigger_odds, side, stop_ref, persistence="PERSIST")
+                if stop_bet_id:
+                    print(f"✅ [STOP] Stop-loss placed: {stop_bet_id}")
+                    save_bet_to_db(market_id, selection_id, trigger_odds, stake, side, stop_ref, stop_bet_id)
+                else:
+                    print("❌ [STOP] Stop-loss bet failed.")
+                return
+
+            time.sleep(3)
+
+    except Exception as e:
+        print(f"💥 [STOP] Monitor crashed: {e}")

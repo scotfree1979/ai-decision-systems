@@ -1,0 +1,46 @@
+import logging
+from bet_placer import place_bet, execute_scalp, green_up
+
+class OGInPlayBot:
+    def __init__(self, risk_manager, budget_manager, headers, bot_signal_queue):
+        self.risk_manager = risk_manager
+        self.budget_manager = budget_manager
+        self.headers = headers
+        self.bot_signal_queue = bot_signal_queue
+        logging.info('OGInPlayBot initialized clearly with Risk Manager and Budget Manager.')
+
+    def start_loop(self):
+        logging.info('OGInPlayBot loop explicitly started.')
+        while True:
+            signal = self.bot_signal_queue.get()
+            logging.info(f"[OGInPlayBot] Explicitly received signal: {signal}")
+
+            approved_signal = self.risk_manager.evaluate_signal(signal)
+
+            if not approved_signal:
+                matched_liability, unmatched_liability, _ = self.budget_manager.get_bot_status_from_db("OGInPlay")
+                approved_signal = self.budget_manager.handle_rejected_signal(
+                    signal, matched_liability, unmatched_liability, "Budget limit reached"
+                )
+
+            if approved_signal:
+                strategy_name = approved_signal.get('strategy_name')
+                marketId = approved_signal['marketId']
+                selectionId = approved_signal['selectionId']
+                stake = approved_signal['stake']
+                odds = approved_signal['odds']
+                market_start_time = approved_signal['marketStartTime']
+
+                if strategy_name == 'Basic Lay':
+                    place_bet(self.headers, marketId, selectionId, stake, odds, 'LAY')
+                    logging.info(f"✅ Basic lay bet placed explicitly for market {marketId}")
+
+                elif strategy_name == 'Scalping':
+                    execute_scalp(self.headers, marketId, selectionId, stake, odds, 'LAY', market_start_time)
+                    logging.info(f"✅ Scalping bet placed explicitly for market {marketId}")
+
+                elif strategy_name == 'Green-Up':
+                    green_up(self.headers, marketId)
+                    logging.info(f"✅ Green-Up bet explicitly executed for market {marketId}")
+
+            self.bot_signal_queue.task_done()

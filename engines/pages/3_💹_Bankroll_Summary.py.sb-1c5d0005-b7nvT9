@@ -1,0 +1,27 @@
+# 3_💹_Bankroll_Summary.py
+import streamlit as st
+import sqlite3
+import pandas as pd
+
+DB_PATH = 'data/bets.db'
+
+st.title("💹 Bankroll Summary")
+
+# Simulated runtime profile
+head_trader_profile = {
+    'bankroll': 1000.0,
+    'stake_multiplier': 1.5,
+    'current_exposure': 240.0
+}
+
+st.metric("Bankroll (£)", f"£{head_trader_profile['bankroll']:.2f}")
+st.metric("Current Exposure (£)", f"£{head_trader_profile['current_exposure']:.2f}")
+st.metric("Stake Multiplier", f"x{head_trader_profile['stake_multiplier']:.2f}")
+
+st.subheader("Strategy Exposure Breakdown")
+with sqlite3.connect(DB_PATH) as conn:
+    df = pd.read_sql_query("SELECT strategy_name, SUM(stake) as total_stake FROM bets GROUP BY strategy_name", conn)
+    if df.empty:
+        st.info("No stake data available.")
+    else:
+        st.bar_chart(df.set_index('strategy_name'))

@@ -1,0 +1,58 @@
+# ram_reader.py
+
+import sqlite3
+import json
+from datetime import datetime
+
+from config_paths import DB_PATH
+
+
+def get_ram_snapshot(market_id, selection_id):
+    """
+    Returns a full snapshot for a specific runner from the RAM snapshot DB.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT odds, tick_pattern, direction_bias, anchor_odd, range_low, range_high,
+                       position_ratio, volatility, tick_trail, oc_snapshots,
+                       position, minutes_to_post, tier, last_updated, snapshot
+                FROM ram_snapshots
+                WHERE marketId = ? AND selectionId = ?
+            """, (market_id, selection_id))
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            keys = ["odds", "tick_pattern", "direction_bias", "anchor_odd", "range_low", "range_high",
+                    "position_ratio", "volatility", "tick_trail", "oc_snapshots", "position", "minutes_to_post",
+                    "tier", "last_updated", "snapshot"]
+
+            snapshot = dict(zip(keys, row))
+
+            # Parse JSON fields
+            snapshot["tick_trail"] = json.loads(snapshot.get("tick_trail", "[]"))
+            snapshot["oc_snapshots"] = json.loads(snapshot.get("oc_snapshots", "{}"))
+            snapshot["snapshot"] = json.loads(snapshot.get("snapshot", "{}"))
+
+            return snapshot
+    except Exception as e:
+        print(f"⚠️ [RAM Reader] Failed to fetch snapshot for {market_id}, {selection_id}: {e}")
+        return None
+
+
+def get_all_ram_runners():
+    """
+    Returns a list of (marketId, selectionId) keys from the RAM DB.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT marketId, selectionId FROM ram_snapshots
+            """)
+            return cursor.fetchall()
+    except Exception as e:
+        print(f"⚠️ [RAM Reader] Failed to fetch runner list: {e}")
+        return []

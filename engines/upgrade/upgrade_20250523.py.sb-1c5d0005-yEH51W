@@ -1,0 +1,117 @@
+from upgrade_import_patch import *
+import sqlite3
+import pandas as pd
+from datetime import datetime, timedelta
+import time
+
+# Connect to database
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/engines/bets.db"
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+
+# 1. Update Historical Form Data
+def update_horse_form():
+    print(f"[{datetime.now()}] Updating historical form data...")
+    trades = pd.read_sql("SELECT horse_name, odds, result FROM bets ORDER BY timestamp DESC", conn)
+    horse_groups = trades.groupby('horse_name')
+
+    for horse, data in horse_groups:
+        recent_results = data.head(5)
+        wins = recent_results[recent_results['result'] > 0]
+
+        last_race_result = 'Win' if recent_results.iloc[0]['result'] > 0 else 'Loss'
+        last_two = recent_results.head(2)['result'] > 0
+        last_two_result = ','.join(['Win' if res else 'Loss' for res in last_two])
+
+        win_rate_last_5 = len(wins) / min(5, len(recent_results))
+        avg_odds_last_5 = recent_results['odds'].mean()
+
+        jockey_perf = 0.4  # Placeholder calculation
+        trainer_perf = 0.35  # Placeholder calculation
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO horse_form (
+                horse_name, last_race_result, last_two_race_results,
+                win_rate_last_5, avg_odds_last_5,
+                jockey_performance, trainer_performance, updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (horse, last_race_result, last_two_result, win_rate_last_5,
+             avg_odds_last_5, jockey_perf, trainer_perf, datetime.now()))
+    conn.commit()
+    print(f"[{datetime.now()}] Historical form data updated.")
+
+# 2. Adjust Exposure Based on Form
+def adjust_exposure(horse):
+    cursor.execute("SELECT * FROM horse_form WHERE horse_name = ?", (horse,))
+    form = cursor.fetchone()
+
+    exposure_factor = 1.0
+    if form:
+        if form[2] == 'Win,Win':
+            exposure_factor -= 0.5
+        elif form[1] == 'Win':
+            exposure_factor -= 0.3
+
+        if form[6] > 0.4:
+            exposure_factor -= 0.2
+        if form[7] > 0.35:
+            exposure_factor -= 0.2
+
+    exposure_factor = max(0.3, exposure_factor)
+    print(f"[{datetime.now()}] Exposure factor for {horse}: {exposure_factor}")
+    return exposure_factor
+
+# 3. Execute Trade with Adjusted Stake
+def execute_trade(strategy, horse, base_stake):
+    print(f"[{datetime.now()}] Executing trade: {strategy} on {horse}")
+    exposure_factor = adjust_exposure(horse)
+    adjusted_stake = base_stake * exposure_factor
+
+    cursor.execute("""
+        INSERT INTO bets (timestamp, strategy_name, horse_name, odds, stake, bet_type, result)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (datetime.now(), strategy, horse, 0, adjusted_stake, 'Adjusted due to form', 0))
+    conn.commit()
+    print(f"[{datetime.now()}] Trade executed with adjusted stake: {adjusted_stake}")
+
+# 4. Share Form Insights with Bots
+def share_insights():
+    print(f"[{datetime.now()}] Sharing insights with bots...")
+    bots = ['Bot_A', 'Bot_B']
+    cursor.execute("SELECT horse_name, last_two_race_results, jockey_performance, trainer_performance FROM horse_form")
+
+    for bot in bots:
+        insights = []
+        for row in cursor.fetchall():
+            if row[1] == 'Win,Win':
+                insights.append(f"{row[0]} in top form, reduce exposure.")
+            if row[2] > 0.4:
+                insights.append(f"High-performing jockey on {row[0]}, caution advised.")
+            if row[3] > 0.35:
+                insights.append(f"Trainer of {row[0]} strong recently, lower exposure.")
+
+        for insight in insights:
+            cursor.execute("""
+                INSERT INTO bot_team_updates (timestamp, bot_name, nugget_description, actionable_advice, form_insights)
+                VALUES (?, ?, ?, ?, ?)""",
+                (datetime.now(), bot, 'Form-Based Adjustment', insight, 'Recommend exposure adjustment'))
+    conn.commit()
+    print(f"[{datetime.now()}] Insights shared with bots.")
+
+# Main Weekly Loop with hourly learning prompt
+def weekly_learning_loop():
+    next_prompt = datetime.now() + timedelta(hours=1)
+    while True:
+        update_horse_form()
+        share_insights()
+
+        if datetime.now() >= next_prompt:
+            print(f"[{datetime.now()}] Learning...")
+            next_prompt = datetime.now() + timedelta(hours=1)
+
+        time.sleep(3600)  # Run hourly
+
+# Example execution
+if __name__ == '__main__':
+    weekly_learning_loop()
+    # execute_trade('Drifter', 'Example Horse', 100)  # Uncomment for direct testing

@@ -1,0 +1,72 @@
+# run_oc_band_debug.py
+# ✅ Manual tester for OC Band Tracker: historical cleanup + live fetch test only
+
+import sys
+import os
+import sqlite3
+import time
+from datetime import datetime, timezone
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from signal_memory_engine.oc_band_tracker import historical_oc_cleanup, get_oc_label_for_minutes_to_off
+from utils.api_tools import fetch_live_odds
+from upgrade_import_patch import get_session_token
+from config_paths import DB_PATH
+
+print("\n🔍 Running OC Band Tracker Debug Tool\n")
+
+# 1. Run historical cleanup in background
+historical_oc_cleanup()
+
+# 2. Fetch a single runner from today
+today = datetime.now(timezone.utc).date().isoformat()
+with sqlite3.connect(DB_PATH) as conn:
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT marketId, selectionId, marketStartTime
+        FROM bets
+        WHERE date = ? AND anchor_odd IS NOT NULL
+        LIMIT 1
+    """, (today,))
+    row = cursor.fetchone()
+
+if not row:
+    print("⚠️ No runners found for today with anchor odds. Cannot run live fetch test.")
+    sys.exit()
+
+market_id, selection_id, start_time = row
+print(f"\n📌 Test runner loaded:\n • marketId: {market_id}\n • selectionId: {selection_id}\n • marketStartTime: {start_time}")
+
+# 3. Parse start time safely
+try:
+    start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(timezone.utc)
+    now_dt = datetime.now(timezone.utc)
+    mto = (start_dt - now_dt).total_seconds() / 60.0
+except Exception as e:
+    print(f"❌ Error parsing marketStartTime: {e}")
+    sys.exit()
+
+oc_label = get_oc_label_for_minutes_to_off(mto)
+session_token = get_session_token()
+odds_data = fetch_live_odds(session_token, market_id, selection_id)
+odds = odds_data.get("last_traded_price") or odds_data.get("lay") or odds_data.get("back")
+
+print(f"\n🔎 Current OC Label: {oc_label} | Minutes to Post: {round(mto, 1)} | Current Odds: {odds}")
+
+# 4. Simulate OC Band building (2s loop)
+print("\n📈 Simulating OC Band collection for 10 seconds...\n")
+
+band = []
+start = time.time()
+while time.time() - start < 10:
+    odds_data = fetch_live_odds(session_token, market_id, selection_id)
+    val = odds_data.get("last_traded_price") or odds_data.get("lay") or odds_data.get("back")
+    if isinstance(val, (float, int)):
+        band.append(val)
+        print(f"  [📊 OC Band] Odds = {val}")
+    else:
+        print(f"  ⚠️ Could not fetch odds this tick")
+    time.sleep(2)
+
+print(f"\n✅ Band simulation complete. Captured {len(band)} ticks: {band}")

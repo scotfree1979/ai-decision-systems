@@ -1,0 +1,110 @@
+# === CANVAS SECTION STARTS HERE ===
+
+# ✅ upgrade_20250602_flow_01
+# ✅ CHANGE: Define and enable `get_markets()` to fetch GB/IE with >= 7 runners for today + tomorrow
+
+import requests
+import json
+from datetime import datetime, timedelta
+
+def get_markets():
+    import os
+    from daily_config import APP_KEY, SESSION_TOKEN
+    import logging
+    import requests
+    import json
+    from datetime import datetime, timedelta
+
+    logging.info("📡 Fetching live WIN markets with 7+ runners...")
+    session_token = os.environ.get("SESSION_TOKEN", SESSION_TOKEN)
+
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": APP_KEY,
+                "X-Authentication": session_token,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketCountries": ["GB", "IE"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z"),
+                                "to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "sort": "FIRST_TO_START",
+                        "maxResults": "50"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+
+        markets = response.json()[0].get("result", []) if response.status_code == 200 else []
+        filtered = [m for m in markets if len(m.get("runners", [])) >= 7]
+        logging.info(f"🎯 Filter complete: {len(filtered)} markets ready")
+        return filtered
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching markets: {e}")
+        return []
+    from daily_config import APP_KEY, SESSION_TOKEN
+
+    headers = {
+        "X-Application": APP_KEY,
+        "X-Authentication": SESSION_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    today = datetime.utcnow()
+    tomorrow = today + timedelta(days=1)
+
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketCatalogue",
+            "params": {
+                "filter": {
+                    "eventTypeIds": ["7"],
+                    "marketCountries": ["GB", "IE"],
+                    "marketStartTime": {
+                        "from": today.strftime("%Y-%m-%dT00:00:00Z"),
+                        "to": tomorrow.strftime("%Y-%m-%dT23:59:00Z")
+                    }
+                },
+                "maxResults": "1000",
+                "marketProjection": ["RUNNER_METADATA", "RUNNER_DESCRIPTION"]
+            },
+            "id": 1
+        }
+    ])
+
+    response = requests.post(
+        "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        headers=headers,
+        data=payload
+    )
+
+    if response.status_code != 200:
+        print(f"❌ Market fetch failed ({response.status_code})")
+        return []
+
+    data = response.json()[0].get("result", [])
+    eligible = [m for m in data if len(m.get("runners", [])) >= 7]
+
+    print(f"📡 Total fetched: {len(data)} | GB/IE 7+ runners: {len(eligible)}")
+    return eligible
+
+
+
+
+

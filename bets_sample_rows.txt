@@ -1,0 +1,93 @@
+
+
+--- __gui_probe ---
+[{"k":"ts","v":"2025-10-29T16:36:50Z"}]
+
+
+--- mastery_state ---
+[{"id":1,"progress":0,"thresholds_json":"{}","volatility_json":"{}","liquidity_json":"{}","time_windows_json":"{}","exit_policy_json":"{}","confidence_json":"{}","version":1,"source":"TEST","updated_at":"2025-09-20 12:19:46"}]
+
+
+--- app_kv ---
+[{"key":"betfair_app_key","value":"CZHojduNWa3kxWIn","updated_at":"2025-10-29 16:37:02"},
+{"key":"betfair_session_token","value":"kJzmMVmjVrb4n1O8oPI97WPPoWYTRp0J/hLxCSFwl54=","updated_at":"2025-10-29 16:37:02"}]
+
+
+--- oc_series ---
+
+
+--- bets ---
+[{"id":1,"marketId":"1.247939515","selectionId":19918822,"horse_name":"Northern Express","race_name":"Ayr 20th Sep","market_name":"1m Hcap","event_name":"Ayr","marketStartTime":"2025-09-20T12:15:00.000Z","date":"2025-09-20","timestamp":"2025-09-20T12:19:46.577371","meta_json":"{\"runner\": {\"selectionId\": 19918822, \"runnerName\": \"Northern Express\", \"handicap\": 0.0, \"sortPriority\": 1}, \"market\": {\"marketId\": \"1.247939515\", \"marketName\": \"1m Hcap\", \"marketStartTime\": \"2025-09-20T12:15:00.000Z\", \"totalMatched\": 214821.44, \"runners\": [{\"selectionId\": 19918822, \"runnerName\": \"Northern Express\", \"handicap\": 0.0, \"sortPriority\": 1}, {\"selectionId\": 69400778, \"runnerName\": \"Khafiz\", \"handicap\": 0.0, \"sortPriority\": 2}, {\"selectionId\": 58644476, \"runnerName\": \"Apiarist\", \"handicap\": 0.0, \"sortPriority\": 3}, {\"selectionId\": 60703430, \"runnerName\": \"Dukes Command\", \"handicap\": 0.0, \"sortPriority\": 4}, {\"selectionId\": 54230560, \"runnerName\": \"Theoryofeverything\", \"handicap\": 0.0, \"sortPriority\": 5}, {\"selectionId\": 71273645, \"runnerName\": \"Impartiality\", \"handicap\": 0.0, \"sortPriority\": 6}, {\"selectionId\": 41122646, \"runnerName\": \"Thunder Roar\", \"handicap\": 0.0, \"sortPriority\": 7}, {\"selectionId\": 62012478, \"runnerName\": \"Naepoint\", \"handicap\": 0.0, \"sortPriority\": 8}, {\"selectionId\": 67452409, \"runnerName\": \"Sex On Fire\", \"handicap\": 0.0, \"sortPriority\": 9}, {\"selectionId\": 22323852, \"runnerName\": \"Mr King\", \"handicap\": 0.0, \"sortPriority\": 10}, {\"selectionId\": 24822538, \"runnerName\": \"Barley\", \"handicap\": 0.0, \"sortPriority\": 11}, {\"selectionId\": 39314, \"runnerName\": \"Arctic Grey\", \"handicap\": 0.0, \"sortPriority\": 12}, {\"selectionId\": 47648569, \"runnerName\": \"Hi Royal\", \"handicap\": 0.0, \"sortPriority\": 13}, {\"selectionId\": 48298473, \"runnerName\": \"Leadenhall\", \"handicap\": 0.0, \"sortPriority\": 14}], \"event\": {\"id\": \"34748348\", \"name\": \"Ayr 20th Sep\", \"countryCode\": \"GB\", \"timezone\": \"Europe/London\", \"venue\": \"Ayr\", \"openDate\": \"2025-09-20T12:15:00.000Z\"}}}","anchor_odd":1000.0,"placed_at":null,"OC0":null,"OC0_band":null,"status":"pending","test_mode":0,"customerOrderRef":"39515_19918822_BASE","runner_name":"1m Hcap"},
+{"id":2,"marketId":"1.247939515","selectionId":69400778,"horse_name":"Khafiz","race_name":"Ayr 20th Sep","market_name":"1m Hcap","event_name":"Ayr","marketStartTime":"2025-09-20T12:15:00.000Z","date":"2025-09-20","timestamp":"2025-09-20T12:19:46.581333","meta_json":"{\"runner\": {\"selectionId\": 69400778, \"runnerName\": \"Khafiz\", \"handicap\": 0.0, \"sortPriority\": 2}, \"market\": {\"marketId\": \"1.247939515\", \"marketName\": \"1m Hcap\", \"marketStartTime\": \"2025-09-20T12:15:00.000Z\", \"totalMatched\": 214821.44, \"runners\": [{\"selectionId\": 19918822, \"runnerName\": \"Northern Express\", \"handicap\": 0.0, \"sortPriority\": 1}, {\"selectionId\": 69400778, \"runnerName\": \"Khafiz\", \"handicap\": 0.0, \"sortPriority\": 2}, {\"selectionId\": 58644476, \"runnerName\": \"Apiarist\", \"handicap\": 0.0, \"sortPriority\": 3}, {\"selectionId\": 60703430, \"runnerName\": \"Dukes Command\", \"handicap\": 0.0, \"sortPriority\": 4}, {\"selectionId\": 54230560, \"runnerName\": \"Theoryofeverything\", \"handicap\": 0.0, \"sortPriority\": 5}, {\"selectionId\": 71273645, \"runnerName\": \"Impartiality\", \"handicap\": 0.0, \"sortPriority\": 6}, {\"selectionId\": 41122646, \"runnerName\": \"Thunder Roar\", \"handicap\": 0.0, \"sortPriority\": 7}, {\"selectionId\": 62012478, \"runnerName\": \"Naepoint\", \"handicap\": 0.0, \"sortPriority\": 8}, {\"selectionId\": 67452409, \"runnerName\": \"Sex On Fire\", \"handicap\": 0.0, \"sortPriority\": 9}, {\"selectionId\": 22323852, \"runnerName\": \"Mr King\", \"handicap\": 0.0, \"sortPriority\": 10}, {\"selectionId\": 24822538, \"runnerName\": \"Barley\", \"handicap\": 0.0, \"sortPriority\": 11}, {\"selectionId\": 39314, \"runnerName\": \"Arctic Grey\", \"handicap\": 0.0, \"sortPriority\": 12}, {\"selectionId\": 47648569, \"runnerName\": \"Hi Royal\", \"handicap\": 0.0, \"sortPriority\": 13}, {\"selectionId\": 48298473, \"runnerName\": \"Leadenhall\", \"handicap\": 0.0, \"sortPriority\": 14}], \"event\": {\"id\": \"34748348\", \"name\": \"Ayr 20th Sep\", \"countryCode\": \"GB\", \"timezone\": \"Europe/London\", \"venue\": \"Ayr\", \"openDate\": \"2025-09-20T12:15:00.000Z\"}}}","anchor_odd":1000.0,"placed_at":null,"OC0":null,"OC0_band":null,"status":"pending","test_mode":0,"customerOrderRef":"39515_69400778_BASE","runner_name":"1m Hcap"}]
+
+
+--- odds_snapshots ---
+
+
+--- blueprint_state ---
+[{"day":"2025-09-20","marketId":"1.247940299","selectionId":"10065928","updated_at":"2025-09-20 18:17:13","blueprint_key":null,"score":null,"features_json":"{\"slope_ppm\": 0.0, \"tick_vel_1s_up\": 0, \"tick_vel_3s_up\": 0, \"fav_rank_now\": 15, \"fav_rank_30s\": 15, \"mto_minutes\": 1000000000.0, \"rank_now\": 15, \"mto\": 1000000000.0, \"breadth\": 0.0}"},
+{"day":"2025-09-20","marketId":"1.247940299","selectionId":"2329498","updated_at":"2025-09-20 18:17:13","blueprint_key":null,"score":null,"features_json":"{\"slope_ppm\": 0.0, \"tick_vel_1s_up\": 0, \"tick_vel_3s_up\": 0, \"fav_rank_now\": 7, \"fav_rank_30s\": 7, \"mto_minutes\": 1000000000.0, \"rank_now\": 7, \"mto\": 1000000000.0, \"breadth\": 0.0}"}]
+
+
+--- order_events ---
+
+
+--- dashboard_runners ---
+
+
+--- pnl_daily ---
+[{"id":1,"run_day":1,"month_index":1,"amount":0.0,"created_at":"2025-09-27 16:12:12","run_id":"TEST-RUN","source":"LIVE"}]
+
+
+--- inbound_oc_cache ---
+
+
+--- pnl_trades ---
+[{"id":1,"amount":1.2299999999999999822,"created_at":"2025-09-27 16:12:12","settled_at":"2025-09-27 16:12:12","source":"LIVE"}]
+
+
+--- letter_credits ---
+[{"id":1,"day":"2025-10-06","marketId":"TEST-001","letter":"S","band":"2-3","delta":5.0,"net":5.0,"updated_at":"2025-10-06 08:07:02"}]
+
+
+--- replay_reports_ingested ---
+[{"filename":"replay_report_20250930-030720.json","outcomes":0,"ingested_at":"2025-10-03 13:17:28"}]
+
+
+--- markets_schedule ---
+[{"marketId":"1.247969502","off_at_utc":"2025-09-21T13:13:00Z","venue":"Hamilton","course":"Hamilton","event_name":null,"market_name":null,"source":"auto.dashboard_markets","discovered_ts":"2025-09-21 09:31:36"},
+{"marketId":"1.247969503","off_at_utc":"2025-09-21T13:13:00Z","venue":"Hamilton","course":"Hamilton","event_name":null,"market_name":null,"source":"auto.dashboard_markets","discovered_ts":"2025-09-21 09:31:36"}]
+
+
+--- schema_meta ---
+[{"key":"schema_version","value":"7"}]
+
+
+--- mastery_consolidator_progress ---
+
+
+--- sim_runs ---
+
+
+--- mastery_events ---
+[{"id":1,"happened_at":"2025-10-25 17:38:09","event_type":"micro_lay","details_json":"{\"marketId\": \"1.2499\", \"selectionId\": \"12345\", \"side\": \"LAY\", \"stake\": 1.0, \"odds\": 5.5, \"confidence\": 0.969, \"liab_total\": 150.0, \"pnl_total\": 5.0}","delta_progress":0,"source":"LIVE"},
+{"id":2,"happened_at":"2025-10-25 17:38:09","event_type":"greenup","details_json":"{\"marketId\": \"1.2499\", \"selectionId\": \"12345\", \"side\": \"BACK\", \"stake\": 1.5, \"odds\": 4.0, \"confidence\": 1.05, \"liab_total\": 200.0, \"pnl_total\": 50.0}","delta_progress":0,"source":"LIVE"}]
+
+
+--- synthetic_runs ---
+
+
+--- mastery_posteriors ---
+[{"bin_key":"1m-1m2|FLAT|30-10|mid|fav","p1_alpha":856901.00000000004598,"p1_beta":1130533.0000000000101,"p2_alpha":452653.00000000001645,"p2_beta":541066.99999999996464,"p3_alpha":404741.99999999997956,"p3_beta":588973.99999999997532,"fill_alpha":3974870.0000000001253,"fill_beta":0.0,"mae_n":3974870,"mae_mean":0.40423631464672986624,"mae_m2":259144.66554492934236,"letter":"","band":"","epic_stories":0,"stop_losses":0,"hedges":0,"net_pnl":0.0,"source_run":"LIVE","updated_at":"2025-09-30 07:19:35","source":"REPLAY","priority":99,"weight_applied":1.0,"day_of_week":"unk","surface_type":"unk","winners":"[]"},
+{"bin_key":"2-4|DRIFT|60+|mid|fav","p1_alpha":158007.99999999998846,"p1_beta":153679.99999999999438,"p2_alpha":80969.99999999999531,"p2_beta":74874.000000000000554,"p3_alpha":74691.999999999998394,"p3_beta":81151.99999999999747,"fill_alpha":623376.00000000001898,"fill_beta":0.0,"mae_n":623376,"mae_mean":0.5306370473037213209,"mae_m2":2497568.8014157757521,"letter":"","band":"","epic_stories":0,"stop_losses":0,"hedges":0,"net_pnl":2962.4000000000410892,"source_run":"LIVE","updated_at":"2025-10-01 19:51:27","source":"REPLAY","priority":9,"weight_applied":1.0,"day_of_week":"unk","surface_type":"unk","winners":"[]"}]
+
+
+--- synthetic_scenarios ---
+
+
+--- mastery_priors ---
+[{"id":1,"bin_key":"5-7f|FLAT|30-10|mid|fav","prior_p1_alpha":55.0,"prior_p1_beta":20.0,"prior_p2_alpha":45.0,"prior_p2_beta":25.0,"prior_p3_alpha":35.0,"prior_p3_beta":25.0,"prior_fill_alpha":40.0,"prior_fill_beta":10.0,"prior_mae_mean":1.1999999999999999644,"prior_mae_std":0.5,"source":"PRIOR","updated_at":"2025-10-01 18:27:56"}]
+
+
+--- system_flags ---
+[{"key":"last_fetch_date","value":"2025-10-29"}]

@@ -1,0 +1,107 @@
+# ✅ head_trader_rules.py – Unified Ruleset for HeadTrader Governance
+
+# 📌 Risk Limits
+MAX_GLOBAL_LIABILITY = 500.0
+MAX_DAILY_LOSS = 200.0
+MAX_RACE_LIABILITY = 50.0
+MAX_LIABILITY_PER_BOT = {
+    "OGPreoff": 200.0,
+    "OGInPlay": 100.0,
+    "OGHeadTrader": 300.0,
+    "Ladder Lays": 150.0,
+    "Scalping": 250.0,
+}
+
+# 📌 Strategy Thresholds
+MIN_WIN_RATE_FOR_APPROVAL = 0.2
+MAX_SIGNAL_AGE_MINUTES = 30
+
+# 📌 Time Signal Enforcement
+ACTIVE_TIME_WINDOWS = {
+    "time_20": True,
+    "time_10": True,
+    "time_5": True,
+    "time_0": True,
+}
+
+# 📌 Execution Constraints
+FORBID_DUPLICATE_CUSTOMERREF = True
+SKIP_BETS_AFTER_OFF = True
+MIN_BACK_ODDS_FOR_SCALP = 2.0
+MAX_LAY_ODDS_FOR_LADDER = 9.0
+
+# 📌 Optimizer Sync Rules
+OPTIMIZER_MIN_ROWS_TO_ANALYZE = 50
+OPTIMIZER_MIN_INTERVAL_HOURS = 6
+MIN_STRATEGY_CONFIDENCE = 0.65
+
+# 📌 Diagnostic Toggles
+ENABLE_SIGNAL_LOGGING = True
+ENABLE_THREAD_WATCHDOG = True
+ENABLE_SCALPING_LOGIC = True
+ENABLE_LADDER_LOGIC = True
+
+# 📌 Budget Enforcement
+MIN_AVAILABLE_BUDGET = 100.0
+AUTO_PAUSE_IF_BUDGET_BELOW = 50.0
+
+# 📌 Market Filtering
+MIN_RUNNERS = 7
+ALLOW_COUNTRIES = ["GB", "IE"]
+
+# 📌 Watchdog Timings
+WATCHDOG_INACTIVE_MINUTES = 60
+WATCHDOG_CHECK_INTERVAL = 300  # seconds
+
+# 📌 Execution Rules – Ladder Strategy
+LADDER_RULES = {
+    "apply_to_top_fancied": 4,
+    "min_liquidity": 1000,
+    "entry_spread": 3,  # number of ticks
+    "field_filter": {
+        "allow_handicaps_only": True,
+        "no_maidens": True
+    }
+}
+
+# 📌 Execution Rules – Scalping Strategy
+SCALPING_RULES = {
+    "momentum_window_seconds": 30,
+    "max_spread_ticks": 5,
+    "switch_threshold_percent": 8.0,  # if drift or steam exceeds this, switch lay/back
+    "fallback_direction": "lay_to_back",
+    "min_matched_volume": 500,
+    "exclude_low_liquidity": True
+}
+
+# 📌 Execution Rules – Green-Up (5-Minute Pre-Off)
+GREENUP_RULES = {
+    "activation_time_signal": "time_5",
+    "min_profit_threshold": 15.0,  # in £
+    "max_unmatched_exposure": 25.0,
+    "confirm_market_stable": True,
+    "cancel_if_volatility": True,
+    "volatility_swing_limit": 12.0
+}
+
+# 📌 Execution Rules – In-Play Logic
+INPLAY_RULES = {
+    "hedge_if_profit": 10.0,  # hedge if profit > £10
+    "green_up_if_odds_hit": 1.5,  # if price crashes in-play
+    "fill_and_kill_window": 15,  # seconds
+    "monitor_runner_count": True,
+    "cancel_if_market_irregular": True
+}
+
+# ✅ Utility Checks
+
+def rule_allows_signal(strategy, odds, bot_name, time_signal):
+    if strategy == "Scalping" and odds < MIN_BACK_ODDS_FOR_SCALP:
+        return False
+    if strategy == "Ladder Lays" and odds > MAX_LAY_ODDS_FOR_LADDER:
+        return False
+    if time_signal not in ACTIVE_TIME_WINDOWS:
+        return False
+    if bot_name in MAX_LIABILITY_PER_BOT and MAX_LIABILITY_PER_BOT[bot_name] < odds * 2:
+        return False
+    return True

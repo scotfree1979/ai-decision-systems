@@ -1,0 +1,154 @@
+import sys
+import os
+
+# Ensure the project root is in the path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+from core.betfair_api import get_session
+from core.api_hijacker import hijack_call
+import logging
+import uuid
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+MINIMUM_STAKE = 2.0  # Betfair's official minimum stake
+
+# Generate customer_ref under 32 characters
+def generate_customer_ref(market_id, runner_id):
+    return f"{market_id[-6:]}_{runner_id}_{uuid.uuid4().hex[:8]}"
+
+# Fetch available account balance
+def get_available_balance():
+    session = get_session()
+    funds = session.account.get_account_funds()
+    balance = float(funds.available_to_bet_balance)
+    logging.info(f"💳 Available balance fetched: £{balance:.2f}")
+    return balance
+
+# Calculate dynamic stake based on balance and max allowed liability
+def calculate_dynamic_stake(odds, max_allowed_liability, predefined_max_stake):
+    potential_stake = max_allowed_liability / (odds - 1)
+    stake = min(potential_stake, predefined_max_stake)
+    logging.info(f"💰 Calculated dynamic stake: £{stake:.2f} (Odds: {odds}, Max Liability: £{max_allowed_liability:.2f})")
+    return stake
+
+# Penny-matching logic
+def penny_match(market_id, selection_id, original_price):
+    penny_price = original_price + 0.02
+    penny_stake = 0.01
+
+    payload = {
+        "market_id": market_id,
+        "instructions": [{
+            "selectionId": selection_id,
+            "side": "BACK",
+            "orderType": "LIMIT",
+            "limitOrder": {
+                "size": penny_stake,
+                "price": penny_price,
+                "persistenceType": "LAPSE"
+            }
+        }],
+        "customer_ref": generate_customer_ref(market_id, selection_id)
+    }
+
+    response = hijack_call("place_orders", **payload)
+    logging.info(f"🔍 Penny-matching Response: {response}")
+
+# Adjusted staking logic for ladder bets explicitly from odds 9 onwards
+def adjusted_ladder_stakes(total_stake, odds):
+    ladder = []
+
+    if odds <= 9:
+        increments = 7
+        stake_per_increment = total_stake / increments
+    else:
+        increments = 8
+        liability_cap = 100  # Explicit liability cap per ladder bet
+        stake_per_increment = min(total_stake / increments, liability_cap / (odds - 1))
+
+    for _ in range(increments):
+        ladder.append(round(stake_per_increment, 2))
+
+    logging.info(f"Adjusted ladder stakes calculated: {ladder}")
+    return ladder
+
+# Hybrid bet placement combining pre-off and in-play lay bets
+def place_hybrid_bet(runner, odds, market_id, pre_off_liability, in_play_stake):
+    logging.info("🚩 Initiating hybrid betting strategy.")
+
+    # Place pre-off bet
+    place_pre_off_lay_bet(runner, odds, market_id, pre_off_liability, predefined_max_stake=in_play_stake)
+
+    # Place in-play bet
+    successful_in_play = place_in_play_lay_bet(runner, odds, in_play_stake, market_id)
+
+    if successful_in_play:
+        logging.info("✅ Hybrid betting successfully executed.")
+    else:
+        logging.error("🚫 Hybrid betting encountered an error during in-play execution.")
+
+# Place pre-off lay bets with ladder and penny-matching
+def place_pre_off_lay_bet(runner, odds, market_id, max_liability, predefined_max_stake):
+    available_balance = get_available_balance()
+    effective_liability = min(float(max_liability), available_balance)
+    ladder_stakes = adjusted_ladder_stakes(calculate_dynamic_stake(float(odds), effective_liability, predefined_max_stake), odds)
+
+    current_price = odds
+    for stake in ladder_stakes:
+        if stake < MINIMUM_STAKE:
+            logging.info(f"Stake {stake} below minimum, skipping bet.")
+            continue
+
+        payload = {
+            "market_id": market_id,
+            "instructions": [{
+                "selectionId": runner,
+                "side": "LAY",
+                "orderType": "LIMIT",
+                "limitOrder": {
+                    "size": stake,
+                    "price": current_price,
+                    "persistenceType": "PERSIST"
+                }
+            }],
+            "customer_ref": generate_customer_ref(market_id, runner)
+        }
+
+        response = hijack_call("place_orders", **payload)
+        logging.info(f"🔍 Pre-off Lay Bet Response: {response}")
+
+        if response.get('status') == 'SUCCESS':
+            penny_match(market_id, runner, current_price)
+
+        current_price += 0.02
+
+# Place an in-play lay bet (fill or kill)
+def place_in_play_lay_bet(runner_id, odds, stake, market_id):
+    session = get_session()
+    market_books = session.betting.list_market_book(market_ids=[market_id])
+    if not market_books or market_books[0].status != 'OPEN' or not market_books[0].inplay:
+        logging.error(f"Market {market_id} not in-play or closed.")
+        return False
+
+    payload = {
+        "market_id": market_id,
+        "instructions": [{
+            "selectionId": runner_id,
+            "side": "LAY",
+            "orderType": "LIMIT",
+            "limitOrder": {
+                "size": stake,
+                "price": odds,
+                "persistenceType": "FILL_OR_KILL"
+            }
+        }],
+        "customer_ref": generate_customer_ref(market_id, runner_id)
+    }
+
+    response = hijack_call("place_orders", **payload)
+    logging.info(f"🔍 In-play Lay Bet Response: {response}")
+
+    return response.get('status') == 'SUCCESS'

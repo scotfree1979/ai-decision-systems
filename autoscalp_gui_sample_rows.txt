@@ -1,0 +1,407 @@
+--- __gui_probe ---
+[{"k":"ts","v":"2025-10-29T16:36:50Z"}]
+--- mastery_posteriors ---
+[{"bin_key":"FAKE|TEST|30-10|Sat|flat|fav","p1_alpha":2.0,"p1_beta":0.0,"p2_alpha":0.0,"p2_beta":0.0,"p3_alpha":0.0,"p3_beta":0.0,"fill_alpha":0.0,"fill_beta":0.0,"mae_n":0,"mae_mean":0.0,"mae_m2":0.0,"updated_at":"2025-10-03 23:57:57","source":"TEST","day_of_week":"Sat","surface_type":"flat","priority":99,"weight_applied":1.0,"net_pnl":444.44999999999996731,"distance_band":"unk","fav_rank_bin":"unk","trainer":null,"jockey":null,"venue":null,"going":null,"race_type":null,"distance":null,"market_liquidity":null,"age":null,"stall":null,"official_rating":null,"weight":null,"trainer_form":null,"jockey_form":null,"winners":"[]","letter":null,"band":null,"confidence":0.5,"expected_value":0.0,"target_ticks":1,"n_total":0,"n_success":0,"bias_score":0.0,"mae_ticks":0.0,"source_last":null,"live_pnl_ratio":0.0}]
+--- app_kv ---
+[{"key":"betfair_session_token","value":"kJzmMVmjVrb4n1O8oPI97WPPoWYTRp0J/hLxCSFwl54=","updated_at":null}]
+--- mastery_posteriors_progress ---
+[{"processed_outcome_id":544652167}]
+--- bank_state ---
+[{"day":"2025-09-30","balance":-8680076.2000105518012,"start_balance":1000.0,"updated_at":"2025-09-30 11:59:24"}]
+--- mastery_replay_summary ---
+--- bf_matched_live ---
+--- mastery_state ---
+[{"id":1,"ts":"2025-10-26 10:41:02","progress":1,"thresholds_json":"{\"path\": \"models/mastery_policy_2025-10-26.pkl\", \"trained_on\": \"2025-10-26\"}","version":1,"source":"TRAINER","goal_alignment":0.0,"pnl_today":0.0,"win_rate_today":0.0}]
+--- blueprint_events ---
+--- ml_features_daily ---
+--- blueprint_state ---
+[{"day":"2025-09-27","marketId":"1.248246291","selectionId":"87434295","updated_at":"2025-09-27 12:06:49","blueprint_key":"flat→OC1-OC2→flat→neutral","score":0.65,"features_json":"{}"}]
+--- ml_models ---
+[{"id":1,"trained_at":"2025-10-17T05:32:07Z","model_type":"LogisticRegression","features_json":"[\"target_ticks\", \"odds_ticks\", \"confidence\", \"hedge_ratio\", \"green_up_pnl\", \"liability_released\", \"bin_net_pnl\", \"priority\", \"weight_applied\"]","metrics_json":"{\"accuracy\": 0.6147238643828002, \"roc_auc\": 0.5887440848142923}","weights_json":"{\"target_ticks\": 0.0, \"odds_ticks\": 0.0, \"confidence\": 0.0, \"hedge_ratio\": 0.0, \"green_up_pnl\": 0.0, \"liability_released\": 0.0, \"bin_net_pnl\": 0.0, \"priority\": 0.0, \"weight_applied\": 0.0}"}]
+--- book_state ---
+[{"day":"2025-09-29","run_id":"LIVE","letter":"A","open_parents":348,"matched_children":0,"open_liability":4624.2999999999954141,"net_pl":0.0,"updated_at":"2025-09-29 19:29:36"}]
+--- oc_series ---
+[{"id":1,"marketId":"1.247939515","selectionId":"41122646","stage":"OC12","snapshot_ts":"2025-09-20 12:20:57","odd":1.0100000000000000088,"band_low":0.98979999999999996873,"band_high":1.0302000000000000046,"band_json":"[0.9898, 1.01, 1.0302]","meta_json":"{\"odds\": {\"lay\": 1.01, \"back\": null}}","source":"SIM"}]
+--- cashout_series ---
+[{"id":1,"day":"2025-10-23","marketId":"1.249069436","selectionId":74312534,"order_id":30812,"oc_stage":"ODDS_CUR","snapshot_ts":"2025-10-23T08:59:24Z","ltp":2.9199999999999999289,"cashout_pnl":-0.38507462686567176746,"total_pnl_now":-0.38507462686567176746,"source":"SIM","created_at":"2025-10-23 08:59:24"}]
+--- odds_current ---
+[{"day":"2025-09-24","marketId":"TEST-MID","selectionId":"123456","updated_ts":"2025-09-24 14:33:43","ltp":5.5,"back1":null,"lay1":null,"fav_rank_now":null,"mto_minutes":null,"slope_ppm":null,"tick_vel_1s_up":null,"tick_vel_3s_up":null}]
+--- dashboard_activity ---
+[{"day":"2025-09-20","window_start_ts":"2025-09-20 08:57:23","runners_scanned":75,"decisions":21210,"proposals":0,"parents_placed":0,"hedges_matched":0,"cancels":0,"timeouts":0,"open_parents":0,"recent_events_json":"[]","gate_reasons_json":"[]","last_refreshed_ts":"2025-09-20 20:57:23","id":null}]
+--- odds_snapshots ---
+[{"id":1,"ts":"2025-09-20 13:01:14","marketId":"1.247938543","selectionId":"10677","ltp":100.0,"back1":null,"lay1":null,"slope_ppm":0.0,"tick_vel_1s_up":0,"tick_vel_3s_up":0,"fav_rank_now":12,"fav_rank_30s":99,"mto_minutes":1000000000.0,"source":"AUTO_DB"}]
+--- dashboard_markets ---
+[{"day":"2025-09-20","marketId":"1.248003904","course":"Newmarket","market_name":null,"off_at_utc":"2025-09-20T12:00:00Z","status":"PRE","t_minus_sec":-32244,"is_next":1,"runners_total":null,"source":"SCHEDULE","betfair_status":null,"betfair_status_mapped":"UNKNOWN","betfair_status_age_sec":null,"status_source":"SCHEDULE","last_api_ok_ts":null,"last_api_err":null,"discovered_ts":"2025-09-20 12:20:59","last_refreshed_ts":"2025-09-20 20:57:24","t0_phase":"WAIT_INPLAY","t0_color":"RED","t0_sec":32244,"inplay_start_ts":null,"late_since_ts":null,"is_concurrent":0,"concurrent_rank":null}]
+--- orders ---
+[{"id":1,"customerOrderRef":"S-100ef8555c","mode":"LIVE","run_id":"LIVE-20250924-130622","marketId":"1.248102544","selectionId":"85419008","side":"LAY","entry_odds":30.0,"entry_stake":2.0,"entry_status":"cancelled","entry_bet_id":"402877510691","opened_at":"2025-09-24 13:07:58","exit_status":"STALE","exit_bet_id":null,"exit_odds":null,"exit_stake":null,"closed_at":"2025-10-18 14:11:14","realized_pnl":null,"net_pl":null,"error":"cleanup_orphan","role":"PARENT","hedge_of":null,"source":"S","ts":null,"bf_bet_id":null,"customer_ref":"LAY-20250924130759-939","entry_matched_odds":null,"entry_matched_stake":null,"exit_matched_odds":null,"exit_matched_stake":null,"child_bf_bet_id":null,"notes":"pre-claim S","stop_ticks":4,"stop_loss_triggered":0,"greened_up":0,"exit_kind":null}]
+--- dashboard_orders_tape ---
+[{"id":162409,"ts":"2025-09-24 19:17:14","marketId":"1.248102125","selectionId":"70013927","runner_name":"Muma Myflo","side":"LAY","status":"FAILED","price":29.0,"amount":3.0,"realized_pnl":null,"order_id":null,"mode":"LIVE","day":"2025-09-24"}]
+--- orders_effective ---
+[{"id":1113,"customerOrderRef":"LAY-20250924151530-324","mode":"LIVE","run_id":2,"marketId":"1.248107413","selectionId":"50280179","side":"LAY","entry_odds":10.0,"entry_stake":3.0,"entry_status":"placed","entry_bet_id":"402893347363","opened_at":"2025-09-24 15:15:30","exit_status":"STALE","exit_bet_id":null,"exit_odds":null,"exit_stake":null,"closed_at":"2025-10-18 14:11:14","realized_pnl":null,"net_pl":null,"error":null,"role":"PARENT","hedge_of":null,"source":"A","ts":null,"bf_bet_id":null,"customer_ref":null,"entry_matched_odds":null,"entry_matched_stake":null,"exit_matched_odds":null,"exit_matched_stake":null,"child_bf_bet_id":null,"notes":null,"stop_ticks":4,"stop_loss_triggered":0,"greened_up":0,"exit_kind":null}]
+--- dashboard_runners ---
+[{"day":"2025-09-20","marketId":"1.247938495","selectionId":"2061271","runner_name":"Callahan","odd":3.75,"implied_prob":0.26666666666666665186,"band_low":null,"band_high":null,"last_snapshot_ts":"2025-09-20 13:29:59","source":"DIRECT_ODDS","top6_rank":1,"first_seen_rank":1,"first_seen_ts":"2025-09-20 13:28:37","in_top6":1,"bar_pre_norm":1.0,"bar_post_norm":1.0,"bar_display_norm":1.0,"bar_color":"BLUE","flow_ppm":0.0,"vol_1m":0.0,"trend":"FLAT"}]
+--- plan_ledger ---
+[{"id":1,"day":"2025-10-04","run_id":"","plan_id":"128752","marketId":"1.248552312","selectionId":"70148021","category":"field","allow_letters":"[]","budget_units":1,"max_open_parents":1,"letter":"S","note":"","scalp_direction":null,"proposed_odds":null,"proposed_stake":null,"confidence":0.66000000000000005329,"blueprint_match":null,"window_tag":null,"anchor_odd":null,"oc_stage":null,"decided_at":"2025-10-04 14:02:36","status":"open","why":"schema-test","parent_order_id":null,"child_order_id":null,"updated_at":"2025-10-04 14:02:36","epic_id":"1.248552312","epic_stories":0,"epic_rank":0,"family":"MASTERY","direction":"BACK->LAY","target_ticks":1,"px":4.7999999999999998223,"size":2.0,"plan_json":"{\"enter\":true,\"marketId\":\"1.248552312\",\"selectionId\":\"70148021\",\"family\":\"MASTERY\",\"letter\":\"S\",\"direction\":\"BACK->LAY\",\"target_ticks\":1,\"px\":4.8,\"size\":2.0,\"confidence\":0.66,\"plan_why\":\"schema-test\"}","plan_why":null}]
+--- dashboard_runs ---
+[{"run_id":"FEEDER-2025-09-20-122059","mode":"LIVE","source_mode":"MIRROR","day":"2025-09-20","speed_x":1.0,"now_ts":"2025-09-20 12:20:59","status":"running","last_heartbeat_ts":"2025-09-20 12:20:59"}]
+--- playbooks ---
+[{"id":1,"day":"2025-10-16","marketId":"1.23456789","selectionId":999,"strategy":"BTL_SCOUT","oc_stage":"OC4","pattern_key":"MOCK-OC4-True","band_low":3.0,"band_high":4.0,"entry_odds":3.3999999999999999111,"exit_odds":3.7999999999999998223,"pnl":2.0343299031442332314,"outcome":"WIN","exposure":10.0,"confidence":0.77000000000000001776,"realized_at":"2025-10-16 19:29:27","meta_json":"{\"sim\": true}","source":"TEST"}]
+--- dashboard_strategy_perf ---
+[{"strategy":"BLUEPRINTS","p_q":1,"p_p":2,"p_m":3,"c_q":0,"c_p":1,"c_m":2,"open_parents":1,"matched_liab":50.0,"unmatched_liab":5.0,"pnl_today":12.339999999999999857,"last_trade_ts":"2025-09-29 11:48:18","mode":"TEST"}]
+--- playbooks_diagnostics ---
+[{"day":"2025-09-17","plan_id":null,"letter":null,"strategy":null,"marketId":"1.247877436","selectionId":88237677,"pair_complete":null,"green_up_before_off":0,"time_to_match_s":null,"expected_ticks":null,"realized_ticks":null,"net_pl":-7.3200000000000002842,"cause_tag":"loss","meta_json":"{\"exit_kind\":null,\"off_at\":null}","created_at":"2025-10-16 20:47:20"}]
+--- dashboard_tiles ---
+[{"tile_id":1,"metric":"profit_today","value":0.0,"delta":0.0,"unit":"£","colour":"GREY","updated_at":"2025-10-25 18:28:28"}]
+--- playbooks_insights ---
+[{"day":"2025-08-21","letter":null,"strategy":null,"trades":55,"pair_complete_rate":null,"green_rate":0.0,"win_rate":0.30909090909090908283,"avg_pnl":-20.460888888888888459,"total_pnl":-920.73999999999998067,"avg_slippage":null,"avg_latency_ms":null,"avg_confidence":null,"avg_volatility":null,"recommendation_json":"{\"cap_adj\":null,\"conf_thresh\":null}","updated_at":"2025-10-16 20:47:20"}]
+--- dashboard_tiles_legacy ---
+[{"day":"2025-09-20","mode":"LIVE","total":0.0,"yesterday":0.0,"today":0.0,"d7":0.0,"d30":0.0,"hit_rate":0.0,"pnl_per_hour":0.0,"avg_gain":0.0,"win_pct_mkt":0.0,"bank":478.62999999999997768,"used_exposure":0.0,"last_refreshed_ts":"2025-09-20 20:57:23"}]
+--- playbooks_learning ---
+[{"day":"2025-09-29","marketId":"1.248311039","selectionId":"233636","letter":"A","strategy":"","side":"","entry_odds":0.0,"entry_stake":0.0,"exit_odds":0.0,"exit_stake":0.0,"net_pl":-0.2,"confidence":0.5,"oc_stage_entry":"OC?","class_band":"mid","source":"REPLAY","replay_run_id":"20250930-030720","meta_json":"{\"day\":\"2025-09-29\",\"mid\":\"1.248311039\",\"sid\":\"233636\",\"letter\":\"A\",\"band\":\"ACTIVE\",\"epic_stories\":0,\"distance_band\":\"1m-1m2\",\"code\":\"FLAT\",\"tto_window\":\"30-10\",\"class_band\":\"mid\",\"fav_rank_bin\":\"fav\",\"pnl\":-0.2,\"target_ticks\":1,\"success\":false,\"stoploss\":true,\"hedge\":false}","created_at":"2025-10-17 06:21:22"}]
+--- decisions ---
+[{"id":1,"run_id":"DRYRUN-TEST","marketId":"1.TEST.MKT.001","selectionId":"123456","decided_at":"2025-09-20 14:54:42","signal_type":null,"blueprint_match":null,"confidence":null,"scalp_direction":null,"proposed_odds":null,"proposed_stake":null,"notes":"A","meta_json":"{\"placement_outcome\":\"not_placed\",\"why\":\"range_gate:0.0ticks<3\"}","order_id":null,"why":"range_gate:0.0ticks<3"}]
+--- playbooks_settled ---
+[{"day":"2025-09-18","betId":"402122873100","marketId":"1.247877436","selectionId":88237677,"letter":null,"strategy":null,"side":"LAY","entry_odds":null,"entry_stake":null,"exit_odds":3.9500000000000001776,"exit_stake":2.4799999999999999822,"profit":-7.3200000000000002842,"commission":null,"net_pl":-7.3200000000000002842,"pnl_pct":0.0,"odds_diff":null,"odds_ticks":null,"mto_minutes":null,"oc_stage_entry":null,"oc_stage_exit":null,"band_low_entry":null,"band_high_entry":null,"fav_rank_entry":null,"volatility_band":null,"venue":null,"going":null,"distance":null,"class_band":null,"trainer":null,"jockey":null,"exit_kind":null,"confidence":null,"slippage":null,"latency_ms":null,"pair_id":null,"child_id":null,"pair_complete":null,"hedge_ratio":null,"green_up_pnl":null,"liability_released":null,"risk_state":"OPEN","outcome_bin":"LOSS","meta_json":"{\"settledDate\":\"2025-09-18T16:52:54.000Z\",\"customerOrderRef\":\"LAY-20250918154954-804\"}","created_at":"2025-10-17 06:21:02","segment_key":"unknown"}]
+--- events ---
+[{"ts":"2025-09-24 13:07:59","level":"INFO","source":"live_router","message":"Rehedge loop started"}]
+--- replay_reports_ingested ---
+[{"filename":"replay_report_20250930-121805.json","outcomes":14030498,"ingested_at":"2025-10-04 02:05:20"}]
+--- exposure_log ---
+[{"id":1,"day":"2025-10-16","exposure":34193.500000000001115,"sampled_at":"2025-10-16 18:05:27"}]
+--- replay_resume_progress ---
+[{"id":1,"last_epoch":12,"last_day_idx":3,"updated_at":"2025-10-04 03:10:37"}]
+--- inbound_bets_min ---
+--- runner_activity ---
+--- inbound_oc_cache ---
+[{"id":10788,"marketId":"1.249069347","selectionId":"56183546","anchor_odd":110.00000000000000888,"last_sync_ts":"2025-10-16 19:03:02","oc1":16.000000000000000888,"oc1_band_json":"[15.68, 16.0, 16.32]","oc2":16.499999999999999111,"oc2_band_json":"[16.169999999999998, 16.5, 16.830000000000002]","oc3":17.0,"oc3_band_json":"[16.66, 17.0, 17.34]","oc4":17.5,"oc4_band_json":"[17.15, 17.5, 17.85]","oc5":null,"oc5_band_json":null,"oc6":null,"oc6_band_json":null,"oc7":null,"oc7_band_json":null,"oc8":null,"oc8_band_json":null,"oc9":null,"oc9_band_json":null,"oc10":null,"oc10_band_json":null,"oc11":null,"oc11_band_json":null,"oc12":null,"oc12_band_json":null,"oc13":null,"oc13_band_json":null,"oc14":null,"oc14_band_json":null,"oc15":null,"oc15_band_json":null,"oc16":null,"oc16_band_json":null,"oc17":null,"oc17_band_json":null,"oc18":null,"oc18_band_json":null,"oc19":null,"oc19_band_json":null,"oc20":null,"oc20_band_json":null}]
+--- runner_history ---
+[{"runner_name":"A Major Payne","selectionId":68361512,"marketId":"1.248102570","runs":1,"wins":1,"losses":0,"net_pnl":3.0,"last_run_date":"2025-09-24T15:09:27.000Z","last_win_date":"2025-09-24T15:09:27.000Z","form_string":"1","trainerName":null,"jockeyName":null,"age":null,"stallDraw":null,"officialRating":null,"weightValue":null,"updated_at":"2025-10-03 21:28:47"}]
+--- indicators_opportunities ---
+--- runners ---
+[{"marketId":"1.248003904","selectionId":"3471370","runner_name":"Less than 9.5 lengths"}]
+--- internal_bank ---
+[{"day":"2025-09-30","start_balance":1000.0,"current_balance":-8680076.2000105518012,"updated_at":"2025-09-30 11:59:24"}]
+--- runs ---
+[{"id":1,"started_at":"2025-09-24 13:07:59","finished_at":null,"mode":"LIVE","blueprint_file":null,"notes":"LIVE-20250924-130622"}]
+--- liability_signals ---
+--- strategies_performance ---
+[{"id":1,"run_id":"LIVE-20250924-130622","ts":"2025-09-24 13:08:01","mode":"LIVE","strategy":"A","marketId":"1.248102544","selectionId":"85419008","action":"ENTER","stake":3.0,"price":30.0,"pnl":0.0,"source":"A"}]
+--- live_state ---
+[{"marketId":"1.249069436","pnl_now":4.0700000000000002842,"liability":16.799999999999997157,"status":"OPEN","updated_at":"2025-10-29 16:36:32"}]
+--- v_liability_context ---
+[{"id":1,"day":"2025-10-01","marketId":"1.248414542","selectionId":"1119491","letter":"P","distance_band":"2-4","fav_rank":"fav","day_of_week":"Wed","surface":"flat","class_band":"mid","target_ticks":1,"realized_ticks":8,"success":1,"stoploss_hit":0,"hedge_hit":1,"entry_px":2.6800000000000001598,"pnl":0.0,"weight":1.0,"priority":99,"liab_value":0.0,"liab_over250":0}]
+--- live_state_table ---
+[{"marketId":"test.mid","pnl_now":1.2299999999999999822,"liability":45.600000000000004973,"status":"OPEN","updated_at":"2025-10-24 11:58:57"}]
+--- v_mastery_live ---
+[{"distance_band":"unk","fav_rank_bin":"unk","surface_type":"unk","day_of_week":"unk","bins":2,"total_pnl":null,"avg_mae":0.0,"total_weight":262402.99999999998625,"p1_mean":null,"p2_mean":null,"p3_mean":null}]
+--- loss_tags ---
+[{"id":1,"day":"2025-09-30","marketId":"1.248360002","selectionId":"85557496","tag":"stoploss","created_at":"2025-10-01 09:07:33","dow":""}]
+--- v_mastery_training ---
+--- market_data ---
+[{"marketId":"1.248559535","selectionId":88669368,"runnerName":"Sindagan","trainerName":null,"jockeyName":null,"age":null,"stallDraw":null,"officialRating":null,"weightValue":null,"venue":null,"eventName":null,"marketName":"7f Mdn","marketStartTime":null,"distance":null,"going":null,"raw_json":"{\"selectionId\": 88669368, \"runnerName\": \"Sindagan\", \"handicap\": 0.0, \"sortPriority\": 1}"}]
+--- v_odds_first_last_today ---
+[{"marketId":"1.249715193","selectionId":"15071","ltp_first":7.0,"ltp_last":3.9500000000000001776}]
+--- markets_schedule ---
+[{"marketId":"1.248980759","venue":"Lingfield","course":"Lingfield","event_name":"Lingfield 14th Oct","market_name":"To Be Placed","off_at_utc":"2025-10-14T12:30:00Z","country_code":"GB","off_ts":null,"source":null,"eventId":null,"marketTypeCode":null}]
+--- v_odds_latest ---
+--- mastery_cache ---
+[{"ts":"2025-10-24T07:33:20.500549+00:00","event_type":"cashout_tick","marketId":"1.249069436","json_payload":"{\"ts\": \"2025-10-24T07:33:20.500549+00:00\", \"marketId\": \"1.249069436\", \"cashout_total\": -19.2229, \"liability_total\": 338.7, \"source\": \"LIVE\"}"}]
+--- v_plan_ledger_compat ---
+[{"id":1,"day":"2025-10-04","run_id":"","plan_id":"128752","marketId":"1.248552312","selectionId":"70148021","letter":"S","note":"","direction":null,"px":null,"size":null,"confidence":0.66000000000000005329,"blueprint_match":null,"window_tag":null,"status":"open","why":"schema-test","parent_order_id":null,"child_order_id":null,"epic_id":"1.248552312","epic_stories":0,"epic_rank":0,"decided_at":"2025-10-04 14:02:36","updated_at":"2025-10-04 14:02:36"}]
+--- mastery_feedback ---
+[{"id":1,"ts":"2025-10-24T11:45:50.762090+00:00","marketId":"1.249449649","plan_bias":0.0,"actual_bias":0.0,"bias_delta":0.0,"exposure_target":0.0,"exposure_actual":0.0,"exposure_gap":0.0,"hedge_eff":1.0,"pnl_now":0.0,"status":"VOLATILE","pnl_delta":0.0}]
+--- v_strategy_perf ---
+--- mastery_outcomes_raw ---
+[{"day":"2025-10-01","marketId":"1.248414542","selectionId":"1119491","letter":"P","distance_band":"2-4","fav_rank":"fav","day_of_week":"Wed","surface":"flat","class_band":"mid","target_ticks":1,"realized_ticks":8,"success":1,"stoploss_hit":0,"hedge_hit":1,"entry_px":2.6800000000000001598,"pnl":0.0,"weight":1.0,"priority":99,"created_at":"2025-10-03T06:33:01Z","id":1,"source":"REPLAY","confidence":null}]
+
+
+--- __gui_probe ---
+[{"k":"ts","v":"2025-10-29T16:36:50Z"}]
+
+
+--- mastery_posteriors ---
+[{"bin_key":"FAKE|TEST|30-10|Sat|flat|fav","p1_alpha":2.0,"p1_beta":0.0,"p2_alpha":0.0,"p2_beta":0.0,"p3_alpha":0.0,"p3_beta":0.0,"fill_alpha":0.0,"fill_beta":0.0,"mae_n":0,"mae_mean":0.0,"mae_m2":0.0,"updated_at":"2025-10-03 23:57:57","source":"TEST","day_of_week":"Sat","surface_type":"flat","priority":99,"weight_applied":1.0,"net_pnl":444.44999999999996731,"distance_band":"unk","fav_rank_bin":"unk","trainer":null,"jockey":null,"venue":null,"going":null,"race_type":null,"distance":null,"market_liquidity":null,"age":null,"stall":null,"official_rating":null,"weight":null,"trainer_form":null,"jockey_form":null,"winners":"[]","letter":null,"band":null,"confidence":0.5,"expected_value":0.0,"target_ticks":1,"n_total":0,"n_success":0,"bias_score":0.0,"mae_ticks":0.0,"source_last":null,"live_pnl_ratio":0.0},
+{"bin_key":"FAKE|TEST|30-10|Sat|flat|fav2","p1_alpha":1.0,"p1_beta":0.0,"p2_alpha":0.0,"p2_beta":0.0,"p3_alpha":0.0,"p3_beta":0.0,"fill_alpha":0.0,"fill_beta":0.0,"mae_n":0,"mae_mean":0.0,"mae_m2":0.0,"updated_at":"2025-10-03 23:58:58","source":"TEST","day_of_week":"Sat","surface_type":"flat","priority":99,"weight_applied":1.0,"net_pnl":776.99999999999995736,"distance_band":"unk","fav_rank_bin":"unk","trainer":null,"jockey":null,"venue":null,"going":null,"race_type":null,"distance":null,"market_liquidity":null,"age":null,"stall":null,"official_rating":null,"weight":null,"trainer_form":null,"jockey_form":null,"winners":"[]","letter":null,"band":null,"confidence":0.5,"expected_value":0.0,"target_ticks":1,"n_total":0,"n_success":0,"bias_score":0.0,"mae_ticks":0.0,"source_last":null,"live_pnl_ratio":0.0}]
+
+
+--- app_kv ---
+[{"key":"betfair_session_token","value":"kJzmMVmjVrb4n1O8oPI97WPPoWYTRp0J/hLxCSFwl54=","updated_at":null},
+{"key":"bank:LIVE","value":"100.00","updated_at":"2025-09-23 14:11:50"}]
+
+
+--- mastery_posteriors_progress ---
+[{"processed_outcome_id":544652167}]
+
+
+--- bank_state ---
+[{"day":"2025-09-30","balance":-8680076.2000105518012,"start_balance":1000.0,"updated_at":"2025-09-30 11:59:24"},
+{"day":"2025-10-01","balance":790455.1600005037315,"start_balance":1000.0,"updated_at":"2025-10-01 23:55:05"}]
+
+
+--- mastery_replay_summary ---
+
+
+--- bf_matched_live ---
+
+
+--- mastery_state ---
+[{"id":1,"ts":"2025-10-26 10:41:02","progress":1,"thresholds_json":"{\"path\": \"models/mastery_policy_2025-10-26.pkl\", \"trained_on\": \"2025-10-26\"}","version":1,"source":"TRAINER","goal_alignment":0.0,"pnl_today":0.0,"win_rate_today":0.0},
+{"id":2,"ts":"2025-10-26 10:53:02","progress":2,"thresholds_json":"{\"path\": \"models/mastery_policy_2025-10-26.pkl\", \"trained_on\": \"2025-10-26\"}","version":2,"source":"TRAINER","goal_alignment":0.0,"pnl_today":0.0,"win_rate_today":0.0}]
+
+
+--- blueprint_events ---
+
+
+--- ml_features_daily ---
+
+
+--- blueprint_state ---
+[{"day":"2025-09-27","marketId":"1.248246291","selectionId":"87434295","updated_at":"2025-09-27 12:06:49","blueprint_key":"flat→OC1-OC2→flat→neutral","score":0.65,"features_json":"{}"},
+{"day":"2025-09-27","marketId":"1.248246291","selectionId":"21231","updated_at":"2025-09-27 12:23:11","blueprint_key":"flat→OC1-OC2→flat→neutral","score":0.62000000000000001776,"features_json":"{}"}]
+
+
+--- ml_models ---
+[{"id":1,"trained_at":"2025-10-17T05:32:07Z","model_type":"LogisticRegression","features_json":"[\"target_ticks\", \"odds_ticks\", \"confidence\", \"hedge_ratio\", \"green_up_pnl\", \"liability_released\", \"bin_net_pnl\", \"priority\", \"weight_applied\"]","metrics_json":"{\"accuracy\": 0.6147238643828002, \"roc_auc\": 0.5887440848142923}","weights_json":"{\"target_ticks\": 0.0, \"odds_ticks\": 0.0, \"confidence\": 0.0, \"hedge_ratio\": 0.0, \"green_up_pnl\": 0.0, \"liability_released\": 0.0, \"bin_net_pnl\": 0.0, \"priority\": 0.0, \"weight_applied\": 0.0}"},
+{"id":2,"trained_at":"2025-10-17T05:33:35Z","model_type":"LogisticRegression","features_json":"[\"target_ticks\", \"odds_ticks\", \"confidence\", \"hedge_ratio\", \"green_up_pnl\", \"liability_released\", \"bin_net_pnl\", \"priority\", \"weight_applied\"]","metrics_json":"{\"accuracy\": 0.6147238643828002, \"roc_auc\": 0.5887440848142923}","weights_json":"{\"target_ticks\": 0.0, \"odds_ticks\": 0.0, \"confidence\": 0.0, \"hedge_ratio\": 0.0, \"green_up_pnl\": 0.0, \"liability_released\": 0.0, \"bin_net_pnl\": 0.0, \"priority\": 0.0, \"weight_applied\": 0.0}"}]
+
+
+--- book_state ---
+[{"day":"2025-09-29","run_id":"LIVE","letter":"A","open_parents":348,"matched_children":0,"open_liability":4624.2999999999954141,"net_pl":0.0,"updated_at":"2025-09-29 19:29:36"},
+{"day":"2025-09-29","run_id":"LIVE","letter":"D","open_parents":1,"matched_children":1,"open_liability":12.600000000000002309,"net_pl":0.0,"updated_at":"2025-09-29 19:29:36"}]
+
+
+--- oc_series ---
+[{"id":1,"marketId":"1.247939515","selectionId":"41122646","stage":"OC12","snapshot_ts":"2025-09-20 12:20:57","odd":1.0100000000000000088,"band_low":0.98979999999999996873,"band_high":1.0302000000000000046,"band_json":"[0.9898, 1.01, 1.0302]","meta_json":"{\"odds\": {\"lay\": 1.01, \"back\": null}}","source":"SIM"},
+{"id":2,"marketId":"1.247940289","selectionId":"69804083","stage":"OC10","snapshot_ts":"2025-09-20 12:28:36","odd":1000.0,"band_low":980.00000000000007105,"band_high":1020.0000000000000177,"band_json":"[980.0, 1000.0, 1020.0]","meta_json":"{\"odds\": {\"lay\": 1000.0, \"back\": 60.0}}","source":"SIM"}]
+
+
+--- cashout_series ---
+[{"id":1,"day":"2025-10-23","marketId":"1.249069436","selectionId":74312534,"order_id":30812,"oc_stage":"ODDS_CUR","snapshot_ts":"2025-10-23T08:59:24Z","ltp":2.9199999999999999289,"cashout_pnl":-0.38507462686567176746,"total_pnl_now":-0.38507462686567176746,"source":"SIM","created_at":"2025-10-23 08:59:24"},
+{"id":2,"day":"2025-10-23","marketId":"1.249069436","selectionId":74312534,"order_id":30812,"oc_stage":"OC_AUTO","snapshot_ts":"2025-10-23T08:59:24Z","ltp":5.5999999999999996447,"cashout_pnl":2.0149253731343277351,"total_pnl_now":2.0149253731343277351,"source":"SIM","created_at":"2025-10-23 08:59:24"}]
+
+
+--- odds_current ---
+[{"day":"2025-09-24","marketId":"TEST-MID","selectionId":"123456","updated_ts":"2025-09-24 14:33:43","ltp":5.5,"back1":null,"lay1":null,"fav_rank_now":null,"mto_minutes":null,"slope_ppm":null,"tick_vel_1s_up":null,"tick_vel_3s_up":null},
+{"day":"2025-10-05","marketId":"TEST-001","selectionId":"1000","updated_ts":"2025-10-05 16:50:02","ltp":10.180000000000000159,"back1":null,"lay1":null,"fav_rank_now":null,"mto_minutes":null,"slope_ppm":null,"tick_vel_1s_up":null,"tick_vel_3s_up":null}]
+
+
+--- dashboard_activity ---
+[{"day":"2025-09-20","window_start_ts":"2025-09-20 08:57:23","runners_scanned":75,"decisions":21210,"proposals":0,"parents_placed":0,"hedges_matched":0,"cancels":0,"timeouts":0,"open_parents":0,"recent_events_json":"[]","gate_reasons_json":"[]","last_refreshed_ts":"2025-09-20 20:57:23","id":null},
+{"day":"2025-09-21","window_start_ts":"2025-09-21 11:44:47","runners_scanned":94,"decisions":10220,"proposals":0,"parents_placed":0,"hedges_matched":0,"cancels":0,"timeouts":0,"open_parents":0,"recent_events_json":"[]","gate_reasons_json":"[]","last_refreshed_ts":"2025-09-21 23:44:47","id":null}]
+
+
+--- odds_snapshots ---
+[{"id":1,"ts":"2025-09-20 13:01:14","marketId":"1.247938543","selectionId":"10677","ltp":100.0,"back1":null,"lay1":null,"slope_ppm":0.0,"tick_vel_1s_up":0,"tick_vel_3s_up":0,"fav_rank_now":12,"fav_rank_30s":99,"mto_minutes":1000000000.0,"source":"AUTO_DB"},
+{"id":2,"ts":"2025-09-20 13:01:14","marketId":"1.247938543","selectionId":"1392965","ltp":20.0,"back1":null,"lay1":null,"slope_ppm":0.0,"tick_vel_1s_up":0,"tick_vel_3s_up":0,"fav_rank_now":7,"fav_rank_30s":99,"mto_minutes":1000000000.0,"source":"AUTO_DB"}]
+
+
+--- dashboard_markets ---
+[{"day":"2025-09-20","marketId":"1.248003904","course":"Newmarket","market_name":null,"off_at_utc":"2025-09-20T12:00:00Z","status":"PRE","t_minus_sec":-32244,"is_next":1,"runners_total":null,"source":"SCHEDULE","betfair_status":null,"betfair_status_mapped":"UNKNOWN","betfair_status_age_sec":null,"status_source":"SCHEDULE","last_api_ok_ts":null,"last_api_err":null,"discovered_ts":"2025-09-20 12:20:59","last_refreshed_ts":"2025-09-20 20:57:24","t0_phase":"WAIT_INPLAY","t0_color":"RED","t0_sec":32244,"inplay_start_ts":null,"late_since_ts":null,"is_concurrent":0,"concurrent_rank":null},
+{"day":"2025-09-20","marketId":"1.247939514","course":"Ayr","market_name":null,"off_at_utc":"2025-09-20T12:15:00Z","status":"PRE","t_minus_sec":-31344,"is_next":0,"runners_total":null,"source":"SCHEDULE","betfair_status":null,"betfair_status_mapped":"UNKNOWN","betfair_status_age_sec":null,"status_source":"SCHEDULE","last_api_ok_ts":null,"last_api_err":null,"discovered_ts":"2025-09-20 12:20:59","last_refreshed_ts":"2025-09-20 20:57:24","t0_phase":"WAIT_INPLAY","t0_color":"RED","t0_sec":31344,"inplay_start_ts":null,"late_since_ts":null,"is_concurrent":0,"concurrent_rank":null}]
+
+
+--- orders ---
+[{"id":1,"customerOrderRef":"S-100ef8555c","mode":"LIVE","run_id":"LIVE-20250924-130622","marketId":"1.248102544","selectionId":"85419008","side":"LAY","entry_odds":30.0,"entry_stake":2.0,"entry_status":"cancelled","entry_bet_id":"402877510691","opened_at":"2025-09-24 13:07:58","exit_status":"STALE","exit_bet_id":null,"exit_odds":null,"exit_stake":null,"closed_at":"2025-10-18 14:11:14","realized_pnl":null,"net_pl":null,"error":"cleanup_orphan","role":"PARENT","hedge_of":null,"source":"S","ts":null,"bf_bet_id":null,"customer_ref":"LAY-20250924130759-939","entry_matched_odds":null,"entry_matched_stake":null,"exit_matched_odds":null,"exit_matched_stake":null,"child_bf_bet_id":null,"notes":"pre-claim S","stop_ticks":4,"stop_loss_triggered":0,"greened_up":0,"exit_kind":null},
+{"id":2,"customerOrderRef":"LAY-20250924130759-939","mode":"LIVE","run_id":1,"marketId":null,"selectionId":null,"side":null,"entry_odds":null,"entry_stake":null,"entry_status":"matched","entry_bet_id":"402877510691","opened_at":"2025-09-24 13:08:00","exit_status":null,"exit_bet_id":null,"exit_odds":null,"exit_stake":null,"closed_at":null,"realized_pnl":null,"net_pl":null,"error":null,"role":"PARENT","hedge_of":null,"source":null,"ts":null,"bf_bet_id":null,"customer_ref":null,"entry_matched_odds":3.0500000000000007105,"entry_matched_stake":3.0,"exit_matched_odds":null,"exit_matched_stake":null,"child_bf_bet_id":null,"notes":null,"stop_ticks":4,"stop_loss_triggered":0,"greened_up":0,"exit_kind":null}]
+
+
+--- dashboard_orders_tape ---
+[{"id":162409,"ts":"2025-09-24 19:17:14","marketId":"1.248102125","selectionId":"70013927","runner_name":"Muma Myflo","side":"LAY","status":"FAILED","price":29.0,"amount":3.0,"realized_pnl":null,"order_id":null,"mode":"LIVE","day":"2025-09-24"},
+{"id":162410,"ts":"2025-09-24 19:17:13","marketId":"1.248102125","selectionId":"70013927","runner_name":"Muma Myflo","side":"LAY","status":"PLACED","price":29.0,"amount":2.0,"realized_pnl":null,"order_id":null,"mode":"LIVE","day":"2025-09-24"}]
+
+
+--- orders_effective ---
+[{"id":1113,"customerOrderRef":"LAY-20250924151530-324","mode":"LIVE","run_id":2,"marketId":"1.248107413","selectionId":"50280179","side":"LAY","entry_odds":10.0,"entry_stake":3.0,"entry_status":"placed","entry_bet_id":"402893347363","opened_at":"2025-09-24 15:15:30","exit_status":"STALE","exit_bet_id":null,"exit_odds":null,"exit_stake":null,"closed_at":"2025-10-18 14:11:14","realized_pnl":null,"net_pl":null,"error":null,"role":"PARENT","hedge_of":null,"source":"A","ts":null,"bf_bet_id":null,"customer_ref":null,"entry_matched_odds":null,"entry_matched_stake":null,"exit_matched_odds":null,"exit_matched_stake":null,"child_bf_bet_id":null,"notes":null,"stop_ticks":4,"stop_loss_triggered":0,"greened_up":0,"exit_kind":null},
+{"id":1128,"customerOrderRef":"LAY-20250924151545-333","mode":"LIVE","run_id":2,"marketId":"1.248107413","selectionId":"2133910","side":"LAY","entry_odds":15.5,"entry_stake":3.0,"entry_status":"placed","entry_bet_id":"402893387975","opened_at":"2025-09-24 15:15:45","exit_status":"STALE","exit_bet_id":null,"exit_odds":null,"exit_stake":null,"closed_at":"2025-10-18 14:11:14","realized_pnl":null,"net_pl":null,"error":null,"role":"PARENT","hedge_of":null,"source":"A","ts":null,"bf_bet_id":null,"customer_ref":null,"entry_matched_odds":null,"entry_matched_stake":null,"exit_matched_odds":null,"exit_matched_stake":null,"child_bf_bet_id":null,"notes":null,"stop_ticks":4,"stop_loss_triggered":0,"greened_up":0,"exit_kind":null}]
+
+
+--- dashboard_runners ---
+[{"day":"2025-09-20","marketId":"1.247938495","selectionId":"2061271","runner_name":"Callahan","odd":3.75,"implied_prob":0.26666666666666665186,"band_low":null,"band_high":null,"last_snapshot_ts":"2025-09-20 13:29:59","source":"DIRECT_ODDS","top6_rank":1,"first_seen_rank":1,"first_seen_ts":"2025-09-20 13:28:37","in_top6":1,"bar_pre_norm":1.0,"bar_post_norm":1.0,"bar_display_norm":1.0,"bar_color":"BLUE","flow_ppm":0.0,"vol_1m":0.0,"trend":"FLAT"},
+{"day":"2025-09-20","marketId":"1.247938495","selectionId":"13095814","runner_name":"Seance","odd":4.5,"implied_prob":0.22222222222222223209,"band_low":null,"band_high":null,"last_snapshot_ts":"2025-09-20 13:29:59","source":"DIRECT_ODDS","top6_rank":2,"first_seen_rank":2,"first_seen_ts":"2025-09-20 13:28:37","in_top6":1,"bar_pre_norm":0.8333333333333332149,"bar_post_norm":0.8333333333333332149,"bar_display_norm":0.8333333333333332149,"bar_color":"BLUE","flow_ppm":0.0,"vol_1m":0.0,"trend":"FLAT"}]
+
+
+--- plan_ledger ---
+[{"id":1,"day":"2025-10-04","run_id":"","plan_id":"128752","marketId":"1.248552312","selectionId":"70148021","category":"field","allow_letters":"[]","budget_units":1,"max_open_parents":1,"letter":"S","note":"","scalp_direction":null,"proposed_odds":null,"proposed_stake":null,"confidence":0.66000000000000005329,"blueprint_match":null,"window_tag":null,"anchor_odd":null,"oc_stage":null,"decided_at":"2025-10-04 14:02:36","status":"open","why":"schema-test","parent_order_id":null,"child_order_id":null,"updated_at":"2025-10-04 14:02:36","epic_id":"1.248552312","epic_stories":0,"epic_rank":0,"family":"MASTERY","direction":"BACK->LAY","target_ticks":1,"px":4.7999999999999998223,"size":2.0,"plan_json":"{\"enter\":true,\"marketId\":\"1.248552312\",\"selectionId\":\"70148021\",\"family\":\"MASTERY\",\"letter\":\"S\",\"direction\":\"BACK->LAY\",\"target_ticks\":1,\"px\":4.8,\"size\":2.0,\"confidence\":0.66,\"plan_why\":\"schema-test\"}","plan_why":null},
+{"id":2,"day":"2025-10-07","run_id":"","plan_id":"129135","marketId":"TEST-001","selectionId":"1000","category":"field","allow_letters":"[]","budget_units":1,"max_open_parents":1,"letter":"A","note":"","scalp_direction":null,"proposed_odds":null,"proposed_stake":null,"confidence":0.0,"blueprint_match":null,"window_tag":null,"anchor_odd":null,"oc_stage":null,"decided_at":"2025-10-07 06:39:32","status":"no_trade","why":"","parent_order_id":null,"child_order_id":null,"updated_at":"2025-10-07 06:39:32","epic_id":"TEST-001","epic_stories":6,"epic_rank":1,"family":"","direction":"","target_ticks":0,"px":0.0,"size":0.0,"plan_json":"{\"marketId\":\"TEST-001\",\"selectionId\":\"1000\",\"letter\":\"A\",\"enter\":false,\"why\":\"\",\"run_id\":null,\"epic_id\":\"TEST-001\",\"epic_stories\":6,\"epic_rank\":1}","plan_why":null}]
+
+
+--- dashboard_runs ---
+[{"run_id":"FEEDER-2025-09-20-122059","mode":"LIVE","source_mode":"MIRROR","day":"2025-09-20","speed_x":1.0,"now_ts":"2025-09-20 12:20:59","status":"running","last_heartbeat_ts":"2025-09-20 12:20:59"},
+{"run_id":"FEEDER-2025-09-20-122100","mode":"LIVE","source_mode":"MIRROR","day":"2025-09-20","speed_x":1.0,"now_ts":"2025-09-20 12:21:30","status":"running","last_heartbeat_ts":"2025-09-20 12:21:30"}]
+
+
+--- playbooks ---
+[{"id":1,"day":"2025-10-16","marketId":"1.23456789","selectionId":999,"strategy":"BTL_SCOUT","oc_stage":"OC4","pattern_key":"MOCK-OC4-True","band_low":3.0,"band_high":4.0,"entry_odds":3.3999999999999999111,"exit_odds":3.7999999999999998223,"pnl":2.0343299031442332314,"outcome":"WIN","exposure":10.0,"confidence":0.77000000000000001776,"realized_at":"2025-10-16 19:29:27","meta_json":"{\"sim\": true}","source":"TEST"},
+{"id":2,"day":"2025-10-16","marketId":"1.23456789","selectionId":999,"strategy":"BTL_SCOUT","oc_stage":"OC6","pattern_key":"MOCK-OC6-False","band_low":3.0,"band_high":4.0,"entry_odds":3.3999999999999999111,"exit_odds":3.7999999999999998223,"pnl":-2.4142189077388342965,"outcome":"LOSS","exposure":10.0,"confidence":0.77000000000000001776,"realized_at":"2025-10-16 19:29:27","meta_json":"{\"sim\": true}","source":"TEST"}]
+
+
+--- dashboard_strategy_perf ---
+[{"strategy":"BLUEPRINTS","p_q":1,"p_p":2,"p_m":3,"c_q":0,"c_p":1,"c_m":2,"open_parents":1,"matched_liab":50.0,"unmatched_liab":5.0,"pnl_today":12.339999999999999857,"last_trade_ts":"2025-09-29 11:48:18","mode":"TEST"},
+{"strategy":"LADDER_STRATEGY","p_q":0,"p_p":1,"p_m":0,"c_q":0,"c_p":0,"c_m":0,"open_parents":0,"matched_liab":20.0,"unmatched_liab":0.0,"pnl_today":-5.6699999999999999289,"last_trade_ts":"2025-09-29 11:48:18","mode":"TEST"}]
+
+
+--- playbooks_diagnostics ---
+[{"day":"2025-09-17","plan_id":null,"letter":null,"strategy":null,"marketId":"1.247877436","selectionId":88237677,"pair_complete":null,"green_up_before_off":0,"time_to_match_s":null,"expected_ticks":null,"realized_ticks":null,"net_pl":-7.3200000000000002842,"cause_tag":"loss","meta_json":"{\"exit_kind\":null,\"off_at\":null}","created_at":"2025-10-16 20:47:20"},
+{"day":"2025-09-17","plan_id":null,"letter":null,"strategy":null,"marketId":"1.247877436","selectionId":88237677,"pair_complete":null,"green_up_before_off":0,"time_to_match_s":null,"expected_ticks":null,"realized_ticks":null,"net_pl":7.3499999999999996447,"cause_tag":"ok","meta_json":"{\"exit_kind\":null,\"off_at\":null}","created_at":"2025-10-16 20:47:20"}]
+
+
+--- dashboard_tiles ---
+[{"tile_id":1,"metric":"profit_today","value":0.0,"delta":0.0,"unit":"£","colour":"GREY","updated_at":"2025-10-25 18:28:28"},
+{"tile_id":2,"metric":"profit_d7","value":0.0,"delta":0.0,"unit":"£","colour":"GREY","updated_at":"2025-10-25 18:28:28"}]
+
+
+--- playbooks_insights ---
+[{"day":"2025-08-21","letter":null,"strategy":null,"trades":55,"pair_complete_rate":null,"green_rate":0.0,"win_rate":0.30909090909090908283,"avg_pnl":-20.460888888888888459,"total_pnl":-920.73999999999998067,"avg_slippage":null,"avg_latency_ms":null,"avg_confidence":null,"avg_volatility":null,"recommendation_json":"{\"cap_adj\":null,\"conf_thresh\":null}","updated_at":"2025-10-16 20:47:20"},
+{"day":"2025-08-24","letter":null,"strategy":null,"trades":373,"pair_complete_rate":null,"green_rate":0.0,"win_rate":0.43699731903485252715,"avg_pnl":0.28272727272727276925,"total_pnl":83.970000000000020179,"avg_slippage":null,"avg_latency_ms":null,"avg_confidence":null,"avg_volatility":null,"recommendation_json":"{\"cap_adj\":null,\"conf_thresh\":null}","updated_at":"2025-10-16 20:47:20"}]
+
+
+--- dashboard_tiles_legacy ---
+[{"day":"2025-09-20","mode":"LIVE","total":0.0,"yesterday":0.0,"today":0.0,"d7":0.0,"d30":0.0,"hit_rate":0.0,"pnl_per_hour":0.0,"avg_gain":0.0,"win_pct_mkt":0.0,"bank":478.62999999999997768,"used_exposure":0.0,"last_refreshed_ts":"2025-09-20 20:57:23"},
+{"day":"2025-09-21","mode":"LIVE","total":0.0,"yesterday":0.0,"today":0.0,"d7":0.0,"d30":0.0,"hit_rate":0.0,"pnl_per_hour":0.0,"avg_gain":0.0,"win_pct_mkt":0.0,"bank":0.0,"used_exposure":0.0,"last_refreshed_ts":"2025-09-21 23:44:47"}]
+
+
+--- playbooks_learning ---
+[{"day":"2025-09-29","marketId":"1.248311039","selectionId":"233636","letter":"A","strategy":"","side":"","entry_odds":0.0,"entry_stake":0.0,"exit_odds":0.0,"exit_stake":0.0,"net_pl":-0.2,"confidence":0.5,"oc_stage_entry":"OC?","class_band":"mid","source":"REPLAY","replay_run_id":"20250930-030720","meta_json":"{\"day\":\"2025-09-29\",\"mid\":\"1.248311039\",\"sid\":\"233636\",\"letter\":\"A\",\"band\":\"ACTIVE\",\"epic_stories\":0,\"distance_band\":\"1m-1m2\",\"code\":\"FLAT\",\"tto_window\":\"30-10\",\"class_band\":\"mid\",\"fav_rank_bin\":\"fav\",\"pnl\":-0.2,\"target_ticks\":1,\"success\":false,\"stoploss\":true,\"hedge\":false}","created_at":"2025-10-17 06:21:22"},
+{"day":"2025-09-29","marketId":"1.248311039","selectionId":"7038707","letter":"A","strategy":"","side":"","entry_odds":0.0,"entry_stake":0.0,"exit_odds":0.0,"exit_stake":0.0,"net_pl":-0.2,"confidence":0.5,"oc_stage_entry":"OC?","class_band":"mid","source":"REPLAY","replay_run_id":"20250930-030720","meta_json":"{\"day\":\"2025-09-29\",\"mid\":\"1.248311039\",\"sid\":\"7038707\",\"letter\":\"A\",\"band\":\"ACTIVE\",\"epic_stories\":0,\"distance_band\":\"1m-1m2\",\"code\":\"FLAT\",\"tto_window\":\"30-10\",\"class_band\":\"mid\",\"fav_rank_bin\":\"fav\",\"pnl\":-0.2,\"target_ticks\":1,\"success\":false,\"stoploss\":true,\"hedge\":false}","created_at":"2025-10-17 06:21:22"}]
+
+
+--- decisions ---
+[{"id":1,"run_id":"DRYRUN-TEST","marketId":"1.TEST.MKT.001","selectionId":"123456","decided_at":"2025-09-20 14:54:42","signal_type":null,"blueprint_match":null,"confidence":null,"scalp_direction":null,"proposed_odds":null,"proposed_stake":null,"notes":"A","meta_json":"{\"placement_outcome\":\"not_placed\",\"why\":\"range_gate:0.0ticks<3\"}","order_id":null,"why":"range_gate:0.0ticks<3"},
+{"id":2,"run_id":"LIVE-20250920-151613","marketId":"1.247938489","selectionId":"2513164","decided_at":"2025-09-20 15:16:21","signal_type":null,"blueprint_match":null,"confidence":null,"scalp_direction":null,"proposed_odds":null,"proposed_stake":null,"notes":"A","meta_json":"{\"placement_outcome\":\"not_placed\",\"why\":\"range_gate:0.0ticks<3\"}","order_id":null,"why":"range_gate:0.0ticks<3"}]
+
+
+--- playbooks_settled ---
+[{"day":"2025-09-18","betId":"402122873100","marketId":"1.247877436","selectionId":88237677,"letter":null,"strategy":null,"side":"LAY","entry_odds":null,"entry_stake":null,"exit_odds":3.9500000000000001776,"exit_stake":2.4799999999999999822,"profit":-7.3200000000000002842,"commission":null,"net_pl":-7.3200000000000002842,"pnl_pct":0.0,"odds_diff":null,"odds_ticks":null,"mto_minutes":null,"oc_stage_entry":null,"oc_stage_exit":null,"band_low_entry":null,"band_high_entry":null,"fav_rank_entry":null,"volatility_band":null,"venue":null,"going":null,"distance":null,"class_band":null,"trainer":null,"jockey":null,"exit_kind":null,"confidence":null,"slippage":null,"latency_ms":null,"pair_id":null,"child_id":null,"pair_complete":null,"hedge_ratio":null,"green_up_pnl":null,"liability_released":null,"risk_state":"OPEN","outcome_bin":"LOSS","meta_json":"{\"settledDate\":\"2025-09-18T16:52:54.000Z\",\"customerOrderRef\":\"LAY-20250918154954-804\"}","created_at":"2025-10-17 06:21:02","segment_key":"unknown"},
+{"day":"2025-09-18","betId":"402122874150","marketId":"1.247877436","selectionId":88237677,"letter":null,"strategy":null,"side":"BACK","entry_odds":null,"entry_stake":null,"exit_odds":4.0,"exit_stake":2.4500000000000001776,"profit":7.3499999999999996447,"commission":null,"net_pl":7.3499999999999996447,"pnl_pct":0.0,"odds_diff":null,"odds_ticks":null,"mto_minutes":null,"oc_stage_entry":null,"oc_stage_exit":null,"band_low_entry":null,"band_high_entry":null,"fav_rank_entry":null,"volatility_band":null,"venue":null,"going":null,"distance":null,"class_band":null,"trainer":null,"jockey":null,"exit_kind":null,"confidence":null,"slippage":null,"latency_ms":null,"pair_id":null,"child_id":null,"pair_complete":null,"hedge_ratio":null,"green_up_pnl":null,"liability_released":null,"risk_state":"OPEN","outcome_bin":"WIN","meta_json":"{\"settledDate\":\"2025-09-18T16:52:54.000Z\",\"customerOrderRef\":\"BACK-20250918154954-727\"}","created_at":"2025-10-17 06:21:02","segment_key":"unknown"}]
+
+
+--- events ---
+[{"ts":"2025-09-24 13:07:59","level":"INFO","source":"live_router","message":"Rehedge loop started"},
+{"ts":"2025-09-24 13:07:59","level":"INFO","source":"live_router","message":"creds resolved app=CZHo…xWIn tok=kJMs…jVY= (env/db/DC)"}]
+
+
+--- replay_reports_ingested ---
+[{"filename":"replay_report_20250930-121805.json","outcomes":14030498,"ingested_at":"2025-10-04 02:05:20"},
+{"filename":"replay_report_20250930-122000.json","outcomes":14030498,"ingested_at":"2025-10-04 02:07:12"}]
+
+
+--- exposure_log ---
+[{"id":1,"day":"2025-10-16","exposure":34193.500000000001115,"sampled_at":"2025-10-16 18:05:27"}]
+
+
+--- replay_resume_progress ---
+[{"id":1,"last_epoch":12,"last_day_idx":3,"updated_at":"2025-10-04 03:10:37"}]
+
+
+--- inbound_bets_min ---
+
+
+--- runner_activity ---
+
+
+--- inbound_oc_cache ---
+[{"id":10788,"marketId":"1.249069347","selectionId":"56183546","anchor_odd":110.00000000000000888,"last_sync_ts":"2025-10-16 19:03:02","oc1":16.000000000000000888,"oc1_band_json":"[15.68, 16.0, 16.32]","oc2":16.499999999999999111,"oc2_band_json":"[16.169999999999998, 16.5, 16.830000000000002]","oc3":17.0,"oc3_band_json":"[16.66, 17.0, 17.34]","oc4":17.5,"oc4_band_json":"[17.15, 17.5, 17.85]","oc5":null,"oc5_band_json":null,"oc6":null,"oc6_band_json":null,"oc7":null,"oc7_band_json":null,"oc8":null,"oc8_band_json":null,"oc9":null,"oc9_band_json":null,"oc10":null,"oc10_band_json":null,"oc11":null,"oc11_band_json":null,"oc12":null,"oc12_band_json":null,"oc13":null,"oc13_band_json":null,"oc14":null,"oc14_band_json":null,"oc15":null,"oc15_band_json":null,"oc16":null,"oc16_band_json":null,"oc17":null,"oc17_band_json":null,"oc18":null,"oc18_band_json":null,"oc19":null,"oc19_band_json":null,"oc20":null,"oc20_band_json":null},
+{"id":11240,"marketId":"1.249069436","selectionId":"74312534","anchor_odd":3.3500000000000000888,"last_sync_ts":"2025-10-16 19:03:02","oc1":2.9199999999999999289,"oc1_band_json":"[2.8615999999999997, 2.92, 2.9784]","oc2":2.980000000000000071,"oc2_band_json":"[2.9204, 2.98, 3.0396]","oc3":3.0,"oc3_band_json":"[2.94, 3.0, 3.06]","oc4":3.2999999999999998223,"oc4_band_json":"[3.234, 3.3, 3.3659999999999997]","oc5":3.5499999999999998223,"oc5_band_json":"[3.4789999999999996, 3.55, 3.621]","oc6":3.6000000000000000888,"oc6_band_json":"[3.528, 3.6, 3.672]","oc7":3.5499999999999998223,"oc7_band_json":"[3.55]","oc8":null,"oc8_band_json":null,"oc9":5.5999999999999996447,"oc9_band_json":"[5.6]","oc10":null,"oc10_band_json":null,"oc11":null,"oc11_band_json":null,"oc12":null,"oc12_band_json":null,"oc13":null,"oc13_band_json":null,"oc14":null,"oc14_band_json":null,"oc15":null,"oc15_band_json":null,"oc16":null,"oc16_band_json":null,"oc17":null,"oc17_band_json":null,"oc18":null,"oc18_band_json":null,"oc19":null,"oc19_band_json":null,"oc20":null,"oc20_band_json":null}]
+
+
+--- runner_history ---
+[{"runner_name":"A Major Payne","selectionId":68361512,"marketId":"1.248102570","runs":1,"wins":1,"losses":0,"net_pnl":3.0,"last_run_date":"2025-09-24T15:09:27.000Z","last_win_date":"2025-09-24T15:09:27.000Z","form_string":"1","trainerName":null,"jockeyName":null,"age":null,"stallDraw":null,"officialRating":null,"weightValue":null,"updated_at":"2025-10-03 21:28:47"},
+{"runner_name":"Accrual","selectionId":47603763,"marketId":"1.248043925","runs":1,"wins":1,"losses":0,"net_pnl":11.680000000000005933,"last_run_date":"2025-09-23T17:33:04.000Z","last_win_date":"2025-09-23T17:33:04.000Z","form_string":"1","trainerName":null,"jockeyName":null,"age":null,"stallDraw":null,"officialRating":null,"weightValue":null,"updated_at":"2025-10-03 21:28:47"}]
+
+
+--- indicators_opportunities ---
+
+
+--- runners ---
+[{"marketId":"1.248003904","selectionId":"3471370","runner_name":"Less than 9.5 lengths"},
+{"marketId":"1.248003904","selectionId":"2431199","runner_name":"9.5 - 13.5 lengths inclusive"}]
+
+
+--- internal_bank ---
+[{"day":"2025-09-30","start_balance":1000.0,"current_balance":-8680076.2000105518012,"updated_at":"2025-09-30 11:59:24"},
+{"day":"2025-10-01","start_balance":1000.0,"current_balance":790455.1600005037315,"updated_at":"2025-10-01 23:55:05"}]
+
+
+--- runs ---
+[{"id":1,"started_at":"2025-09-24 13:07:59","finished_at":null,"mode":"LIVE","blueprint_file":null,"notes":"LIVE-20250924-130622"},
+{"id":2,"started_at":"2025-09-24 14:39:01","finished_at":null,"mode":"LIVE","blueprint_file":null,"notes":"LIVE-20250924-142715"}]
+
+
+--- liability_signals ---
+
+
+--- strategies_performance ---
+[{"id":1,"run_id":"LIVE-20250924-130622","ts":"2025-09-24 13:08:01","mode":"LIVE","strategy":"A","marketId":"1.248102544","selectionId":"85419008","action":"ENTER","stake":3.0,"price":30.0,"pnl":0.0,"source":"A"},
+{"id":2,"run_id":"LIVE-20250924-130622","ts":"2025-09-24 13:08:14","mode":"LIVE","strategy":"A","marketId":"1.248102544","selectionId":"83539443","action":"ENTER","stake":3.0,"price":8.1999999999999992894,"pnl":0.0,"source":"A"}]
+
+
+--- live_state ---
+[{"marketId":"1.249069436","pnl_now":4.0700000000000002842,"liability":16.799999999999997157,"status":"OPEN","updated_at":"2025-10-29 16:36:32"},
+{"marketId":"1.249069347","pnl_now":0.04,"liability":3.0,"status":"OPEN","updated_at":"2025-10-29 16:36:32"}]
+
+
+--- v_liability_context ---
+[{"id":1,"day":"2025-10-01","marketId":"1.248414542","selectionId":"1119491","letter":"P","distance_band":"2-4","fav_rank":"fav","day_of_week":"Wed","surface":"flat","class_band":"mid","target_ticks":1,"realized_ticks":8,"success":1,"stoploss_hit":0,"hedge_hit":1,"entry_px":2.6800000000000001598,"pnl":0.0,"weight":1.0,"priority":99,"liab_value":0.0,"liab_over250":0},
+{"id":2,"day":"2025-10-01","marketId":"1.248414542","selectionId":"1119491","letter":"S","distance_band":"2-4","fav_rank":"fav","day_of_week":"Wed","surface":"flat","class_band":"mid","target_ticks":1,"realized_ticks":8,"success":1,"stoploss_hit":0,"hedge_hit":1,"entry_px":2.6800000000000001598,"pnl":0.0,"weight":1.0,"priority":99,"liab_value":0.0,"liab_over250":0}]
+
+
+--- live_state_table ---
+[{"marketId":"test.mid","pnl_now":1.2299999999999999822,"liability":45.600000000000004973,"status":"OPEN","updated_at":"2025-10-24 11:58:57"},
+{"marketId":"1.249069436","pnl_now":-19.222889610389614745,"liability":338.70000000000000106,"status":"OPEN","updated_at":"2025-10-24 12:15:34"}]
+
+
+--- v_mastery_live ---
+[{"distance_band":"unk","fav_rank_bin":"unk","surface_type":"unk","day_of_week":"unk","bins":2,"total_pnl":null,"avg_mae":0.0,"total_weight":262402.99999999998625,"p1_mean":null,"p2_mean":null,"p3_mean":null}]
+
+
+--- loss_tags ---
+[{"id":1,"day":"2025-09-30","marketId":"1.248360002","selectionId":"85557496","tag":"stoploss","created_at":"2025-10-01 09:07:33","dow":""},
+{"id":2,"day":"2025-09-30","marketId":"1.248360002","selectionId":"2108962","tag":"late_entry","created_at":"2025-10-01 09:07:33","dow":""}]
+
+
+--- v_mastery_training ---
+[{"marketId":"1.249449609","pnl_total":0.1,"liability_total":569.09999999999998365,"ratio":0.00018000000000000003552,"slope_ppm":0.0,"tick_vel_3s_up":0.0,"mto_minutes":0,"action":"unknown","reward":0.0},
+{"marketId":"1.249449616","pnl_total":11.187099999999998711,"liability_total":150.64080000000002357,"ratio":0.074260000000000001563,"slope_ppm":0.0,"tick_vel_3s_up":0.0,"mto_minutes":0,"action":"unknown","reward":0.0}]
+
+
+--- market_data ---
+[{"marketId":"1.248559535","selectionId":88669368,"runnerName":"Sindagan","trainerName":null,"jockeyName":null,"age":null,"stallDraw":null,"officialRating":null,"weightValue":null,"venue":null,"eventName":null,"marketName":"7f Mdn","marketStartTime":null,"distance":null,"going":null,"raw_json":"{\"selectionId\": 88669368, \"runnerName\": \"Sindagan\", \"handicap\": 0.0, \"sortPriority\": 1}"},
+{"marketId":"1.248559535","selectionId":452611,"runnerName":"Causeway","trainerName":null,"jockeyName":null,"age":null,"stallDraw":null,"officialRating":null,"weightValue":null,"venue":null,"eventName":null,"marketName":"7f Mdn","marketStartTime":null,"distance":null,"going":null,"raw_json":"{\"selectionId\": 452611, \"runnerName\": \"Causeway\", \"handicap\": 0.0, \"sortPriority\": 2}"}]
+
+
+--- v_odds_first_last_today ---
+[{"marketId":"1.249715193","selectionId":"15071","ltp_first":7.0,"ltp_last":3.9500000000000001776},
+{"marketId":"1.249715193","selectionId":"2166270","ltp_first":4.2999999999999998223,"ltp_last":4.7999999999999998223}]
+
+
+--- markets_schedule ---
+[{"marketId":"1.248980759","venue":"Lingfield","course":"Lingfield","event_name":"Lingfield 14th Oct","market_name":"To Be Placed","off_at_utc":"2025-10-14T12:30:00Z","country_code":"GB","off_ts":null,"source":null,"eventId":null,"marketTypeCode":null},
+{"marketId":"1.248980757","venue":"Lingfield","course":"Lingfield","event_name":"Lingfield 14th Oct","market_name":"1m4f Hcap","off_at_utc":"2025-10-14T12:30:00Z","country_code":"GB","off_ts":null,"source":null,"eventId":null,"marketTypeCode":null}]
+
+
+--- v_odds_latest ---
+[{"marketId":"1.247938489","selectionId":"2513164","ltp":4.7999999999999998223,"snapshot_ts":"2025-09-20 12:45:46"},
+{"marketId":"1.247938489","selectionId":"82473637","ltp":5.0999999999999996447,"snapshot_ts":"2025-09-20 12:45:46"}]
+
+
+--- mastery_cache ---
+[{"ts":"2025-10-24T07:33:20.500549+00:00","event_type":"cashout_tick","marketId":"1.249069436","json_payload":"{\"ts\": \"2025-10-24T07:33:20.500549+00:00\", \"marketId\": \"1.249069436\", \"cashout_total\": -19.2229, \"liability_total\": 338.7, \"source\": \"LIVE\"}"},
+{"ts":"2025-10-24T07:33:20.500549+00:00","event_type":"cashout_tick","marketId":"1.249069347","json_payload":"{\"ts\": \"2025-10-24T07:33:20.500549+00:00\", \"marketId\": \"1.249069347\", \"cashout_total\": 0.039, \"liability_total\": 6.0, \"source\": \"LIVE\"}"}]
+
+
+--- v_plan_ledger_compat ---
+[{"id":1,"day":"2025-10-04","run_id":"","plan_id":"128752","marketId":"1.248552312","selectionId":"70148021","letter":"S","note":"","direction":null,"px":null,"size":null,"confidence":0.66000000000000005329,"blueprint_match":null,"window_tag":null,"status":"open","why":"schema-test","parent_order_id":null,"child_order_id":null,"epic_id":"1.248552312","epic_stories":0,"epic_rank":0,"decided_at":"2025-10-04 14:02:36","updated_at":"2025-10-04 14:02:36"},
+{"id":2,"day":"2025-10-07","run_id":"","plan_id":"129135","marketId":"TEST-001","selectionId":"1000","letter":"A","note":"","direction":null,"px":null,"size":null,"confidence":0.0,"blueprint_match":null,"window_tag":null,"status":"no_trade","why":"","parent_order_id":null,"child_order_id":null,"epic_id":"TEST-001","epic_stories":6,"epic_rank":1,"decided_at":"2025-10-07 06:39:32","updated_at":"2025-10-07 06:39:32"}]
+
+
+--- mastery_feedback ---
+[{"id":1,"ts":"2025-10-24T11:45:50.762090+00:00","marketId":"1.249449649","plan_bias":0.0,"actual_bias":0.0,"bias_delta":0.0,"exposure_target":0.0,"exposure_actual":0.0,"exposure_gap":0.0,"hedge_eff":1.0,"pnl_now":0.0,"status":"VOLATILE","pnl_delta":0.0},
+{"id":2,"ts":"2025-10-24T11:46:56.488978+00:00","marketId":"1.249449649","plan_bias":0.0,"actual_bias":0.0,"bias_delta":0.0,"exposure_target":0.0,"exposure_actual":0.0,"exposure_gap":0.0,"hedge_eff":1.0,"pnl_now":0.0,"status":"VOLATILE","pnl_delta":0.0}]
+
+
+--- v_strategy_perf ---
+
+
+--- mastery_outcomes_raw ---
+[{"day":"2025-10-01","marketId":"1.248414542","selectionId":"1119491","letter":"P","distance_band":"2-4","fav_rank":"fav","day_of_week":"Wed","surface":"flat","class_band":"mid","target_ticks":1,"realized_ticks":8,"success":1,"stoploss_hit":0,"hedge_hit":1,"entry_px":2.6800000000000001598,"pnl":0.0,"weight":1.0,"priority":99,"created_at":"2025-10-03T06:33:01Z","id":1,"source":"REPLAY","confidence":null},
+{"day":"2025-10-01","marketId":"1.248414542","selectionId":"1119491","letter":"S","distance_band":"2-4","fav_rank":"fav","day_of_week":"Wed","surface":"flat","class_band":"mid","target_ticks":1,"realized_ticks":8,"success":1,"stoploss_hit":0,"hedge_hit":1,"entry_px":2.6800000000000001598,"pnl":0.0,"weight":1.0,"priority":99,"created_at":"2025-10-03T06:33:01Z","id":2,"source":"REPLAY","confidence":null}]

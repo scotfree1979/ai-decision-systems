@@ -1,0 +1,245 @@
+import os
+import json
+import requests
+import logging
+from datetime import datetime
+
+# -----------------------------
+# 🔐 Session Management (Unified Refactor)
+# -----------------------------
+# Betfair APP KEY — single source of truth (do not read from DB/env)
+BETFAIR_APP_KEY = "CZHojduNWa3kxWIn"   # <-- keep your literal here
+# Optional: legacy alias if anything still imports APP_KEY
+APP_KEY = BETFAIR_APP_KEY
+
+# (Optional) a parking spot for temporary session (not required if you prefer DB/env only)
+BETFAIR_SESSION = None
+# === PATCH END ===
+
+# engines/daily_config.py  (top-level, alongside your other constants)
+
+APP_KEY = "CZHojduNWa3kxWIn"
+
+def get_app_key() -> str:
+    """Single source of truth for the App Key."""
+    try:
+        return APP_KEY.strip()
+    except Exception:
+        return ""
+
+
+# -----------------------------
+# 📦 Path Setup
+# -----------------------------
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DB_PATH = os.path.join(BASE_DIR, "data", "bets.db")
+
+# -----------------------------
+# ⚙️ Environment & Settings
+# -----------------------------
+TEST_MODE = False
+STAKE_MULTIPLIER = 1.5
+TODAY_DATE = datetime.utcnow().strftime("%Y-%m-%d")
+# autoscalp LIVE auto‑reconcile cadence (seconds)
+AUTO_RECONCILE_SECONDS = 60
+
+# Global toggle: force router to use dynamic sizing for ALL letters (LIVE).
+USE_ROUTER_DYNAMIC_STAKE = True        # ← set True to enforce for every letter
+
+# ...or keep this list if you want per-letter forcing later:
+USE_ROUTER_DYNAMIC_STAKE_LETTERS = []  # e.g. ["A","B","G","X","R","F","L","Z","P","I","T","C","E","K"]
+
+# Add or adjust this structure
+MARKET_MONITOR = {
+    "bands": {
+        "ACTIVE_MIN": 1.50,   # odds >= 1.5
+        "ACTIVE_MAX": 8.00,   # up to 8.0
+        "PASSIVE_MAX": 12.00, # up to 12.0
+        # >12.0 = ignored automatically
+    },
+
+    "letter_policy": {
+        # Overarching
+        "P": ("ACTIVE", "PASSIVE"),  # BLUEPRINTS
+
+        # Always-on & steam families
+        "A": ("ACTIVE", "PASSIVE"),  # ALWAYS_ON
+        "S": ("ACTIVE", "PASSIVE"),  # STEAM
+        "Z": ("ACTIVE", "PASSIVE"),  # OG_STRATEGY
+        "F": ("ACTIVE", "PASSIVE"),  # STEAM_FADE
+
+        # BTL families
+        "B": ("ACTIVE", "PASSIVE"),  # BTL_SCOUT
+        "G": ("ACTIVE", "PASSIVE"),  # BTL_AGGR
+
+        # Tactical
+        "X": ("ACTIVE",),            # CROSSOVER
+        "R": ("ACTIVE",),            # BREAKOUT
+
+        # Mechanical
+        "L": ("ACTIVE", "PASSIVE"),  # LADDER
+
+        # Risk
+        "M": ("ACTIVE", "PASSIVE"),  # MLM
+
+        # In-play families
+        "I": ("IN_PLAY",),           # IP1_SHOCK_DRIFT
+        "T": ("IN_PLAY",),           # IP2_TIRED_LEADER
+        "C": ("IN_PLAY",),           # IP3_CLOSE_FINISH
+        "E": ("IN_PLAY",),           # IP4_FENCE_ERROR
+        "K": ("IN_PLAY",),           # IP5_COLLAPSE_FADE
+    },
+
+    # Optional flags
+    # We deliberately do NOT enable fav_sub_1p5_active,
+    # since horses starting below 1.5 should be left alone
+    # and only re-enter if they drift into ACTIVE >= 1.5.
+}
+
+# ============================================================
+# 💰 Budget & Risk Controls (Global)
+# ============================================================
+BANK_PCT_PER_ENTRY    = 0.004   # 0.4% of bank per entry (main sizing knob)
+MAX_BANK_PCT_PER_TRADE = 0.02   # absolute safety cap (2% of bank per trade)
+MIN_STAKE             = 2.00    # Betfair minimum
+L1_FRACTION_CAP       = 0.35    # at most 35% of L1 liquidity on the relevant side
+
+# If you want a "scout always-on" toggle for testing/learning:
+SCOUT_ALWAYS_ON       = True    # <<< flip this to start/stop scout strategy
+
+# ============================================================
+# 📍 TARGET: engines/daily_config.py
+# 🔎 ACTION: append these tunables (anywhere near the other risk knobs)
+# ============================================================
+# --------------------------------------------
+# 📐 Direction Engine Tunables (story + trend)
+# --------------------------------------------
+# Analyzer override threshold
+MIN_ANALYZER_CONF = 0.55
+
+# Lifespan story threshold (anchor -> now, in ticks)
+T_TOTAL = 2
+
+# Mid-window settings (minutes)
+W_MID_PRE = 15    # pre-off
+W_MID_IP  = 2     # in-play
+
+# Mid-window slope threshold (ticks per minute; approx)
+S_MID = 0.10
+
+# Micro momentum threshold (10s oc_momentum_ticks)
+M_MICRO = 2
+
+# Flatness / volatility thresholds (ticks std over mid window)
+V_STD       = 0.60   # if below, considered quiet
+V_STD_CHOP  = 1.40   # (reserved) treat as choppy when exceeded
+
+# Passive band stake multiplier (already used in sizing)
+# PASSIVE_MULT = 0.5   # keep your existing setting here
+
+
+# ============================================================
+# 📊 Per-letter Stake Configuration (Single Source of Truth)
+# ============================================================
+# PRE-OFF families
+BASE_STAKE_P = 3.00;  STAKE_MAX_P = 10.00   # Blueprints (overarching)
+BASE_STAKE_A = 3.00;  STAKE_MAX_A = 8.00    # Always-On
+BASE_STAKE_S = 3.00;  STAKE_MAX_S = 10.00   # Steam
+BASE_STAKE_Z = 3.00;  STAKE_MAX_Z = 8.00    # OG Strategy (legacy Steam)
+BASE_STAKE_L = 2.50;  STAKE_MAX_L = 6.00    # Ladder (multi-entry tool)
+BASE_STAKE_B = 4.00;  STAKE_MAX_B = 12.00   # BTL Scout
+BASE_STAKE_G = 4.00;  STAKE_MAX_G = 12.00   # BTL Aggro
+BASE_STAKE_X = 4.50;  STAKE_MAX_X = 12.00   # Crossover (decisive tactical)
+BASE_STAKE_R = 4.50;  STAKE_MAX_R = 12.00   # Breakout (big conviction)
+BASE_STAKE_F = 3.50;  STAKE_MAX_F = 8.00    # Steam Fade (contrarian)
+
+# IN-PLAY families
+BASE_STAKE_I = 3.00;  STAKE_MAX_I = 6.00    # IP1 Shock Drift
+BASE_STAKE_T = 3.00;  STAKE_MAX_T = 6.00    # IP2 Tired Leader
+BASE_STAKE_C = 3.00;  STAKE_MAX_C = 6.00    # IP3 Close Finish
+BASE_STAKE_E = 3.00;  STAKE_MAX_E = 6.00    # IP4 Fence Error
+BASE_STAKE_K = 3.00;  STAKE_MAX_K = 6.00    # IP5 Collapse Fade
+
+# ============================================================
+# 📉 Passive Zone Scaling
+# ============================================================
+# Multiplier for stake sizing when odds fall in the PASSIVE band (8.0 < odds <= 12.0).
+# Applied after BANK_PCT_PER_ENTRY scaling and before per-letter caps.
+PASSIVE_MULT = 0.5
+
+
+# Per-family multipliers (fine tune per letter)
+LETTER_MULT = {
+    # PRE
+    "A":1.00, "S":1.00, "B":1.10, "G":1.15, "F":1.00, "X":1.20, "R":1.20, "L":0.90, "Z":0.90,
+    "P":1.25,  # ← BLUEPRINTS
+    # IN-PLAY
+    "I":0.70, "T":0.70, "C":0.70, "E":0.70, "K":0.70, "P":1.25, "D":0.70, # ← BLUEPRINTS
+}
+
+
+# Hard cash caps by phase (keeps IP smaller than PRE)
+HARD_CAP_PRE = 5.00
+HARD_CAP_IP  = 3.00
+
+
+# --- Stop-Loss Tick Rules ---------------------------------------------------
+# Defines max ticks allowed before stop-loss fires, depending on entry odds
+STOP_TICKS_PER_ODDS = [
+    (3.0, 2),   # odds < 3.0 → 2 ticks
+    (6.0, 1),   # 3.0–6.0 → 1 tick
+    (12.0, 1),  # 6.0–12.0 → 1 tick
+    (1000.0, 1) # everything above → 1 tick
+]
+
+def get_stop_ticks(entry_odds: float, default_ticks: int = 1) -> int:
+    for threshold, ticks in STOP_TICKS_PER_ODDS:
+        if entry_odds <= threshold:
+            return ticks
+    return default_ticks
+
+# engines/daily_config.py
+try:
+    from engines.upgrade_import_patch import get_session_token  # ✅ shim Step-1 creates
+except Exception:
+    def get_session_token():
+        return None
+
+# -----------------------------
+# 💰 Budget Fetching (only when called)
+# -----------------------------
+def fetch_available_budget() -> float:
+    """
+    Fetch available balance from Betfair Account API using Step-1 credentials.
+    Falls back to 800.0 on error.
+    """
+    token = get_session_token()
+    if not token:
+        logging.warning("[⚠️ Warning] No session token available; using fallback budget 500.0")
+        return 500.0
+    try:
+        headers = {
+            "X-Application": APP_KEY,
+            "X-Authentication": token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = json.dumps([{
+            "jsonrpc": "2.0",
+            "method": "AccountAPING/v1.0/getAccountFunds",
+            "params": {},
+            "id": 1
+        }])
+        resp = requests.post(
+            "https://api.betfair.com/exchange/account/json-rpc/v1",
+            headers=headers,
+            data=payload,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data[0].get("result", {}).get("availableToBetBalance", 0.0))
+    except Exception as e:
+        logging.warning(f"[❌ Error] Budget fetch failed: {e} — using 1000.0 fallback")
+        return 1000.0
+

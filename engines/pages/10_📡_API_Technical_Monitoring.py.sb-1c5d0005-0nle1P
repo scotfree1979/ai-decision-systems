@@ -1,0 +1,90 @@
+import streamlit as st
+import requests
+import json
+import datetime
+
+# Page Configuration
+st.set_page_config(page_title="API Technical Monitoring", layout="wide")
+st.title('📡 API Technical Monitoring')
+
+# Headers with session token from session state
+headers = {
+    "X-Application": "CZHojduNWa3kxWIn",
+    "X-Authentication": st.session_state.get('session_token', ''),
+    "Content-Type": "application/json"
+}
+
+# API Back-door methods with enhanced logging
+def hijack_call(method, params=None):
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    payload = {"jsonrpc": "2.0", "method": f"SportsAPING/v1.0/{method}", "params": params or {}, "id": 1}
+    try:
+        start_time = datetime.datetime.now()
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        latency = (datetime.datetime.now() - start_time).total_seconds() * 1000  # latency in ms
+        response.raise_for_status()
+        result = response.json().get('result', {})
+        return result, latency, response.status_code
+    except requests.RequestException as e:
+        return None, None, str(e)
+
+# Check API Status (Keep Alive)
+st.subheader("API Connection Status")
+api_status, latency, status_code = hijack_call("keepAlive")
+if api_status:
+    st.success(f"✅ API Connection Healthy | Latency: {latency:.2f} ms | Status Code: {status_code}")
+else:
+    st.error(f"⚠️ API Connection Issue: {status_code}")
+
+# Session Details
+st.subheader("Session Details")
+if api_status:
+    st.json(api_status)
+else:
+    st.info("Session details unavailable due to connection issue.")
+
+# Detailed API Performance Monitoring
+st.subheader("Detailed API Performance")
+api_methods = [
+    "getAccountFunds",
+    "listCurrentOrders",
+    "listClearedOrders",
+    "listMarketCatalogue"
+]
+
+performance_data = []
+for method in api_methods:
+    _, method_latency, method_status = hijack_call(method)
+    performance_data.append({
+        'API Method': method,
+        'Latency (ms)': method_latency if method_latency else 'N/A',
+        'Status Code/Error': method_status
+    })
+
+st.table(performance_data)
+
+# API Error Tracking
+st.subheader("API Error Log")
+errors = [entry for entry in performance_data if isinstance(entry['Status Code/Error'], str)]
+
+if errors:
+    for error in errors:
+        st.warning(f"⚠️ {error['API Method']} encountered an error: {error['Status Code/Error']}")
+else:
+    st.success("✅ No recent API errors detected.")
+
+# Latency Visualization
+st.subheader("API Latency Overview")
+latency_data = [entry for entry in performance_data if isinstance(entry['Latency (ms)'], float)]
+
+if latency_data:
+    latency_df = pd.DataFrame(latency_data)
+    fig_latency = px.bar(latency_df, x='API Method', y='Latency (ms)', title='API Latency by Method',
+                         color='Latency (ms)', color_continuous_scale='Blues')
+    st.plotly_chart(fig_latency, use_container_width=True)
+else:
+    st.info("No latency data available for visualization.")
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Data sourced from real-time Betfair API monitoring.')

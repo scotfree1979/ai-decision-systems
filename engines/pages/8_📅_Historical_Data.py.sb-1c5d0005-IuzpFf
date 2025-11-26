@@ -1,0 +1,72 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import sqlite3
+
+# Page Configuration
+st.set_page_config(page_title="Historical Data", layout="wide")
+st.title('📅 Historical Data')
+
+# Load Historical Data from Database
+def load_historical_data():
+    conn = sqlite3.connect('/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db')
+    query = """
+    SELECT timestamp, marketId, selectionId, odds, stake, pnl, strategy_name
+    FROM bets
+    ORDER BY timestamp DESC
+    """
+    return pd.read_sql(query, conn)
+
+historical_df = load_historical_data()
+historical_df['timestamp'] = pd.to_datetime(historical_df['timestamp'])
+
+# Data Overview
+st.subheader("Historical Bets Overview")
+st.dataframe(historical_df.head(50), use_container_width=True)
+
+# Monthly Profit & Loss
+st.subheader("Monthly Profit & Loss")
+historical_df['month'] = historical_df['timestamp'].dt.to_period('M')
+monthly_pnl = historical_df.groupby('month')['pnl'].sum().reset_index()
+monthly_pnl['month'] = monthly_pnl['month'].astype(str)
+
+fig_monthly_pnl = px.bar(monthly_pnl, x='month', y='pnl',
+                         title='Monthly Profit & Loss',
+                         labels={'pnl': 'Profit/Loss (£)', 'month': 'Month'},
+                         color='pnl', color_continuous_scale='RdYlGn')
+st.plotly_chart(fig_monthly_pnl, use_container_width=True)
+
+# Profit/Loss Distribution
+st.subheader("Profit/Loss Distribution")
+fig_pnl_distribution = px.histogram(historical_df, x='pnl', nbins=50,
+                                   title='Profit/Loss Distribution of Historical Bets',
+                                   labels={'pnl': 'Profit/Loss (£)'},
+                                   color_discrete_sequence=['#636EFA'])
+st.plotly_chart(fig_pnl_distribution, use_container_width=True)
+
+# Historical Odds Analysis
+st.subheader("Historical Odds Analysis")
+fig_odds_analysis = px.histogram(historical_df, x='odds', nbins=50,
+                                 title='Odds Distribution of Historical Bets',
+                                 labels={'odds': 'Odds'},
+                                 color_discrete_sequence=['#EF553B'])
+st.plotly_chart(fig_odds_analysis, use_container_width=True)
+
+# Strategy Performance Over Time
+st.subheader("Strategy Performance Over Time")
+strategy_pnl = historical_df.groupby(['timestamp', 'strategy_name']).agg({'pnl': 'sum'}).reset_index()
+strategy_pnl['cumulative_pnl'] = strategy_pnl.groupby('strategy_name')['pnl'].cumsum()
+
+fig_strategy_performance = px.line(strategy_pnl, x='timestamp', y='cumulative_pnl', color='strategy_name',
+                                  title='Cumulative Strategy Performance Over Time', markers=True)
+st.plotly_chart(fig_strategy_performance, use_container_width=True)
+
+# Recent Large Wins/Losses
+st.subheader("Recent Significant Trades")
+significant_trades = historical_df[historical_df['pnl'].abs() > historical_df['pnl'].std() * 2].head(20)
+st.dataframe(significant_trades[['timestamp', 'marketId', 'selectionId', 'odds', 'stake', 'pnl', 'strategy_name']],
+             use_container_width=True)
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Dashboard refreshes every 30 seconds. Data sourced from historical database.')

@@ -1,0 +1,31 @@
+# session_manager.py
+
+import requests
+import time
+import threading
+
+APP_KEY = "CZHojduNWa3kxWIn"
+USERNAME = "quickwallets@gmail.com"
+PASSWORD = "MR5049mr!!!"
+headers = {"X-Application": APP_KEY, "Content-Type": "application/json"}
+
+def refresh_session_token(interval=300):
+    global headers
+    login_url = "https://identitysso-cert.betfair.com/api/login"
+    payload = {"username": "quickwallets@gmail.com", "MR5049mr!!!": PASSWORD}
+
+    while True:
+        response = requests.post(login_url, data=payload)
+        login_response = response.json()
+
+        if login_response.get('status') == 'SUCCESS':
+            session_token = login_response['token']
+            headers["X-Authentication"] = session_token
+            print("🔑 Session Token Refreshed")
+        else:
+            print("🚫 Session Token Refresh Failed:", login_response)
+
+        time.sleep(interval)
+
+# Start the refresh token thread immediately on import
+threading.Thread(target=refresh_session_token, daemon=True).start()

@@ -1,0 +1,37 @@
+# 🐎 OGInPlayBot Dynamic Liability Management
+
+def in_play_liability_management(live_odds, current_liabilities, green_up_target=50):
+    """
+    Dynamically manages liabilities during in-play to achieve green-up.
+
+    Parameters:
+    - live_odds: dict with current live odds for each horse.
+    - current_liabilities: dict with current liabilities for each horse.
+    - green_up_target: float, desired minimum green-up profit.
+
+    Returns:
+    - Dict indicating lay bets placement for liability redistribution.
+    """
+    lay_bets = {}
+
+    # Identify horses with increasing odds (drifting)
+    drifting_horses = {horse: odds for horse, odds in live_odds.items() if odds > 5.0}
+
+    total_liability = sum(current_liabilities.values())
+
+    if total_liability <= 0:
+        return {'Action': 'Already Greened Up'}
+
+    # Calculate lay bets to redistribute liability onto drifting horses
+    for horse, odds in drifting_horses.items():
+        # Proportionate redistribution of liability
+        lay_stake = min((total_liability / odds), green_up_target / len(drifting_horses))
+        lay_bets[horse] = {'Odds': odds, 'Stake': round(lay_stake, 2)}
+
+    return lay_bets
+
+# Example usage:
+# live_odds_example = {'Horse A': 2.5, 'Horse B': 6.5, 'Horse C': 10.0}
+# liabilities_example = {'Horse A': 30, 'Horse B': 20, 'Horse C': 10}
+# liability_actions = in_play_liability_management(live_odds_example, liabilities_example)
+# print(liability_actions)

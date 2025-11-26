@@ -1,0 +1,400 @@
+# -----------------------------
+# upgrade_20250525.py
+# 🔒 Master Automation Rebuild – Isolated Test Mode: No interference with live data
+# -----------------------------
+
+import logging
+from queue import Queue
+
+# -----------------------------
+# Global Setup
+# -----------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True
+)
+
+signal_queue = Queue()
+bot_signal_queues = {
+    "OG Head Trader": Queue(),
+    "OG Pre-off": Queue(),
+    "OG In-Play": Queue()
+}
+
+MARKET_DATA = {}
+SNAPSHOT_DATA = {}
+CLOCK_DATA = {}
+
+# -----------------------------
+# Utility Functions
+# -----------------------------
+
+def safe_time(raw_time):
+    try:
+        return datetime.strptime(raw_time, "%Y-%m-%dT%H:%M:%S.000Z")
+    except Exception:
+        return datetime.utcnow() + timedelta(hours=1)
+
+def get_time_to_off(start_time):
+    return int((start_time - datetime.utcnow()).total_seconds() / 60)
+
+# -----------------------------
+# Clock + Odds Thread
+# -----------------------------
+
+def clock_thread():
+    logging.info("🕒 [Thread] Clock + Odds Monitor Launched")
+from upgrade.upgrade_20250602_flow_01 import get_markets
+from upgrade.upgrade_20250602_flow_01 import get_markets
+for market in get_markets():
+        marketId = market["marketId"]
+        start_time = safe_time(market["marketStartTime"])
+        time_to_off = get_time_to_off(start_time)
+
+        # ⏳ Skip markets that are in the past (test mode only runs for active windows)
+        if TEST_MODE and time_to_off <= 0:
+            continue
+
+        CLOCK_DATA[marketId] = time_to_off
+        logging.info(f"🕒 [Clock] {marketId} | {time_to_off} mins to off")
+
+        odds = fetch_anchor_odds(marketId)
+        MARKET_DATA[marketId] = {
+            "marketName": market["marketName"],
+            "startTime": start_time,
+            "odds": odds,
+            "runners": market["runners"]
+        }
+
+        for runner in market["runners"]:
+            selectionId = runner["selectionId"]
+            runner_name = runner["runnerName"]
+            lay = odds.get(str(selectionId), {}).get("lay")
+            back = odds.get(str(selectionId), {}).get("back")
+
+            if lay is None or back is None:
+                logging.warning(f"❌ [Odds] Missing odds for {runner_name} in {marketId}")
+                continue
+
+            logging.info(f"💰 [Odds] {runner_name} | Back: {back} | Lay: {lay}")
+
+            SNAPSHOT_DATA[(marketId, selectionId)] = {
+                "marketId": marketId,
+                "selectionId": selectionId,
+                "runnerName": runner_name,
+                "back": back,
+                "lay": lay,
+                "startTime": start_time,
+                "marketName": market["marketName"]
+            }
+
+            if not TEST_MODE:
+                insert_runner_snapshot(marketId, selectionId, runner_name, back, lay, start_time)
+        
+        if not TEST_MODE:
+            insert_market(marketId, market["marketName"], start_time)
+
+# -----------------------------
+# Filter + Signal Thread
+# -----------------------------
+
+def signal_filter_thread():
+    logging.info("🧹 [Thread] Signal Filter Launched")
+    for key, snapshot in SNAPSHOT_DATA.items():
+        if not apply_filters_to_runner(snapshot):
+            logging.info(f"🧹 [Filter] Runner failed: {snapshot['runnerName']}")
+            continue
+
+        logging.info(f"📤 [Signal] Created | Market: {snapshot['marketName']} | Runner: {snapshot['runnerName']}")
+        signal_queue.put(snapshot)
+
+# -----------------------------
+# Bot Assignment Thread
+# -----------------------------
+
+def bot_assignment_thread():
+    logging.info("🤖 [Thread] Bot Dispatcher Launched")
+    while not signal_queue.empty():
+        signal = signal_queue.get()
+        assigned_bot = assign_bot_to_signal(signal)
+
+        if assigned_bot not in bot_signal_queues:
+            logging.warning(f"❌ [Assignment] Unknown bot: {assigned_bot}")
+            continue
+
+        bot_signal_queues[assigned_bot].put(signal)
+        logging.info(f"🤖 [Assignment] {signal['runnerName']} → {assigned_bot}")
+
+# -----------------------------
+# Bot Execution Threads
+# -----------------------------
+
+def execute_bot(bot_name):
+    logging.info(f"🎯 [Thread] Execution: {bot_name} Active")
+    q = bot_signal_queues[bot_name]
+
+    while not q.empty():
+        signal = q.get()
+
+        if not validate_signal_data(signal):
+            logging.warning(f"⚠️ [Risk] Signal validation failed for {signal['runnerName']}")
+            continue
+
+        if TEST_MODE:
+            place_test_bet(signal)
+            logging.info(f"🧪 [Test Bet] {signal['runnerName']} @ {signal['lay']} Lay")
+        else:
+            result = place_lay_bet(signal)
+            if result.get("status") == "SUCCESS":
+                logging.info(f"✅ [Bet] Placed | {signal['runnerName']} @ {signal['lay']} Lay")
+            else:
+                logging.error(f"❌ [Bet] Failed | {signal['runnerName']} | Reason: {result.get('errorCode', 'Unknown')}")
+
+# -----------------------------
+# System Launcher
+# -----------------------------
+
+def launch_upgrade_20250525():
+    logging.info("🚀 [System] Boot Sequence Initiated")
+    CLOCK_DATA.clear()
+    MARKET_DATA.clear()
+    SNAPSHOT_DATA.clear()
+
+    with signal_queue.mutex:
+        signal_queue.queue.clear()
+    for q in bot_signal_queues.values():
+        with q.mutex:
+            q.queue.clear()
+
+    threads = [
+        Thread(target=clock_thread),
+        Thread(target=signal_filter_thread),
+        Thread(target=bot_assignment_thread)
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    exec_threads = [
+        Thread(target=execute_bot, args=(bot_name,)) for bot_name in bot_signal_queues
+    ]
+
+    for t in exec_threads:
+        t.start()
+    for t in exec_threads:
+        t.join()
+
+    logging.info("✅ [System] All processes completed.")
+
+# -----------------------------
+# APPLY CHANGES BELOW THIS LINE
+# -----------------------------
+
+# Exportable alias for legacy launchers
+launch_protocol = launch_upgrade_20250525
+
+if __name__ == "__main__":
+    launch_upgrade_20250525()
+# -----------------------------
+# upgrade_20250525 – Part 2
+# 🕒 run_monitor + 📤 signal_monitor (with full lifecycle prep and settlement placeholder)
+# -----------------------------
+
+
+import time
+import logging
+from threading import Thread
+
+# These will hook into shared globals
+# CLOCK_DATA, SNAPSHOT_DATA, signal_queue, bot_signal_queues already exist in Part 1
+
+# -----------------------------
+# market_monitor_signals
+# -----------------------------
+def market_monitor_signals():
+    logging.info("📥 [Thread] market_monitor_signals launched")
+    for marketId, market in MARKET_DATA.items():
+        runners = market.get("runners", [])
+        for runner in runners:
+            selectionId = runner["selectionId"]
+            runner_name = runner["runnerName"]
+            key = (marketId, selectionId)
+
+            if key in SNAPSHOT_DATA:
+                snapshot = SNAPSHOT_DATA[key]
+                logging.info(f"📥 [Market Monitor] Added snapshot for {runner_name} ({selectionId})")
+                # Signal will be picked up later by signal_monitor
+            else:
+                logging.warning(f"⚠️ [Market Monitor] No snapshot found for {runner_name} in {marketId}")
+
+
+# -----------------------------
+# run_monitor
+# -----------------------------
+def run_monitor():
+    logging.info("🕒 [Thread] run_monitor launched")
+    while True:
+        for marketId, time_to_off in list(CLOCK_DATA.items()):
+            new_time = time_to_off - 1
+            CLOCK_DATA[marketId] = new_time
+            logging.info(f"🕒 [Countdown] {marketId} now {new_time} mins to off")
+
+            if new_time == 60 or new_time == 30:
+                logging.info(f"📸 [Snapshot Trigger] {marketId} @ {new_time} mins — duplicate snapshot event")
+                # Placeholder: later logic will duplicate snapshot
+
+            if new_time == 0:
+                logging.info(f"🔚 [Time Zero] {marketId} reached off time. No error flagged. Monitoring continues.")
+
+            if new_time <= -5:
+                logging.info(f"🏁 [Market Closed] {marketId} expired and removed from active list")
+                CLOCK_DATA.pop(marketId, None)
+        time.sleep(60)
+
+# -----------------------------
+# signal_monitor
+# -----------------------------
+def signal_monitor():
+    logging.info("📡 [Thread] signal_monitor launched")
+    while True:
+        for key, snapshot in SNAPSHOT_DATA.items():
+            marketId = snapshot["marketId"]
+            selectionId = snapshot["selectionId"]
+            runner_name = snapshot["runnerName"]
+
+            if marketId not in CLOCK_DATA:
+                continue  # Skip markets already off
+
+            time_remaining = CLOCK_DATA[marketId]
+            if time_remaining <= 10:
+                logging.info(f"📡 [Signal Monitor] Runner ready: {runner_name} ({selectionId})")
+                signal_queue.put(snapshot)
+        time.sleep(30)
+
+# -----------------------------
+# bet_settlement placeholder
+# -----------------------------
+def bet_settlement():
+    logging.info("📊 [Thread] bet_settlement launched")
+    while True:
+        # Placeholder: Logic to fetch settled markets from Betfair or results DB
+        # Then mark each bet as win/lose/void in bets table
+        logging.info("📊 [Settlement] Checking for results...")
+        time.sleep(300)  # Check every 5 minutes
+
+# -----------------------------
+# upgrade_20250525 – Part 3
+# 💰 budget_manager + 🛡 risk_manager (stake control and safety enforcement)
+# -----------------------------
+
+import logging
+import time
+
+# These assume access to: signal, snapshot, HEADERS, SESSION_TOKEN, AVAILABLE_BUDGET
+
+# -----------------------------
+# budget_manager
+# -----------------------------
+def budget_manager(signal):
+    # Placeholder: Fixed allocation for now
+    base_stake = 5.00
+    logging.info(f"💰 [Budget] Allocated £{base_stake} for {signal['runnerName']}")
+    return base_stake
+
+# -----------------------------
+# risk_manager
+# -----------------------------
+def risk_manager(signal):
+    # Placeholder: Accepts all signals unless lay > 20
+    lay_price = signal.get("lay")
+    if lay_price is None or lay_price > 20:
+        logging.warning(f"🛑 [Risk] Blocked signal for {signal['runnerName']} | Lay: {lay_price}")
+        return False
+    logging.info(f"🛡 [Risk] Passed signal for {signal['runnerName']}")
+    return True
+
+# These functions are meant to be called inside each bot’s threaded loop before placing any bets.
+# -----------------------------
+# upgrade_20250525 – Part 4
+# 🚀 Thread Launcher + 🔄 Lifecycle Cleaner
+# -----------------------------
+
+import logging
+from threading import Thread
+
+# -----------------------------
+# thread_launcher
+# -----------------------------
+def thread_launcher():
+    logging.info("🚀 [System] Launching all strategy threads")
+
+    threads = [
+        Thread(target=run_monitor),
+        Thread(target=signal_monitor),
+        Thread(target=bet_settlement),
+        Thread(target=bot_pre_off),
+        Thread(target=bot_in_play),
+        Thread(target=bot_head_trader)
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    logging.info("✅ [System] All threads completed.")
+
+# -----------------------------
+# lifecycle_cleaner
+# -----------------------------
+def lifecycle_cleaner():
+    logging.info("🧹 [System] Lifecycle cleaner running")
+    # Placeholder: logic to free old memory, reset queues, prune dead markets
+    # Could include DB cleanup, archiving, or stale signal detection
+    pass
+# -----------------------------
+# upgrade_20250525 – Part 5
+# 🧪 Testing Hooks + 🧼 Debug Enhancements
+# -----------------------------
+
+import logging
+
+# -----------------------------
+# test_signal_injection
+# -----------------------------
+def test_signal_injection(mock_runner):
+    """
+    Inject a mock signal directly into the system for end-to-end test flow.
+    Example usage: test_signal_injection({ ... })
+    """
+    logging.info(f"🧪 [Test] Injecting test runner: {mock_runner['runnerName']}")
+    signal_queue.put(mock_runner)
+
+# -----------------------------
+# debug_signal_flow
+# -----------------------------
+def debug_signal_flow(signal):
+    logging.info("🔍 [Debug] Signal received:")
+    for key, value in signal.items():
+        logging.info(f"   {key}: {value}")
+
+# -----------------------------
+# error_handler_wrapper
+# -----------------------------
+def safe_execute(label, func, *args):
+    try:
+        func(*args)
+    except Exception as e:
+        logging.error(f"❌ [{label}] Error during execution: {e}")
+
+# -----------------------------
+# test_report_banner
+# -----------------------------
+def print_test_banner():
+    logging.info("\n===============================")
+    logging.info("🚀 TEST MODE ACTIVE")
+    logging.info("===============================")

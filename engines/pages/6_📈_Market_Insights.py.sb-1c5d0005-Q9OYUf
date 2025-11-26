@@ -1,0 +1,148 @@
+# risk_manager.py - Enhanced Structured Risk Manager Core Logic with Comprehensive Controls and Dynamic Hedging
+import sqlite3
+from datetime import datetime
+
+class RiskManager:
+    SIGNAL_ODDS_RANGES = {
+        'Market Drifter Pre-off': (2.0, 15.0),
+        'Market Drifter In-play': (2.0, 25.0),
+        'Market Steamer': (1.5, 5.0),
+        'Fast Pace Collapse': (1.8, 4.0),
+        'Drifter Recovery': (2.0, 10.0),
+        'Late Surge Fade': (3.0, 15.0),
+        'Odds Spike Reversal': (2.5, 20.0)
+    }
+
+    def __init__(self, max_liability_per_race, max_daily_loss_per_bot, global_max_exposure,
+                 max_concurrent_races, stop_loss_threshold, profit_lock_threshold):
+
+        self.max_liability_per_race = max_liability_per_race
+        self.max_daily_loss_per_bot = max_daily_loss_per_bot
+        self.global_max_exposure = global_max_exposure
+        self.max_concurrent_races = max_concurrent_races
+        self.stop_loss_threshold = stop_loss_threshold
+        self.profit_lock_threshold = profit_lock_threshold
+
+        self.bot_daily_losses = {}
+        self.bot_status = {}
+        self.current_global_exposure = 0
+        self.current_race_liabilities = {}
+
+        self.db_path = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db'
+        self.init_db()
+
+        print("✅ Risk Manager initialized with comprehensive controls.")
+
+    def init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_status (
+                    bot_name TEXT PRIMARY KEY,
+                    status TEXT DEFAULT 'active',
+                    last_updated TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_performance (
+                    bot_name TEXT PRIMARY KEY,
+                    total_trades INTEGER DEFAULT 0,
+                    profitable_trades INTEGER DEFAULT 0,
+                    total_profit_loss REAL DEFAULT 0.0,
+                    average_win REAL DEFAULT 0.0,
+                    average_loss REAL DEFAULT 0.0,
+                    last_updated TIMESTAMP
+                );
+            """)
+            conn.commit()
+
+    def update_bot_loss(self, bot_name, loss_amount):
+        self.bot_daily_losses.setdefault(bot_name, 0)
+        self.bot_daily_losses[bot_name] += loss_amount
+        print(f"Bot '{bot_name}' daily loss updated: £{self.bot_daily_losses[bot_name]:.2f}")
+        if self.bot_daily_losses[bot_name] >= self.max_daily_loss_per_bot:
+            self.pause_bot(bot_name)
+
+    def pause_bot(self, bot_name):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("REPLACE INTO bot_status (bot_name, status, last_updated) VALUES (?, ?, ?)",
+                           (bot_name, 'paused', datetime.now()))
+            conn.commit()
+        print(f"🚨 Pausing {bot_name} - daily loss limit of £{self.max_daily_loss_per_bot} exceeded.")
+
+    def reactivate_bot(self, bot_name):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("REPLACE INTO bot_status (bot_name, status, last_updated) VALUES (?, ?, ?)",
+                           (bot_name, 'active', datetime.now()))
+            conn.commit()
+        print(f"✅ Reactivating {bot_name}")
+
+    def verify_limits(self, requested_liability):
+        can_trade = (self.current_global_exposure + requested_liability <= self.global_max_exposure)
+        if not can_trade:
+            print("❌ Global exposure limit exceeded, trade rejected.")
+        return can_trade
+
+    def check_race_liability(self, race_id, race_liability):
+        self.current_race_liabilities[race_id] = self.current_race_liabilities.get(race_id, 0) + race_liability
+        if self.current_race_liabilities[race_id] >= self.max_liability_per_race:
+            self.trigger_race_hedge(race_id)
+
+    def trigger_race_hedge(self, race_id):
+        print(f"⚠️ Hedging triggered: Race '{race_id}' liability exceeds limit.")
+
+    def update_global_exposure(self, exposure_change):
+        self.current_global_exposure += exposure_change
+        print(f"Updated global exposure: £{self.current_global_exposure:.2f}")
+        if self.current_global_exposure >= self.global_max_exposure:
+            self.trigger_global_hedge()
+
+    def trigger_global_hedge(self):
+        print(f"🌐 Global hedging action triggered: Total exposure of £{self.current_global_exposure:.2f} exceeds global limit.")
+
+    def insert_trade_to_db(self, horse_name, odds, liability, bet_type, strategy_name, bot_name, signal_type):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO bets (horse_name, odds, liability, bet_type, strategy_name, bot_name, signal_type, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (horse_name, odds, liability, bet_type, strategy_name, bot_name, signal_type, datetime.now()))
+            conn.commit()
+
+    def calculate_stake(self, signal_type):
+        stake_mapping = {
+            'Market Drifter Pre-off': 5,
+            'Market Drifter In-play': 10,
+            'Market Steamer': 5,
+            'Fast Pace Collapse': 15,
+            'Drifter Recovery': 10,
+            'Late Surge Fade': 10,
+            'Odds Spike Reversal': 10
+        }
+        base_stake = stake_mapping.get(signal_type, 5)
+        print(f"Calculated dynamic stake for signal '{signal_type}': £{base_stake}")
+        return base_stake
+
+    def approve_trade(self, bot_name, market_id, selection_id, odds, stake, num_runners, signal_type):
+        min_odds, max_odds = self.SIGNAL_ODDS_RANGES.get(signal_type, (1.0, 100.0))
+        if not (min_odds <= odds <= max_odds):
+            print(f"🚫 Trade rejected: odds {odds:.2f} outside allowed range ({min_odds}-{max_odds}) for signal '{signal_type}'.")
+            return False
+
+        potential_liability = (odds - 1) * stake
+        race_key = f"{market_id}_{selection_id}"
+
+        if self.current_global_exposure + potential_liability > self.global_max_exposure:
+            print(f"🚫 Global limit breached by {bot_name}'s trade (Exposure: £{self.current_global_exposure:.2f}, Potential: £{potential_liability:.2f}).")
+            return False
+
+        if self.bot_status.get(bot_name) == 'paused':
+            print(f"🚫 Trade rejected, bot '{bot_name}' is currently paused.")
+            return False
+
+        print(f"✅ Trade approved for bot '{bot_name}' with potential liability: £{potential_liability:.2f}")
+        self.update_global_exposure(potential_liability)
+        self.check_race_liability(race_key, potential_liability)
+        return True

@@ -1,0 +1,315 @@
+    
+                    "duration": float
+                WHERE placed_at >= "{today_5am.isoformat
+                records.append
+            'pnl': tag_df['pnl'].sum
+            'signals': len
+            SELECT bot_name, strategy_name, status, COUNT
+            WHERE date >= date
+            WHERE placed_at >= date
+            conn.commit
+            conn.execute
+            if len
+            parts = line.strip
+            return pd.read_sql
+        - Filters: {date_option} | Bots: {', '.join
+        - Time Signals: {', '.join
+        AND datetime
+        Losses=
+        ROI=
+        Strike_Rate=
+        WHERE date >= date
+        WinRate=
+        Wins=
+        archive_name = f"bets_{datetime.utcnow
+        brain_df = pd.read_sql_query
+        brain_df['timestamp'] = pd.to_datetime
+        data = json.loads
+        df = pd.read_sql_query
+        df['meta'] = df['meta_json'].apply
+        fig_dd = px.line
+        lines = f.readlines
+        max_drawdown = subset['drawdown'].max
+        meta = eval
+        return data.get
+        return pd.DataFrame
+        return pd.read_sql
+        return pd.read_sql_query
+        return vol.get
+        set_session_token
+        shutil.copy
+        st.dataframe
+        st.error
+        st.markdown
+        st.plotly_chart
+        st.success
+        st.warning
+        subprocess.Popen
+        subset = pnl_by_day[pnl_by_day['strategy_name'] == strat].copy
+        subset['cumulative'] = subset['pnl'].cumsum
+        subset['drawdown'] = subset['cumulative'].cummax
+        tag_data.append
+        tag_df = df[df['meta_json'].str.contains
+        vol = meta.get
+        wins=
+        with sqlite3.connect
+    'bankroll': fetch_available_budget
+    ).reset_index
+    ).sort_values
+    AND bot_name IN 
+    AND status IN 
+    AND strategy_name IN 
+    AND time_signal IN 
+    all_bots = pd.read_sql
+    all_status = pd.read_sql
+    all_strats = pd.read_sql
+    avg_liability = exposure_df.groupby
+    bot_df = df.copy
+    c = canvas.Canvas
+    c.drawString
+    c.save
+    chart_data = avg_liability.sort_values
+    col1, col2 = st.columns
+    col1, col2, col3, col4 = st.columns
+    col1.dataframe
+    col1.metric
+    col1.write
+    col2.dataframe
+    col2.metric
+    col2.write
+    col3.metric
+    col4.metric
+    cutoff = now - timedelta
+    daily_changes = hist_df.groupby
+    daily_pnl = df.groupby
+    df = df.sort_values
+    df = df[df['timestamp'].notnull
+    df = pd.read_sql_query
+    df.dropna
+    df['anchor_odds'] = df['meta_json'].apply
+    df['date'] = pd.to_datetime
+    df['hour'] = df['timestamp'].dt.strftime
+    df['marketStartTime'] = pd.to_datetime
+    df['meta'] = df['meta_json'].apply
+    df['meta_json'] = df['meta_json'].apply
+    df['meta_json'] = df['meta_json'].fillna
+    df['minutes_to_off'] = 
+    df['odds'] = pd.to_numeric
+    df['placed_at'] = pd.to_datetime
+    df['placement_issue'] = df.apply
+    df['pnl'] = pd.to_numeric
+    df['stake'] = pd.to_numeric
+    df['status_tag'] = df['status'].apply
+    df['swing_pct'] = df['meta_json'].apply
+    df['timestamp'] = pd.to_datetime
+    df['volatility'] = df['meta'].apply
+    end_date = col2.date_input
+    endpoint_summary = df['endpoint'].value_counts
+    errors['timestamp'] = pd.to_datetime
+    exposure_df = exposure_df.sort_values
+    exposure_df['timestamp'] = pd.to_datetime
+    fig = px.bar
+    fig_bankroll = px.line
+    fig_daily = px.bar
+    fig_strike = px.bar
+    for strat in pnl_by_day['strategy_name'].unique
+    heatmap_df = df.groupby
+    hijack_df = df[df['status'].isin
+    hist_df = pd.read_sql_query
+    hist_df['cumulative_bankroll'] = hist_df['pnl'].cumsum
+    hist_df['timestamp'] = pd.to_datetime
+    historical_trades_df = historical_trades_df.rename
+    historical_trades_df['placed_at'] = historical_trades_df['placed_at'].dt.strftime
+    historical_trades_df['placed_at'] = pd.to_datetime
+    hourly_summary = df.groupby
+    if not os.path.exists
+    leaderboard = df.groupby
+    leaderboard = leaderboard.sort_values
+    leaderboard.rename
+    now = datetime.utcnow
+    optimizer = LearningOptimizer
+    optimizer.run
+    os.makedirs
+    pdf_path = os.path.join
+    perf_df = pd.DataFrame.from_dict
+    perf_summary = pd.DataFrame
+    placed_by_bot = bot_df[bot_df['status'] == 'placed'].groupby
+    pnl_by_day = df.groupby
+    pnl_summary = df.groupby
+    pnl_summary.rename
+    raw_threads = [t.name for t in threading.enumerate
+    recent = hist_df.tail
+    recent['timestamp'] = recent['timestamp'].dt.strftime
+    rejected_by_bot = bot_df[bot_df['status'] == 'rejected'].groupby
+    return pd.DataFrame
+    return sum
+    runner_pnl = df.groupby
+    st.bar_chart
+    st.caption
+    st.dataframe
+    st.download_button
+    st.error
+    st.info
+    st.line_chart
+    st.markdown
+    st.plotly_chart
+    st.stop
+    st.subheader
+    st.success
+    st.warning
+    st.write
+    start_date = col1.date_input
+    start_date, end_date = today - timedelta
+    strat_df = df.groupby
+    strat_summary = df.groupby
+    strategy_pnl = df_filtered.groupby
+    strategy_pnl = strategy_pnl.sort_values
+    strike = pd.merge
+    strike.rename
+    strike_by_bot = bot_df[bot_df['status'] == 'won'].groupby
+    strike_rate = round
+    summary = df.groupby
+    summary = summary.sort_values
+    summary['PnL'] = summary['PnL'].round
+    sys.path.append
+    tag_df_final = pd.DataFrame
+    today = datetime.utcnow
+    today_5am = today_5am - timedelta
+    total = df.groupby
+    total_by_bot = bot_df.groupby
+    total_liability = exposure_df['liability'].sum
+    total_pnl = round
+    total_races = int
+    total_wins = int
+    translated = [thread_name_map.get
+    view_df = daily_summary_df.head
+    vol_summary = df['volatility'].value_counts
+    wins = df[df['status'] == 'won'].groupby
+    with open
+    with sqlite3.connect
+    }).fillna
+).reset_index
+AUTO_DISABLE_UNSTABLE_STRATEGY = col14.checkbox
+AUTO_MODE_SWITCH = col19.checkbox
+AUTO_TOGGLE_ON_POSITIVE_RUN = col17.checkbox
+ENABLE_GREENUP_LOGIC = col3.checkbox
+ENABLE_INPLAY_LOGIC = col4.checkbox
+ENABLE_LADDER_LOGIC = col1.checkbox
+ENABLE_SCALPING_LOGIC = col2.checkbox
+ENABLE_STRATEGY_JOURNALING = col16.checkbox
+EXECUTION_MODE = col18.radio
+FOCUS_ON_LOW_VOLATILITY = col15.checkbox
+FORBID_DUPLICATE_CUSTOMERREF = col6.checkbox
+LOCK_STRATEGY_ON_PROFIT = col20.checkbox
+MAX_BET_PER_RUNNER = col13.slider
+MAX_DAILY_LOSS = col9.slider
+MAX_GLOBAL_LIABILITY = col8.slider
+MAX_RACE_LIABILITY = col12.slider
+MAX_SCALPS_PER_HORSE = col10.slider
+MIN_AVAILABLE_BUDGET = col7.slider
+PAGES_DIR = os.path.abspath
+SCALP_MATCH_THRESHOLD = col11.slider
+SKIP_BETS_AFTER_OFF = col5.checkbox
+activity_df = get_active_summary
+bets = load_bets
+bets['date'] = pd.to_datetime
+bets['form'] = bets['meta'].apply
+bets['jockey'] = bets['meta'].apply
+bets['trainer'] = bets['meta'].apply
+bets_df = fetch_historical_bets
+bot_filter = st.multiselect
+brain_feedback = st.text_area
+col1, col2 = st.columns
+col1, col2, col3 = st.columns
+col1.metric
+col10, col11 = st.columns
+col10, col11, col12 = st.columns
+col10.metric
+col11.metric
+col12, col13 = st.columns
+col12.metric
+col14, col15 = st.columns
+col16, col17 = st.columns
+col18, col19, col20 = st.columns
+col2.metric
+col3.metric
+col4, col5, col6 = st.columns
+col7, col8, col9 = st.columns
+colA, colB, colC = st.columns
+command_input = st.text_input
+current_budget = fetch_budget
+daily_drawdown = df.groupby
+daily_summary_df = calculate_daily_stats
+date_option = st.selectbox
+df = df.sort_values
+df = fetch_30_day_data
+df = fetch_api_logs
+df = fetch_bot_data
+df = fetch_insights
+df = load_bet_data
+df = load_signals
+df = load_strategy_data
+df['vol_level'] = df['meta_json'].apply
+df['volatility'] = df.apply
+errors = load_recent_errors
+expected, active, missing = evaluate_threads
+exposure_df = fetch_current_exposure
+fig = px.line
+fig_trades = px.bar
+form_scores = past_bets[past_bets['won']].groupby
+historical_trades_df = load_historical_trades
+if colA.button
+if colB.button
+if st.button
+jockey_winners = past_bets[past_bets['won']].groupby
+latest_date = bets['date'].max
+message = st.text_area
+now = datetime.utcnow
+recent_df = df_filtered[['customerOrderRef', 'strategy_name', 'signal_type', 'status', 'odds', 'stake', 'pnl', 'marketStartTime']].head
+risk_df = df[df['time_signal'].isin
+risk_summary = risk_df.groupby
+risk_window = st.slider
+selected_bot = st.sidebar.multiselect
+selected_page = st.selectbox
+selected_status = st.sidebar.multiselect
+selected_time = st.sidebar.multiselect
+session_token = st.text_input
+signal_counts = df.groupby
+signal_freq = df_filtered['signal_type'].value_counts
+signal_pivot = signal_counts.pivot
+st.bar_chart
+st.caption
+st.code
+st.dataframe
+st.line_chart
+st.markdown
+st.plotly_chart
+st.set_page_config
+st.sidebar.header
+st.subheader
+st.success
+st.table
+st.title
+status_filter = st.multiselect
+strat_filter = st.multiselect
+strategy_trend = df.groupby
+sys.path.append
+time_signal_filter = st.multiselect
+today = datetime.utcnow
+today_5am = now.replace
+today_horses = today_bets[['horse_name']].drop_duplicates
+today_horses = today_horses.merge
+today_horses = today_horses[today_horses['recent_wins'] >= 1].sort_values
+today_jockeys = today_bets[['jockey']].drop_duplicates
+today_jockeys = today_jockeys.merge
+today_jockeys = today_jockeys[today_jockeys['wins'] > 1].sort_values
+today_trainers = today_bets[['trainer']].drop_duplicates
+today_trainers = today_trainers.merge
+today_trainers = today_trainers[today_trainers['wins'] > 2].sort_values
+trade_counts = df.groupby
+trade_counts.rename
+trainer_winners = past_bets[past_bets['won']].groupby
+view_option = st.radio
+vol_summary = df.groupby
+with sqlite3.connect
+with st.expander

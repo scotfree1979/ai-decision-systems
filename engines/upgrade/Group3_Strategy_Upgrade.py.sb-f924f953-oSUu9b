@@ -1,0 +1,142 @@
+###1 TRADE STRUCTURE SETUP
+# Group linked trades by signal: Entry, Hedge, Stop
+import time
+
+def build_trade_group(signal):
+    """
+    Constructs a dictionary to logically group all trades from the same signal.
+    """
+    suffix = signal.get("customerOrderRef", "SS_MANUAL")
+    return {
+        "entry": {
+            "side": "LAY" if signal["scalp_direction"] == "lay_to_back" else "BACK",
+            "odds": signal["odds"],
+            "stake": signal["stake"],
+            "ref": f"{suffix}_E"
+        },
+        "hedge": {
+            "side": "BACK" if signal["scalp_direction"] == "lay_to_back" else "LAY",
+            "ticks": signal.get("scalp_ticks", 2),
+            "ref": f"{suffix}_H"
+        },
+        "stop": {
+            "side": "BACK" if signal["scalp_direction"] == "lay_to_back" else "LAY",
+            "ticks": signal.get("scalp_ticks", 2) * 3,
+            "ref": f"{suffix}_S"
+        },
+        "meta": {
+            "group_id": suffix,
+            "direction": signal["scalp_direction"],
+            "marketId": signal["marketId"],
+            "selectionId": signal["selectionId"]
+        }
+    }
+
+
+###2 SMART SCALPING LOGIC
+# Executes full trade chain using updated stop + exit logic
+
+def execute_smart_scalp(signal):
+    from bet_core import place_bet, check_bet_matched, cancel_bet
+
+    group = build_trade_group(signal)
+    tick_size = signal.get("tick_size")
+    session_token = signal.get("session_token")
+    marketId = signal["marketId"]
+    selectionId = signal["selectionId"]
+
+    # Place Entry
+    entry = group["entry"]
+    entry_id = place_bet(session_token, marketId, selectionId, entry["stake"], entry["odds"], entry["side"], entry["ref"])
+    if not entry_id:
+        print("❌ Entry failed")
+        return
+
+    # Wait for match
+    for _ in range(10):
+        time.sleep(3)
+        if check_bet_matched(session_token, entry_id):
+            break
+    else:
+        cancel_bet(session_token, entry_id)
+        print("⚠️ Entry not matched – cancelled")
+        return
+
+    # Place Hedge
+    hedge = group["hedge"]
+    hedge_odds = round(entry["odds"] - hedge["ticks"] * tick_size, 2) if entry["side"] == "LAY" else round(entry["odds"] + hedge["ticks"] * tick_size, 2)
+    place_bet(session_token, marketId, selectionId, entry["stake"], hedge_odds, hedge["side"], hedge["ref"], persistence_type="PERSIST")
+
+    # Setup Stop Loss
+    stop = group["stop"]
+    stop_odds = round(entry["odds"] + stop["ticks"] * tick_size, 2) if entry["side"] == "LAY" else round(entry["odds"] - stop["ticks"] * tick_size, 2)
+    stop_logic_tracker[selectionId] = {
+        "odds": stop_odds,
+        "side": stop["side"],
+        "stake": entry["stake"],
+        "ref": stop["ref"],
+        "executed": False
+    }
+
+
+###3 AUTO STAKE SCALING
+# Dynamically increase base stake as bankroll grows
+
+def calculate_scaled_stake(base_stake, profit_bank):
+    """
+    Increase stake based on performance bank.
+    e.g. every £100 = +£2 to base stake
+    """
+    increment = int(profit_bank / 100) * 2
+    return round(base_stake + increment, 2)
+
+
+###4 PROFIT ATTRIBUTION ENGINE
+# Market-level win/loss determination based on real outcome
+
+def resolve_market_pnl(marketId, winning_selection):
+    from database_hijack_monitor import fetch_trades_for_market
+
+    trades = fetch_trades_for_market(marketId)
+    pnl = 0.0
+    for trade in trades:
+        if trade["selectionId"] == winning_selection:
+            pnl += trade["back_win"] if trade["side"] == "BACK" else trade["lay_loss"]
+        else:
+            pnl += trade["lay_win"] if trade["side"] == "LAY" else -trade["back_stake"]
+    return pnl
+
+
+###5 IN-RUNNING STRATEGY EXTENSIONS
+# Layer logic for in-play lay detection, field runners, drifters
+
+def detect_inplay_lay_signals(signal):
+    odds = signal["odds"]
+    bracket = signal["market_bracket"]
+    if bracket == "field" and odds >= 6.0:
+        return True
+    return False
+
+
+def execute_inplay_lay(signal):
+    from bet_core import place_bet
+    signal["session_token"] = get_session_token()
+    ref = f"INPLAY_{_next_suffix()}"
+    place_bet(signal["session_token"], signal["marketId"], signal["selectionId"], 4.0, signal["odds"], "LAY", ref, persistence_type="PERSIST")
+
+
+###6 STOP LOSS EXECUTION TRIGGER
+# Monitors market to activate predefined stop logic
+
+def check_and_execute_stop(selection_id, current_odds):
+    from bet_core import place_bet
+    info = stop_logic_tracker.get(selection_id)
+    if not info or info["executed"]:
+        return
+
+    if (info["side"] == "BACK" and current_odds >= info["odds"]) or \
+       (info["side"] == "LAY" and current_odds <= info["odds"]):
+        print(f"🚨 Stop triggered for {selection_id} @ {current_odds}. Placing {info['side']} @ {info['odds']}")
+        session_token = get_session_token()
+        place_bet(session_token, signal["marketId"], selection_id, info["stake"], info["odds"], info["side"], info["ref"])
+        info["executed"] = True

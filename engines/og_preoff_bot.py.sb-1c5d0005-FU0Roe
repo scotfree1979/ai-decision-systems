@@ -1,0 +1,109 @@
+# og_preoff_bot.py - OG Pre-Off Bot Implementation Integrated with Enhanced Bet Placer Logic and Debug Statements
+import time
+from datetime import datetime
+from risk_manager import RiskManager
+from upgrade.upgrade_20250526 import place_basic_lay_bet, place_ladder_lay_bet, place_scalp_trade, place_greenup_exit, place_inplay_lay_bet
+from og_bot_family import og_inplay_bot
+
+
+class OGPreOffBot:
+    def __init__(self, risk_manager, head_trader):
+        self.risk_manager = risk_manager
+        self.head_trader = head_trader
+        self.strategies = {
+            'market_drifters': True,
+            'market_steamers': True,
+            'favourite_vulnerability': True,
+            'early_value': True
+        }
+        self.horses_traded = set()
+
+    def log_event(self, message):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_message = f"[{timestamp}] {message}"
+        print(log_message)
+
+    def monitor_pre_race_market(self, market_data, market_id):
+        analysis = self.head_trader.analyze_market(market_data)
+        if self.strategies['market_drifters']:
+            self.market_drifters(market_data, analysis, market_id)
+        if self.strategies['market_steamers']:
+            self.market_steamers(market_data, analysis, market_id)
+        if self.strategies['favourite_vulnerability']:
+            self.favourite_vulnerability(market_data, analysis, market_id)
+        if self.strategies['early_value']:
+            self.early_value(market_data, analysis, market_id)
+
+    def market_drifters(self, market_data, analysis, market_id):
+        for horse in market_data:
+            if horse['name'] not in self.horses_traded and horse['odds_drift'] >= 0.15 and 2.5 <= horse['current_odds'] <= 6.0:
+                self.place_lay(horse, 'Market Drifters', 0.25, analysis, market_id)
+
+    def market_steamers(self, market_data, analysis, market_id):
+        for horse in market_data:
+            if horse['name'] not in self.horses_traded and horse['odds_shorten'] >= 0.20 and 3.0 <= horse['current_odds'] <= 8.0:
+                self.place_back(horse, 'Market Steamers', 0.10, analysis, market_id)
+
+    def favourite_vulnerability(self, market_data, analysis, market_id):
+        for horse in market_data:
+            if horse['name'] not in self.horses_traded and horse['is_favourite'] and horse['odds_drift'] >= 0.10 and 1.5 <= horse['current_odds'] <= 3.0:
+                self.place_lay(horse, 'Favourite Vulnerability', 0.30, analysis, market_id)
+
+    def early_value(self, market_data, analysis, market_id):
+        for horse in market_data:
+            if horse['name'] not in self.horses_traded and horse['stable_odds'] <= 0.05 and 4.0 <= horse['current_odds'] <= 10.0:
+                self.place_back(horse, 'Early Value', 0.10, analysis, market_id)
+
+    def place_lay(self, horse, strategy_name, liability_pct, analysis, market_id):
+        liability = self.risk_manager.max_liability_per_race * liability_pct
+        current_odds = horse['current_odds']
+        optimized_odds = analysis.get(horse['name'], current_odds)
+        if optimized_odds < current_odds:
+            current_odds = optimized_odds
+
+        if self.risk_manager.verify_limits(liability):
+            self.horses_traded.add(horse['name'])
+
+            self.log_event(f"🚨 Lay Placed | Horse: '{horse['name']}' | Strategy: '{strategy_name}'\n"
+                           f"- Trigger Condition met.\n"
+                           f"- Lay Odds: {current_odds:.2f}\n"
+                           f"- Liability: £{liability:.2f}")
+
+            print(f"[DEBUG] Lay bet placement details - Horse: {horse['name']}, Odds: {current_odds}, Stake: {liability / (current_odds - 1)}, Market ID: {market_id}")
+
+            place_pre_off_lay_bet(horse['selection_id'], current_odds, liability / (current_odds - 1), market_id)
+
+            self.risk_manager.insert_trade_to_db(
+                horse_name=horse['name'], odds=current_odds, liability=liability,
+                bet_type='Lay', strategy_name=strategy_name, bot_name='OG Pre-Off Bot'
+            )
+
+            self.risk_manager.update_global_exposure(liability)
+            self.risk_manager.check_race_liability(liability)
+
+    def place_back(self, horse, strategy_name, stake_pct, analysis, market_id):
+        stake = self.risk_manager.max_liability_per_race * stake_pct
+        current_odds = horse['current_odds']
+        optimized_odds = analysis.get(horse['name'], current_odds)
+        if optimized_odds > current_odds:
+            current_odds = optimized_odds
+
+        if self.risk_manager.verify_limits(stake):
+            self.horses_traded.add(horse['name'])
+
+            self.log_event(f"✅ Back Placed | Horse: '{horse['name']}' | Strategy: '{strategy_name}'\n"
+                           f"- Trigger Condition met.\n"
+                           f"- Back Odds: {current_odds:.2f}\n"
+                           f"- Stake: £{stake:.2f}")
+
+            print(f"[DEBUG] Back bet placement details - Horse: {horse['name']}, Odds: {current_odds}, Stake: {stake}, Market ID: {market_id}")
+
+            place_back_bet(horse['selection_id'], current_odds, stake, market_id)
+
+            self.risk_manager.insert_trade_to_db(
+                horse_name=horse['name'], odds=current_odds, liability=stake,
+                bet_type='Back', strategy_name=strategy_name, bot_name='OG Pre-Off Bot'
+            )
+
+            self.risk_manager.update_global_exposure(stake)
+            self.risk_manager.check_race_liability(stake)

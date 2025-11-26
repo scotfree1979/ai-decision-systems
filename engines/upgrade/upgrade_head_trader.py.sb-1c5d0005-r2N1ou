@@ -1,0 +1,119 @@
+# ✅ LearningOptimizer – Updated with HeadTrader Sync
+import logging
+import sqlite3
+import json
+from datetime import datetime, timedelta
+from upgrade_head_trader import handle_strategy_feedback
+
+DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db"
+
+class LearningOptimizer:
+    def __init__(self):
+        self.db_path = DB_PATH
+        self.last_run = None
+        self.stats = {
+            "total_bets": 0,
+            "win_rate": 0.0,
+            "average_odds": 0.0,
+            "strategy_performance": {}
+        }
+
+    def load_bets(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            one_day_ago = (datetime.utcnow() - timedelta(days=1)).isoformat()
+            cursor.execute("""
+                SELECT strategy_name, status, odds
+                FROM bets
+                WHERE placed_at >= ?
+            """, (one_day_ago,))
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+        except Exception as e:
+            logging.error(f"❌ [LearningOptimizer] Failed to load bets: {e}")
+            return []
+
+    def analyze(self, rows):
+        if not rows:
+            logging.info("📭 [LearningOptimizer] No new bets to analyze.")
+            return
+
+        total = 0
+        wins = 0
+        total_odds = 0.0
+        performance = {}
+
+        for strategy, status, odds in rows:
+            total += 1
+            total_odds += odds if odds else 0
+            if strategy not in performance:
+                performance[strategy] = {"wins": 0, "bets": 0}
+            performance[strategy]["bets"] += 1
+            if status == "won":
+                wins += 1
+                performance[strategy]["wins"] += 1
+
+        self.stats["total_bets"] = total
+        self.stats["win_rate"] = round(wins / total, 2) if total else 0.0
+        self.stats["average_odds"] = round(total_odds / total, 2) if total else 0.0
+        self.stats["strategy_performance"] = {
+            k: round(v["wins"] / v["bets"], 2) for k, v in performance.items()
+        }
+
+        logging.info(f"📊 [LearningOptimizer] {self.stats}")
+
+    def enhance_bots(self):
+        # 🔁 Sync performance with HeadTrader controls
+        handle_strategy_feedback(self.stats["strategy_performance"])
+        logging.info("🧠 [LearningOptimizer] Sent live feedback to HeadTrader controller.")
+
+    def run(self):
+        if self.last_run and datetime.utcnow() - self.last_run < timedelta(hours=6):
+            logging.info("⏳ [LearningOptimizer] Skipping — already analyzed today.")
+            return
+
+        self.last_run = datetime.utcnow()
+        logging.info("🔁 [LearningOptimizer] Starting daily optimization run...")
+        rows = self.load_bets()
+        self.analyze(rows)
+        log_optimizer_run(self.stats)
+        self.enhance_bots()
+
+# ✅ Log-to-DB helper (used in legacy)
+def log_optimizer_run(stats):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS optimizer_logs (
+                run_at TEXT,
+                total_bets INTEGER,
+                win_rate REAL,
+                average_odds REAL,
+                strategy_performance TEXT
+            )
+        """)
+        conn.commit()
+
+        cursor.execute("""
+            INSERT INTO optimizer_logs (run_at, total_bets, win_rate, average_odds, strategy_performance)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            datetime.utcnow().isoformat(),
+            stats.get("total_bets", 0),
+            stats.get("win_rate", 0.0),
+            stats.get("average_odds", 0.0),
+            json.dumps(stats.get("strategy_performance", {}))
+        ))
+        conn.commit()
+        conn.close()
+        logging.info("💾 [LearningOptimizer] Stats logged to optimizer_logs table.")
+    except Exception as e:
+        logging.error(f"❌ [LearningOptimizer] Failed to log stats: {e}")
+
+# Example usage (attach to HeadTraderBot or end-of-day logic)
+if __name__ == "__main__":
+    optimizer = LearningOptimizer()
+    optimizer.run()

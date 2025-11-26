@@ -1,0 +1,174 @@
+# upgrade_20250522.py (Cleaned Version with No 20250521 References)
+
+import logging
+import json
+from bet_core import place_bet, calculate_tick, round_to_valid_odds, green_up
+
+# ✅ Direct logic only – no shims from 20250521
+import requests
+import time
+
+def place_basic_lay_bet(signal):
+    # Lock marketId and selectionId into local immutable refs
+    locked_market_id = signal['marketId']
+    locked_selection_id = signal['selectionId']
+    session_token = signal['session_token']
+    market_id = locked_market_id
+    selection_id = locked_selection_id
+    odds = signal['odds']
+    stake = signal['stake']
+    customer_order_ref = signal.get('customerOrderRef', f"BASIC-{selection_id}-{int(time.time())}")
+
+    logging.info(f"💸 [BasicLay] Laying {selection_id} @ {odds} (£{stake})")
+    place_bet(session_token, market_id, selection_id, stake, odds, "LAY", customer_order_ref)
+
+
+def place_ladder_lay_bet(signal):
+    session_token = signal['session_token']
+    market_id = signal['marketId']
+    selection_id = signal['selectionId']
+    base_odds = signal['odds']
+    total_stake = signal['stake']
+    anchor_stake = total_stake / 5
+    tick = calculate_tick(base_odds)
+    customer_order_ref = signal.get('customerOrderRef', f"LADDER-{selection_id}-{int(time.time())}")
+
+    logging.info(f"🪜 [LadderLay] Anchor @ {base_odds} for £{anchor_stake}")
+    place_bet(session_token, market_id, selection_id, anchor_stake, base_odds, "LAY", customer_order_ref)
+
+    for i in range(1, 5):
+        ladder_odds = round_to_valid_odds(base_odds - i * tick)
+        place_bet(session_token, market_id, selection_id, anchor_stake, ladder_odds, "LAY", f"LADDER-{selection_id}-LEG{i}")
+
+
+def place_scalp_trade(signal, direction='lay_to_back'):
+    from bet_core import check_bet_matched
+    session_token = signal['session_token']
+    market_id = signal['marketId']
+    selection_id = signal['selectionId']
+    entry_odds = signal['odds']
+    total_stake = signal.get('stake', 20.0)
+    tick = calculate_tick(entry_odds)
+
+    if direction == 'lay_to_back':
+        hedge_odds = round_to_valid_odds(entry_odds + 2 * tick)
+        hedge_side = 'BACK'
+    else:
+        hedge_odds = round_to_valid_odds(entry_odds - 2 * tick)
+        hedge_side = 'LAY'
+
+    for i in range(int(total_stake / 0.01)):
+        place_bet(session_token, market_id, selection_id, 0.01, entry_odds, "LAY" if direction == 'lay_to_back' else "BACK")
+        place_bet(session_token, market_id, selection_id, 0.01, hedge_odds, hedge_side)
+
+
+def place_greenup_exit(signal):
+    session_token = signal['session_token']
+    market_id = signal['marketId']
+    green_up(session_token, market_id, target_profit=1.0)
+
+
+def place_inplay_lay_bet(signal):
+    session_token = signal['session_token']
+    market_id = signal['marketId']
+    selection_id = signal['selectionId']
+    odds = signal['odds']
+    stake = signal.get('stake', 2.0)
+    customer_order_ref = signal.get('customerOrderRef', f"INPLAY-{selection_id}-{int(time.time())}")
+
+    logging.info(f"⚡ [InPlay] FOK @ {odds} for £{stake}")
+    place_bet(session_token, market_id, selection_id, stake, odds, "LAY", customer_order_ref)
+
+
+def get_market_book(session_token, market_id):
+    import requests
+    headers = {
+        'X-Authentication': session_token,
+        'Content-Type': 'application/json'
+    }
+    payload = [{
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listMarketBook",
+        "params": {
+            "marketIds": [market_id],
+            "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
+        },
+        "id": 1
+    }]
+    response = requests.post("https://api.betfair.com/exchange/betting/json-rpc/v1", headers=headers, data=json.dumps(payload)).json()
+    return response[0]['result'][0] if 'result' in response[0] else None
+
+
+def wrap_run_monitor(signal_queue, session_token, markets):
+    import datetime
+    if not markets:
+        logging.warning("⚠️ [Upgrade] No markets passed to wrap_run_monitor.")
+        return
+
+    valid_markets = [
+        m for m in markets
+        if m.get('marketType') == 'WIN'
+        and len(m.get('runners', [])) >= 7
+        and m.get('event', {}).get('countryCode') in ['GB', 'IE']
+        and m.get('event', {}).get('openDate', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+        and not any(bad in m.get('marketName', '') for bad in ['Distance', 'Tote', 'Odds'])
+        and m.get('marketStartTime', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+    ])) >= 7
+        and m.get('event', {}).get('countryCode') in ['GB', 'IE']
+        and m.get('event', {}).get('openDate', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+        and not any(bad in m.get('marketName', '') for bad in ['Distance', 'Tote', 'Odds'])
+    ])) >= 7
+        and not any(bad in m.get('marketName', '') for bad in ['Distance', 'Tote', 'Odds'])
+        and m.get('marketStartTime', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+    ])) >= 7
+        and not any(bad in m.get('marketName', '') for bad in ['Distance', 'Tote', 'Odds'])
+        and m.get('marketStartTime', '').startswith(datetime.datetime.utcnow().strftime('%Y-%m-%d'))
+    ])) >= 7
+        and not any(bad in m.get('marketName', '') for bad in ['Distance', 'Tote', 'Odds'])
+    ]
+    if not valid_markets:
+        logging.warning("⚠️ [Upgrade] No valid WIN markets with 7+ runners found.")
+        return
+
+    for market in valid_markets:
+        time.sleep(1)
+        signal_market_id = market['marketId']
+        signal_selection_id = market['runners'][0]['selectionId']
+
+        # Fetch live odds
+        book = get_market_book(session_token, signal_market_id)
+        best_odds = None
+        for runner in book['runners']:
+            if runner['selectionId'] == signal_selection_id and runner['ex']['availableToLay']:
+                best_odds = runner['ex']['availableToLay'][0]['price']
+                break
+        if not best_odds:
+            logging.warning("⚠️ No lay odds available. Fallback to 3.0.")
+            best_odds = 3.0
+
+        signal = {
+            'type': 'heartbeat',
+            'signal_type': 'Market Drifter Signal',
+            'marketId': signal_market_id,
+            'selectionId': signal_selection_id,
+            'strategy_name': 'Basic Lay',
+            'stake': 5.0,
+            'odds': best_odds,
+            'bot_name': 'OGHeadTrader',
+            'session_token': session_token,
+            'timestamp': datetime.datetime.utcnow().isoformat(),
+            'source': 'upgrade.wrap_run_monitor',
+            'detail': 'heartbeat',
+            'time_session': 'anytime',
+            'market_name': market.get('marketName'),
+            'event_name': market.get('event', {}).get('name')
+        }
+
+        signal_queue.put(signal)
+        logging.info(f"⏱ [Upgrade Monitor] Locked signal emitted: {signal}")
+    logging.info(f"⏱ [Upgrade Monitor] Locked signal emitted: {signal}")
+
+def evaluate_signal(signal):
+    from risk_manager import RiskManager  # assumes your active RiskManager class is accessible
+    dummy_mgr = RiskManager({}, {}, 500, 1000, 1.5, {}, {}, {})
+    return dummy_mgr.evaluate_signal(signal)

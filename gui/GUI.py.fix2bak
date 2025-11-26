@@ -1,0 +1,1729 @@
+#!/usr/bin/env python3
+
+"""
+GUI phase-runner: build in micro-steps with hard gates.
+Steps implemented:
+  1) Set credentials (token via UI; app key from daily_config.json or env)
+  2) Ensure DB + start writer + seed bets (runners only) for today/tomorrow
+  3) Seed anchor odds (OC0) into bets and oc_series
+  4) Start OC1 polling loop (records into oc_series)
+
+After each step: prints "READY: next step" to terminal.
+"""
+
+
+import os, sys, sqlite3
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(_here)
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
+import engines.config_paths as cp
+from engines.config_paths import ensure_db_ready
+ensure_db_ready()
+import logging
+from engines.decision_engine.orchestrator import _log_once_per_minute as _oc_orch_log
+import time as _time
+
+# ── util: log at most once per minute per key ────────────────────────────────
+import time, logging
+
+def _log_once_per_minute(level, key: str, msg: str) -> None:
+    """
+    Rate-limit log lines to once per minute per unique key.
+    Example: _log_once_per_minute(logging.DEBUG, f"{mid}/{sid}", "no odds")
+    """
+    try:
+        now = time.time()
+        if not hasattr(logging, "_oc_last"):
+            logging._oc_last = {}
+        k = ("min", str(key))
+        last = logging._oc_last.get(k, 0.0)
+        if now - last >= 60.0:
+            logging.log(level, msg)
+            logging._oc_last[k] = now
+    except Exception:
+        # inside the loop exception path
+        key = f"{mid}/{sid}"
+        now = time.time()
+        last = logging._oc_last.get(("min", key), 0.0)
+        if now - last >= 60.0:
+            logging.info("timeline: transient network/no price")
+            logging._oc_last[("min", key)] = now
+        pass
+
+# bridge: ensure engines.utils.api_tools has a _log_once_per_minute symbol
+try:
+    from engines.decision_engine.orchestrator import _log_once_per_minute as _orch_log_once
+except Exception:
+    def _orch_log_once(mid, sid, level, msg):  # silent no-op fallback
+        pass
+
+try:
+    import engines.utils.api_tools as _api_tools
+    if not hasattr(_api_tools, "_log_once_per_minute"):
+        _api_tools._log_once_per_minute = lambda mid, sid, level, msg: _log_once_per_minute(
+            level, f"{mid}/{sid}", msg
+        )
+except Exception:
+    # keep going even if api_tools import fails
+    pass
+
+
+
+def _oc_timeline_log(mid: str, sid: str, msg: str, lvl: int = logging.WARNING) -> None:
+    # map logging levels (ints) to the strings orchestrator._log_event expects
+    if   lvl <= logging.DEBUG:   s = "DEBUG"
+    elif lvl <= logging.INFO:    s = "INFO"
+    elif lvl <= logging.WARNING: s = "WARN"
+    elif lvl <= logging.ERROR:   s = "ERROR"
+    else:                        s = "ERROR"
+    try:
+        _oc_orch_log(str(mid), str(sid), s, msg)
+    except Exception:
+        # last-resort: still print something
+        logging.log(lvl, f"[OC_TIMELINE] {mid}/{sid} {msg}")
+
+
+
+
+import os, sys, json, threading, time, logging
+from datetime import datetime, timedelta
+from typing import Optional, Iterable, Set, Tuple
+from datetime import datetime, timezone, timedelta
+import threading
+import sqlite3
+import json
+import time
+from decimal import Decimal, ROUND_HALF_UP
+from dashboard import DashboardView
+try:
+    from engines.decision_engine.engine import DecisionEngine
+except Exception:
+    DecisionEngine = None
+
+from engines.live.live_router import _start_rehedge_loop as start_rehedge_loop
+from engines.db_triggers import ensure_order_events_triggers
+
+from engines.utils.time_utils import minutes_to_off, now_utc
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+# Scalper View launcher (safe import)
+try:
+    from gui.scalper_view import open_scalper_window
+except Exception:
+    open_scalper_window = None
+
+
+# --- make repo root importable ------------------------------------------------
+_HERE = os.path.dirname(os.path.abspath(__file__))            # .../analytics_beta/gui
+_ROOT = os.path.abspath(os.path.join(_HERE, os.pardir))       # .../analytics_beta
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+# --- DB router shim: synchronous SQLite writes, no hijack ---------------------
+import sqlite3, types, re
+
+# Resolve both DB paths (prefer repo /data/, fall back to /engines/data/)
+_BETS_DB = os.path.join(_ROOT, "data", "bets.db")
+if not os.path.exists(_BETS_DB):
+    _BETS_DB = os.path.join(_ROOT, "engines", "data", "bets.db")
+
+_AUTOSCALP_DB = os.path.join(_ROOT, "data", "autoscalp_gui.db")
+if not os.path.exists(_AUTOSCALP_DB):
+    _AUTOSCALP_DB = os.path.join(_ROOT, "engines", "data", "autoscalp_gui.db")
+
+# --- DB router shim: synchronous SQLite writes, no hijack ---------------------
+# --- DB router shim: asks config_paths for current TEST/LEARNING/LIVE paths ---
+import types, re
+import engines.config_paths as cp
+
+try:
+    from adapters import ensure_betfair_ready, keep_alive
+except ImportError:
+    try:
+        from engines.decision_engine.adapters import ensure_betfair_ready, keep_alive
+    except ImportError:
+        from engines.adapters import ensure_betfair_ready, keep_alive  # final fallback if you keep it under engines/
+
+import logging
+log = logging.getLogger("gui")
+
+def _auto_boot_feeder_if_ready(self=None, mode: str = "LIVE"):
+    """
+    Auto-start feeder ONLY if DB creds exist (fresh from Validate).
+    We deliberately ignore ENV/JSON here to avoid stale tokens.
+    """
+    import os, sys, subprocess
+
+    # 1) Require DB creds
+    try:
+        from engines.session_secrets import load_betfair_creds
+        ak, ss = load_betfair_creds()
+    except Exception:
+        ak = ss = None
+
+    if not (ak and ss):
+        print("[gui] No DB creds yet — waiting for Validate; feeder not auto-started")
+        return False
+
+    # 2) Set adapters + current-process ENV from DB creds
+    try:
+        from engines.decision_engine.adapters import configure_betfair, force_reload_creds
+        configure_betfair(ak, ss)
+        force_reload_creds()  # ensures DB>ENV>JSON precedence everywhere
+    except Exception:
+        pass
+    os.environ["BETFAIR_APP_KEY"] = ak
+    os.environ["BETFAIR_SESSION"] = ss
+
+    # 3) Spawn feeder module (same path as restart)
+    try:
+        _HERE = os.path.dirname(os.path.abspath(__file__))
+        _ROOT = os.path.abspath(os.path.join(_HERE, os.pardir))
+        env = dict(os.environ)
+        env["PYTHONPATH"] = _ROOT + (os.pathsep + env.get("PYTHONPATH", "")) if env.get("PYTHONPATH") else _ROOT
+
+        if hasattr(self, "_restart_feeder_with_creds"):
+            # Use the robust launcher you already have
+            self._restart_feeder_with_creds(ak, ss)
+        else:
+            # Fallback: spawn directly
+            args = [sys.executable, "-u", "-m", "engines.dashboard_feeder", "--mode", mode]
+            subprocess.Popen(args, cwd=_ROOT, env=env)
+        return True
+    except Exception as e:
+        print(f"[gui] feeder auto-start error: {e}")
+        return False
+
+from engines.config_paths import auto_conn as _adb, q_retry as _q
+import datetime as _dt
+
+def _seed_guard_ok(tag: str) -> bool:
+    con = _adb()
+    try:
+        con.execute("""
+          CREATE TABLE IF NOT EXISTS app_kv(
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT DEFAULT (datetime('now','utc'))
+          )""")
+        today = _dt.datetime.utcnow().date().isoformat()
+        key = f"seed_done_{tag}_{today}"
+        row = con.execute("SELECT value FROM app_kv WHERE key=?", (key,)).fetchone()
+        if row: 
+            con.close()
+            return False
+        con.execute("INSERT OR REPLACE INTO app_kv(key,value,updated_at) VALUES(?,?,datetime('now','utc'))", (key, "1"))
+        con.commit()
+        con.close()
+        return True
+    except Exception:
+        try: con.close()
+        except Exception: pass
+        return True  # fail-open once
+
+
+def restart_feeder_with_creds(app_key: str, session: str) -> None:
+    """
+    Start/restart the dashboard feeder as a background subprocess.
+    Works regardless of which widget (tkapp, frame, view) calls it.
+    """
+    try:
+        import subprocess, sys, os, json
+        from engines.config_paths import autoscalp_db
+
+        # Persist creds so feeder (and future sessions) can read them
+        base = os.path.dirname(autoscalp_db())
+        os.makedirs(base, exist_ok=True)
+        creds_file = os.path.join(base, "betfair_creds.json")
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump({"app_key": app_key or "", "session": session or ""}, f)
+
+        # Kill any previously spawned feeder held in a pidfile (optional noop)
+        # (Skip: we don't maintain a pid registry here — the class method does if available.)
+
+        # Spawn feeder in LIVE/MIRROR mode; it will resolve creds from DB/JSON
+        cmd = [
+            sys.executable, "-u", "-m", "engines.dashboard_feeder",
+            "--mode", "LIVE", "--source", "MIRROR", "--tick", "1.0",
+        ]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("[FEEDER] launched via module-level restart_feeder_with_creds")
+    except Exception as e:
+        print(f"[FEEDER] module-level launch error: {e}")
+
+
+def _sqlite_exec(db_path: str, sql: str, params=None, fetch=False):
+    ensure_parent(db_path)
+    con = sqlite3.connect(db_path, timeout=15, isolation_level=None)
+    try:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.execute("PRAGMA busy_timeout=5000")
+        cur = con.execute(sql, params or [])
+        return cur.fetchall() if fetch else None
+    finally:
+        con.close()
+
+_AUTOSCALP_PAT = re.compile(
+    r"\b(inbound_|oc_series\b|stories\b|chapters\b|orders\b|decisions\b|ladders_obs\b|events\b|pnl_)",
+    re.IGNORECASE
+)
+
+
+def _route(sql: str) -> str:
+    # decide target *at call time* so TEST routing works
+    return cp.autoscalp_db() if _AUTOSCALP_PAT.search(sql.lower()) else cp.bets_db()
+
+def _enqueue_write(sql: str, params=None, priority: int = 5):
+    _sqlite_exec(_route(sql), sql, params, fetch=False)
+
+def _enqueue_read(sql: str, params=None):
+    return _sqlite_exec(_route(sql), sql, params, fetch=True)
+
+class _NoopQueue:
+    def join(self): pass
+
+_hm = types.ModuleType("engines.database_hijack_monitor")
+_hm.launch_db_writer = lambda: None
+_hm.enqueue_write = _enqueue_write
+_hm.enqueue_read  = _enqueue_read
+_hm.priority_queue = _NoopQueue()
+sys.modules["engines.database_hijack_monitor"] = _hm
+
+from engines.database_hijack_monitor import enqueue_write, enqueue_read, priority_queue as DBQ, launch_db_writer
+
+# --- imports from repo --------------------------------------------------------
+from engines.config_paths import DB_PATH, connect_db
+from engines.path_guard import ensure_parent
+from engines.db_migrations import ensure_tables
+
+from engines.utils.api_tools import fetch_live_odds
+
+# get_markets function we’ll use to seed runners
+from engines.get_markets import get_markets_and_insert
+
+# === OC schedule (minutes before off-time) ===
+OC_SCHEDULE_MINUTES = {
+    0: 90,    # OC0 (anchor)
+    1: 80,
+    2: 60,
+    3: 40,
+    4: 20,
+    5: 10,
+    6: 5,
+    7: 0,
+    8: -1,
+    9: -2,
+    10: -3,
+    11: -4,
+    12: -5,
+    13: -6,
+    14: -7,   # 30s
+    15: -8,  # 20s
+    16: -9,  # 10s
+    17: -10,  # 5s
+    18: -12,  # 30s AFTER off-time
+    19: -13   # 60s AFTER off-time
+}
+
+# --- simple persistent app state (mode) --------------------------------------
+_STATE_FILE = os.path.join(_ROOT, "data", "app_state.json")
+
+def _load_state() -> dict:
+    try:
+        with open(_STATE_FILE, "r") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+def _save_state(d: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
+        with open(_STATE_FILE, "w") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+# --- scheduling constants ---
+OC0_MINUTES = 90  # gate anchor at T-90
+
+def _parse_iso_utc(s: str):
+    # tolerates ...Z and offsets
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+# ── OC_TIMELINE throttle helper (once-per-runner/period) ─────────────────────
+import time as _oc_time, logging as _oc_log
+
+def _oc_timeline_log(mid: str, sid: str, msg: str,
+                     *, benign: tuple[str, ...] = (
+                         "unable to open database file", "database is locked", "busy",
+                         "NameResolutionError", "Max retries exceeded", "No odds"),
+                     period_s: float = 30.0) -> None:
+    """
+    Log at WARNING once per (mid/sid)/period; demote known-benign to DEBUG.
+    """
+    if not hasattr(_oc_timeline_log, "_last"):
+        _oc_timeline_log._last = {}
+    key = f"{mid}/{sid}"
+    now = _oc_time.time()
+    last = _oc_timeline_log._last.get(key, 0.0)
+    if now - last < period_s:
+        return
+    _oc_timeline_log._last[key] = now
+    level = _oc_log.DEBUG if any(b in msg for b in benign) else _oc_log.WARNING
+    _oc_log.log(level, f"[OC_TIMELINE] {mid}/{sid} {msg}")
+
+
+# ------------------------------------------------------------------------------
+# helpers
+# ------------------------------------------------------------------------------
+
+from engines.session_secrets import set_secret, APP_KEY_KEY, SESSION_KEY
+from engines.decision_engine.adapters import configure_betfair, keep_alive
+
+def on_validate_credentials(app_key: str, session_token: str):
+    """
+    Called by the Validate button in the GUI after user enters creds.
+    Persists to DB, configures adapters, and (optionally) boots feeder.
+    """
+    ak = (app_key or "").strip()
+    st = (session_token or "").strip()
+    if not ak or not st:
+        return False
+
+    # persist to DB
+    try:
+        set_secret(APP_KEY_KEY, ak)
+        set_secret(SESSION_KEY, st)
+    except Exception:
+        pass
+
+    # configure current process
+    try:
+        configure_betfair(ak, st)
+    except Exception:
+        pass
+
+    # sanity ping
+    ok = bool(keep_alive())
+
+    # optional: start feeder immediately if OK
+    if ok:
+        try:
+            _auto_boot_feeder_if_ready()
+        except Exception:
+            pass
+
+    return ok
+
+
+def _load_app_key_from_daily_config() -> Optional[str]:
+    """
+    Order:
+      1) BETFAIR_APP_KEY env
+      2) analytics_beta/daily_config.json  -> {"app_key": "..."}
+      3) engines/daily_config.json         -> {"app_key": "..."}
+      4) engines/upgrade_import_patch.get_app_key() if available
+    """
+    k = os.environ.get("BETFAIR_APP_KEY") or os.environ.get("APP_KEY")
+    if k:
+        return k.strip()
+
+    candidates = [
+        os.path.join(_ROOT, "daily_config.json"),
+        os.path.join(_ROOT, "engines", "daily_config.json"),
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    data = json.load(f)
+                v = (data.get("app_key") or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+    try:
+        from engines.upgrade_import_patch import get_app_key  # type: ignore
+        v = (get_app_key() or "").strip()
+        return v or None
+    except Exception:
+        return None
+
+
+def _install_upgrade_patch_shim(token: str, app_key: Optional[str], mode: Optional[str] = None):
+    """
+    Ensure engines.upgrade_import_patch exposes:
+      - set/get_session_token
+      - set/get_app_key
+      - set/get_mode
+    Works whether the module already exists or not.
+    """
+    import types, sys
+    try:
+        import engines.upgrade_import_patch as uip  # type: ignore
+    except Exception:
+        uip = types.ModuleType("engines.upgrade_import_patch")
+        sys.modules["engines.upgrade_import_patch"] = uip
+
+    # Session token
+    if not hasattr(uip, "set_session_token"):
+        def set_session_token(t: str): setattr(uip, "_tok", t or "")
+        uip.set_session_token = set_session_token
+    if not hasattr(uip, "get_session_token"):
+        uip.get_session_token = lambda: getattr(uip, "_tok", "")
+
+    # App key
+    if not hasattr(uip, "set_app_key"):
+        def set_app_key(k: str): setattr(uip, "_app", k or "")
+        uip.set_app_key = set_app_key
+    if not hasattr(uip, "get_app_key"):
+        uip.get_app_key = lambda: getattr(uip, "_app", "")
+
+    # Mode
+    if not hasattr(uip, "set_mode"):
+        def set_mode(m: str): setattr(uip, "_mode", (m or "learning").lower())
+        uip.set_mode = set_mode
+    if not hasattr(uip, "get_mode"):
+        uip.get_mode = lambda: getattr(uip, "_mode", "learning")
+
+    # Set current values
+    uip.set_session_token(token or "")
+    if app_key is not None:
+        uip.set_app_key(app_key)
+    if mode is not None:
+        uip.set_mode(mode)
+
+    return uip
+
+
+
+def _iso_date_from_start(start: Optional[str]) -> Optional[str]:
+    if not start:
+        return None
+    try:
+        s = start.replace("Z", "+00:00") if "Z" in start else start
+        return datetime.fromisoformat(s).date().isoformat()
+    except Exception:
+        return None
+
+
+def _filter_markets_by_dates(markets: Iterable[dict], target_dates: Set[str]) -> list:
+    out = []
+    for m in markets or []:
+        d = _iso_date_from_start(m.get("marketStartTime"))
+        if d and d in target_dates:
+            out.append(m)
+    return out
+
+
+def _band_from_value(v: Optional[float], pct: float = 0.02):
+    if v is None:
+        return None, None, None
+    low, high = v * (1 - pct), v * (1 + pct)
+    return low, high, json.dumps([low, v, high])
+
+def _ensure_autoscalp_tables():
+    # Only create if missing; your DB already has these, so this is safe.
+    sql1 = """CREATE TABLE IF NOT EXISTS inbound_bets_min (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        placed_at TEXT,
+        anchor_odd REAL,
+        odds_check_1 REAL, odds_check_2 REAL, odds_check_3 REAL,
+        odds_check_4 REAL, odds_check_5 REAL, odds_check_6 REAL,
+        horse_name TEXT,
+        meta_json TEXT
+    );"""
+    sql2 = """CREATE TABLE IF NOT EXISTS inbound_oc_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        anchor_odd REAL,
+        oc1 REAL,  oc2 REAL,  oc3 REAL,  oc4 REAL,  oc5 REAL,
+        oc6 REAL,  oc7 REAL,  oc8 REAL,  oc9 REAL,  oc10 REAL,
+        oc11 REAL, oc12 REAL, oc13 REAL, oc14 REAL, oc15 REAL,
+        oc16 REAL, oc17 REAL, oc18 REAL, oc19 REAL, oc20 REAL,
+        oc1_band_json  TEXT, oc2_band_json  TEXT, oc3_band_json  TEXT, oc4_band_json  TEXT, oc5_band_json  TEXT,
+        oc6_band_json  TEXT, oc7_band_json  TEXT, oc8_band_json  TEXT, oc9_band_json  TEXT, oc10_band_json TEXT,
+        oc11_band_json TEXT, oc12_band_json TEXT, oc13_band_json TEXT, oc14_band_json TEXT, oc15_band_json TEXT,
+        oc16_band_json TEXT, oc17_band_json TEXT, oc18_band_json TEXT, oc19_band_json TEXT, oc20_band_json TEXT,
+        last_sync_ts TEXT
+    );"""
+    enqueue_write(sql1)
+    enqueue_write(sql2)
+
+def _bets_lookup_horse_name(market_id: str, selection_id: int) -> str | None:
+    rows = _sqlite_exec(_BETS_DB,
+        "SELECT horse_name FROM bets WHERE marketId=? AND selectionId=? LIMIT 1",
+        [market_id, selection_id], fetch=True)
+    return (rows[0][0] if rows and rows[0] and rows[0][0] else None)
+
+def _autoscalp_upsert_inbound_bets_min(market_id: str, selection_id: int, placed_at: str, anchor_odd: float | None, horse_name: str | None, meta: dict | None):
+    meta_json = json.dumps(meta or {})
+    # create if missing
+    enqueue_write(
+        "INSERT INTO inbound_bets_min (marketId, selectionId, placed_at, anchor_odd, horse_name, meta_json) "
+        "SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM inbound_bets_min WHERE marketId=? AND selectionId=?)",
+        [market_id, selection_id, placed_at, anchor_odd, horse_name, meta_json, market_id, selection_id]
+    )
+    # then update latest fields
+    enqueue_write(
+        "UPDATE inbound_bets_min SET placed_at=?, anchor_odd=?, horse_name=COALESCE(?, horse_name), meta_json=? "
+        "WHERE marketId=? AND selectionId=?",
+        [placed_at, anchor_odd, horse_name, meta_json, market_id, selection_id]
+    )
+
+def _autoscalp_upsert_cache_anchor(market_id: str, selection_id: int, anchor_odd: float | None):
+    from datetime import datetime, timezone
+    enqueue_write(
+        "INSERT INTO inbound_oc_cache (marketId, selectionId, anchor_odd, last_sync_ts) "
+        "SELECT ?,?, ?, datetime('now','utc') "
+        "WHERE NOT EXISTS (SELECT 1 FROM inbound_oc_cache WHERE marketId=? AND selectionId=?)",
+        [market_id, selection_id, anchor_odd, market_id, selection_id]
+    )
+    enqueue_write(
+        "UPDATE inbound_oc_cache SET anchor_odd=?, last_sync_ts=datetime('now','utc') "
+        "WHERE marketId=? AND selectionId=?",
+        [anchor_odd, market_id, selection_id]
+    )
+
+
+def _autoscalp_update_cache_oc(
+    market_id: str,
+    selection_id: int,
+    oc_label: str,
+    odd: float | None,
+    band_json: "list[float] | str | None" = None
+    ):
+    """
+    Upsert ocN value and ocN_band_json for inbound_oc_cache.
+    - If band_json is provided:
+        * list -> JSON dump of samples (e.g., [6.4, 6.2, 6.1])
+        * str  -> used as-is (assumed JSON)
+      Else we fall back to a simple [low, v, high] triple (via _band_from_value).
+    Also normalises last_sync_ts to SQLite datetime('now','utc') for recency checks.
+    """
+    import re, json
+
+    m = re.fullmatch(r"OC(\d{1,2})", oc_label.upper())
+    if not m:
+        return
+    n = int(m.group(1))
+    if not (1 <= n <= 20):
+        return
+
+    # Ensure row exists; set an initial last_sync_ts in SQLite-friendly format
+    enqueue_write(
+        "INSERT INTO inbound_oc_cache (marketId, selectionId, last_sync_ts) "
+        "SELECT ?, ?, datetime('now','utc') "
+        "WHERE NOT EXISTS (SELECT 1 FROM inbound_oc_cache WHERE marketId=? AND selectionId=?)",
+        [market_id, selection_id, market_id, selection_id]
+    )
+
+    # Build band JSON safely so 'bj' is ALWAYS defined
+    if band_json is None:
+        # fallback band around 'odd'
+        _, _, bj = _band_from_value(odd)
+    elif isinstance(band_json, str):
+        bj = band_json
+    else:
+        try:
+            bj = json.dumps(band_json)
+        except Exception:
+            # last resort: derive a simple band from 'odd'
+            _, _, bj = _band_from_value(odd)
+
+    # Update OCn value + band + last_sync_ts
+    sql = (
+        f"UPDATE inbound_oc_cache "
+        f"SET oc{n}=?, oc{n}_band_json=?, last_sync_ts=datetime('now','utc') "
+        f"WHERE marketId=? AND selectionId=?"
+    )
+    enqueue_write(sql, [odd, bj, market_id, selection_id])
+
+
+
+def _autoscalp_cache_has_oc(market_id: str, selection_id: int, n: int) -> bool:
+    try:
+        row = _sqlite_exec(_AUTOSCALP_DB,
+            f"SELECT oc{n} FROM inbound_oc_cache WHERE marketId=? AND selectionId=? LIMIT 1",
+            [market_id, selection_id], fetch=True)
+        return bool(row and row[0] and row[0][0] is not None)
+    except Exception:
+        return False
+
+
+def _record_oc_series(market_id: str, selection_id: int, stage: str,
+                      odd: Optional[float], source: str = "SIM", meta: Optional[dict] = None):
+    """
+    Insert a snapshot into oc_series. Idempotent table guard (no-op if exists).
+    Uses SQLite datetime('now','utc') so time arithmetic works in validators.
+    """
+    low, high, band_json = _band_from_value(odd)
+    sql_ddl = """
+      CREATE TABLE IF NOT EXISTS oc_series(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        snapshot_ts TEXT NOT NULL,
+        odd REAL,
+        band_low REAL,
+        band_high REAL,
+        band_json TEXT,
+        meta_json TEXT,
+        source TEXT
+      )"""
+    sql_idx1 = "CREATE INDEX IF NOT EXISTS idx_oc_series_mkt_time ON oc_series(marketId, snapshot_ts)"
+    sql_idx2 = "CREATE INDEX IF NOT EXISTS idx_oc_series_sel_time ON oc_series(selectionId, snapshot_ts)"
+    sql_ins = ("INSERT INTO oc_series (marketId, selectionId, stage, snapshot_ts, odd, "
+               "band_low, band_high, band_json, meta_json, source) "
+               "VALUES (?, ?, ?, datetime('now','utc'), ?, ?, ?, ?, ?, ?)")
+
+    try:
+        # write directly to BETS_DB (router will choose the right file)
+        enqueue_write(sql_ddl)
+        enqueue_write(sql_idx1)
+        enqueue_write(sql_idx2)
+        params = [
+            market_id, selection_id, stage,
+            odd, low, high, band_json, json.dumps(meta or {}), source
+        ]
+        enqueue_write(sql_ins, params, priority=3)
+    except Exception:
+        # swallow — this is telemetry only, core flow is inbound_oc_cache
+        pass
+
+
+
+def _update_bets_anchor(market_id: str, selection_id: int, lay: Optional[float]):
+    low, high, band_json = _band_from_value(lay)
+    sql = (
+        "UPDATE bets SET "
+        "anchor_odd = COALESCE(anchor_odd, ?), "
+        "OC0 = COALESCE(OC0, ?), "
+        "OC0_band = COALESCE(OC0_band, ?), "
+        "placed_at = COALESCE(placed_at, ?), "
+        "timestamp = COALESCE(timestamp, ?) "
+        "WHERE marketId = ? AND selectionId = ?"
+    )
+    from datetime import datetime, timezone
+    now_iso = now_utc().isoformat()
+    params = [lay, lay, band_json, now_iso, now_iso, market_id, selection_id]
+    enqueue_write(sql, params, priority=3)
+
+
+def _start_keepalive_thread(get_token, get_app_key, interval=60):
+    try:
+        import requests
+    except Exception:
+        logging.warning("[keepalive] 'requests' module missing; keep-alive disabled")
+        return None
+
+    def tick():
+        tok = (get_token() or "").strip()
+        if not tok:
+            logging.warning("[session] no token yet; skipping keep-alive tick")
+            return
+        try:
+            r = requests.post(
+                "https://identitysso.betfair.com/api/keepAlive",
+                headers={"X-Authentication": tok, "X-Application": (get_app_key() or "")},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                logging.info("✅ [session] keep-alive OK")
+            else:
+                logging.warning(f"⚠️ [session] keep-alive HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            logging.error(f"❌ [session] keep-alive error: {e}")
+
+    def loop():
+        while True:
+            tick(); time.sleep(interval)
+
+    t = threading.Thread(target=loop, name="KeepAliveThread", daemon=True)
+    t.start()
+    return t
+
+# ------------------------------------------------------------------------------
+# GUI
+# ------------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*class PhaseGUI\(tk\.Tk\):\n(?:[ \t].*\n)+?self\.btn4\.grid\(row=4, column=0, columnspan=3, sticky="we", pady=\(6,0\)\)\n\n\n\n\n        # --- Modes \(TEST / LEARNING / LIVE\) .*\n(?:[ \t].*\n)+?self\.status = ttk\.Label\(frm, text="• Ready to run Step 1", foreground="#2c7"\)
+# ─────────────────────────────────────────────────────────────────────────────
+class PhaseGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("AutoScalp – Step Runner")
+        self.geometry("720x270")
+        self.resizable(True, True)
+
+        # state
+        self._token = tk.StringVar()
+        self._app_key = _load_app_key_from_daily_config() or ""
+        self._markets: list[dict] = []
+        self._oc1_thread = None
+        self._learn_thread = None
+
+
+        # default mode: last saved, else env, else learning
+        _state = _load_state()
+        initial_mode = (_state.get("mode")
+                        or os.environ.get("AUTOSCALP_MODE")
+                        or "learning").lower()
+        self._mode = tk.StringVar(value=initial_mode)
+
+        # route DBs right away so everything looks at the same files on launch
+        try:
+            import engines.config_paths as cp
+            cp.set_db_paths(mode=initial_mode, quiet=True)
+        except Exception:
+            pass
+
+
+        # layout
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+
+        # Token
+        ttk.Label(frm, text="Session Token:").grid(row=0, column=0, sticky="w")
+        ent = ttk.Entry(frm, textvariable=self._token, width=58, show="•")
+        ent.grid(row=0, column=1, columnspan=2, sticky="we", padx=(8,0))
+
+        # App key (readonly)
+        ttk.Label(frm, text="App Key (daily_config):").grid(row=1, column=0, sticky="w", pady=(8,0))
+        self.appkey_lbl = ttk.Label(frm, text=self._mask(self._app_key))
+        self.appkey_lbl.grid(row=1, column=1, columnspan=2, sticky="w", padx=(8,0), pady=(8,0))
+
+        # Buttons (step runner)
+        self.btn1 = ttk.Button(frm, text="Step 1: Set Credentials", command=self._step1)
+        self.btn2 = ttk.Button(frm, text="Step 2: Seed Bets (today+tomorrow)", command=self._step2, state="disabled")
+        self.btn3 = ttk.Button(frm, text="Step 3: Seed Anchor Odds (OC0)", command=self._step3, state="disabled")
+        self.btn4 = ttk.Button(frm, text="Step 4: Start OC1 Loop", command=self._step4, state="disabled")
+
+        self.btn1.grid(row=3, column=0, sticky="we", pady=(16,6))
+        self.btn2.grid(row=3, column=1, sticky="we", padx=8, pady=(16,6))
+        self.btn3.grid(row=3, column=2, sticky="we", pady=(16,6))
+        self.btn4.grid(row=4, column=0, columnspan=3, sticky="we", pady=(6,0))
+
+        # --- Launch TEST ---
+        # Dedicated button (no radio). Pressing this runs TEST fast-path (no Steps).
+      
+        ttk.Button(frm, text="Launch TEST (Simulator)", command=self._launch_test).grid(
+            row=2, column=0, sticky="we", pady=(8,0)
+        )
+
+        # --- Modes (LEARNING / LIVE) ---
+        ttk.Label(frm, text="Mode:").grid(row=2, column=1, sticky="w", pady=(8,0))
+        modes = ttk.Frame(frm)
+        modes.grid(row=2, column=2, sticky="w", padx=(8,0), pady=(8,0))
+
+        ttk.Radiobutton(modes, text="Learning", value="learning", variable=self._mode).pack(side="left", padx=(0,12))
+        ttk.Radiobutton(modes, text="Live",     value="live",     variable=self._mode).pack(side="left", padx=(0,0))
+
+        # Status
+        self.status = ttk.Label(frm, text="• Ready to run Step 1", foreground="#2c7")
+        self.status.grid(row=5, column=0, columnspan=3, sticky="w", pady=(16,0))
+
+        # logging to console
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+    @staticmethod
+    def _mask(s: str) -> str:
+        if not s: return "(not found)"
+        if len(s) <= 6: return "*" * len(s)
+        return s[:3] + "…" + s[-3:]
+
+    def _open_dashboard_window(self):
+        from dashboard import DashboardView  # lazy import here
+        # Re-focus if already open
+        if getattr(self, "_dash_win", None) and self._dash_win.winfo_exists():
+            self._dash_win.deiconify()
+            self._dash_win.lift()
+            self._dash_win.focus_force()
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Auto Scalping — Live Dashboard")
+        win.geometry("1100x730")
+        win.minsize(1000, 680)
+
+        container = ttk.Frame(win)
+        container.pack(fill="both", expand=True)
+
+        view = DashboardView(parent=container, app=self)
+        view.pack(fill="both", expand=True)
+        # Kick learning loop in case user launched dashboard first
+        self._start_learning_loop_background()
+        self._dash_win = win
+        def _on_close():
+            self._dash_win = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*def _open_dashboard_window\(self\):\n(?:[ \t].*\n)+?win\.protocol\("WM_DELETE_WINDOW", _on_close\)\n\n
+# ─────────────────────────────────────────────────────────────────────────────
+    def _build_mode_menu(self):
+        self.mode_var.set(self.mode_var.get() or "LIVE")
+        self.btn_live.configure(command=lambda: self._launch_mode("LIVE"))
+        self.btn_replay.configure(command=lambda: self._launch_mode("REPLAY"))
+
+    def _launch_mode(self, mode: str):
+        """
+        Mode switcher. TEST behaves as REPLAY with a compressed clock.
+        """
+        import datetime as dt
+        from engines.config_paths import set_db_paths, DATA_DIR
+        set_db_paths(
+            mode="test",
+            bets=os.path.join(DATA_DIR, "bets.db"),
+            autoscalp=os.path.join(DATA_DIR, "autoscalp_gui.db"),
+        )
+
+        # Clear any optional banner safely (works whether you use a StringVar or a Label)
+        try:
+            if hasattr(self, "banner_var") and hasattr(self.banner_var, "set"):
+                self.banner_var.set("")
+            elif hasattr(self, "banner") and hasattr(self.banner, "configure"):
+                self.banner.configure(text="")
+        except Exception as _e:
+            print("[replay] banner clear skipped:", _e)
+  
+        m = (mode or "LIVE").upper()
+        if m in ("TEST", "REPLAY"):
+            # Configure compressed clock (timezone-aware; no utcnow() deprecation)
+            try:
+                from engines.replay_clock import configure_replay
+                yday = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)).isoformat()
+                # Optional speed control
+                speed_x = 60.0
+                if hasattr(self, "replay_speed_var"):
+                    try:
+                        speed_x = float(self.replay_speed_var.get() or 60.0)
+                    except Exception:
+                        pass
+                configure_replay(
+                    replay_day_iso=yday,
+                    start_at_iso=f"{yday}T10:30:00Z",
+                    speed_x=speed_x,
+                )
+                # Set banner if available
+                try:
+                    if hasattr(self, "banner_var") and hasattr(self.banner_var, "set"):
+                        self.banner_var.set(f"REPLAY x{speed_x:g}")
+                    elif hasattr(self, "banner") and hasattr(self.banner, "configure"):
+                        self.banner.configure(text=f"REPLAY x{speed_x:g}")
+                except Exception as _e2:
+                    print("[replay] banner set skipped:", _e2)
+            except Exception as e:
+                print("[replay] configure_replay failed:", e)
+
+            # ✅ Always open the dashboard (restores old behaviour of Launch TEST)
+            try:
+                if hasattr(self, "_open_dashboard_window"):
+                    self._open_dashboard_window()
+                else:
+                    # Fallback if method name changes in future
+                    from dashboard import DashboardView
+                    win = tk.Toplevel(self)
+                    win.title("Auto Scalping — Live Dashboard")
+                    container = ttk.Frame(win); container.pack(fill="both", expand=True)
+                    view = DashboardView(parent=container, app=self); view.pack(fill="both", expand=True)
+            except Exception as e:
+                print("[GUI] Failed to open dashboard:", e)
+
+        # Kick your existing loops
+        if hasattr(self, "_start_loops"):
+            self._start_loops()
+        
+
+    def _launch_test(self):
+        """Back-compat: TEST behaves as REPLAY (compressed clock)."""
+        return self._launch_mode("TEST")
+
+    def _preview_tick(self):
+        from engines.config_paths import is_replay_mode
+        if is_replay_mode():
+            from engines.replay_clock import replay_now_utc
+            now_utc = replay_now_utc()
+        else:
+            now_utc = dt.datetime.utcnow()
+
+        # existing logic that computes next-race header, countdown, bar positions
+        # must use 'now_utc' from above
+        self._refresh_dashboard(now_utc=now_utc)
+        self.after(1000, self._preview_tick)
+
+    # --- log helper used by Step 4 / dashboard ---
+    def _append(self, msg: str):
+        try:
+            print(msg)
+            if hasattr(self, "txt_alerts") and self.txt_alerts.winfo_exists():
+                self.txt_alerts.insert("end", msg + "\n")
+                self.txt_alerts.see("end")
+        except Exception:
+            pass
+
+    def _seed_test_markets(self, n_markets: int = 10, runners_range=(8, 12)) -> None:
+        """Create synthetic markets + runners for TEST (no network)."""
+        from random import randint
+        from datetime import timedelta
+
+        markets = []
+        base = now_utc().replace(microsecond=0)
+
+        # Single writer to BETS_DB for the whole seeding step
+        bdb = connect_db(ro=False)
+        try:
+            # Autocommit + sane pragmas so we don't hold long transactions
+            bdb.isolation_level = None              # autocommit per statement
+            bdb.execute("PRAGMA journal_mode=WAL")
+            bdb.execute("PRAGMA synchronous=NORMAL")
+            bdb.execute("PRAGMA busy_timeout=8000")
+
+            # Ensure the minimal table we also seed (join target for TEST builder)
+            bdb.execute("""
+                CREATE TABLE IF NOT EXISTS inbound_bets_min (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    marketId TEXT NOT NULL,
+                    selectionId TEXT NOT NULL,
+                    active INTEGER,
+                    placed_at TEXT,
+                    horse_name TEXT,
+                    meta_json TEXT
+                )
+            """)
+
+            # Backfill columns on older DBs (idempotent)
+            cols = [r[1] for r in bdb.execute("PRAGMA table_info(inbound_bets_min)")]
+            if "active" not in cols:
+                bdb.execute("ALTER TABLE inbound_bets_min ADD COLUMN active INTEGER")
+            if "placed_at" not in cols:
+                bdb.execute("ALTER TABLE inbound_bets_min ADD COLUMN placed_at TEXT")
+            if "horse_name" not in cols:
+                bdb.execute("ALTER TABLE inbound_bets_min ADD COLUMN horse_name TEXT")
+            if "meta_json" not in cols:
+                bdb.execute("ALTER TABLE inbound_bets_min ADD COLUMN meta_json TEXT")
+
+            # Seed markets + runners
+            for i in range(n_markets):
+                mid = f"1.TEST.MKT.{i+1:03}"
+                start = (base + timedelta(minutes=5 + i*2)).isoformat()
+
+                rcount = randint(runners_range[0], runners_range[1])
+                runners = []
+
+                for j in range(rcount):
+                    sid = 100000 + i*1000 + j
+                    name = f"Runner {j+1}"
+                    runners.append({"selectionId": sid, "runnerName": name})
+
+                    # (1) Insert minimal 'bets' row using the SAME connection
+                    bdb.execute(
+                        "INSERT OR IGNORE INTO bets (marketId, selectionId, horse_name, event_name, market_name, race_name, marketStartTime, date, timestamp, meta_json) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        [
+                            mid, sid, name,
+                            "TEST", "WIN", f"TEST RACE {i+1}",
+                            start, start.split('T')[0], now_utc().isoformat(),
+                            json.dumps({"src": "test-seed"})
+                        ]
+                    )
+
+                    # (2) Ensure TEST builder join table has an ACTIVE row
+                    bdb.execute(
+                        "INSERT OR IGNORE INTO inbound_bets_min (marketId, selectionId) VALUES (?, ?)",
+                        (mid, str(sid))
+                    )
+                    bdb.execute(
+                        "UPDATE inbound_bets_min "
+                        "SET active=1, placed_at=COALESCE(placed_at, datetime('now','utc')), "
+                        "    horse_name=COALESCE(?, horse_name), meta_json=? "
+                        "WHERE marketId=? AND selectionId=?",
+                        (name, json.dumps({"src": "test-seed"}), mid, str(sid))
+                    )
+
+                markets.append({"marketId": mid, "marketStartTime": start, "runners": runners})
+
+            # autocommit is on; this is effectively a no-op, but harmless
+            bdb.commit()
+
+        finally:
+            try:
+                bdb.close()
+            except Exception:
+                pass
+
+        self._markets = markets
+        print(f"✅ Step 2 OK — TEST seeded {sum(len(m['runners']) for m in markets)} runners across {len(markets)} markets.")
+        print("READY: next step")
+        self.status.config(text="• Step 2 complete → Run Step 3", foreground="#2c7")
+        self.btn3.config(state="normal")
+
+
+
+    # ---------- Steps ----------
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*def _step1\(self\):\n(?:[ \t].*\n)+?
+# ─────────────────────────────────────────────────────────────────────────────
+    def _step1(self):
+        """Persist creds + mode to the shim and (if not TEST) start keep-alive."""
+        mode_now = (self._mode.get() or "learning").lower()
+        token = (self._token.get() or "").strip()
+        import engines.config_paths as cp
+        cp.set_db_paths(mode=mode_now, quiet=False)
+        _save_state({"mode": mode_now})
+
+
+        if not token:
+            messagebox.showwarning("Credentials", "Please paste your Betfair session token.")
+            return
+
+        _install_upgrade_patch_shim(token, self._app_key, mode=mode_now)
+
+        # 🔸 dual-write to BOTH DBs (GUI + bets)
+        #from engines.session_secrets import set_betfair_creds_all
+        #set_betfair_creds_all(session_token) TODO
+
+        # OS env (you already had this) — stays for legacy readers
+        os.environ["BETFAIR_APP_KEY"] = self._app_key or ""
+        os.environ["BETFAIR_SESSION"] = token
+
+        # 🔸 NEW: install strategy import alias so both paths work
+        try:
+            from engines.upgrade_import_patch import install_strategy_import_alias, discover_strategies
+            install_strategy_import_alias()
+        except Exception as e:
+            print(f"[strategies] alias install warn: {e}")
+
+        # ⬇️ NEW 1/2: save to DB (single source of truth for all processes)
+        try:
+            from engines.session_secrets import set_secret, APP_KEY_KEY, SESSION_KEY
+            set_secret(APP_KEY_KEY, self._app_key or "")
+            set_secret(SESSION_KEY, token)
+        except Exception as e:
+            print(f"[step1] DB persist warn: {e}")
+
+        # ⬇️ NEW 2/2: make adapters use the fresh creds immediately (no stale cache)
+        try:
+            from engines.decision_engine import adapters as AD
+            AD.lock_cred_source("DB")                    # never downgrade to ENV/JSON mid-run
+            AD.configure_betfair(self._app_key or "", token)
+            AD.force_reload_creds()
+        except Exception as e:
+            print(f"[step1] adapters reload warn: {e}")
+
+        print(f"🧭 Mode selected: {mode_now.upper()}")
+        global _BETS_DB, _AUTOSCALP_DB
+        print(f"[paths] DATA_DIR={os.path.join(_ROOT,'data')} BETS_DB={_BETS_DB} AUTO_DB={_AUTOSCALP_DB}")
+
+
+
+        # 🔸 NEW: probe strategies (both NEW + LEGACY) so you see them straight away
+        try:
+            new_act, leg_act, disc, reasons = discover_strategies()
+            print(f"[strategies] discovered={len(disc)}")
+            print(f"[strategies] active(NEW)={new_act}")
+            print(f"[strategies] active(LEGACY)={leg_act}")
+            for r in reasons:
+                print(f"[strategies] {r}")
+        except Exception as e:
+            print(f"[strategies] probe failed: {e}")
+
+        # Keep-alive (learning/live)
+        try:
+            from engines.upgrade_import_patch import get_session_token, get_app_key  # type: ignore
+        except Exception:
+            module = sys.modules.get("engines.upgrade_import_patch")
+            get_session_token = (lambda: getattr(module, "_tok", token))
+            get_app_key = (lambda: getattr(module, "_app", self._app_key))
+        _start_keepalive_thread(get_session_token, get_app_key, interval=60)
+
+        print("✅ Step 1 OK — token/app key set.")
+        print("READY: next step")
+        self.status.config(text="• Step 1 complete → Run Step 2", foreground="#2c7")
+        self.btn2.config(state="normal")
+
+        # Start feeder immediately with fresh creds (class method if present; else module fallback)
+        try:
+            if hasattr(self, "_restart_feeder_with_creds"):
+                self._restart_feeder_with_creds(self._app_key or "", token)
+                print("[FEEDER] launch requested (LIVE/MIRROR) via Step-1 (class method)")
+            else:
+                # module-level helper works even if self is a raw tkapp
+                restart_feeder_with_creds(self._app_key or "", token)
+                print("[FEEDER] launch requested (LIVE/MIRROR) via Step-1 (module fallback)")
+        except Exception as e:
+            print(f"[FEEDER] launch error: {e}")
+
+        # Also persist JSON alongside DB so any external feeder can read creds
+        try:
+            from engines.config_paths import autoscalp_db
+            base = os.path.dirname(autoscalp_db())
+            os.makedirs(base, exist_ok=True)
+            with open(os.path.join(base, "betfair_creds.json"), "w", encoding="utf-8") as f:
+                json.dump({"app_key": self._app_key or "", "session": token}, f)
+        except Exception:
+            pass
+
+
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*def _step2\(self\):\n(?:[ \t].*\n)+?
+# ─────────────────────────────────────────────────────────────────────────────
+    def _step2(self):
+        from engines.upgrade_import_patch import get_session_token
+        tok = (get_session_token() or "").strip()
+        markets = get_markets_and_insert(app_key=self._app_key, session_token=tok)
+        """Ensure DB + launch writer + seed runners. TEST=synthetic; others=live fetch."""
+        self.btn2.config(state="disabled")
+
+        def run():
+            try:
+                # Make sure both schemas exist for the *current* mode
+                ensure_tables()
+                _ensure_autoscalp_tables()
+
+                mode = (self._mode.get() or "learning").lower()
+
+                if mode == "test":
+                    # Seed synthetic markets/runners; no network, no stdin prompt
+                    self._seed_test_markets(n_markets=10, runners_range=(8, 12))
+                    return
+
+                # ----- LEARNING/LIVE path -----
+                ensure_parent(DB_PATH)
+                launch_db_writer()
+
+                today = now_utc().date()
+                tgt = {(today + timedelta(days=d)).isoformat() for d in (0, 1)}
+
+                markets = get_markets_and_insert() or []
+                markets = _filter_markets_by_dates(markets, tgt)
+                self._markets = markets
+
+                if not any(m.get("marketStartTime") for m in markets):
+                    print("⚠️ Only 0 runners with marketStartTime found. Skipping re-fetch in GUI (no stdin prompts).")
+                    messagebox.showwarning(
+                        "Seed Bets",
+                        "No markets with start times found from API.\n"
+                        "Check your session token (Step 1) or try again later."
+                    )
+                else:
+                    print(f"✅ Step 2 OK — seeded {sum(len(m.get('runners') or []) for m in markets)} runners "
+                          f"across {len(markets)} markets for {sorted(tgt)}.")
+
+                print("READY: next step")
+                self.status.config(text="• Step 2 complete → Run Step 3", foreground="#2c7")
+                self.btn3.config(state="normal")
+
+            except Exception as e:
+                print(f"❌ Step 2 failed: {e}")
+                messagebox.showerror("Seed Bets", str(e))
+                self.btn2.config(state="normal")
+
+        threading.Thread(target=run, daemon=True).start()
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*def _step3\(self\):\n(?:[ \t].*\n)+?
+# ─────────────────────────────────────────────────────────────────────────────
+    def _step3(self):
+        """Gate & fetch anchor (lay) odds → update bets + record OC0 in oc_series."""
+        if not self._markets:
+            messagebox.showwarning("Anchors", "No markets in memory. Run Step 2 first.")
+            return
+        self.btn3.config(state="disabled")
+
+        mode_now = (self._mode.get() or "learning").lower()
+
+        def _snap(v: float) -> float:
+            try:
+                from engines.price_math import snap_to_tick
+                return snap_to_tick(float(v))
+            except Exception:
+                return round(float(v), 2)
+
+        def run():
+            total = 0
+
+            # TEST: inject synthetic anchors, no network
+            if mode_now == "test":
+                for m in self._markets:
+                    mid = m.get("marketId")
+                    for r in (m.get("runners") or []):
+                        sid = r.get("selectionId")
+                        if not mid or sid is None:
+                            continue
+                        try:
+                            # Skip if already has anchor
+                            row = _sqlite_exec(_AUTOSCALP_DB,
+                                "SELECT anchor_odd FROM inbound_oc_cache WHERE marketId=? AND selectionId=? LIMIT 1",
+                                [mid, sid], fetch=True)
+                            has_anchor = bool(row and row[0] and row[0][0] is not None)
+                            if has_anchor:
+                                continue
+
+                            # Deterministic synthetic anchor
+                            base = 6.0 + ((int(sid) % 17) * 0.1)
+                            lay = _snap(base)
+
+                            hn = r.get("runnerName") or _bets_lookup_horse_name(mid, sid)
+                            try:
+                                _autoscalp_upsert_inbound_bets_min(mid, sid, None, None, hn, {"src": "anchor_inject_test"})
+                            except Exception:
+                                pass
+                            _update_bets_anchor(mid, sid, lay)
+                            _record_oc_series(mid, sid, "OC0", lay, source="SIM", meta={"mode": "TEST"})
+                            _autoscalp_upsert_cache_anchor(mid, sid, lay)
+                            total += 1
+                        except Exception as e:
+                            logging.warning(f"[anchors][TEST] {mid}/{sid} inject error: {e}")
+
+                try: DBQ.join()
+                except Exception: pass
+
+                print(f"✅ Step 3 OK — anchors injected for ~{total} runners (TEST).")
+                print("READY: next step")
+                self.status.config(text="• Step 3 complete → Run Step 4 (TEST skips loop; use Dashboard Tests)", foreground="#2c7")
+                self.btn4.config(state="disabled")
+                return
+
+            # LEARNING/LIVE: live fetch path
+            try:
+                from engines.upgrade_import_patch import get_session_token  # type: ignore
+                token = (get_session_token() or "").strip()
+            except Exception:
+                token = (self._token.get() or "").strip()
+
+            for m in self._markets:
+                mid = m.get("marketId")
+                for r in (m.get("runners") or []):
+                    sid = r.get("selectionId")
+                    if not mid or sid is None:
+                        continue
+                    try:
+                        row = _sqlite_exec(_AUTOSCALP_DB,
+                            "SELECT anchor_odd FROM inbound_oc_cache WHERE marketId=? AND selectionId=? LIMIT 1",
+                            [mid, sid], fetch=True)
+                        has_anchor = bool(row and row[0] and row[0][0] is not None)
+                        if has_anchor:
+                            continue
+
+                        # AFTER (safer + opt-in)
+                        use_direct = (os.getenv("AUTOSCALP_ENABLE_DIRECT_ODDS", "0") == "1") and bool(token)
+                        odds = fetch_live_odds(token, mid, sid) if use_direct else {}
+                        odds = odds or {}
+                        lay = odds.get("lay")
+                        if lay is None:
+                            continue
+
+                        lay = _snap(lay)
+                        hn = r.get("runnerName") or _bets_lookup_horse_name(mid, sid)
+                        try:
+                            _autoscalp_upsert_inbound_bets_min(mid, sid, None, None, hn, {"src": "anchor_check"})
+                        except Exception:
+                            pass
+                        _update_bets_anchor(mid, sid, lay)
+                        _record_oc_series(mid, sid, "OC0", lay, meta={"odds": odds})
+                        _autoscalp_upsert_cache_anchor(mid, sid, lay)
+                        total += 1
+                    except Exception as e:
+                        logging.warning(f"[anchors] {mid}/{sid} fetch error: {e}")
+
+            try: DBQ.join()
+            except Exception: pass
+
+            print(f"✅ Step 3 OK — anchors written (live) for ~{total} runners.")
+            print("READY: next step")
+            self.status.config(text="• Step 3 complete → Run Step 4 (start OC timeline loop)", foreground="#2c7")
+            self.btn4.config(state="normal")
+
+        threading.Thread(target=run, daemon=True).start()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*def _step4\(self\):\n(?:[ \t].*\n)+?
+# ─────────────────────────────────────────────────────────────────────────────
+    def _step4(self):
+        """Start OC timeline loop (OC1…OC20 on schedule, with band accumulation)."""
+        import os, threading, time, logging
+        from tkinter import messagebox
+
+        # --- ensure mode is set for downstream (orders.mode, routers, etc.) ---
+        mode_now = (self._mode.get() or "learning").lower()
+        os.environ["AUTOSCALP_MODE"] = mode_now  # orchestrator/routers read this
+
+        # --- HYBRID: auto-validate creds (same effect as pressing Validate) ---
+        try:
+            # Prefer UI entries, then env, then any stored secrets.
+            ak = getattr(self, "_cred_ak", None)
+            ss = getattr(self, "_cred_ss", None)
+
+            # Fallback to DB secrets if UI fields aren’t set yet
+            if not (ak and ss):
+                try:
+                    from engines.session_secrets import load_betfair_creds
+                    ak2, ss2 = load_betfair_creds()
+                    if ak2 and ss2:
+                        ak, ss = ak2, ss2
+                        self._cred_ak, self._cred_ss = ak, ss
+                except Exception:
+                    pass
+            try:
+                # optional secret store
+                from engines.session_secrets import get_secret, set_secret, APP_KEY_KEY, SESSION_KEY  # type: ignore
+                if not ak:
+                    ak = (get_secret(APP_KEY_KEY) or "").strip()
+                if not ss:
+                    ss = (get_secret(SESSION_KEY) or "").strip()
+                # refresh stored values so adapters/routers can read them later
+                if ak: set_secret(APP_KEY_KEY, ak)
+                if ss: set_secret(SESSION_KEY, ss)
+            except Exception:
+                pass
+
+            # Configure adapters (same side-effects as Validate button).
+            try:
+                from engines.decision_engine.adapters import ensure_betfair_ready  # type: ignore
+                # Many builds read creds from env/secret store; setting env helps all codepaths.
+                if ak: os.environ["BETFAIR_APP_KEY"] = ak
+                if ss: os.environ["BETFAIR_SESSION"] = ss
+                try:
+                    ensure_betfair_ready()  # signatureless in our builds; returns bool
+                except TypeError:
+                    # some versions accept explicit args
+                    ensure_betfair_ready(app_key=ak, session=ss)  # type: ignore
+            except Exception:
+                pass
+
+            # Launch feeder the same way your manual path does, if creds present.
+            if ak and ss and hasattr(self, "_restart_feeder_with_creds"):
+                try:
+                    self._restart_feeder_with_creds(ak, ss)
+                    print("[FEEDER] launched via Step-4 auto-validate")
+                except Exception as e:
+                    print(f"[FEEDER] auto-launch error: {e}")
+        except Exception:
+            # Never block Step 4 if auto-validate fails; OC loop will still run.
+            pass
+
+        # --- TEST mode: keep existing behavior ---
+        if mode_now == "test":
+            messagebox.showinfo(
+                "OC Loop (TEST)",
+                "TEST mode bypasses the live OC loop. Use Dashboard → Tests to run synthetic OC timelines."
+            )
+            return
+
+        # --- guards you already had ---
+        if not self._markets:
+            messagebox.showwarning("OC Loop", "No markets in memory. Run Step 2 first.")
+            return
+        if getattr(self, "_oc1_thread", None) and self._oc1_thread.is_alive():
+            messagebox.showinfo("OC Loop", "OC loop already running.")
+            return
+
+        # --- your existing OC loop (unchanged) ---
+        def loop():
+            """Minimal resilient live OC loop (keeps UI responsive if live odds fail)."""
+            try:
+                # Get token once per loop iteration to allow re-auth without restart.
+                from engines.upgrade_import_patch import get_session_token  # type: ignore
+            except Exception:
+                get_session_token = lambda: (self._token.get() or "").strip()
+
+            def _snap(v: float) -> float:
+                try:
+                    from engines.price_math import snap_to_tick
+                    return snap_to_tick(float(v))
+                except Exception:
+                    return round(float(v), 2)
+
+            # cadence in seconds (keep modest to avoid UI churn)
+            CADENCE = 2.0
+            while True:
+                token = (get_session_token() or "").strip()
+                for m in self._markets:
+                    mid = m.get("marketId")
+                    start_iso = m.get("marketStartTime")
+                    if not mid or not start_iso:
+                        continue
+
+                    # Which OC number is due right now?
+                    mto = minutes_to_off(start_iso)
+                    if mto is None:
+                        continue
+                    ordered = sorted(OC_SCHEDULE_MINUTES.items(), key=lambda kv: kv[1])
+                    due = [n for (n, thr) in ordered if n >= 1 and mto <= thr]
+                    current_n = max(due) if due else 0
+
+                    for r in (m.get("runners") or []):
+                        sid = r.get("selectionId")
+                        if sid is None:
+                            continue
+                        try:
+                            odds = fetch_live_odds(token, mid, sid) or {}
+                            lay = odds.get("lay")
+                            if lay is None:
+                                continue
+                            lay_val = _snap(lay)
+
+                            # Backfill anchor if missing
+                            rows = _sqlite_exec(_AUTOSCALP_DB,
+                                "SELECT anchor_odd FROM inbound_oc_cache WHERE marketId=? AND selectionId=? LIMIT 1",
+                                [mid, sid], fetch=True)
+                            has_anchor = bool(rows and rows[0] and rows[0][0] is not None)
+                            if not has_anchor:
+                                _update_bets_anchor(mid, sid, lay_val)
+                                _autoscalp_upsert_cache_anchor(mid, sid, lay_val)
+                                _record_oc_series(mid, sid, "OC0", lay_val, source="SIM", meta={"odds": odds})
+
+                            # Pre-OC1: keep recording OC0 as band samples
+                            if current_n == 0:
+                                _record_oc_series(mid, sid, "OC0", lay_val, source="SIM", meta={"odds": odds})
+                                continue
+
+                            # OC1..OC20: write current value and grow band
+                            if not _autoscalp_cache_has_oc(mid, sid, current_n):
+                                label = f"OC{current_n}"
+                                _record_oc_series(mid, sid, label, lay_val, source="SIM", meta={"odds": odds})
+                                _autoscalp_update_cache_oc(mid, sid, label, lay_val, band_json=[lay_val])
+                            else:
+                                # append to band json (cheap update: set last value; impl already handles append)
+                                label = f"OC{current_n}"
+                                _autoscalp_update_cache_oc(mid, sid, label, lay_val, band_json=None)
+
+                        except Exception as e:
+                            # quiet reserve/no-odds + transient issues
+                            import time, logging
+
+                            # one-liner helper lives near top of file; include here if not already present
+                            if not hasattr(logging, "_oc_last"):
+                                logging._oc_last = {}
+                                #_log_once_per_minute()
+                                now = time.time()
+                                _log_once_per_minute(logging.INFO, f"{mid}/{sid}", "transient network/no price")
+                                if now - last >= 60.0:
+                                    logging.log(level, msg)
+                                    logging._oc_last[("min", key)] = now
+
+                            # inside the loop exception path
+                            key = f"{mid}/{sid}"
+                            now = time.time()
+                            last = logging._oc_last.get(("min", key), 0.0)
+                            if now - last >= 60.0:
+                                logging.info("timeline: transient network/no price")
+                                logging._oc_last[("min", key)] = now
+
+                            # only once per 30s per runner for chatty network/DB noise
+                            if now_ts - last_ts >= 30.0:
+                                msg = str(e)
+                                benign = ("unable to open database file", "database is locked", "busy",
+                                          "NameResolutionError", "Max retries exceeded", "No odds")
+                                lvl = logging.DEBUG if any(b in msg for b in benign) else logging.WARNING
+                                _oc_timeline_log(mid, sid, f"fetch error: {e}", lvl)
+
+
+
+
+
+                try:
+                    DBQ.join()
+                except Exception:
+                    pass
+                _time.sleep(CADENCE)
+
+        self._oc1_thread = threading.Thread(target=loop, name="OC_Timeline_Loop", daemon=True)
+        self._oc1_thread.start()
+
+        print("✅ Step 4 OK — OC timeline loop started (OC1…OC20).")
+        # Auto-start the decision loop based on current mode (no button needed)
+        mode_now = (self._mode.get() or "learning").lower()
+
+        # Don’t double-start if already running
+        if not any(t.name in ("LiveLoop", "LearningLoop") and t.is_alive() for t in threading.enumerate()):
+            from datetime import datetime, timezone
+            run_id_prefix = "LIVE" if mode_now == "live" else "LEARN"
+            run_id = f"{run_id_prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+            if mode_now == "live":
+                from engines.decision_engine.orchestrator import start_live_loop
+                threading.Thread(
+                    target=lambda: start_live_loop(run_id=run_id, hz=2, logger=lambda m: print(m) or None),
+                    name="LiveLoop",
+                    daemon=True
+                ).start()
+                print(f"[LOOP] LiveLoop start requested (run_id={run_id}).")
+            else:
+                from engines.decision_engine.orchestrator import start_learning_loop
+                threading.Thread(
+                    target=lambda: start_learning_loop(run_id=run_id, hz=2, logger=lambda m: print(m) or None),
+                    name="LearningLoop",
+                    daemon=True
+                ).start()
+                print(f"[LOOP] LearningLoop start requested (run_id={run_id}).")
+
+        print("READY: next step")
+        self.status.config(text="• Step 4 running (OC timeline). Bands accumulate per window.", foreground="#2c7")
+        self._open_dashboard_window()
+        # kick off the learning loop once OC1 is detected
+        self.after(3000, self._start_learning_loop_background)
+
+
+    def _ready_for_learning(self) -> bool:
+        """True when OC1 is flowing so the policy has live ctx to work with."""
+        try:
+            import sqlite3, engines.config_paths as cp
+            db = sqlite3.connect(cp.autoscalp_db(), timeout=5)
+            row = db.execute("SELECT COUNT(1) FROM inbound_oc_cache WHERE oc1 IS NOT NULL").fetchone()
+            return bool(row and int(row[0] or 0) > 0)
+        except Exception:
+            return False
+        finally:
+            try: db.close()
+            except Exception: pass
+
+
+    def _start_learning_loop_background(self):
+        """Start orchestrator's learning loop once OC1 exists; retry until ready."""
+        import threading
+        mode = (self._mode.get() or "learning").lower()
+        if mode != "learning":
+            return
+        # don't double-start
+        if getattr(self, "_learn_thread", None) and self._learn_thread.is_alive():
+            return
+        # wait for OC1 to appear (validator already checks this)
+        if not self._ready_for_learning():
+            # retry in 3 seconds
+            try: self.after(3000, self._start_learning_loop_background)
+            except Exception: pass
+            return
+
+        from engines.decision_engine.orchestrator import start_live_loop, start_learning_loop
+        mode = (os.environ.get("AUTOSCALP_MODE") or "learning").lower()
+        prefix = "LIVE" if mode == "live" else "LEARN"
+        run_id = f"{prefix}-{now_utc().strftime('%Y%m%d-%H%M%S')}"
+
+        if mode == "live":
+            start_live_loop(run_id=run_id, hz=2, logger=print)
+        else:
+            start_learning_loop(run_id=run_id, hz=2, logger=print)
+
+        def _logger(msg: str):
+            try: self._append(msg)
+            except Exception: print(msg)
+
+        self._learn_thread = threading.Thread(
+            target=lambda: start_learning_loop(run_id=run_id, hz=2, logger=_logger),
+            name="LearningLoop",
+            daemon=True,
+        )
+        self._learn_thread.start()
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^\s*class PhaseGUI\(tk\.Tk\):\n
+# ─────────────────────────────────────────────────────────────────────────────
+    def _ensure_test_run_and_order(self):
+        """Create a TEST run + one sample open order if none exist, so ScalperView shows content."""
+        try:
+            import engines.config_paths as cp
+            autoscalp_path = cp.autoscalp_db()
+        except Exception:
+            # fallback to local router if needed
+            import engines.config_paths as cp
+            autoscalp_path = cp.autoscalp_db()
+
+
+        with sqlite3.connect(autoscalp_path, timeout=10) as con:
+            con.row_factory = sqlite3.Row
+            # 1) Ensure a TEST run
+            row = con.execute(
+                "SELECT id FROM runs WHERE finished_at IS NULL AND mode='TEST' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                run_id = row["id"]
+            else:
+                con.execute(
+                    "INSERT INTO runs (started_at, mode, blueprint_file, notes) VALUES (?,?,?,?)",
+                    (now_utc().isoformat(), "TEST", None, "Simulator"),
+                )
+                run_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            # 2) If no open orders in TEST, create one using first seeded market/runner
+            open_cnt = con.execute(
+                "SELECT COUNT(1) AS c FROM orders "
+                "WHERE (closed_at IS NULL OR closed_at='') AND mode='TEST'"
+            ).fetchone()["c"]
+
+            if open_cnt == 0:
+                # pick a runner from self._markets
+                mid, sid = None, None
+                for m in (self._markets or []):
+                    if m.get("runners"):
+                        mid = m.get("marketId")
+                        sid = m["runners"][0].get("selectionId")
+                        if mid and sid is not None:
+                            break
+                if not mid or sid is None:
+                    return  # nothing to seed yet
+
+                # Seed a queued lay scalp
+                con.execute(
+                    "INSERT INTO orders (run_id, decision_id, customerOrderRef, marketId, selectionId, mode, "
+                    "side, entry_odds, entry_stake, entry_status, opened_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id, None, f"TEST-{mid}-{sid}-{int(time.time())}", mid, str(sid), "TEST",
+                        "LAY", 6.0, 2.0, "queued", now_utc().isoformat()
+                    ),
+                )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: ^def main\(\):\n(?:[ \t].*\n)+?
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    print(f"[GUI] DB_PATH = {DB_PATH}")
+    print("[GUI] Start app → choose: Launch TEST or run Step 1.")
+    try:
+        ensure_order_events_triggers()
+    except Exception:
+        pass
+
+    app = PhaseGUI()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    # LIVE by default
+    try:
+        from config_paths import set_db_paths   # root-level
+    except Exception:
+        from engines.config_paths import set_db_paths  # engines/ fallback
+
+    set_db_paths("LIVE")
+    main()
+

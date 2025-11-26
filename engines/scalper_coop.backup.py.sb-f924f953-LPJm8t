@@ -1,0 +1,717 @@
+# ✅ scalper_coop.py – Head Trader Co-op Session Handler
+
+# --------------------------------------------------------
+# 🔁 Decision Engine Import – Unified Signal Evaluator
+# --------------------------------------------------------
+from brain_headtrader import evaluate_signal
+
+# -----------------------------
+# 🗂️ init_system_flags_db – Setup standalone system flags DB
+# -----------------------------
+def init_system_flags_db():
+    import sqlite3, os
+    db_path = os.path.join(os.path.dirname(__file__), "coop_flags.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_flags (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+    return db_path
+
+# -----------------------------
+# 🧠 Confidence Score Helper
+# -----------------------------
+def calculate_confidence_score(selection_id, drift_pct):
+    base = 0.75
+    boost = min(abs(drift_pct) * 0.005, 0.1)
+    return round(base + boost, 3)
+
+# -----------------------------
+# ✅ Data Readiness Estimate Utility
+# -----------------------------
+def estimate_data_coverage():
+    import sqlite3, os
+    db_path = os.path.join(os.path.dirname(__file__), "odds_history.db")
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT marketId, COUNT(*) as samples
+                FROM odds_snapshots
+                GROUP BY marketId
+            """)
+            rows = cursor.fetchall()
+            print("📊 Odds Snapshot Coverage:")
+            for market_id, samples in rows:
+                print(f"📍 Market {market_id[-6:]} – {samples} snapshots")
+            print(f"✅ Total markets tracked: {len(rows)}")
+    except Exception as e:
+        print(f"⚠️ Failed to estimate data readiness: {e}")
+
+# -----------------------------
+# 🧾 Signal Debug Printer – Shows signal attributes clearly
+# -----------------------------
+def print_signal_analysis(signal):
+    print("\n📊 SIGNAL SNAPSHOT:")
+    print(f"🏇 Runner:         {signal.get('runnerName')}")
+    print(f"🎯 Market ID:      {signal.get('marketId')}")
+    print(f"💸 Odds:           {signal.get('odds')}")
+    print(f"📏 Spread:         {signal.get('spread')}")
+    print(f"📈 Confidence:     {round(signal.get('confidence', 0) * 100)}%")
+    print(f"📉 Drift:          {signal.get('drift')}%")
+    print(f"⚡ Volatility:     {signal.get('avg_volatility', '–')} (Volatile: {signal.get('volatile')})")
+    print(f"✅ Status:         {signal.get('status')}")
+
+# --------------------------------------------------------
+# 📦 Anchor Odds Fetch – Enhanced Odds Bootstrap from BETS Table
+# --------------------------------------------------------
+def fetch_anchor_odds(market_id, selection_id):
+    import sqlite3
+    from datetime import datetime, timedelta
+    import logging
+    from config_paths import DB_PATH
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT anchor_odd, placed_at FROM bets
+                WHERE marketId = ? AND selectionId = ? AND anchor_odd IS NOT NULL
+                ORDER BY placed_at ASC LIMIT 1
+            """, (market_id, selection_id))
+            row = cursor.fetchone()
+            if row:
+                return float(row[0])
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to fetch anchor_odd for {selection_id}: {e}")
+    return None
+
+# -----------------------------
+# 🧩 Odds Check Filler – Updates all odds_check fields if fallback used
+# -----------------------------
+def update_odds_checks_with_anchor(market_id, selection_id, anchor):
+    import sqlite3
+    from config_paths import DB_PATH
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT odds_check_1, odds_check_2, odds_check_3,
+                   odds_check_4, odds_check_5, odds_check_6
+            FROM bets
+            WHERE marketId = ? AND selectionId = ?
+        """, (market_id, selection_id))
+        checks = cursor.fetchone()
+
+        if checks and all(v is None for v in checks):
+            cursor.execute("""
+                UPDATE bets
+                SET odds_check_1 = ?, odds_check_2 = ?, odds_check_3 = ?,
+                    odds_check_4 = ?, odds_check_5 = ?, odds_check_6 = ?
+                WHERE marketId = ? AND selectionId = ?
+            """, (anchor, anchor, anchor, anchor, anchor, anchor, market_id, selection_id))
+            conn.commit()
+            print(f"🧠 Seeded odds_check_1–6 for {selection_id} @ {anchor}")
+        else:
+            print(f"ℹ️ Skipped odds check fill for {selection_id} – some fields already set")
+
+# -----------------------------
+# 📍 Market Loop Handler – Live Mode Refactored from RANDCARB
+# -----------------------------
+def market_loop():
+    from upgrade_import_patch import get_session_token
+    from utils.api_tools import fetch_live_odds
+    from volatility_check import get_volatility_meta, get_recent_odds
+    from get_markets import get_markets_and_insert
+    from config_paths import DB_PATH
+    from brain_headtrader import evaluate_signal
+    from datetime import datetime, timezone
+    import sqlite3, time
+
+    print("🚀 Starting market loop...")
+
+    while True:
+        all_markets = get_markets_and_insert()
+        now = datetime.now(timezone.utc)
+        filtered = [m for m in all_markets if -15 <= (datetime.fromisoformat(m["marketStartTime"].replace("Z", "+00:00")) - now).total_seconds() / 60.0 <= 90 and len(m.get("runners", [])) >= 7]
+
+        for market in filtered:
+            segments = {"<20": 0, "20-40": 0, "40-60": 0, "60-80": 0, "80-90": 0, ">90": 0}
+            odds_check_counts = {"anchor": 0, "oc1": 0, "oc2": 0, "oc3": 0, "oc4": 0, "oc5": 0, "oc6": 0}
+
+            print(f"📍 {market['event']['venue']} – {market['marketName']} @ {market['marketStartTime']}")
+            signal = None
+            last_odds_map = {}
+            runners_checked = 0
+            valid_ranges = 0
+            invalid_ranges = 0
+            entry_signals = 0
+            exit_signals = 0
+            neutral_signals = 0
+            missing_odds_history = 0
+            missed_runners = 0
+
+            for runner in market.get("runners", []):
+                runners_checked += 1
+                selection_id = runner["selectionId"]
+                odds_data = fetch_live_odds(get_session_token(), market["marketId"], selection_id)
+
+                start_time = datetime.fromisoformat(market["marketStartTime"].replace("Z", "+00:00"))
+                minutes_to_off = (start_time - now).total_seconds() / 60.0
+
+                if minutes_to_off < 20:
+                    segments["<20"] += 1
+                    missed_runners += 1
+                    continue
+                elif 20 <= minutes_to_off < 40:
+                    segments["20-40"] += 1
+                elif 40 <= minutes_to_off < 60:
+                    segments["40-60"] += 1
+                elif 60 <= minutes_to_off < 80:
+                    segments["60-80"] += 1
+                elif 80 <= minutes_to_off <= 90:
+                    segments["80-90"] += 1
+                else:
+                    segments[">90"] += 1
+
+                if not odds_data or "lay" not in odds_data:
+                    missed_runners += 1
+                    continue
+
+                current_odds = odds_data["lay"]
+                odds_list = get_recent_odds(market["marketId"], selection_id)
+                if not odds_list:
+                    missing_odds_history += 1
+
+                try:
+                    with sqlite3.connect(DB_PATH) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            SELECT anchor_odd FROM bets
+                            WHERE marketId = ? AND selectionId = ? AND anchor_odd IS NOT NULL
+                        """, (market["marketId"], selection_id))
+                        exists = cursor.fetchone()
+                        if not exists:
+                            cursor.execute("""
+                                UPDATE bets
+                                SET anchor_odd = ?, placed_at = ?
+                                WHERE marketId = ? AND selectionId = ?
+                            """, (current_odds, datetime.utcnow().isoformat(), market["marketId"], selection_id))
+                            conn.commit()
+                            odds_check_counts["anchor"] += 1
+
+                        oc_field = None
+                        field_key = None
+                        if 85 <= minutes_to_off <= 95:
+                            oc_field, field_key = "odds_check_1", "oc1"
+                        elif 65 <= minutes_to_off < 85:
+                            oc_field, field_key = "odds_check_2", "oc2"
+                        elif 45 <= minutes_to_off < 65:
+                            oc_field, field_key = "odds_check_3", "oc3"
+                        elif 25 <= minutes_to_off < 45:
+                            oc_field, field_key = "odds_check_4", "oc4"
+                        elif 10 <= minutes_to_off < 25:
+                            oc_field, field_key = "odds_check_5", "oc5"
+                        elif 0 <= minutes_to_off < 10:
+                            oc_field, field_key = "odds_check_6", "oc6"
+
+                        if oc_field:
+                            cursor.execute(f"""
+                                UPDATE bets
+                                SET {oc_field} = COALESCE({oc_field}, ?)
+                                WHERE marketId = ? AND selectionId = ?
+                            """, (current_odds, market["marketId"], selection_id))
+                            conn.commit()
+                            odds_check_counts[field_key] += 1
+                except Exception as e:
+                    print(f"⚠️ DB error for {selection_id}: {e}")
+
+                volatility_meta = get_volatility_meta(market["marketId"], selection_id, odds_list)
+                range_low = volatility_meta.get("range_low")
+                range_high = volatility_meta.get("range_high")
+                if not range_low or not range_high or range_low >= range_high:
+                    invalid_ranges += 1
+                    continue
+                else:
+                    valid_ranges += 1
+
+                position_ratio = round((current_odds - range_low) / (range_high - range_low), 3)
+                if position_ratio <= 0.3:
+                    entry_signals += 1
+                elif position_ratio >= 0.7:
+                    exit_signals += 1
+                else:
+                    neutral_signals += 1
+
+                last_odds = last_odds_map.get(selection_id)
+                if last_odds == current_odds:
+                    continue
+                last_odds_map[selection_id] = current_odds
+
+                anchor = volatility_meta.get("anchor", current_odds)
+                drift = round(((current_odds - anchor) / anchor) * 100, 2)
+                signal_candidate = {
+                    "selectionId": selection_id,
+                    "marketId": market["marketId"],
+                    "runnerName": runner["runnerName"],
+                    "odds": current_odds,
+                    "anchor_odds": anchor,
+                    "drift": drift,
+                    "volatility_trend": volatility_meta.get("volatility_trend", "choppy"),
+                    "quality_score": volatility_meta.get("quality_score", 75),
+                    "confidence": calculate_confidence_score(selection_id, drift),
+                    "spread": 3,
+                    "time_signal": "time_10"
+                }
+                signal_result = evaluate_signal(signal_candidate, headers={}, horses=market.get("runners"), initial_stakes=None, current_odds={selection_id: current_odds}, fire_ice_status=None, bot_queues=None)
+                if isinstance(signal_result, dict):
+                    signal = signal_result
+                    break
+
+            print(f"📊 Market Summary: {market['event']['venue']} – {market['marketName']} @ {market['marketStartTime']}")
+            print(f"• Runners Checked: {runners_checked}")
+            print(f"• Valid Ranges: {valid_ranges} ✅ | Invalid Ranges: {invalid_ranges} ❌")
+            print(f"• Entry Signals: {entry_signals} ✅ | Exit Signals: {exit_signals} ✅ | Neutral: {neutral_signals} 🛁")
+            print(f"• Odds History Missing: {missing_odds_history} ⚠️")
+            print(f"• Missed (<20 mins or no data): {missed_runners} ⚠️")
+            print(f"🔹 Time Segment Summary (This Market):")
+            for label, count in segments.items():
+                print(f"  • {label} mins: {count} runners")
+            print(f"🔹 Odds Check Summary (This Market):")
+            for key, value in odds_check_counts.items():
+                print(f"  • {key.upper()} updated: {value}")
+
+            if not signal:
+                print("📜 No signal change. Monitoring...")
+                time.sleep(10)
+                continue
+
+            print_signal_analysis(signal)
+
+            import threading
+            user_input = None
+            def prompt_with_timeout():
+                nonlocal user_input
+                try:
+                    user_input = input("🔀 Your choice: ").strip().lower()
+                except Exception as e:
+                    print(f"⚠️ Prompt error: {e}")
+
+            thread = threading.Thread(target=prompt_with_timeout)
+            thread.start()
+            thread.join(timeout=60)
+
+            if user_input is None:
+                print("⏳ No response. Signal marked as missed.")
+                log_coop_result(signal, "missed")
+                continue
+            if user_input in ("accept", "y", "yes"):
+                result = execute_coop_trade(signal)
+                log_coop_result(signal, result)
+            elif user_input in ("edit", "e"):
+                print("✏️ Edit functionality not yet implemented.")
+            elif user_input in ("manual", "m"):
+                manual_bet_entry(get_session_token())
+            elif user_input in ("quit", "q"):
+                print("👋 Co-op session ended.")
+                return
+            else:
+                log_coop_result(signal, "skipped")
+
+        print("🔁 Auto-cycle continuing – monitoring markets for valid signal...")
+        time.sleep(10)
+
+# -----------------------------
+# 📋 get_next_races – Fetch races with runners
+# -----------------------------
+def get_next_races():
+    from get_markets import get_markets_and_insert
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    all_markets = get_markets_and_insert()
+    filtered = []
+
+    for market in all_markets:
+        start = datetime.fromisoformat(market["marketStartTime"].replace("Z", "+00:00"))
+        mins_to_off = (start - now).total_seconds() / 60.0
+        if 0 <= mins_to_off <= 20 and len(market.get("runners", [])) >= 7:
+            filtered.append(market)
+
+    return filtered[:5]
+
+# -----------------------------
+# 🔍 show_runners_with_odds – Display runner list
+# -----------------------------
+def show_runners_with_odds(market):
+    from utils.api_tools import fetch_live_odds
+    import time
+
+    print("🐎 Runners in this race:")
+    runners = market.get("runners", [])
+    marketId = market.get("marketId")
+
+    for i, runner in enumerate(runners, 1):
+        odds = fetch_live_odds(None, marketId, runner["selectionId"]) or {}
+        lay = odds.get("lay", "–")
+        back = odds.get("back", "–")
+        print(f"{i}. {runner['runnerName']} – Lay: {lay}, Back: {back}")
+        time.sleep(0.1)  # light delay to avoid spam or rate limits
+
+    selection = input("🎯 Select a runner by number or press enter to skip: ").strip()
+    if selection.isdigit():
+        idx = int(selection) - 1
+        if 0 <= idx < len(runners):
+            return runners[idx]
+
+    return None
+
+# -----------------------------
+# 🧠 run_coop_session – Entry Point for Co-op Mode
+# -----------------------------
+def run_coop_session():
+    from get_markets import get_markets_and_insert
+    from datetime import datetime, timezone
+
+    print("🧠 [Co-op] Session started with Head Trader...")
+
+    while True:
+        all_markets = get_markets_and_insert()
+        if not all_markets:
+            print("📭 No markets found.")
+            return
+
+        now = datetime.now(timezone.utc)
+
+        # ✅ FIXED: Only switch to test mode if *all* markets are more than 90 mins away
+        future_markets = [
+            m for m in all_markets
+            if (datetime.fromisoformat(m["marketStartTime"].replace("Z", "+00:00")) - now).total_seconds() / 60.0 > 90
+            and len(m.get("runners", [])) >= 7
+        ]
+
+        if len(future_markets) == len(all_markets):
+            print(f"🧪 {len(future_markets)} future markets, {len(all_markets)} total. Switching to test mode only if all are future.")
+            print("📅 No races within 90 mins – pick a market to begin early analysis:")
+            for i, m in enumerate(future_markets[:5], 1):
+                print(f"{i}. {m['event']['venue']} – {m['marketName']} @ {m['marketStartTime']}")
+            choice = input("🔢 Pick a market by number or [Q]uit: ").strip().lower()
+
+            if choice == "q":
+                print("👋 Co-op session ended.")
+                return
+            if not choice.isdigit():
+                print("❌ Invalid selection.")
+                continue
+
+            market = future_markets[int(choice)-1]
+            from scalper_coop import randcarb_session
+            randcarb_session(market)
+            continue
+
+        # If at least one race is now within 90 mins, switch to live loop
+        from scalper_coop import market_loop
+        market_loop()
+        break
+# --------------------------------------------------------
+# 🤖 RANDCARB Session Placeholder (Updated for Brain Integration)
+# --------------------------------------------------------
+def randcarb_session(market):
+    from upgrade_import_patch import get_session_token
+    from utils.api_tools import fetch_live_odds
+    from brain_headtrader import evaluate_signal
+    from config_paths import DB_PATH
+    import sqlite3, time
+    from datetime import datetime
+    from volatility_check import real_time_volatility_check
+
+
+    print("🤖 [RANDCARB] Running live co-op recommendation for selected market...")
+
+    def save_anchor_if_new(market_id, selection_id, odds):
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT anchor_odd FROM bets
+                    WHERE marketId = ? AND selectionId = ? AND anchor_odd IS NOT NULL
+                """, (market_id, selection_id))
+                if cursor.fetchone() is None:
+                    cursor.execute("""
+                        INSERT INTO bets (marketId, selectionId, anchor_odd, placed_at)
+                        VALUES (?, ?, ?, ?)
+                    """, (market_id, selection_id, odds, datetime.utcnow().isoformat()))
+                    conn.commit()
+        except Exception as e:
+            print(f"⚠️ Failed to save anchor_odd for {selection_id}: {e}")
+
+    last_odds_map = {}
+
+    while True:
+        print("🔍 Polling odds for signal generation...")
+        signal = None
+        for runner in market.get("runners", []):
+            selection_id = runner["selectionId"]
+            odds_data = fetch_live_odds(get_session_token(), market["marketId"], selection_id)
+            if not odds_data or "lay" not in odds_data:
+                continue
+
+            current_odds = odds_data["lay"]
+            # 🔁 SCALP Signal Evaluation Block (RANDCARB)
+            odds_list = get_recent_odds(market["marketId"], selection_id)
+            volatility_meta = get_volatility_meta(market["marketId"], selection_id, odds_list)
+
+            range_low = volatility_meta.get("range_low")
+            range_high = volatility_meta.get("range_high")
+
+            if not range_low or not range_high or range_low >= range_high:
+                print(f"⛔ RANDCARB: Skipped {runner['runnerName']} – invalid range: low={range_low}, high={range_high}")
+            else:
+                position_ratio = (current_odds - range_low) / (range_high - range_low)
+                position_ratio = round(position_ratio, 3)
+                print(f"📊 RANDCARB: {runner['runnerName']} – Odds: {current_odds} | Range: [{range_low}, {range_high}] | Pos: {position_ratio}")
+
+                if position_ratio <= 0.3:
+                    print(f"✅ SCALP ENTRY SIGNAL – odds near bottom of range")
+                elif position_ratio >= 0.7:
+                    print(f"✅ SCALP EXIT SIGNAL – odds near top of range")
+                else:
+                    print(f"🟡 No SCALP signal – odds in neutral zone")
+            last_odds = last_odds_map.get(selection_id)
+            if last_odds == current_odds:
+                continue
+
+            last_odds_map[selection_id] = current_odds
+            anchor = fetch_anchor_odds(market["marketId"], selection_id)
+            if anchor is None:
+                save_anchor_if_new(market["marketId"], selection_id, current_odds)
+                print(f"⚠️ Anchor not yet available for {runner['runnerName']}. Skipping this cycle.")
+                continue
+
+            drift = round(((current_odds - anchor) / anchor) * 100, 2) if anchor else 0
+            signal_candidate = {
+                "selectionId": selection_id,
+                "marketId": market["marketId"],
+                "runnerName": runner["runnerName"],
+                "odds": current_odds,
+                "anchor_odds": anchor,
+                "drift": drift,
+                "volatility_trend": "choppy",
+                "quality_score": 75,
+                "confidence": calculate_confidence_score(selection_id, drift),
+                "spread": 3,
+                "time_signal": "time_10"
+            }
+
+            signal_result = evaluate_signal(
+                signal_candidate,
+                headers={},
+                horses=market.get("runners"),
+                initial_stakes=None,
+                current_odds={selection_id: current_odds},
+                fire_ice_status=None,
+                bot_queues=None
+            )
+
+            if isinstance(signal_result, dict):
+                signal = signal_result
+                break
+
+        if not signal:
+            print("📜 No signal change. Monitoring...")
+            time.sleep(10)
+            continue
+
+        print("\n📊 Head Trader Recommendation:")
+        print(f"🏇 Horse: {signal['runnerName']}")
+        print(f"🎯 Market: {signal['marketId'][-6:]}")
+        print(f"🎯 Strategy: {signal['strategy_name']}")
+        print(f"💸 Odds: {signal['odds']}")
+        print(f"📊 Confidence: {round(signal['confidence'] * 100)}%")
+        print(f"📈 Quality Score: {signal.get('quality_score', '–')}")
+        print(f"📉 Drift: {signal.get('drift')}%")
+        print(f"🧠 Status: {signal.get('status')}")
+
+        import threading
+        user_input = None
+
+        def prompt_with_timeout():
+            nonlocal user_input
+            try:
+                user_input = input("🔀 Your choice: ").strip().lower()
+            except Exception as e:
+                print(f"⚠️ Prompt error: {e}")
+
+        thread = threading.Thread(target=prompt_with_timeout)
+        thread.start()
+        thread.join(timeout=60)
+
+        if user_input is None:
+            print("⏳ No response. Signal marked as missed.")
+            log_coop_result(signal, "missed")
+            continue
+        if user_input in ("accept", "y", "yes"):
+            result = execute_coop_trade(signal)
+            log_coop_result(signal, result)
+        elif user_input in ("edit", "e"):
+            print("✏️ Edit path coming soon...")
+        elif user_input in ("manual", "m"):
+            from scalper_coop import manual_bet_entry
+            manual_bet_entry(None)
+        elif user_input in ("quit", "q"):
+            print("👋 Exiting RANDCARB session.")
+            return
+        else:
+            log_coop_result(signal, "skipped")
+
+        print("🔁 Returning to early signal tracking...")
+        time.sleep(5)
+
+
+# -----------------------------
+# 📈 list_recent_signals – Optional: show past suggestions
+# -----------------------------
+def list_recent_signals():
+    import sqlite3
+    import os
+
+    db_path = os.path.join(os.path.dirname(__file__), "scalping_bets.db")
+    if not os.path.exists(db_path):
+        print("📭 No trades have been logged yet.")
+        return
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT runnerName, odds, scalp_direction, confidence, result, placed_at
+            FROM scalping_bets
+            ORDER BY placed_at DESC
+            LIMIT 5
+        """)
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("📭 No recent signals to display.")
+            return
+
+        print("🕓 Last 5 Co-op Trades:")
+        for row in rows:
+            name, odds, direction, conf, result, timestamp = row
+            print(f"{timestamp[:16]} | {name:20} | {direction:13} | Odds: {odds:<4} | Conf: {round(conf*100):>2}% | {result.upper()}")
+
+# -----------------------------
+# 🧠 manual_bet_entry – Allow manual trade during session
+# -----------------------------
+def manual_bet_entry(session_token):
+    def manual_market_signal_flow(market):
+        from scalper_coop import fetch_anchor_odds, calculate_confidence_score, evaluate_odds_history
+        from utils.api_tools import fetch_live_odds
+        def get_anchor(selection_id):
+            return fetch_anchor_odds(market["marketId"], selection_id)
+
+        runners = market.get("runners", [])
+        for runner in runners:
+            selection_id = runner["selectionId"]
+            odds_data = fetch_live_odds(None, market["marketId"], selection_id)
+            if not odds_data or "lay" not in odds_data:
+                continue
+            current_odds = odds_data["lay"]
+            anchor = get_anchor(selection_id) or current_odds
+            drift = round(((current_odds - anchor) / anchor) * 100, 2) if anchor else 0
+
+            signal = analyze_market_signal(
+                market,
+                get_anchor,
+                selection_id,
+                current_odds,
+                anchor,
+                drift
+            )
+        if not signal:
+            print("⚠️ No signal could be generated for this market.")
+            return
+        user_choice = prompt_user_decision(signal)
+        if user_choice == "accept":
+            outcome = execute_coop_trade(signal)
+            log_coop_result(signal, outcome)
+    from get_markets import get_markets_and_insert
+    from utils.api_tools import fetch_live_odds
+    from price_math import get_tick_size, calculate_tick_distance
+    import time
+    import random
+    from datetime import datetime, timezone
+
+    all_markets = get_markets_and_insert()
+    now = datetime.now(timezone.utc)
+
+    upcoming = []
+    for market in all_markets:
+        start = datetime.fromisoformat(market["marketStartTime"].replace("Z", "+00:00"))
+        if 0 <= (start - now).total_seconds() / 60.0 <= 300:
+            upcoming.append(market)
+
+    if not upcoming:
+        print("📭 No nearby races found.")
+        return
+
+    print("🏇 Recent Races:")
+    for i, m in enumerate(upcoming[:3], 1):
+        print(f"{i}. {m['event']['venue']} – {m['marketName']} @ {m['marketStartTime']}")
+
+    choice = input("🔢 Pick a race by number: ").strip()
+    if not choice.isdigit():
+        print("❌ Invalid choice.")
+        return
+
+    market = upcoming[int(choice) - 1]
+    runners = market.get("runners", [])
+    market_id = market.get("marketId")
+
+    print("🐎 Runners:")
+    for i, runner in enumerate(runners, 1):
+        print(f"{i}. {runner['runnerName']}")
+
+    rchoice = input("🎯 Pick a runner by number: ").strip()
+    if not rchoice.isdigit():
+        print("❌ Invalid runner.")
+        return
+
+    runner = runners[int(rchoice) - 1]
+    odds_data = fetch_live_odds(session_token, market_id, runner["selectionId"]) or {}
+    tick = get_tick_size(odds_data.get("lay", 1.0))
+
+    side = input("🔁 Direction [L = Lay to Back | B = Back to Lay]: ").strip().lower()
+    odds = float(input("💸 Entry Odds: ").strip())
+    stake = float(input("💰 Stake: ").strip())
+    btype = input("📦 Bet Type [scalp/ladder/basic]: ").strip().lower()
+
+    direction = "lay_to_back" if side == "l" else "back_to_lay"
+    strategy_name = f"manual_{btype}_signal"
+    time_signal = "manual"
+
+    signal = {
+        "marketId": market_id,
+        "selectionId": runner["selectionId"],
+        "runnerName": runner["runnerName"],
+        "odds": odds,
+        "stake": stake,
+        "scalp_direction": direction,
+        "strategy_name": strategy_name,
+        "bet_type": btype.upper(),
+        "confidence": 0.88,
+        "time_signal": time_signal,
+        "anchor_odds": odds,
+        "spread": 0.0,
+        "tick_size": tick,
+        "avg_volatility": 0.0,
+        "volatile": False,
+        "customerOrderRef": f"MANUAL_{random.randint(1000,9999)}"
+    }
+
+    outcome = execute_coop_trade(signal)
+    log_coop_result(signal, outcome)
+
+    # 🔁 Launch full co-op signal logic after manual market choice
+    manual_market_signal_flow(market)

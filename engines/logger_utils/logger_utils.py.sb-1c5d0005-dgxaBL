@@ -1,0 +1,32 @@
+import logging
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def log_session_management(activity_type, error_message=""):
+    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    messages = {
+        "session_start": f"🚀 [Session] Starting new session at {timestamp}",
+        "session_alive_success": f"✅ [Session] Session keep-alive successful at {timestamp}",
+        "session_alive_fail": f"❌ [Session] Session keep-alive failed: {error_message}",
+        "session_end": f"🛑 [Session] Ending session at {timestamp}"
+    }
+    logging.info(messages.get(activity_type, "Unknown session activity."))
+
+def log_heartbeat(active_bots):
+    heartbeat_timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    logging.info(f"💓 [Heartbeat] All bots alive: {', '.join(active_bots)} at {heartbeat_timestamp}")
+
+def log_bet_and_db_operations(operation_type, bet_id=None, details=None):
+    messages = {
+        "bet_attempt": f"📥 [Bet Attempt] | Market: {details['market_id']}, Runner: {details['selection_id']}, Stake: {details['stake']}, Odds: {details['odds']}",
+        "bet_placed": f"✅ [Bet Placed] | Bet ID: {bet_id}, Details: {details}",
+        "bet_settled": f"✅ [Bet Settled] | Bet ID: {bet_id}, Runner: {details['runner']}, PnL: {details['pnl']}",
+        "db_record_success": f"💾 [Database Record] | Operation successful: {details}",
+        "db_record_fail": f"❌ [Database Record] | Operation failed: {details}"
+    }
+    logging.info(messages.get(operation_type, "Unknown bet or DB operation."))
+
+def log_error_handling(error_type, error_detail):
+    error_timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    logging.error(f"🔴 [Error] Type: {error_type}, Detail: {error_detail}, Timestamp: {error_timestamp}")

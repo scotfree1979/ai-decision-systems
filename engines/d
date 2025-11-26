@@ -1,0 +1,606 @@
+import queue
+import threading
+import requests
+import logging
+import time
+import sqlite3
+from datetime import datetime
+from toggles import TOGGLES
+from budget_manager import BudgetManager
+from risk_manager import RiskManager  # Correct import clearly
+from og_bot_family_launcher import launch_bot_family
+from logger_utils.logger_utils import log_session_management, log_bet_and_db_operations
+from daily_config import AVAILABLE_BUDGET
+from bet_placer import place_bet, execute_scalp, green_up  # Correct import clearly
+from market_monitor_signals import fetch_market_data
+
+# betfair_check.py
+
+# Prompt for the session token
+SESSION_TOKEN = input("🔐 Enter your Betfair session token: ").strip()
+
+# Define App Key
+APP_KEY = "CZHojduNWa3kxWIn"
+
+# Set headers explicitly
+headers = {
+    'X-Application': APP_KEY,
+    'X-Authentication': SESSION_TOKEN,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+}
+
+# Path to daily configuration file
+config_path = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/engines/daily_config.py'
+
+# Read the existing config file
+with open(config_path, 'r') as file:
+    lines = file.readlines()
+
+# Write the new session token clearly to daily_config.py
+with open(config_path, 'w') as file:
+    for line in lines:
+        if line.startswith('SESSION_TOKEN ='):
+            file.write(f'SESSION_TOKEN = "{SESSION_TOKEN}"\n')
+        else:
+            file.write(line)
+
+print("✅ Session token updated successfully in daily_config.py.")
+
+# Database Path
+DB_PATH = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db'
+
+
+# Queues explicitly defined
+bot_queues = {
+    'OGHeadTrader': queue.Queue(),
+    'OGPreoff': queue.Queue(),
+    'OGInPlay': queue.Queue()
+}
+
+signal_queue = queue.Queue()
+
+# Initialize Managers explicitly
+budget_mgr = BudgetManager(db_path=DB_PATH)
+budget_mgr.update_available_budget(AVAILABLE_BUDGET)
+
+risk_mgr = RiskManager(
+    max_liability_per_race={'OGHeadTrader': 340.8, 'OGPreoff': 136.32, 'OGInPlay': 163.68},
+    max_daily_loss_per_bot={'OGHeadTrader': 200, 'OGPreoff': 150, 'OGInPlay': 100},
+    global_max_exposure=500,
+    scalping_max_exposure=1320,
+    scalping_liability_multiplier=2,
+    max_concurrent_races={'OGHeadTrader': 5, 'OGPreoff': 3, 'OGInPlay': 2},
+    stop_loss_threshold={'OGHeadTrader': 100, 'OGPreoff': 75, 'OGInPlay': 50},
+    profit_lock_threshold={'OGHeadTrader': 150, 'OGPreoff': 100, 'OGInPlay': 75},
+    budget_manager=budget_mgr
+)
+
+budget_mgr.risk_manager = risk_mgr
+
+bot_assignments = {
+    'Market Drifter Signal': ['OGHeadTrader', 'OGPreoff'],
+    'Market Steamer Signal': ['OGHeadTrader', 'OGPreoff'],
+    'In-Play Opportunity': ['OGHeadTrader', 'OGInPlay'],
+    'Early Pace Collapse': ['OGHeadTrader', 'OGInPlay'],
+    'Late Surge Fade': ['OGPreoff'],
+    'Odds Spike Reversal': ['OGHeadTrader', 'OGInPlay'],
+    'Drifter Recovery': ['OGPreoff'],
+    'Venue/Trainer/Jockey Signals': ['OGHeadTrader', 'OGPreoff']
+}
+
+bot_budget_limits = {
+    'OGHeadTrader': {'max_liability': 340.8, 'max_stake': 81.6},
+    'OGPreoff': {'max_liability': 136.32, 'max_stake': 40.8},
+    'OGInPlay': {'max_liability': 163.68, 'max_stake': 47.76},
+}
+
+# Part 2: Session Management and Signal Routing
+
+# Updated clearly to ensure placeholder functions and correct logic explicitly defined:
+
+def keep_alive(headers):
+    if TOGGLES["keep_alive"]:
+        response = requests.post("https://identitysso.betfair.com/api/keepAlive", headers=headers)
+        status = "success" if response.status_code == 200 else "fail"
+        log_session_management(f"session_alive_{status}", error_message=response.text)
+
+
+def fetch_budget(headers):
+    url = "https://api.betfair.com/exchange/account/json-rpc/v1"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "AccountAPING/v1.0/getAccountFunds",
+        "params": {},
+        "id": 1
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+    account_data = response.json().get('result', {})
+    return account_data.get('availableToBetBalance', 0.0)
+
+
+
+def fetch_settled_bets(headers):
+    url = "https://api.betfair.com/exchange/betting/rest/v1.0/listClearedOrders/"
+    params = {"betStatus": "SETTLED"}
+    response = requests.post(url, headers=headers, json=params)
+    if response.status_code == 200:
+        cleared_orders = response.json().get('clearedOrders', [])
+        for order in cleared_orders:
+            log_bet_and_db_operations("bet_settled", details={
+                'market_id': order.get('marketId'),
+                'selection_id': order.get('selectionId'),
+                'stake': order.get('sizeSettled', 0),
+                'odds': order.get('priceMatched', 0),
+                'runner': order.get('runnerName', 'Unknown Runner'),
+                'pnl': order.get('profit', 0)
+            })
+    else:
+        log_bet_and_db_operations("bet_settle_fetch_failed", details={
+            'error_message': response.text
+        })
+
+
+def fetch_and_store_markets(headers):
+    today = datetime.utcnow().strftime('%Y-%m-%dT00:00:00Z')
+    tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
+
+    params = {
+        "filter": {
+            "eventTypeIds": ["7"],  # Horse Racing
+            "marketStartTime": {"from": today, "to": tomorrow},
+            "marketTypeCodes": ["WIN"]
+        },
+        "maxResults": 1000,
+        "marketProjection": ["RUNNER_DESCRIPTION", "EVENT"]
+    }
+
+    response = requests.post(
+        "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        headers=headers,
+        json={"jsonrpc": "2.0", "method": "SportsAPING/v1.0/listMarketCatalogue", "params": params, "id": 1}
+    )
+
+    response.raise_for_status()
+    markets = response.json().get('result', [])
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    for market in markets:
+        if len(market['runners']) >= 8:
+            for runner in market['runners']:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO bets (marketId, selectionId, horse_name, marketStartTime, timestamp)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        market['marketId'],
+                        runner['selectionId'],
+                        runner['runnerName'],
+                        market['marketStartTime'],
+                        datetime.utcnow().isoformat()
+                    )
+                )
+
+    conn.commit()
+    conn.close()
+    logging.info("✅ Today's markets and runners stored successfully.")
+
+
+def get_all_upcoming_races():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT marketId, marketStartTime FROM bets WHERE DATE(marketStartTime) = DATE('now')")
+    races = cursor.fetchall()
+    conn.close()
+
+    return [
+        {
+            'marketId': marketId,
+            'raceStartTime': datetime.strptime(marketStartTime, '%Y-%m-%dT%H:%M:%S.%fZ')
+        } for marketId, marketStartTime in races
+    ]
+
+
+def evaluate_signal(signal, risk_mgr, budget_mgr):
+    logging.info(f"🔍 Evaluating signal explicitly: {signal}")
+
+    odds = signal.get('odds', 0)
+    stake = signal.get('stake', 0)
+    bot_name = signal.get('bot_name')
+
+    if not risk_mgr.is_odds_within_limits(signal['signal_type'], odds):
+        logging.warning(f"❌ Odds outside risk limits: {odds}")
+        return []
+
+    available_budget = budget_mgr.get_available_budget(bot_name)
+    required_liability = (odds - 1) * stake
+
+    if available_budget < required_liability:
+        logging.warning(f"❌ Budget insufficient. Needed: {required_liability}, Available: {available_budget}")
+        return []
+
+    approved_signal = {
+        **signal,
+        "approved_timestamp": datetime.utcnow().isoformat()
+    }
+
+    logging.info(f"✅ Signal approved: {approved_signal}")
+    return [approved_signal]
+
+
+def run_monitor(headers, risk_mgr, bot_queues):
+    TIME_WINDOWS = [80, 20, 10, 5, 0]
+    sent_signals = set()
+
+    while True:
+        current_time = datetime.utcnow()
+
+        if not fetch_market_data(headers):
+            fetch_and_store_markets(headers)
+
+        upcoming_races = get_all_upcoming_races()
+        next_race_time = min(race['raceStartTime'] for race in upcoming_races) if upcoming_races else None
+        minutes_to_next_race = int((next_race_time - current_time).total_seconds() / 60) if next_race_time else None
+
+        for race in upcoming_races:
+            market_id = race['marketId']
+            race_start_time = race['raceStartTime']
+            minutes_to_race = int((race_start_time - current_time).total_seconds() / 60)
+
+            if minutes_to_race in TIME_WINDOWS:
+                signal_identifier = (market_id, minutes_to_race)
+                if signal_identifier not in sent_signals:
+                    signal = {
+                        "signal_type": f"time_{minutes_to_race}_min",
+                        "time_session": minutes_to_race,
+                        "marketId": market_id,
+                        "timestamp": current_time.isoformat()
+                    }
+
+                    processed_signals = evaluate_signal(signal, risk_mgr, budget_mgr)
+
+                    for proc_signal in processed_signals:
+                        bot_name = proc_signal['bot_name']
+                        if bot_name in bot_queues:
+                            bot_queues[bot_name].put(proc_signal)
+                            logging.info(f"✅ Time-based signal queued for {bot_name}: {proc_signal}")
+
+                    sent_signals.add(signal_identifier)
+                    logging.info(f"✅ Sent time_{minutes_to_race}_min signal for market {market_id}")
+
+        sleep_duration = 30
+
+        logging.info(f"🕒 Sleeping for {sleep_duration} seconds.")
+        time.sleep(sleep_duration)
+
+
+# Part 3: Main Loop and Signal Processing
+
+
+# Updated explicitly to ensure correct signal handling and placeholder functions clearly defined:
+
+def process_and_place_bets(signals, headers, risk_mgr):
+    for signal in signals:
+        approved_signal = risk_mgr.evaluate_signal(signal)
+
+        if approved_signal:
+            bet_type = approved_signal.get('bet_type', 'LAY')
+            if bet_type == 'SCALP':
+                execute_scalp(headers, approved_signal['marketId'], approved_signal['selectionId'], approved_signal['stake'], approved_signal['odds'], 'LAY', approved_signal['marketStartTime'])
+            elif bet_type == 'GREEN':
+                green_up(headers, approved_signal['marketId'])
+            else:
+                bet_id = place_bet(
+                    headers=headers,
+                    market_id=approved_signal['marketId'],
+                    selection_id=approved_signal['selectionId'],
+                    stake=approved_signal['stake'],
+                    odds=approved_signal['odds'],
+                    bet_type=bet_type
+                )
+                if bet_id:
+                    logging.info(f"✅ Bet successfully placed: Betfair Bet ID {bet_id}")
+                else:
+                    logging.error("🔴 Bet failed to place or was skipped due to duplication.")
+
+# Placeholder functions explicitly defined clearly to prevent errors:
+
+import sqlite3
+from datetime import datetime, timedelta
+
+def get_markets_starting_in(minutes):
+    logging.info(f"🔍 Fetching markets starting in next {minutes} minutes.")
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    now = datetime.utcnow()
+    target_time = now + timedelta(minutes=minutes)
+
+    cursor.execute("""
+        SELECT DISTINCT marketId, marketStartTime FROM bets
+        WHERE datetime(marketStartTime) BETWEEN ? AND ?
+    """, (now.isoformat(), target_time.isoformat()))
+
+    markets_data = cursor.fetchall()
+
+    markets = []
+    for marketId, marketStartTime in markets_data:
+        cursor.execute("""
+            SELECT DISTINCT selectionId FROM bets WHERE marketId = ?
+        """, (marketId,))
+        selections = cursor.fetchall()
+        selection_ids = [s[0] for s in selections]
+
+        markets.append({
+            'marketId': marketId,
+            'marketStartTime': marketStartTime,
+            'selectionIds': selection_ids
+        })
+
+    conn.close()
+
+    logging.info(f"✅ Found {len(markets)} markets starting within {minutes} minutes.")
+    return markets
+
+
+
+def fetch_anchor_odds(market_id, headers):
+    params = {"marketIds": [market_id], "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}}
+
+    response = requests.post(
+        "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        headers=headers,
+        json={"jsonrpc": "2.0", "method": "SportsAPING/v1.0/listMarketBook", "params": params, "id": 1}
+    )
+
+    response.raise_for_status()
+    market_books = response.json().get('result', [])
+
+    if market_books:
+        runners_odds = {}
+        for runner in market_books[0]['runners']:
+            best_offer = runner['ex']['availableToBack'][0]['price'] if runner['ex']['availableToBack'] else None
+            if best_offer:
+                runners_odds[runner['selectionId']] = best_offer
+        return runners_odds
+
+    return {}
+
+def fetch_live_odds(market_id, headers):
+    # Assuming fetch_live_odds functionality matches fetch_anchor_odds for live market data
+    return fetch_anchor_odds(market_id, headers)
+
+
+
+# Clearly structured main loop explicitly updated:
+def main_loop(headers, risk_mgr, bot_queues):
+    while True:
+        keep_alive(headers)
+        fetch_budget()
+        fetch_settled_bets(headers)
+        current_time = datetime.utcnow()
+
+        if not fetch_market_data(headers):
+            fetch_and_store_markets(headers)
+
+        upcoming_races = get_all_upcoming_races()
+
+        signals = []
+        markets = get_markets_starting_in(0)
+
+        for market in markets:
+            anchor_odds = fetch_anchor_odds(market['marketId'])
+            live_odds = fetch_live_odds(market['marketId'])
+
+            signal = {
+                "bot_name": "OGHeadTrader",  # Explicit placeholder bot
+                "odds": live_odds,
+                "stake": 10,  # Placeholder stake
+                "time_session": 'anytime',
+                "signal_type": 'Market Drifter Signal',
+                "anchor_odds": anchor_odds,
+                "marketStartTime": market.get('marketStartTime', datetime.utcnow().isoformat()),
+                "market_status": 'ACTIVE',
+                "marketId": market['marketId'],
+                "selectionId": market.get('selectionId', 0)
+            }
+
+            signals.append(signal)
+
+        process_and_place_bets(signals, headers, risk_mgr)
+
+        next_race_time = min(race['raceStartTime'] for race in upcoming_races) if upcoming_races else None
+        minutes_to_next_race = int((next_race_time - current_time).total_seconds() / 60) if next_race_time else None
+
+        sleep_duration = (
+            60 if minutes_to_next_race is None else
+            60 if minutes_to_next_race > 90 else
+            60 if 30 < minutes_to_next_race <= 90 else
+            60 if 5 < minutes_to_next_race <= 30 else
+            30
+        )
+
+        logging.info(f"🕒 Sleeping for {sleep_duration} seconds.")
+        time.sleep(sleep_duration)
+
+# Part 4: Signal Processor Worker
+
+
+# Clearly updated to ensure consistency in headers and structured signals explicitly:
+
+def signal_processor_worker(signal_queue, risk_mgr, budget_mgr, headers):
+    logging.info("✅ Signal Processor Worker started.")
+    while True:
+        signal = signal_queue.get()
+        logging.info(f"✅ Signal retrieved from queue: {signal}")
+
+        approved_signal = risk_mgr.evaluate_signal(signal)
+
+        if not approved_signal:
+            matched_liability, unmatched_liability = budget_mgr.get_bot_status_from_db(signal['bot_name'])
+            approved_signal = budget_mgr.handle_rejected_signal(
+                signal, matched_liability, unmatched_liability, "Budget limit reached"
+            )
+
+        if approved_signal:
+            market_id = approved_signal['marketId']
+            selection_id = approved_signal['selectionId']
+            stake = approved_signal['stake']
+            odds = approved_signal['odds']
+            bet_type = approved_signal.get('bet_type', 'LAY')
+            market_start_time = approved_signal.get('marketStartTime', datetime.utcnow().isoformat())
+
+            if bet_type == 'SCALP':
+                execute_scalp(headers, market_id, selection_id, stake, odds, 'LAY', market_start_time)
+            elif bet_type == 'GREEN':
+                green_up(headers, market_id)
+            else:
+                bet_id = place_bet(
+                    headers=headers,
+                    market_id=market_id,
+                    selection_id=selection_id,
+                    stake=stake,
+                    odds=odds,
+                    bet_type=bet_type
+                )
+                if bet_id:
+                    logging.info(f"✅ Bet explicitly placed for Market {market_id}, Selection {selection_id}, Bet ID {bet_id}")
+                else:
+                    logging.error("🔴 Bet placement explicitly failed.")
+
+        signal_queue.task_done()
+
+# Part 5: Main Loop Execution and Thread Initialization
+
+def main_loop(headers, risk_mgr, bot_queues):
+    TIME_WINDOWS = [80, 20, 10, 5, 0]
+    sent_signals = set()
+
+    while True:
+        keep_alive(headers)
+        available_budget = fetch_budget(headers)
+        budget_mgr.update_available_budget(available_budget)
+        fetch_settled_bets(headers)
+
+        current_time = datetime.utcnow()
+
+        if not fetch_market_data(headers):
+            fetch_and_store_markets(headers)
+
+        upcoming_races = get_all_upcoming_races()
+
+        for race in upcoming_races:
+            market_id = race['marketId']
+            race_start_time = race['raceStartTime']
+            minutes_to_race = int((race_start_time - current_time).total_seconds() / 60)
+
+            if minutes_to_race in TIME_WINDOWS:
+                signal_identifier = (market_id, minutes_to_race)
+                if signal_identifier not in sent_signals:
+                    anchor_odds = fetch_anchor_odds(market_id, headers)
+                    live_odds = fetch_live_odds(market_id, headers)
+
+                    signal = {
+                        "bot_name": "OGHeadTrader",
+                        "odds": live_odds,
+                        "stake": 10,  # Replace with actual dynamic staking logic
+                        "time_session": minutes_to_race,
+                        "signal_type": 'Market Drifter Signal',
+                        "anchor_odds": anchor_odds,
+                        "marketStartTime": race_start_time.isoformat(),
+                        "market_status": 'ACTIVE',
+                        "marketId": market_id,
+                        "selectionId": next(iter(live_odds), 0),
+                        "timestamp": current_time.isoformat()
+                    }
+
+                    processed_signals = evaluate_signal(signal, risk_mgr, budget_mgr)
+
+                    for proc_signal in processed_signals:
+                        bot_name = proc_signal['bot_name']
+                        if bot_name in bot_queues:
+                            bot_queues[bot_name].put(proc_signal)
+                            logging.info(f"✅ Signal queued for {bot_name}: {proc_signal}")
+
+                    sent_signals.add(signal_identifier)
+                    logging.info(f"✅ Sent time_{minutes_to_race}_min signal for market {market_id}")
+
+        next_race_time = min(race['raceStartTime'] for race in upcoming_races) if upcoming_races else None
+        minutes_to_next_race = int((next_race_time - current_time).total_seconds() / 60) if next_race_time else None
+
+        sleep_duration = (
+            900 if minutes_to_next_race is None else
+            900 if minutes_to_next_race > 90 else
+            300 if 30 < minutes_to_next_race <= 90 else
+            60 if 5 < minutes_to_next_race <= 30 else
+            30
+        )
+
+        logging.info(f"🕒 Main loop sleeping for {sleep_duration} seconds.")
+        time.sleep(sleep_duration)
+
+
+# Part 6: Main Execution Block and Thread Management
+
+def signal_router(bot_queues, risk_mgr, headers):
+    logging.info("🚦 Automated Signal Router started.")
+
+    while True:
+        for bot_name, queue in bot_queues.items():
+            while not queue.empty():
+                signal = queue.get()
+                logging.info(f"🔄 Signal retrieved from {bot_name} queue: {signal}")
+
+                approved_signal = risk_mgr.evaluate_signal(signal)
+
+                if approved_signal:
+                    bet_type = approved_signal.get('bet_type', 'LAY')
+                    if bet_type == 'SCALP':
+                        execute_scalp(headers['X-Authentication'], approved_signal['marketId'],
+                                     approved_signal['selectionId'], approved_signal['stake'],
+                                     approved_signal['odds'], 'LAY', approved_signal['marketStartTime'])
+                    elif bet_type == 'GREEN':
+                        green_up(headers['X-Authentication'], approved_signal['marketId'])
+                    else:
+                        bet_id = place_bet(
+                            session_token=headers['X-Authentication'],
+                            market_id=approved_signal['marketId'],
+                            selection_id=approved_signal['selectionId'],
+                            stake=approved_signal['stake'],
+                            odds=approved_signal['odds'],
+                            bet_type=bet_type
+                        )
+                        if bet_id:
+                            logging.info(f"✅ Bet placed successfully: Betfair ID {bet_id}")
+                        else:
+                            logging.error("🔴 Bet placement failed at Bet Placer stage.")
+                else:
+                    logging.warning(f"❌ Signal rejected by Risk Manager: {signal}")
+
+                queue.task_done()
+
+        time.sleep(2)
+
+
+# Consolidated clearly into a single, explicit main execution block:
+
+if __name__ == "__main__":
+    threading.Thread(target=run_monitor, args=(headers, risk_mgr, bot_queues), daemon=True).start()
+    threading.Thread(target=signal_router, args=(bot_queues, risk_mgr, headers), daemon=True).start()
+    threading.Thread(target=launch_bot_family, args=(headers, risk_mgr, bot_assignments, bot_budget_limits, TOGGLES, budget_mgr), daemon=True).start()
+    
+    # ✅ Start signal processor explicitly
+    threading.Thread(target=signal_processor_worker, args=(signal_queue, risk_mgr, budget_mgr, headers), daemon=True).start()
+
+    available_budget = fetch_budget(headers)
+    log_session_management(f"budget_fetched - Available Budget: {available_budget} GBP")
+
+    main_loop(headers, risk_mgr, bot_queues)
+
+
+

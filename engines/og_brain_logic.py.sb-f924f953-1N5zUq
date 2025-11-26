@@ -1,0 +1,110 @@
+# =============================================
+# 🧠 og_brain_logic.py – Master Execution Logic for Bet Placement
+# =============================================
+
+import logging
+import time
+import sqlite3
+import pandas as pd
+from datetime import datetime
+from config_paths import DB_PATH
+from price_math import calculate_tick_distance
+
+# =============================================
+# ✅ Memory & Learning Model Placeholders
+# =============================================
+
+brain_insights = {}
+brain_memory = {
+    "daily_signals": [],
+    "executed_bets": [],
+    "error_log": [],
+    "current_pnl": [],
+    "settlement_tracker": [],
+    "duplicate_refs": [],
+    "scalp_opportunities": [],
+    "inplay_flags": []
+}
+
+# ✅ Configurable Constants
+MAX_INPLAY_LAYS_PER_HORSE = 4
+MAX_TOTAL_LAYS_PER_RACE = 16
+MIN_TICK_SPREAD = 10
+RELAY_COOLDOWN_SECONDS = 15
+
+# 🧠 Internal Tracker for In-Play Lay State
+inplay_lays = {}
+greenup_flags = set()
+
+# =============================================
+# ✅ Core Brain Loop – Observes, Learns, Logs, and Guides
+# =============================================
+
+def place_bets_from_brain():
+    logging.info("🧠 OG Brain: Live execution started (non-blocking mode)")
+    while True:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM bets ORDER BY placed_at DESC LIMIT 100")
+                recent_bets = cursor.fetchall()
+
+                for row in recent_bets:
+                    ref = row["customerOrderRef"]
+                    status = row["status"]
+                    pnl = row["pnl"]
+                    result = row["result"]
+                    bet_type = row["bet_type"]
+                    odds = row["odds"]
+                    anchor = row["anchor_odd"]
+                    selection_id = row["selectionId"]
+                    market_id = row["marketId"]
+
+                    if status == "settled":
+                        brain_memory["settlement_tracker"].append({
+                            "ref": ref,
+                            "pnl": pnl,
+                            "result": result
+                        })
+
+                    if ref in brain_memory["daily_signals"]:
+                        brain_memory["duplicate_refs"].append(ref)
+
+                    brain_memory["daily_signals"].append(ref)
+
+                    if isinstance(pnl, (int, float)):
+                        brain_memory["current_pnl"].append(pnl)
+
+                    if bet_type == "LADDER":
+                        logging.info(f"🧠 [Brain] LADDER strategy review for {selection_id} in {market_id}")
+
+                    elif bet_type == "GREENUP":
+                        if market_id not in greenup_flags:
+                            greenup_flags.add(market_id)
+                            logging.info(f"🧠 [Brain] GREENUP approved for {selection_id} in {market_id}")
+                        else:
+                            logging.debug(f"🧠 [Brain] GREENUP skipped – already flagged for {market_id}")
+
+                    elif bet_type == "SCALP":
+                        drift = calculate_tick_distance(anchor, odds)
+                        if drift >= 4:
+                            brain_memory["scalp_opportunities"].append({"ref": ref, "drift": drift})
+                            logging.info(f"🧠 [Brain] SCALP drift {drift} ticks for {selection_id} in {market_id}")
+                        else:
+                            logging.debug(f"🧠 [Brain] SCALP ignored (drift={drift}) for {selection_id}")
+
+                    elif bet_type == "INPLAY":
+                        lays = inplay_lays.get((market_id, selection_id), 0)
+                        if lays < MAX_INPLAY_LAYS_PER_HORSE:
+                            lays += 1
+                            inplay_lays[(market_id, selection_id)] = lays
+                            logging.info(f"🧠 [Brain] INPLAY lay {lays}/{MAX_INPLAY_LAYS_PER_HORSE} approved for {selection_id}")
+                        else:
+                            logging.info(f"🧠 [Brain] INPLAY blocked – max reached for {selection_id} in {market_id}")
+
+        except Exception as e:
+            brain_memory["error_log"].append(str(e))
+            logging.error(f"❌ OG Brain DB Error: {e}")
+
+        time.sleep(10)  # Observe every 10s

@@ -1,0 +1,140 @@
+CREATE VIEW v_odds_latest AS
+WITH latest AS (
+  SELECT marketId, selectionId, MAX(snapshot_ts) AS max_ts
+  FROM oc_series
+  GROUP BY marketId, selectionId
+),
+stage_ordered AS (
+  SELECT o.*,
+         CASE WHEN o.stage GLOB 'OC[0-9]*' THEN CAST(SUBSTR(o.stage,3) AS INT) ELSE 0 END AS stage_n
+  FROM oc_series o
+  JOIN latest l
+--
+CREATE VIEW v_odds_first_last_today AS
+WITH raw AS (
+  SELECT marketId, selectionId, snapshot_ts, odd, stage, id,
+         CASE WHEN stage GLOB 'OC[0-9]*' THEN CAST(SUBSTR(stage,3) AS INT) ELSE 0 END AS stage_n
+  FROM oc_series
+  WHERE date(snapshot_ts)=date('now','utc')
+),
+first_ts AS ( SELECT marketId, selectionId, MIN(snapshot_ts) AS first_ts FROM raw GROUP BY marketId, selectionId ),
+last_ts  AS ( SELECT marketId, selectionId, MAX(snapshot_ts) AS last_ts  FROM raw GROUP BY marketId, selectionId ),
+first_pick AS (
+  SELECT r.marketId, r.selectionId, r.snapshot_ts AS ts, r.odd AS ltp,
+--
+CREATE TABLE mastery_posteriors (
+  bin_key TEXT PRIMARY KEY,
+  p1_alpha REAL NOT NULL DEFAULT 0, p1_beta REAL NOT NULL DEFAULT 0,
+  p2_alpha REAL NOT NULL DEFAULT 0, p2_beta REAL NOT NULL DEFAULT 0,
+  p3_alpha REAL NOT NULL DEFAULT 0, p3_beta REAL NOT NULL DEFAULT 0,
+  fill_alpha REAL NOT NULL DEFAULT 0, fill_beta REAL NOT NULL DEFAULT 0,
+  mae_n INTEGER NOT NULL DEFAULT 0,
+  mae_mean REAL NOT NULL DEFAULT 0.0,
+  mae_m2 REAL NOT NULL DEFAULT 0.0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  source TEXT NOT NULL DEFAULT 'TEST'
+--
+CREATE TABLE mastery_outcomes_raw(
+        day TEXT,
+        marketId TEXT,
+        selectionId TEXT,
+        letter TEXT,
+        distance_band TEXT,
+        fav_rank TEXT,
+        day_of_week TEXT,
+        surface TEXT,
+        class_band TEXT,
+        target_ticks INTEGER,
+--
+CREATE TABLE mastery_posteriors_progress(
+            processed_outcome_id INTEGER
+        );
+CREATE VIEW v_plan_ledger_compat AS
+SELECT
+    id,
+    day,
+    run_id,
+    plan_id,
+    marketId,
+    selectionId,
+--
+CREATE TABLE mastery_replay_summary (
+    epoch_type TEXT NOT NULL,              -- '100d' or '365d'
+    day TEXT NOT NULL,                     -- replay day
+    first_id INTEGER,
+    last_id INTEGER,
+    outcomes INTEGER,
+    processed_id INTEGER,
+    posterior_day TEXT,
+    status TEXT,
+    updated_at TEXT DEFAULT (datetime('now','utc')),
+    PRIMARY KEY(epoch_type, day)
+--
+CREATE VIEW v_mastery_live AS
+SELECT
+    distance_band,
+    fav_rank_bin,
+    surface_type,
+    day_of_week,
+    COUNT(*)            AS bins,
+    ROUND(SUM(net_pnl), 2) AS total_pnl,
+    ROUND(AVG(mae_mean), 3) AS avg_mae,
+    ROUND(SUM(weight_applied), 1) AS total_weight,
+    ROUND(SUM(p1_alpha) / NULLIF(SUM(p1_alpha + p1_beta), 0), 3) AS p1_mean,
+--
+CREATE TABLE mastery_cache (
+                ts TEXT,
+                event_type TEXT,
+                marketId TEXT,
+                json_payload TEXT
+            );
+CREATE TABLE liability_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT,
+    marketId TEXT,
+    selectionId TEXT,
+--
+CREATE VIEW v_liability_context AS
+SELECT 
+    m.id AS id,            -- expose internal id for checkpointing
+    m.day,
+    m.marketId,
+    m.selectionId,
+    m.letter,
+    m.distance_band,
+    m.fav_rank,
+    m.day_of_week,
+    m.surface,
+--
+CREATE TABLE mastery_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now','utc')),
+            marketId TEXT,
+            plan_bias REAL,
+            actual_bias REAL,
+            bias_delta REAL,
+            exposure_target REAL,
+            exposure_actual REAL,
+            exposure_gap REAL,
+            hedge_eff REAL,
+--
+CREATE VIEW v_mastery_training AS
+WITH
+  cash AS (
+    SELECT 
+        marketId,
+        MAX(CAST(json_extract(json_payload,'$.cashout_total') AS REAL))   AS cashout_total,
+        MAX(CAST(json_extract(json_payload,'$.liability_total') AS REAL)) AS liability_total
+      FROM mastery_cache
+     WHERE event_type='cashout_tick'
+     GROUP BY marketId
+  ),
+--
+CREATE TABLE mastery_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT DEFAULT (datetime('now','utc')),
+    progress INTEGER DEFAULT 0,
+    thresholds_json TEXT,
+    version INTEGER DEFAULT 1,
+    source TEXT DEFAULT 'INIT'
+, goal_alignment REAL DEFAULT 0.0, pnl_today REAL DEFAULT 0.0, win_rate_today REAL DEFAULT 0.0);

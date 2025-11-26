@@ -1,0 +1,110 @@
+# 🔑 Anchor Odds Integration (Final System Logic) - Database Schema Alignment with Updates
+
+import sqlite3
+from datetime import datetime, timedelta
+
+# --- Database Initialization and Structure ---
+
+def initialize_odds_table():
+    conn = sqlite3.connect('bets.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS hourly_odds_snapshots (
+        market_id TEXT,
+        runner_id INTEGER,
+        horse_name TEXT,
+        race_name TEXT,
+        market_name TEXT,
+        event_name TEXT,
+        snapshot_time TEXT,
+        odds REAL,
+        anchor_odd REAL,
+        odds_check_1 REAL,
+        odds_check_2 REAL,
+        odds_check_3 REAL,
+        odds_check_4 REAL,
+        odds_check_5 REAL,
+        odds_check_6 REAL,
+        PRIMARY KEY (market_id, runner_id, snapshot_time)
+    )
+    ''')
+    conn.commit()
+    conn.close()
+
+initialize_odds_table()
+
+# --- Explicit Logic to Capture Initial (Anchor) Odds ---
+
+def capture_anchor_odds(market_id, runner_id, horse_name, race_name, market_name, event_name, odds, snapshot_time):
+    conn = sqlite3.connect('bets.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    INSERT OR IGNORE INTO hourly_odds_snapshots (
+        market_id, runner_id, horse_name, race_name, market_name, event_name,
+        snapshot_time, anchor_odd
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (market_id, runner_id, horse_name, race_name, market_name, event_name, snapshot_time, odds))
+    conn.commit()
+    conn.close()
+
+# --- Explicit Logic to Store and Manage Hourly Snapshots ---
+
+def store_hourly_snapshot(market_id, runner_id, snapshot_time, snapshot_column, odds):
+    conn = sqlite3.connect('bets.db')
+    cursor = conn.cursor()
+    cursor.execute(f'''
+    UPDATE hourly_odds_snapshots
+    SET {snapshot_column} = ?
+    WHERE market_id = ? AND runner_id = ? AND snapshot_time = ?
+    ''', (odds, market_id, runner_id, snapshot_time))
+    conn.commit()
+    conn.close()
+
+# --- Explicit Logic to Retrieve Anchor Odds ---
+
+def get_anchor_odds(market_id, runner_id):
+    conn = sqlite3.connect('bets.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT anchor_odd FROM hourly_odds_snapshots
+    WHERE market_id = ? AND runner_id = ?
+    ORDER BY snapshot_time ASC LIMIT 1
+    ''', (market_id, runner_id))
+
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+# --- Explicit Logic to Retrieve Historical Snapshots ---
+
+def get_historical_snapshots(market_id, runner_id):
+    conn = sqlite3.connect('bets.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT odds_check_1, odds_check_2, odds_check_3,
+           odds_check_4, odds_check_5, odds_check_6
+    FROM hourly_odds_snapshots
+    WHERE market_id = ? AND runner_id = ?
+    ''', (market_id, runner_id))
+
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+# --- Integration with Market Monitor ---
+
+def integrate_with_market_monitor(market_id, runner_id, horse_name, race_name, market_name, event_name, initial_odds, race_start_time):
+    snapshot_intervals = [7, 6, 5, 4, 3, 2, 1/60]  # hours
+    snapshot_columns = ["anchor_odd", "odds_check_1", "odds_check_2", "odds_check_3", "odds_check_4", "odds_check_5", "odds_check_6"]
+
+    for interval, column in zip(snapshot_intervals, snapshot_columns):
+        snapshot_time = (race_start_time - timedelta(hours=interval)).strftime('%Y-%m-%d %H:%M:%S')
+        current_odds = initial_odds  # Replace with live odds fetching logic as needed
+
+        if column == "anchor_odd":
+            capture_anchor_odds(market_id, runner_id, horse_name, race_name, market_name, event_name, current_odds, snapshot_time)
+        else:
+            store_hourly_snapshot(market_id, runner_id, snapshot_time, column, current_odds)
+
+# Example Integration Call:
+# integrate_with_market_monitor("1.234567890", 12345, "Horse A", "Race X", "Market Y", "Event Z", 5.2, datetime.utcnow() + timedelta(hours=7))

@@ -1,0 +1,51 @@
+# 4_🕒_Recent_Trades.py – Updated to Match Dashboard Format
+import streamlit as st
+import sqlite3
+import pandas as pd
+from datetime import datetime
+
+DB_PATH = '/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/data/bets.db'
+
+st.set_page_config(page_title="Recent Trades", layout="wide")
+st.title("🕒 Recent Trades")
+
+# Fetch latest trades from today
+@st.cache_data
+def fetch_today_trades():
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(f"""
+            SELECT strategy_name, marketId, selectionId, horse_name, stake, price, confidence, status, placed_at, pnl
+            FROM bets 
+            WHERE DATE(placed_at) = DATE('{today}') 
+            ORDER BY placed_at DESC
+        """, conn)
+    return df
+
+trades_df = fetch_today_trades()
+
+if trades_df.empty:
+    st.warning("No trades placed today.")
+else:
+    trades_df['Time'] = pd.to_datetime(trades_df['placed_at']).dt.strftime("%H:%M:%S")
+    trades_df['Odds'] = trades_df['price'] if 'price' in trades_df else None
+    trades_df['Stake'] = trades_df['stake'] if 'stake' in trades_df else None
+    display_df = trades_df[[
+        'Time', 'strategy_name', 'marketId', 'horse_name', 'Odds', 'Stake', 'status', 'pnl']].copy()
+    display_df.columns = ['Time', 'Strategy', 'Market', 'Horse', 'Odds', 'Stake', 'Status', 'Profit/Loss (£)']
+
+    st.subheader("📋 Trades from Today")
+    st.dataframe(display_df, use_container_width=True)
+
+    st.subheader("📈 P/L Per Trade")
+    st.bar_chart(display_df.set_index('Time')['Profit/Loss (£)'])
+
+    st.subheader("🎯 Odds vs. Stake Distribution")
+    fig = px.scatter(display_df, x='Odds', y='Stake', color='Profit/Loss (£)',
+                     title='Odds vs Stake (Colored by P/L)',
+                     color_continuous_scale='RdYlGn')
+    st.plotly_chart(fig, use_container_width=True)
+
+# Footer
+st.markdown('---')
+st.caption('🔄 Trades reflect today's recorded bets. Data is live from local database.')

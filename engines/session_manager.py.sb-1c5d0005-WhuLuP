@@ -1,0 +1,323 @@
+Here's the report from Blueprint. As you can see, the in-play bit is blank. So that's what we need to look at next. How do we get the in-play blueprints to work, considering we are now getting the data. So you just need to investigate that.
+
+malachikelly@Malachis-MBP-3 engines % python3 blueprint.py
+📘 Loading blueprints from latest file: blueprint_signals_2025-07-16.json
+✅ Loaded 102 blueprint patterns from dict.
+📘 Loaded 102 blueprint patterns from JSON.
+🧩 patch.place_basic_lay_bet: <function place_basic_lay_bet at 0x11c282790>
+
+🔁 Running Enhanced Blueprint Builder
+
+📜 Known Blueprint Patterns
+
+📦 Exporting 40759 trend trades to structured JSON format
+✅ Exported 102 blueprint patterns to blueprint_signals_2025-07-17.json
+🔍 Running In-Play Blueprint Detector...
+
+📜 BLUEPRINT PERFORMANCE SNAPSHOT
+🔹 drift→OC1-OC2→drifted→lay-to-back → PnL: £299.82 | WinRate: 1.9% | Trades: 1225
+🔹 drift→OC1-OC3→pingpong→lay-to-back → PnL: £161.98 | WinRate: 1.8% | Trades: 282
+🔹 drift→OC1-OC5→volatile→lay-to-back → PnL: £131.23 | WinRate: 1.5% | Trades: 663
+🔹 drift→OC5-OC7→drifted→lay-to-back → PnL: £128.03 | WinRate: 1.8% | Trades: 385
+🔹 drift→OC4-OC5→drifted→lay-to-back → PnL: £120.14 | WinRate: 2.8% | Trades: 397
+🔹 drift→OC4-OC7→pingpong→lay-to-back → PnL: £117.41 | WinRate: 4.8% | Trades: 270
+🔹 drift→OC1-OC3→volatile→lay-to-back → PnL: £116.94 | WinRate: 1.4% | Trades: 560
+🔹 drift→OC1-OC6→volatile→lay-to-back → PnL: £111.23 | WinRate: 1.4% | Trades: 580
+🔹 drift→OC1-OC7→volatile→lay-to-back → PnL: £110.76 | WinRate: 1.4% | Trades: 432
+🔹 drift→OC3-OC7→pingpong→lay-to-back → PnL: £110.10 | WinRate: 4.0% | Trades: 328
+🔹 drift→OC1-OC4→volatile→lay-to-back → PnL: £108.72 | WinRate: 1.0% | Trades: 671
+🔹 drift→OC1-OC3→drifted→lay-to-back → PnL: £101.89 | WinRate: 2.1% | Trades: 333
+🔹 drift→OC1-OC6→pingpong→lay-to-back → PnL: £86.74 | WinRate: 4.3% | Trades: 326
+🔹 drift→OC1-OC4→drifted→lay-to-back → PnL: £86.71 | WinRate: 5.4% | Trades: 92
+🔹 steam→OC4-OC6→steamed→back-to-lay → PnL: £79.14 | WinRate: 2.4% | Trades: 417
+🔹 drift→OC2-OC5→drifted→lay-to-back → PnL: £74.16 | WinRate: 3.7% | Trades: 82
+🔹 drift→OC2-OC4→drifted→lay-to-back → PnL: £74.00 | WinRate: 2.1% | Trades: 191
+🔹 drift→OC6-OC7→drifted→lay-to-back → PnL: £73.33 | WinRate: 1.6% | Trades: 628
+🔹 drift→OC1-OC7→pingpong→lay-to-back → PnL: £70.49 | WinRate: 6.2% | Trades: 226
+🔹 drift→OC1-OC5→drifted→lay-to-back → PnL: £69.16 | WinRate: 8.3% | Trades: 24
+🔹 drift→OC3-OC5→drifted→lay-to-back → PnL: £68.10 | WinRate: 3.2% | Trades: 277
+🔹 steam→OC5-OC6→steamed→back-to-lay → PnL: £67.78 | WinRate: 1.1% | Trades: 626
+🔹 steam→OC2-OC3→steamed→back-to-lay → PnL: £37.58 | WinRate: 1.7% | Trades: 297
+🔹 drift→OC2-OC5→volatile→lay-to-back → PnL: £35.67 | WinRate: 1.3% | Trades: 302
+🔹 drift→OC1-OC5→pingpong→lay-to-back → PnL: £35.45 | WinRate: 3.1% | Trades: 358
+🔹 steam→OC5-OC7→steamed→back-to-lay → PnL: £34.20 | WinRate: 1.7% | Trades: 416
+🔹 drift→OC1-OC4→pingpong→lay-to-back → PnL: £32.51 | WinRate: 2.2% | Trades: 368
+🔹 drift→OC3-OC6→pingpong→lay-to-back → PnL: £31.37 | WinRate: 2.5% | Trades: 277
+🔹 drift→OC3-OC5→pingpong→lay-to-back → PnL: £31.00 | WinRate: 1.7% | Trades: 119
+🔹 steam→OC3-OC6→steamed→back-to-lay → PnL: £22.86 | WinRate: 1.3% | Trades: 151
+🔹 drift→OC4-OC6→pingpong→lay-to-back → PnL: £19.98 | WinRate: 2.0% | Trades: 147
+🔹 drift→OC5-OC7→pingpong→lay-to-back → PnL: £19.90 | WinRate: 3.9% | Trades: 128
+🔹 steam→OC2-OC4→volatile→back-to-lay → PnL: £17.10 | WinRate: 0.9% | Trades: 216
+🔹 drift→OC2-OC4→pingpong→lay-to-back → PnL: £15.00 | WinRate: 0.9% | Trades: 112
+🔹 steam→OC5-OC7→volatile→back-to-lay → PnL: £12.34 | WinRate: 0.5% | Trades: 184
+🔹 steam→OC2-OC7→volatile→back-to-lay → PnL: £11.00 | WinRate: 1.1% | Trades: 461
+🔹 steam→OC1-OC7→pingpong→back-to-lay → PnL: £10.82 | WinRate: 2.5% | Trades: 321
+🔹 steam→OC4-OC7→steamed→back-to-lay → PnL: £9.55 | WinRate: 2.7% | Trades: 148
+🔹 steam→OC2-OC6→volatile→back-to-lay → PnL: £5.58 | WinRate: 0.8% | Trades: 503
+🔹 drift→OC4-OC6→volatile→lay-to-back → PnL: £4.00 | WinRate: 0.5% | Trades: 202
+🔹 steam→OC3-OC5→pingpong→back-to-lay → PnL: £1.30 | WinRate: 2.1% | Trades: 145
+🔹 drift→OC2-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 27
+🔹 drift→OC2-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 12
+🔹 drift→OC3-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 23
+🔹 steam→OC1-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 67
+🔹 steam→OC2-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 112
+🔹 steam→OC1-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 21
+🔹 steam→OC2-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 36
+🔹 steam→OC3-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 38
+🔹 drift→OC1-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 5
+🔹 drift→OC1-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 2
+🔹 steam→OC1-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 5
+🔹 steam→OC2-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 6
+🔹 steam→OC4-OC7→volatile→back-to-lay → PnL: £-2.09 | WinRate: 0.6% | Trades: 354
+🔹 steam→OC1-OC4→pingpong→back-to-lay → PnL: £-2.24 | WinRate: 1.0% | Trades: 507
+🔹 drift→OC2-OC3→drifted→lay-to-back → PnL: £-3.33 | WinRate: 0.5% | Trades: 221
+🔹 drift→OC3-OC4→drifted→lay-to-back → PnL: £-3.36 | WinRate: 0.8% | Trades: 367
+🔹 steam→OC1-OC6→pingpong→back-to-lay → PnL: £-4.07 | WinRate: 1.8% | Trades: 453
+🔹 drift→OC2-OC5→pingpong→lay-to-back → PnL: £-4.19 | WinRate: 2.6% | Trades: 271
+🔹 drift→OC4-OC7→drifted→lay-to-back → PnL: £-4.44 | WinRate: 0.0% | Trades: 117
+🔹 steam→OC2-OC4→steamed→back-to-lay → PnL: £-5.76 | WinRate: 0.4% | Trades: 273
+🔹 drift→OC3-OC6→drifted→lay-to-back → PnL: £-6.67 | WinRate: 1.8% | Trades: 112
+🔹 steam→OC1-OC5→pingpong→back-to-lay → PnL: £-10.17 | WinRate: 1.2% | Trades: 516
+🔹 steam→OC1-OC4→steamed→back-to-lay → PnL: £-12.08 | WinRate: 0.9% | Trades: 224
+🔹 steam→OC3-OC6→volatile→back-to-lay → PnL: £-17.06 | WinRate: 0.7% | Trades: 420
+🔹 steam→OC4-OC5→steamed→back-to-lay → PnL: £-17.36 | WinRate: 1.3% | Trades: 468
+🔹 steam→OC3-OC7→volatile→back-to-lay → PnL: £-20.96 | WinRate: 0.9% | Trades: 436
+🔹 drift→OC2-OC7→pingpong→lay-to-back → PnL: £-22.78 | WinRate: 3.8% | Trades: 340
+🔹 drift→OC3-OC5→volatile→lay-to-back → PnL: £-23.41 | WinRate: 0.5% | Trades: 199
+🔹 drift→OC2-OC4→volatile→lay-to-back → PnL: £-26.16 | WinRate: 0.0% | Trades: 188
+🔹 steam→OC4-OC6→pingpong→back-to-lay → PnL: £-29.22 | WinRate: 0.6% | Trades: 165
+🔹 steam→OC1-OC3→steamed→back-to-lay → PnL: £-29.97 | WinRate: 1.1% | Trades: 743
+🔹 steam→OC2-OC5→volatile→back-to-lay → PnL: £-33.30 | WinRate: 0.8% | Trades: 393
+🔹 steam→OC3-OC5→volatile→back-to-lay → PnL: £-38.35 | WinRate: 0.9% | Trades: 214
+🔹 steam→OC1-OC3→pingpong→back-to-lay → PnL: £-39.13 | WinRate: 1.5% | Trades: 408
+🔹 steam→OC4-OC6→volatile→back-to-lay → PnL: £-46.39 | WinRate: 0.0% | Trades: 236
+🔹 drift→OC2-OC6→pingpong→lay-to-back → PnL: £-98.18 | WinRate: 3.2% | Trades: 343
+🔹 drift→OC4-OC6→drifted→lay-to-back → PnL: £-158.34 | WinRate: 1.8% | Trades: 331
+🔹 drift→OC4-OC7→volatile→lay-to-back → PnL: £-174.61 | WinRate: 0.9% | Trades: 327
+🔹 drift→OC2-OC7→volatile→lay-to-back → PnL: £-174.83 | WinRate: 0.8% | Trades: 391
+🔹 drift→OC3-OC7→volatile→lay-to-back → PnL: £-174.83 | WinRate: 0.8% | Trades: 380
+🔹 drift→OC5-OC6→drifted→lay-to-back → PnL: £-175.50 | WinRate: 1.1% | Trades: 531
+🔹 drift→OC5-OC7→volatile→lay-to-back → PnL: £-219.24 | WinRate: 0.0% | Trades: 195
+🔹 drift→OC2-OC6→volatile→lay-to-back → PnL: £-222.12 | WinRate: 0.3% | Trades: 367
+🔹 drift→OC3-OC6→volatile→lay-to-back → PnL: £-230.24 | WinRate: 0.3% | Trades: 329
+🔹 steam→OC2-OC5→pingpong→back-to-lay → PnL: £-558.24 | WinRate: 2.9% | Trades: 349
+🔹 steam→OC3-OC5→steamed→back-to-lay → PnL: £-576.22 | WinRate: 1.1% | Trades: 369
+🔹 steam→OC6-OC7→steamed→back-to-lay → PnL: £-588.46 | WinRate: 1.6% | Trades: 614
+🔹 steam→OC2-OC4→pingpong→back-to-lay → PnL: £-636.67 | WinRate: 2.7% | Trades: 150
+🔹 steam→OC3-OC7→pingpong→back-to-lay → PnL: £-638.05 | WinRate: 2.0% | Trades: 352
+🔹 steam→OC3-OC4→steamed→back-to-lay → PnL: £-646.07 | WinRate: 0.7% | Trades: 448
+🔹 steam→OC5-OC7→pingpong→back-to-lay → PnL: £-650.53 | WinRate: 1.4% | Trades: 146
+🔹 steam→OC2-OC6→pingpong→back-to-lay → PnL: £-656.83 | WinRate: 1.2% | Trades: 414
+🔹 steam→OC3-OC6→pingpong→back-to-lay → PnL: £-658.21 | WinRate: 0.9% | Trades: 332
+🔹 steam→OC2-OC7→pingpong→back-to-lay → PnL: £-666.19 | WinRate: 1.6% | Trades: 372
+🔹 steam→OC4-OC7→pingpong→back-to-lay → PnL: £-675.94 | WinRate: 1.4% | Trades: 286
+🔹 steam→OC1-OC3→volatile→back-to-lay → PnL: £-953.76 | WinRate: 0.6% | Trades: 1488
+🔹 steam→OC1-OC6→volatile→back-to-lay → PnL: £-973.59 | WinRate: 0.9% | Trades: 1393
+🔹 steam→OC1-OC7→volatile→back-to-lay → PnL: £-977.59 | WinRate: 1.1% | Trades: 1001
+🔹 steam→OC1-OC4→volatile→back-to-lay → PnL: £-993.49 | WinRate: 0.6% | Trades: 1714
+🔹 steam→OC1-OC5→volatile→back-to-lay → PnL: £-1011.30 | WinRate: 0.7% | Trades: 1619
+🔹 steam→OC1-OC2→steamed→back-to-lay → PnL: £-1057.40 | WinRate: 0.9% | Trades: 2730
+
+📜 PERFORMANCE SINCE JULY 9
+🔹 drift→OC4-OC5→drifted→lay-to-back → PnL: £16.27 | WinRate: 2.2% | Trades: 230 | Δ -86.46% 🡇
+🔹 drift→OC1-OC3→volatile→lay-to-back → PnL: £15.47 | WinRate: 1.2% | Trades: 254 | Δ -86.77% 🡇
+🔹 drift→OC1-OC4→volatile→lay-to-back → PnL: £15.25 | WinRate: 1.0% | Trades: 297 | Δ -85.97% 🡇
+🔹 drift→OC1-OC5→volatile→lay-to-back → PnL: £15.25 | WinRate: 1.0% | Trades: 307 | Δ -88.38% 🡇
+🔹 drift→OC3-OC5→drifted→lay-to-back → PnL: £15.07 | WinRate: 2.9% | Trades: 137 | Δ -77.87% 🡇
+🔹 drift→OC2-OC5→volatile→lay-to-back → PnL: £14.78 | WinRate: 0.6% | Trades: 160 | Δ -58.56% 🡇
+🔹 steam→OC1-OC5→pingpong→back-to-lay → PnL: £3.21 | WinRate: 1.9% | Trades: 269 | Δ +131.56% 🡅
+🔹 steam→OC2-OC5→pingpong→back-to-lay → PnL: £2.95 | WinRate: 3.4% | Trades: 175 | Δ +100.53% 🡅
+🔹 steam→OC1-OC3→steamed→back-to-lay → PnL: £2.51 | WinRate: 0.5% | Trades: 399 | Δ +108.38% 🡅
+🔹 steam→OC1-OC7→pingpong→back-to-lay → PnL: £1.82 | WinRate: 4.1% | Trades: 147 | Δ -83.18% 🡇
+🔹 steam→OC2-OC7→pingpong→back-to-lay → PnL: £1.80 | WinRate: 3.0% | Trades: 169 | Δ +100.27% 🡅
+🔹 steam→OC1-OC4→pingpong→back-to-lay → PnL: £1.54 | WinRate: 1.2% | Trades: 259 | Δ +168.75% 🡅
+🔹 steam→OC1-OC6→pingpong→back-to-lay → PnL: £1.50 | WinRate: 2.6% | Trades: 230 | Δ +136.86% 🡅
+🔹 steam→OC2-OC3→steamed→back-to-lay → PnL: £1.47 | WinRate: 1.2% | Trades: 165 | Δ -96.09% 🡇
+🔹 steam→OC2-OC6→pingpong→back-to-lay → PnL: £1.46 | WinRate: 2.3% | Trades: 214 | Δ +100.22% 🡅
+🔹 steam→OC3-OC5→pingpong→back-to-lay → PnL: £1.30 | WinRate: 4.2% | Trades: 72 | Δ +0.00% 
+🔹 steam→OC2-OC4→steamed→back-to-lay → PnL: £1.24 | WinRate: 0.7% | Trades: 150 | Δ +121.53% 🡅
+🔹 steam→OC1-OC4→steamed→back-to-lay → PnL: £0.92 | WinRate: 0.8% | Trades: 129 | Δ +107.62% 🡅
+🔹 drift→OC2-OC5→pingpong→lay-to-back → PnL: £0.86 | WinRate: 3.5% | Trades: 142 | Δ +120.53% 🡅
+🔹 steam→OC3-OC7→pingpong→back-to-lay → PnL: £0.78 | WinRate: 3.7% | Trades: 161 | Δ +100.12% 🡅
+🔹 drift→OC1-OC6→pingpong→lay-to-back → PnL: £0.74 | WinRate: 3.4% | Trades: 146 | Δ -99.15% 🡇
+🔹 drift→OC5-OC7→pingpong→lay-to-back → PnL: £0.74 | WinRate: 6.7% | Trades: 60 | Δ -96.28% 🡇
+🔹 drift→OC2-OC6→pingpong→lay-to-back → PnL: £0.73 | WinRate: 2.5% | Trades: 162 | Δ +100.74% 🡅
+🔹 drift→OC2-OC3→drifted→lay-to-back → PnL: £0.67 | WinRate: 0.9% | Trades: 111 | Δ +120.12% 🡅
+🔹 drift→OC1-OC4→pingpong→lay-to-back → PnL: £0.63 | WinRate: 1.8% | Trades: 165 | Δ -98.06% 🡇
+🔹 drift→OC1-OC5→pingpong→lay-to-back → PnL: £0.57 | WinRate: 3.5% | Trades: 170 | Δ -98.39% 🡇
+🔹 steam→OC4-OC6→steamed→back-to-lay → PnL: £0.54 | WinRate: 2.6% | Trades: 194 | Δ -99.32% 🡇
+🔹 steam→OC4-OC5→steamed→back-to-lay → PnL: £0.51 | WinRate: 2.2% | Trades: 232 | Δ +102.94% 🡅
+🔹 drift→OC1-OC7→pingpong→lay-to-back → PnL: £0.49 | WinRate: 7.7% | Trades: 91 | Δ -99.30% 🡇
+🔹 drift→OC3-OC6→drifted→lay-to-back → PnL: £0.35 | WinRate: 2.0% | Trades: 49 | Δ +105.25% 🡅
+🔹 steam→OC4-OC7→pingpong→back-to-lay → PnL: £0.29 | WinRate: 2.4% | Trades: 126 | Δ +100.04% 🡅
+🔹 steam→OC4-OC7→steamed→back-to-lay → PnL: £0.28 | WinRate: 4.8% | Trades: 62 | Δ -97.07% 🡇
+🔹 drift→OC1-OC6→volatile→lay-to-back → PnL: £0.25 | WinRate: 0.8% | Trades: 259 | Δ -99.78% 🡇
+🔹 steam→OC3-OC6→steamed→back-to-lay → PnL: £0.22 | WinRate: 1.4% | Trades: 74 | Δ -99.04% 🡇
+🔹 steam→OC5-OC7→steamed→back-to-lay → PnL: £0.22 | WinRate: 2.5% | Trades: 158 | Δ -99.36% 🡇
+🔹 drift→OC1-OC3→drifted→lay-to-back → PnL: £0.18 | WinRate: 1.4% | Trades: 139 | Δ -99.82% 🡇
+🔹 steam→OC1-OC3→pingpong→back-to-lay → PnL: £0.15 | WinRate: 1.0% | Trades: 198 | Δ +100.38% 🡅
+🔹 drift→OC1-OC3→pingpong→lay-to-back → PnL: £0.14 | WinRate: 0.9% | Trades: 116 | Δ -99.91% 🡇
+🔹 steam→OC5-OC6→steamed→back-to-lay → PnL: £0.08 | WinRate: 0.7% | Trades: 289 | Δ -99.88% 🡇
+🔹 steam→OC3-OC6→pingpong→back-to-lay → PnL: £0.08 | WinRate: 1.7% | Trades: 174 | Δ +100.01% 🡅
+🔹 drift→OC1-OC4→drifted→lay-to-back → PnL: £0.04 | WinRate: 2.4% | Trades: 42 | Δ -99.95% 🡇
+🔹 steam→OC3-OC5→volatile→back-to-lay → PnL: £0.04 | WinRate: 0.8% | Trades: 124 | Δ +100.10% 🡅
+🔹 drift→OC3-OC5→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 67 | Δ -100.00% 🡇
+🔹 steam→OC1-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 41 | Δ +0.00% 
+🔹 steam→OC2-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 61 | Δ +0.00% 
+🔹 steam→OC4-OC6→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 108 | Δ +100.00% 🡅
+🔹 steam→OC4-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 125 | Δ +100.00% 🡅
+🔹 drift→OC2-OC4→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 65 | Δ -100.00% 🡇
+🔹 drift→OC4-OC6→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 120 | Δ -100.00% 🡇
+🔹 steam→OC5-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 73 | Δ -100.00% 🡇
+🔹 steam→OC3-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 12 | Δ +0.00% 
+🔹 drift→OC2-OC5→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 35 | Δ -100.00% 🡇
+🔹 drift→OC1-OC5→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 10 | Δ -100.00% 🡇
+🔹 drift→OC3-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 7 | Δ +0.00% 
+🔹 drift→OC2-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 9 | Δ +0.00% 
+🔹 drift→OC2-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 3 | Δ +0.00% 
+🔹 steam→OC2-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 18 | Δ +0.00% 
+🔹 steam→OC1-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 11 | Δ +0.00% 
+🔹 steam→OC1-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 2 | Δ +0.00% 
+🔹 steam→OC2-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 2 | Δ +0.00% 
+🔹 drift→OC1-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 1 | Δ +0.00% 
+🔹 drift→OC4-OC6→pingpong→lay-to-back → PnL: £-0.02 | WinRate: 1.4% | Trades: 71 | Δ -100.10% 🡇
+🔹 steam→OC3-OC5→steamed→back-to-lay → PnL: £-0.03 | WinRate: 0.5% | Trades: 204 | Δ +99.99% 🡅
+🔹 steam→OC4-OC6→pingpong→back-to-lay → PnL: £-0.06 | WinRate: 1.1% | Trades: 90 | Δ +99.79% 🡅
+🔹 steam→OC6-OC7→steamed→back-to-lay → PnL: £-0.06 | WinRate: 1.7% | Trades: 234 | Δ +99.99% 🡅
+🔹 drift→OC4-OC6→drifted→lay-to-back → PnL: £-0.08 | WinRate: 1.3% | Trades: 156 | Δ +99.95% 🡅
+🔹 drift→OC4-OC7→drifted→lay-to-back → PnL: £-0.14 | WinRate: 0.0% | Trades: 49 | Δ +96.85% 🡅
+🔹 drift→OC2-OC4→drifted→lay-to-back → PnL: £-0.16 | WinRate: 1.2% | Trades: 84 | Δ -100.22% 🡇
+🔹 steam→OC2-OC4→volatile→back-to-lay → PnL: £-0.17 | WinRate: 0.0% | Trades: 138 | Δ -100.99% 🡇
+🔹 steam→OC2-OC6→volatile→back-to-lay → PnL: £-0.18 | WinRate: 0.4% | Trades: 256 | Δ -103.23% 🡇
+🔹 steam→OC2-OC7→volatile→back-to-lay → PnL: £-0.18 | WinRate: 0.5% | Trades: 182 | Δ -101.64% 🡇
+🔹 steam→OC3-OC6→volatile→back-to-lay → PnL: £-0.18 | WinRate: 0.5% | Trades: 206 | Δ +98.94% 🡅
+🔹 steam→OC3-OC7→volatile→back-to-lay → PnL: £-0.18 | WinRate: 0.6% | Trades: 169 | Δ +99.14% 🡅
+🔹 steam→OC2-OC5→volatile→back-to-lay → PnL: £-0.18 | WinRate: 0.4% | Trades: 236 | Δ +99.46% 🡅
+🔹 drift→OC3-OC4→drifted→lay-to-back → PnL: £-0.22 | WinRate: 0.0% | Trades: 197 | Δ +93.45% 🡅
+🔹 drift→OC1-OC7→volatile→lay-to-back → PnL: £-0.22 | WinRate: 0.0% | Trades: 182 | Δ -100.20% 🡇
+🔹 drift→OC2-OC4→volatile→lay-to-back → PnL: £-0.22 | WinRate: 0.0% | Trades: 108 | Δ +99.16% 🡅
+🔹 drift→OC2-OC6→volatile→lay-to-back → PnL: £-0.22 | WinRate: 0.0% | Trades: 195 | Δ +99.90% 🡅
+🔹 drift→OC3-OC6→volatile→lay-to-back → PnL: £-0.22 | WinRate: 0.0% | Trades: 177 | Δ +99.90% 🡅
+🔹 drift→OC3-OC5→volatile→lay-to-back → PnL: £-0.22 | WinRate: 0.0% | Trades: 111 | Δ +99.06% 🡅
+🔹 drift→OC5-OC6→drifted→lay-to-back → PnL: £-0.29 | WinRate: 0.7% | Trades: 277 | Δ +99.83% 🡅
+🔹 drift→OC3-OC6→pingpong→lay-to-back → PnL: £-0.29 | WinRate: 1.5% | Trades: 132 | Δ -100.92% 🡇
+🔹 steam→OC5-OC7→pingpong→back-to-lay → PnL: £-0.30 | WinRate: 0.0% | Trades: 60 | Δ +99.95% 🡅
+🔹 drift→OC5-OC7→drifted→lay-to-back → PnL: £-0.55 | WinRate: 0.0% | Trades: 162 | Δ -100.43% 🡇
+🔹 drift→OC6-OC7→drifted→lay-to-back → PnL: £-0.64 | WinRate: 1.1% | Trades: 269 | Δ -100.87% 🡇
+🔹 drift→OC4-OC7→volatile→lay-to-back → PnL: £-0.80 | WinRate: 0.0% | Trades: 145 | Δ +99.54% 🡅
+🔹 drift→OC5-OC7→volatile→lay-to-back → PnL: £-0.80 | WinRate: 0.0% | Trades: 87 | Δ +99.64% 🡅
+🔹 steam→OC1-OC6→volatile→back-to-lay → PnL: £-1.01 | WinRate: 0.2% | Trades: 664 | Δ +99.90% 🡅
+🔹 steam→OC1-OC7→volatile→back-to-lay → PnL: £-1.01 | WinRate: 0.2% | Trades: 406 | Δ +99.90% 🡅
+🔹 steam→OC1-OC5→volatile→back-to-lay → PnL: £-1.02 | WinRate: 0.1% | Trades: 842 | Δ +99.90% 🡅
+🔹 drift→OC2-OC7→volatile→lay-to-back → PnL: £-1.02 | WinRate: 0.0% | Trades: 174 | Δ +99.42% 🡅
+🔹 drift→OC3-OC7→volatile→lay-to-back → PnL: £-1.02 | WinRate: 0.0% | Trades: 174 | Δ +99.42% 🡅
+🔹 drift→OC4-OC7→pingpong→lay-to-back → PnL: £-3.21 | WinRate: 5.1% | Trades: 117 | Δ -102.73% 🡇
+🔹 drift→OC2-OC7→pingpong→lay-to-back → PnL: £-3.22 | WinRate: 4.2% | Trades: 142 | Δ +85.86% 🡅
+🔹 drift→OC3-OC7→pingpong→lay-to-back → PnL: £-3.22 | WinRate: 4.1% | Trades: 145 | Δ -102.92% 🡇
+🔹 steam→OC2-OC4→pingpong→back-to-lay → PnL: £-18.54 | WinRate: 3.2% | Trades: 93 | Δ +97.09% 🡅
+🔹 steam→OC3-OC4→steamed→back-to-lay → PnL: £-18.94 | WinRate: 0.7% | Trades: 269 | Δ +97.07% 🡅
+🔹 steam→OC1-OC3→volatile→back-to-lay → PnL: £-25.02 | WinRate: 0.1% | Trades: 747 | Δ +97.38% 🡅
+🔹 steam→OC1-OC4→volatile→back-to-lay → PnL: £-25.07 | WinRate: 0.0% | Trades: 906 | Δ +97.48% 🡅
+🔹 steam→OC1-OC2→steamed→back-to-lay → PnL: £-37.73 | WinRate: 0.4% | Trades: 1336 | Δ +96.43% 🡅
+🔹 drift→OC1-OC2→drifted→lay-to-back → PnL: £-79.16 | WinRate: 1.3% | Trades: 522 | Δ -126.40% 🡇
+
+📜 YESTERDAY VS DAY BEFORE
+🔹 steam→OC1-OC2→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 183 | Δ +0.00% 
+🔹 steam→OC1-OC3→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 28 | Δ +0.00% 
+🔹 steam→OC1-OC4→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 35 | Δ +0.00% 
+🔹 steam→OC1-OC5→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 39 | Δ +0.00% 
+🔹 steam→OC1-OC6→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 36 | Δ +0.00% 
+🔹 steam→OC1-OC7→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 20 | Δ +0.00% 
+🔹 drift→OC2-OC3→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 14 | Δ +0.00% 
+🔹 drift→OC2-OC6→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 30 | Δ +0.00% 
+🔹 drift→OC2-OC7→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 28 | Δ +0.00% 
+🔹 drift→OC3-OC7→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 26 | Δ +0.00% 
+🔹 drift→OC4-OC7→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 22 | Δ +0.00% 
+🔹 drift→OC5-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 30 | Δ +0.00% 
+🔹 drift→OC6-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 54 | Δ +0.00% 
+🔹 steam→OC1-OC3→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 49 | Δ +0.00% 
+🔹 steam→OC2-OC7→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 26 | Δ +0.00% 
+🔹 drift→OC3-OC6→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 24 | Δ +0.00% 
+🔹 steam→OC3-OC7→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 25 | Δ +0.00% 
+🔹 steam→OC4-OC7→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 20 | Δ +0.00% 
+🔹 steam→OC5-OC7→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 10 | Δ +0.00% 
+🔹 steam→OC6-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 43 | Δ +0.00% 
+🔹 steam→OC1-OC4→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 134 | Δ +0.00% 
+🔹 steam→OC1-OC5→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 138 | Δ +0.00% 
+🔹 steam→OC1-OC6→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 136 | Δ +0.00% 
+🔹 steam→OC1-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 100 | Δ +0.00% 
+🔹 steam→OC2-OC6→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 41 | Δ +0.00% 
+🔹 steam→OC3-OC6→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 31 | Δ +0.00% 
+🔹 steam→OC4-OC6→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 12 | Δ +0.00% 
+🔹 steam→OC5-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 39 | Δ +0.00% 
+🔹 steam→OC1-OC3→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 107 | Δ +0.00% 
+🔹 drift→OC2-OC5→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 22 | Δ +0.00% 
+🔹 drift→OC2-OC6→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 36 | Δ +0.00% 
+🔹 steam→OC2-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 36 | Δ +0.00% 
+🔹 drift→OC3-OC5→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 20 | Δ +0.00% 
+🔹 steam→OC3-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 33 | Δ +0.00% 
+🔹 drift→OC4-OC5→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 21 | Δ +0.00% 
+🔹 steam→OC4-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 24 | Δ +0.00% 
+🔹 steam→OC5-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 25 | Δ +0.00% 
+🔹 steam→OC2-OC3→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 17 | Δ +0.00% 
+🔹 steam→OC2-OC4→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 19 | Δ +0.00% 
+🔹 steam→OC2-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 12 | Δ +0.00% 
+🔹 steam→OC2-OC6→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 34 | Δ +0.00% 
+🔹 steam→OC3-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 28 | Δ +0.00% 
+🔹 steam→OC3-OC6→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 32 | Δ +0.00% 
+🔹 drift→OC1-OC7→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 30 | Δ +0.00% 
+🔹 drift→OC2-OC7→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 30 | Δ +0.00% 
+🔹 drift→OC3-OC7→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 33 | Δ +0.00% 
+🔹 drift→OC4-OC7→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 27 | Δ +0.00% 
+🔹 drift→OC1-OC2→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 73 | Δ +0.00% 
+🔹 drift→OC1-OC3→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 17 | Δ +0.00% 
+🔹 drift→OC1-OC4→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 21 | Δ +0.00% 
+🔹 drift→OC1-OC7→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 11 | Δ +0.00% 
+🔹 drift→OC5-OC7→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 15 | Δ +0.00% 
+🔹 drift→OC1-OC3→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 19 | Δ +0.00% 
+🔹 drift→OC1-OC4→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 52 | Δ +0.00% 
+🔹 drift→OC1-OC5→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 55 | Δ +0.00% 
+🔹 drift→OC1-OC6→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 46 | Δ +0.00% 
+🔹 drift→OC2-OC5→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 17 | Δ +0.00% 
+🔹 drift→OC3-OC5→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 16 | Δ +0.00% 
+🔹 steam→OC4-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 29 | Δ +0.00% 
+🔹 drift→OC5-OC7→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 13 | Δ +0.00% 
+🔹 drift→OC3-OC6→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 34 | Δ +0.00% 
+🔹 steam→OC1-OC4→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 15 | Δ +0.00% 
+🔹 steam→OC2-OC5→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 25 | Δ +0.00% 
+🔹 steam→OC3-OC4→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 31 | Δ +0.00% 
+🔹 steam→OC3-OC5→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 7 | Δ +0.00% 
+🔹 steam→OC2-OC4→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 13 | Δ +0.00% 
+🔹 steam→OC2-OC5→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 22 | Δ +0.00% 
+🔹 drift→OC1-OC3→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 39 | Δ +0.00% 
+🔹 steam→OC3-OC5→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 13 | Δ +0.00% 
+🔹 steam→OC4-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 23 | Δ +0.00% 
+🔹 steam→OC4-OC6→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 17 | Δ +0.00% 
+🔹 steam→OC3-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 12 | Δ +0.00% 
+🔹 steam→OC3-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 2
+🔹 steam→OC4-OC7→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 9 | Δ +0.00% 
+🔹 drift→OC4-OC6→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 18 | Δ +0.00% 
+🔹 drift→OC5-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 39 | Δ +0.00% 
+🔹 steam→OC5-OC7→volatile→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 13 | Δ +0.00% 
+🔹 drift→OC2-OC4→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 11 | Δ +0.00% 
+🔹 drift→OC3-OC4→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 26 | Δ +0.00% 
+🔹 drift→OC3-OC5→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 9 | Δ +0.00% 
+🔹 drift→OC4-OC6→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 13 | Δ +0.00% 
+🔹 drift→OC1-OC5→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 20 | Δ +0.00% 
+🔹 drift→OC2-OC4→volatile→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 14 | Δ +0.00% 
+🔹 drift→OC1-OC6→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 17 | Δ +0.00% 
+🔹 drift→OC2-OC4→pingpong→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 7 | Δ +0.00% 
+🔹 drift→OC4-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 28 | Δ +0.00% 
+🔹 drift→OC3-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 8 | Δ +0.00% 
+🔹 drift→OC4-OC7→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 11 | Δ +0.00% 
+🔹 steam→OC2-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 5 | Δ +0.00% 
+🔹 drift→OC2-OC5→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 5 | Δ +0.00% 
+🔹 drift→OC2-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 3 | Δ +0.00% 
+🔹 drift→OC1-OC4→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 3 | Δ +0.00% 
+🔹 drift→OC1-OC5→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 2 | Δ +0.00% 
+🔹 drift→OC1-OC6→drifted→lay-to-back → PnL: £0.00 | WinRate: 0.0% | Trades: 1
+🔹 steam→OC1-OC5→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 7 | Δ +0.00% 
+🔹 steam→OC2-OC4→pingpong→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 13 | Δ +0.00% 
+🔹 steam→OC1-OC6→steamed→back-to-lay → PnL: £0.00 | WinRate: 0.0% | Trades: 4 | Δ +0.00% 
+✅ Blueprint update complete.
+malachikelly@Malachis-MBP-3 engines % 

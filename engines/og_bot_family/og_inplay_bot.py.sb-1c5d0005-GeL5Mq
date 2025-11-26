@@ -1,0 +1,65 @@
+import logging
+from threading import Thread
+from .og_inplay_logic import inplay_loop
+import bet_placer
+from .green_up import green_up
+
+class OGInPlayBot:
+    def __init__(self, risk_manager, budget_manager, headers, signal_queue):
+        self.risk_manager = risk_manager
+        self.budget_manager = budget_manager
+        self.headers = headers
+        self.signal_queue = signal_queue
+        self.active = True
+        logging.info('In-Play Bot: Initialized successfully with centralized Risk Manager, Budget Manager, and signal queue.')
+
+    def bot_loop(self):
+        logging.info('In-Play Bot: Continuous loop started explicitly.')
+        while self.active:
+            signal = self.signal_queue.get()
+            logging.info(f'In-Play Bot: Received signal explicitly: {signal}')
+
+            # Execute green-up explicitly at 5-minute signal
+            if signal.get('signal_type') == '5':
+                market_id = signal['marketId']
+                horses = signal['horses']
+                initial_stakes = signal['initial_stakes']
+                current_odds = signal['current_odds']
+                fire_ice_status = signal.get('fire_ice_status')
+
+                green_up(
+                    self.headers,
+                    market_id,
+                    horses,
+                    initial_stakes,
+                    current_odds,
+                    fire_ice_status
+                )
+                logging.info(f"In-Play Bot: Green-up executed explicitly for market {market_id}")
+
+            approved_signal = self.risk_manager.evaluate_signal(signal)
+
+            if not approved_signal:
+                matched_liability, unmatched_liability, _ = self.budget_manager.get_bot_status_from_db("OGInPlay")
+                approved_signal = self.budget_manager.handle_rejected_signal(
+                    signal, matched_liability, unmatched_liability, "Budget limit reached"
+                )
+
+            if approved_signal:
+                try:
+                    bet_placer.place_in_play_lay_bet(
+                        self.headers,
+                        approved_signal['marketId'],
+                        approved_signal['selectionId'],
+                        stake=approved_signal['stake'],
+                        odds=approved_signal['odds']
+                    )
+                    logging.info(f"In-Play Bot: Bet placed explicitly: {approved_signal['marketId']}")
+                except Exception as e:
+                    logging.error(f'In-Play Bot: Error placing bet explicitly: {e}')
+
+            self.signal_queue.task_done()
+
+    def start_loop(self):
+        logging.info('In-Play Bot: Loop starting explicitly.')
+        Thread(target=self.bot_loop, daemon=True).start()

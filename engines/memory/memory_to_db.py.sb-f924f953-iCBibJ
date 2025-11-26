@@ -1,0 +1,73 @@
+import requests
+import json
+import pandas as pd
+import os
+
+# Betfair API credentials
+BETFAIR_API_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+APP_KEY = "CZHojduNWa3kxWIn"
+SESSION_TOKEN = "X/OMZKbok+9jUV28sdnt5vBLm4tPGOfJgbIJ2Snyprk="
+
+headers = {
+    'X-Application': APP_KEY,
+    'X-Authentication': SESSION_TOKEN,
+    'Content-Type': 'application/json'
+}
+
+# Full precise market IDs (exact from earlier provided list)
+market_ids = [
+    "1.243518086", "1.243518186", "1.243518226", "1.243521052", "1.243518132",
+    "1.243518093", "1.243521012", "1.243518189", "1.243518233", "1.243518138",
+    "1.243518101", "1.243521017", "1.243518195", "1.243518239", "1.243521062",
+    "1.243518145", "1.243518108", "1.243521022", "1.243518200", "1.243518253",
+    "1.243521067", "1.243518154", "1.243521027", "1.243518206", "1.243518246",
+    "1.243521072", "1.243518160", "1.243518121", "1.243521032", "1.243517932",
+    "1.243518213", "1.243518260", "1.243521077", "1.243518166", "1.243518126",
+    "1.243521037", "1.243517939", "1.243518267", "1.243518219", "1.243521082",
+    "1.243518173", "1.243521042", "1.243517953", "1.243518296", "1.243521087",
+    "1.243518180", "1.243518059", "1.243521047", "1.243518308", "1.243517960",
+    "1.243518302", "1.243518065", "1.243517965", "1.243518315", "1.243518071",
+    "1.243518321", "1.243518076", "1.243518080", "1.243518334"
+]
+
+payload = {
+    "jsonrpc": "2.0",
+    "method": "SportsAPING/v1.0/listMarketCatalogue",
+    "params": {
+        "filter": {"marketIds": market_ids},
+        "maxResults": "100",
+        "marketProjection": [
+            "EVENT",
+            "MARKET_START_TIME",
+            "RUNNER_METADATA"
+        ]
+    },
+    "id": 1
+}
+
+if response.status_code == 200:
+    data = response.json()
+    print("✅ API Response received successfully.")
+    print(json.dumps(data, indent=4))  # clearly check data
+    
+    if data['result']:
+        races = []
+        for market in data['result']:
+            races.append({
+                "market_id": market['marketId'],
+                "race_time": market['marketStartTime'],
+                "venue": market['event']['venue'],
+                "race_name": market['event']['name'],
+                "distance_meters": market['description']['distance']
+            })
+
+        df_race_details = pd.DataFrame(races)
+        
+        # Explicitly save file in your current working directory
+        df_race_details.to_csv("race_details.csv", index=False)
+        print("✅ CSV created successfully as 'race_details.csv' in your current directory.")
+    else:
+        print("❌ No data returned from Betfair API for provided market IDs.")
+else:
+    print(f"❌ API request failed: {response.status_code}, {response.text}")
+

@@ -1,0 +1,149 @@
+import os
+import sys
+import logging
+from datetime import datetime, timedelta
+from random import choice, randint
+from queue import Queue
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+signal_queue = Queue()
+
+race_runners = [8, 10, 15, 9, 18]
+
+def generate_test_markets():
+    base_time = datetime.utcnow()
+    markets = []
+    runner_id = 1000
+    for i in range(5):
+        race_time = base_time + timedelta(minutes=15 * i)
+        market_id = f"1.TEST{i+1}"
+        runners = [{"selectionId": runner_id + j} for j in range(race_runners[i])]
+        market = {
+            "marketId": market_id,
+            "marketName": f"WIN R{i+1}",
+            "marketStatus": "OPEN",
+            "marketStartTime": race_time.isoformat(),
+            "event": {
+                "countryCode": "GB",
+                "name": f"Test Race {i+1}",
+                "openDate": race_time.isoformat()
+            },
+            "runners": runners
+        }
+        runner_id += race_runners[i]
+        markets.append(market)
+    return markets
+
+strategy_combos = [
+    ("Basic Lay", "20min"),
+    ("Ladder Lays", "20min"),
+    ("Scalping (Lay to Back)", "10min"),
+    ("Scalping (Back to Lay)", "10min"),
+    ("Basic Lay", "10min"),
+    ("Ladder Lays", "10min"),
+    ("Scalping (Lay to Back)", "5min"),
+    ("Scalping (Back to Lay)", "5min"),
+    ("Basic Lay", "5min"),
+    ("Ladder Lays", "5min"),
+    ("Green-Up", "5min"),
+    ("In-Play", "inplay"),
+    ("Scalping (Lay to Back)", "20min"),
+    ("Scalping (Back to Lay)", "20min"),
+    ("In-Play", "inplay"),
+    ("Green-Up", "5min")
+]
+
+def process_signal(signal):
+    return signal
+
+def update_matched_bets(signal):
+    signal.update({
+        "matched_timestamp": datetime.utcnow().isoformat()
+    })
+    logging.info(f"📥 [{signal['status'].upper()}] {signal['strategy_name']} | {signal['selectionId']} | Odds: {signal['odds']} | Matched: £{signal['matched_liability']:.2f} | Unmatched: £{signal['unmatched_liability']:.2f}")
+
+def bet_worker(signal):
+    odds = signal.get("odds", 0)
+    liability = float(signal.get("stake", 0)) * (odds - 1)
+    selection_id = signal.get("selectionId")
+    strategy = signal.get("strategy_name")
+    race = signal.get("marketId")
+
+    if odds > 20 or liability > 40:
+        logging.warning(f"❌ Rejected | Market: {race} | Selection: {selection_id} | Reason: {'Odds > 20' if odds > 20 else 'Liability > 40'}")
+        return
+
+    matched = choice([True, False, False])
+    if matched:
+        signal["matched_liability"] = liability
+        signal["unmatched_liability"] = 0
+        signal["status"] = "placed"
+    else:
+        signal["matched_liability"] = 0
+        signal["unmatched_liability"] = liability
+        signal["status"] = "retry"
+
+    update_matched_bets(signal)
+
+def launch_protocol():
+    with signal_queue.mutex:
+        signal_queue.queue.clear()
+    logging.info("✅ System boot sequence complete.")
+
+def run_test_mode():
+    logging.info("🧪 TEST MODE — Simulating 5 race markets with full strategy set...")
+    test_markets = generate_test_markets()
+    valid_markets = [m for m in test_markets if m["marketStatus"] == "OPEN"]
+
+    for i, market in enumerate(valid_markets):
+        market_id = market["marketId"]
+        runners = market["runners"]
+        race_name = market["event"]["name"]
+
+        print(f"\nRACE {i+1} – {race_name}")
+
+        for idx, (strategy, timing) in enumerate(strategy_combos):
+            runner = runners[idx % len(runners)]
+            selection_id = runner["selectionId"]
+            fire = choice([True, False])
+            ice = choice([True, False])
+
+            odds = round(2.0 + (idx % 6) * 0.5, 2)
+            liability = round((odds - 1) * 5.0, 2)
+
+            signal = {
+                "marketId": market_id,
+                "selectionId": selection_id,
+                "odds": odds,
+                "stake": 5.0,
+                "strategy_name": strategy,
+                "bot_name": "OGHeadTrader" if timing != "inplay" else "OGInPlay",
+                "session_token": "TEST_TOKEN",
+                "time_session": timing,
+                "signal_type": f"{timing} signal",
+                "original_signal_type": "upgrade_test",
+                "timestamp": datetime.utcnow().isoformat(),
+                "source": "upgrade_test",
+                "detail": f"test sim {timing}",
+                "customerOrderRef": f"TEST-{selection_id}-{strategy[:3].upper()}",
+                "market_name": market["marketName"],
+                "event_name": race_name,
+                "meta": {"fire": fire, "ice": ice},
+                "horse": f"TestHorse_{selection_id}"
+            }
+
+            print(f"🐎 {selection_id} | {strategy:<25} | Fire: {'🔥' if fire else ' '} | Ice: {'❄️' if ice else ' '} | Odds: {odds} | Stake: £5 | Liab: £{liability:.2f}")
+
+            processed = process_signal(signal)
+            if processed:
+                bet_worker(processed)
+
+        print(f"\n🟩 GREEN-UP | Race {i+1} Complete")
+        print(f"🏇 RACE {i+1} STARTED | 🏁 FINISHED")
+
+    logging.info("🧪 Test run complete.")
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    run_test_mode()

@@ -1,0 +1,158 @@
+# manual_ladder_test.py
+# ✅ Manual ladder engine with result logging and summary + KeepAlive and fixed market parsing
+
+import threading
+import time
+import sqlite3
+from datetime import datetime
+from upgrade_import_patch import get_session_token, run_keep_alive
+from signal_memory_engine import signal_memory
+from get_markets import get_markets_and_insert  # ✅ Updated import
+from utils.api_tools import fetch_live_odds
+
+DB_PATH = "test_signals.db"
+
+
+def setup_test_log_table():
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS test_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                marketId TEXT,
+                selectionId INTEGER,
+                runnerName TEXT,
+                entry_odds REAL,
+                hedge_odds REAL,
+                scalp_direction TEXT,
+                tick_pattern TEXT,
+                confidence REAL,
+                stake REAL,
+                result TEXT,
+                ticks_moved INTEGER,
+                profit REAL
+            )
+        """)
+        conn.commit()
+
+
+def log_test_result(signal, result, entry_odds, hedge_odds, profit, tick_diff):
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO test_signals (
+                timestamp, marketId, selectionId, runnerName,
+                entry_odds, hedge_odds, scalp_direction, tick_pattern,
+                confidence, stake, result, ticks_moved, profit
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.utcnow().isoformat(),
+            signal.get("marketId"),
+            signal.get("selectionId"),
+            signal.get("runnerName", "Unknown"),
+            entry_odds, hedge_odds,
+            signal.get("scalp_direction"),
+            signal.get("tick_pattern"),
+            signal.get("confidence"),
+            signal.get("stake"),
+            result,
+            tick_diff,
+            profit
+        ))
+        conn.commit()
+
+
+def print_latest_summary():
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT runnerName, entry_odds, hedge_odds, ticks_moved,
+                   result, profit, confidence
+            FROM test_signals
+            ORDER BY id DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if row:
+            print("\n📊 MANUAL TEST SUMMARY:")
+            print("============================")
+            print(f"Runner:         {row[0]}")
+            print(f"Entry:          £10 @ {row[1]}")
+            print(f"Hedge:          £10 @ {row[2]}")
+            print(f"Ticks Moved:    {row[3]}")
+            print(f"Result:         {row[4]}")
+            print(f"Profit:         £{row[5]:.2f}")
+            print(f"Confidence:     {row[6]}")
+            print("============================\n")
+        else:
+            print("⚠️ No summary data available.")
+
+
+def manually_trigger_signal():
+    setup_test_log_table()
+    token = get_session_token()
+    run_keep_alive(token)  # ✅ Maintain session live
+    print("🔐 Using session token. Fetching markets...")
+
+    markets = get_markets_and_insert()
+    if not markets:
+        print("❌ No markets returned.")
+        return
+
+    print("🧠 Top 5 Markets:")
+    for i, market in enumerate(markets[:5]):
+        market_name = market.get("marketName") or market.get("market", {}).get("marketName", "Unknown")
+        print(f"{i+1}. {market_name} ({market['marketId']})")
+
+    index = int(input("Select a market (1-5): ")) - 1
+    market = markets[index]
+    market_id = market['marketId']
+    runners = market['runners']
+    for i, r in enumerate(runners):
+        print(f"{i+1}. {r.get('runnerName', 'Unknown')}")
+
+    r_index = int(input("Select a runner: ")) - 1
+    selection_id = runners[r_index]['selectionId']
+    runner_name = runners[r_index].get('runnerName', 'Unknown')
+
+    odds_data = fetch_live_odds(token, market_id, selection_id)
+    lay_odds = odds_data.get("lay") if odds_data else None
+    if not lay_odds:
+        print("❌ Could not fetch lay odds.")
+        return
+
+    print(f"✅ Odds for {runner_name}: LAY = {lay_odds}")
+
+    fake_signal = {
+        "marketId": market_id,
+        "selectionId": selection_id,
+        "runnerName": runner_name,
+        "odds": lay_odds,
+        "range_low": lay_odds - 0.4,
+        "range_high": lay_odds + 0.4,
+        "tick_pattern": "drifted",
+        "position_ratio": 0.5,
+        "volatility": 0.15,
+        "scalp_direction": "lay_to_back",
+        "signal_type": "manual_test",
+        "confidence": 0.75,
+        "forced": True,
+        "scalp_ticks": 2
+    }
+
+    signal_memory.track_unmatched_signal(fake_signal)
+    print("🚀 Manual signal injected. Ladder running... Press 's' to stop.")
+
+    while True:
+        user_input = input().strip().lower()
+        if user_input == 's':
+            print("🛑 Stopping ladder monitor...")
+            print_latest_summary()
+            break
+        else:
+            print("⌛ Press 's' to stop...")
+        time.sleep(1)
+
+
+if __name__ == '__main__':
+    manually_trigger_signal()

@@ -1,0 +1,120 @@
+# api_hijacker.py (Aligned with New Structure and Explicit Debugging Toggles)
+
+from analytics_beta.engines.betfair_api import get_session
+import inspect
+import logging
+
+# Setup a logger explicitly
+logger = logging.getLogger("APIHijackLogger")
+logger.setLevel(logging.INFO)
+handler = logging.FileHandler("api_hijack.log")
+formatter = logging.Formatter("%(asctime)s - %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# Debugging toggles for isolating API methods explicitly
+DEBUG_TOGGLES = {
+    "list_market_catalogue": True,
+    "list_market_book": True,
+    "place_orders": True,
+    "cancel_orders": True,
+    "replace_orders": True,
+    "update_orders": True,
+    "list_current_orders": True,
+    "list_cleared_orders": True,
+    "list_market_profit_and_loss": True,
+    "list_competitions": True,
+    "list_event_types": True,
+    "list_events": True,
+    "list_market_types": True,
+    "list_time_ranges": True,
+    "list_venues": True
+}
+
+# Helper function to convert snake_case to camelCase explicitly
+def snake_to_camel(snake_str):
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.title() for x in components[1:])
+
+# Recursive payload conversion explicitly excluding specific top-level keys
+def convert_payload(payload, top_level=True):
+    if isinstance(payload, dict):
+        new_dict = {}
+        for k, v in payload.items():
+            if top_level and k in ['market_id', 'customer_ref', 'market_ids']:
+                new_key = k  # explicitly keep these top-level keys in snake_case
+            else:
+                new_key = snake_to_camel(k)
+            new_dict[new_key] = convert_payload(v, False)
+        return new_dict
+    elif isinstance(payload, list):
+        return [convert_payload(i, False) for i in payload]
+    else:
+        return payload
+
+# Central dispatcher explicitly logging usage, converting parameter keys, and handling special method structures
+def hijack_call(method_name, **params):
+    if not DEBUG_TOGGLES.get(method_name, False):
+        logger.info(f"API call to {method_name} skipped (debug toggle off). Params: {params}")
+        return None
+
+    caller = inspect.stack()[1].filename
+    logger.info(f"API call: {method_name} | From: {caller} | Params: {params}")
+    session = get_session()
+    method = getattr(session.betting, method_name)
+    params_converted = convert_payload(params)
+
+    if method_name == "place_orders":
+        return method(
+            market_id=params['market_id'],
+            instructions=params_converted['instructions'],
+            customer_ref=params['customer_ref']
+        )
+    else:
+        return method(**params_converted)
+
+# Explicit wrappers for Betfair API methods with debugging toggles
+def list_market_catalogue(params):
+    return hijack_call("list_market_catalogue", **params)
+
+def list_market_book(params):
+    return hijack_call("list_market_book", **params)
+
+def place_orders(params):
+    return hijack_call("place_orders", **params)
+
+def cancel_orders(params):
+    return hijack_call("cancel_orders", **params)
+
+def replace_orders(params):
+    return hijack_call("replace_orders", **params)
+
+def update_orders(params):
+    return hijack_call("update_orders", **params)
+
+def list_current_orders(params):
+    return hijack_call("list_current_orders", **params)
+
+def list_cleared_orders(params):
+    return hijack_call("list_cleared_orders", **params)
+
+def list_market_profit_and_loss(params):
+    return hijack_call("list_market_profit_and_loss", **params)
+
+def list_competitions(params):
+    return hijack_call("list_competitions", **params)
+
+def list_event_types(params):
+    return hijack_call("list_event_types", **params)
+
+def list_events(params):
+    return hijack_call("list_events", **params)
+
+def list_market_types(params):
+    return hijack_call("list_market_types", **params)
+
+def list_time_ranges(params):
+    return hijack_call("list_time_ranges", **params)
+
+def list_venues(params):
+    return hijack_call("list_venues", **params)

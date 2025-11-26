@@ -1,0 +1,194 @@
+# === upgrade_20250525.py ===
+# 🔒 Master Automation Rebuild – Isolated Test Mode: No interference with live data
+
+import os
+import sys
+import logging
+from datetime import datetime, timedelta
+from threading import Thread
+from queue import Queue
+import requests
+import json
+
+# Adjust path to reach project root (analytics_beta)
+base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.append(base_dir)
+
+from tools.database import insert_runner_snapshot, get_markets, insert_market
+from tools.odds_fetcher import fetch_anchor_odds
+from tools.race_filters import apply_filters_to_runner
+from tools.bot_assignment import assign_bot_to_signal
+from tools.bet_validation import validate_signal_data
+from engines.daily_config import SESSION_TOKEN, TEST_MODE
+from tools.bet_placer import place_lay_bet, place_test_bet
+
+# === Global Setup ===
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True
+)
+
+signal_queue = Queue()
+bot_signal_queues = {
+    "OG Head Trader": Queue(),
+    "OG Pre-off": Queue(),
+    "OG In-Play": Queue()
+}
+
+MARKET_DATA = {}
+SNAPSHOT_DATA = {}
+CLOCK_DATA = {}
+
+# === Utility Functions ===
+
+def safe_time(raw_time):
+    try:
+        return datetime.strptime(raw_time, "%Y-%m-%dT%H:%M:%S.000Z")
+    except Exception:
+        return datetime.utcnow() + timedelta(hours=1)
+
+def get_time_to_off(start_time):
+    return int((start_time - datetime.utcnow()).total_seconds() / 60)
+
+# === Clock + Odds Thread ===
+
+def clock_thread():
+    logging.info("🕒 [Thread] Clock + Odds Monitor Launched")
+    for market in get_markets():
+        market_id = market["marketId"]
+        start_time = safe_time(market["marketStartTime"])
+        time_to_off = get_time_to_off(start_time)
+
+        # ⏳ Skip markets that are in the past (test mode only runs for active windows)
+        if TEST_MODE and time_to_off <= 0:
+            continue
+
+        CLOCK_DATA[market_id] = time_to_off
+        logging.info(f"🕒 [Clock] {market_id} | {time_to_off} mins to off")
+
+        odds = fetch_anchor_odds(market_id)
+        MARKET_DATA[market_id] = {
+            "marketName": market["marketName"],
+            "startTime": start_time,
+            "odds": odds,
+            "runners": market["runners"]
+        }
+
+        for runner in market["runners"]:
+            selection_id = runner["selectionId"]
+            runner_name = runner["runnerName"]
+            lay = odds.get(str(selection_id), {}).get("lay")
+            back = odds.get(str(selection_id), {}).get("back")
+
+            if lay is None or back is None:
+                logging.warning(f"❌ [Odds] Missing odds for {runner_name} in {market_id}")
+                continue
+
+            logging.info(f"💰 [Odds] {runner_name} | Back: {back} | Lay: {lay}")
+
+            SNAPSHOT_DATA[(market_id, selection_id)] = {
+                "marketId": market_id,
+                "selectionId": selection_id,
+                "runnerName": runner_name,
+                "back": back,
+                "lay": lay,
+                "startTime": start_time,
+                "marketName": market["marketName"]
+            }
+
+            if not TEST_MODE:
+                insert_runner_snapshot(market_id, selection_id, runner_name, back, lay, start_time)
+        
+        if not TEST_MODE:
+            insert_market(market_id, market["marketName"], start_time)
+
+# === Filter + Signal Thread ===
+
+def signal_filter_thread():
+    logging.info("🧹 [Thread] Signal Filter Launched")
+    for key, snapshot in SNAPSHOT_DATA.items():
+        if not apply_filters_to_runner(snapshot):
+            logging.info(f"🧹 [Filter] Runner failed: {snapshot['runnerName']}")
+            continue
+
+        logging.info(f"📤 [Signal] Created | Market: {snapshot['marketName']} | Runner: {snapshot['runnerName']}")
+        signal_queue.put(snapshot)
+
+# === Bot Assignment Thread ===
+
+def bot_assignment_thread():
+    logging.info("🤖 [Thread] Bot Dispatcher Launched")
+    while not signal_queue.empty():
+        signal = signal_queue.get()
+        assigned_bot = assign_bot_to_signal(signal)
+
+        if assigned_bot not in bot_signal_queues:
+            logging.warning(f"❌ [Assignment] Unknown bot: {assigned_bot}")
+            continue
+
+        bot_signal_queues[assigned_bot].put(signal)
+        logging.info(f"🤖 [Assignment] {signal['runnerName']} → {assigned_bot}")
+
+# === Bot Execution Threads ===
+
+def execute_bot(bot_name):
+    logging.info(f"🎯 [Thread] Execution: {bot_name} Active")
+    q = bot_signal_queues[bot_name]
+
+    while not q.empty():
+        signal = q.get()
+
+        if not validate_signal_data(signal):
+            logging.warning(f"⚠️ [Risk] Signal validation failed for {signal['runnerName']}")
+            continue
+
+        if TEST_MODE:
+            place_test_bet(signal)
+            logging.info(f"🧪 [Test Bet] {signal['runnerName']} @ {signal['lay']} Lay")
+        else:
+            result = place_lay_bet(signal)
+            if result.get("status") == "SUCCESS":
+                logging.info(f"✅ [Bet] Placed | {signal['runnerName']} @ {signal['lay']} Lay")
+            else:
+                logging.error(f"❌ [Bet] Failed | {signal['runnerName']} | Reason: {result.get('errorCode', 'Unknown')}")
+
+# === System Launcher ===
+
+def launch_upgrade_20250525():
+    logging.info("🚀 [System] Boot Sequence Initiated")
+    CLOCK_DATA.clear()
+    MARKET_DATA.clear()
+    SNAPSHOT_DATA.clear()
+
+    with signal_queue.mutex:
+        signal_queue.queue.clear()
+    for q in bot_signal_queues.values():
+        with q.mutex:
+            q.queue.clear()
+
+    threads = [
+        Thread(target=clock_thread),
+        Thread(target=signal_filter_thread),
+        Thread(target=bot_assignment_thread)
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    exec_threads = [
+        Thread(target=execute_bot, args=(bot_name,)) for bot_name in bot_signal_queues
+    ]
+
+    for t in exec_threads:
+        t.start()
+    for t in exec_threads:
+        t.join()
+
+    logging.info("✅ [System] All processes completed.")
+
+if __name__ == "__main__":
+    launch_upgrade_20250525()

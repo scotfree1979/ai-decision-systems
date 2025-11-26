@@ -1,0 +1,77 @@
+import logging
+import sqlite3
+import pandas as pd
+from queue import Queue
+from datetime import datetime
+from signal_monitor import bot_signal_queues
+from bet_placer import place_basic_lay_bet, place_ladder_lay_bet, place_scalp_trade, place_greenup_exit, place_inplay_lay_bet
+from og_bot_family.og_inplay_bot import OGInPlayBot
+from og_bot_family.og_preoff_bot import PreOffBot
+from market_monitor_signals import fetch_market_data
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class HeadTraderBot:
+    def __init__(self, risk_manager, budget_manager, headers, bot_signal_queues):
+        self.risk_manager = risk_manager
+        self.budget_manager = budget_manager
+        self.headers = headers
+        self.bot_signal_queues = bot_signal_queues
+        self.DB_PATH = "/Volumes/Sonnics/Race Tool - Sandbox/analytics_beta/engines/bets.db"
+        logging.info('OGHeadTrader Bot: Initialized with Risk Manager, Budget Manager, and Signal Queues.')
+
+    def fetch_recent_trades(self):
+        conn = sqlite3.connect(self.DB_PATH)
+        trades = pd.read_sql("SELECT horse, odds, result FROM bets ORDER BY timestamp DESC LIMIT 10", conn)
+        conn.close()
+        return trades
+
+    def orchestrate_bots(self):
+        logging.info('OGHeadTrader Bot: Starting orchestration.')
+
+        market_data = fetch_market_data(self.headers)
+        if not market_data:
+            logging.warning("Market data fetch failed.")
+            return
+
+        inplay_bot = OGInPlayBot(self.risk_manager, self.budget_manager, self.headers, self.bot_signal_queues['OGInPlay'])
+        preoff_bot = PreOffBot(self.risk_manager, self.budget_manager, self.headers, self.bot_signal_queues['OGPreoff'])
+
+        preoff_bot.start_loop()
+        inplay_bot.start_loop()
+
+        logging.info('OGHeadTrader Bot: Bots running smoothly.')
+
+        while True:
+            signal = self.bot_signal_queues['OGHeadTrader'].get()
+            logging.info(f"[OGHeadTrader] Received signal: {signal}")
+
+            approved_signal = self.risk_manager.evaluate_signal(signal)
+            if approved_signal:
+                approved_signal = self.budget_manager.evaluate_budget(approved_signal)
+
+                if approved_signal:
+                    strategy_name = approved_signal.get('strategy_name', 'Basic Lay')
+
+                    if strategy_name == 'Basic Lay':
+                    place_basic_lay_bet(approved_signal)
+                        logging.info(f"✅ Lay bet placed for market {approved_signal['marketId']}")
+
+                    elif strategy_name == 'Ladder Lays':
+                    place_ladder_lay_bet(approved_signal)
+                    logging.info(f"🪜 Ladder lay executed for market {approved_signal['marketId']}")
+
+                elif strategy_name == 'Scalping':
+                    place_scalp_trade(approved_signal)
+                        logging.info(f"✅ Scalping initiated for market {approved_signal['marketId']}")
+
+                    elif strategy_name == 'Green-Up':
+                    place_greenup_exit(approved_signal)
+                    logging.info(f"✅ Green-Up executed for market {approved_signal['marketId']}")
+
+                elif strategy_name == 'In-Play Lay':
+                    place_inplay_lay_bet(approved_signal)
+                    logging.info(f"🏇 In-play lay triggered for market {approved_signal['marketId']}")
+                        logging.info(f"✅ Green-Up executed for market {approved_signal['marketId']}")
+
+            self.bot_signal_queues['OGHeadTrader'].task_done()

@@ -1,0 +1,116 @@
+# learning_optimizer.py
+
+import sqlite3
+import pandas as pd
+from datetime import datetime, timedelta
+
+# Database connection (Adjust to your database configuration)
+DB_PATH = 'scalping_bot.db'
+STRATEGY_NAME = 'Scalper'
+
+# Initialize Database Connection
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    return conn
+
+# Function to log scalping trade results
+def log_trade_result(bet_id, market_id, horse_name, odds, stake, result, error_code,
+                     bet_type, status, liability, risk_profile, confidence_level, race_liability):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    timestamp = datetime.now()
+    cursor.execute('''
+        INSERT INTO trade_logs (bet_id, market_id, horse_name, odds, stake, result, timestamp,
+                                error_code, bet_type, status, strategy_name, liability,
+                                risk_profile, confidence_level, race_liability)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (bet_id, market_id, horse_name, odds, stake, result, timestamp,
+          error_code, bet_type, status, STRATEGY_NAME, liability,
+          risk_profile, confidence_level, race_liability))
+
+    conn.commit()
+    conn.close()
+
+    print(f"[LOGGED TRADE] Bet ID: {bet_id}, Horse: {horse_name}, Result: {result}, Liability: {liability}")
+
+# Function to perform daily analysis
+def daily_analysis():
+    conn = get_db_connection()
+    date_yesterday = datetime.now() - timedelta(days=1)
+    query = '''
+        SELECT * FROM trade_logs
+        WHERE strategy_name = ? AND DATE(timestamp) = DATE(?)
+    '''
+
+    df = pd.read_sql_query(query, conn, params=(STRATEGY_NAME, date_yesterday))
+
+    if df.empty:
+        print("[DAILY ANALYSIS] No trades found for yesterday.")
+        return
+
+    matched_rate = (df['status'] == 'matched').mean()
+    total_pnl = df.apply(lambda row: row['stake'] if row['result'] == 'win' else -row['liability'], axis=1).sum()
+    avg_odds = df['odds'].mean()
+    avg_confidence = df['confidence_level'].mean()
+
+    print(f"[DAILY ANALYSIS - {date_yesterday.date()}]")
+    print(f"- Total Trades: {len(df)}")
+    print(f"- Matched Rate: {matched_rate:.2f}")
+    print(f"- Total P/L: {total_pnl:.2f}")
+    print(f"- Avg Odds: {avg_odds:.2f}")
+    print(f"- Avg Confidence: {avg_confidence:.2f}%")
+
+    conn.close()
+
+# Function to perform weekly analysis
+def weekly_analysis():
+    conn = get_db_connection()
+    date_last_week = datetime.now() - timedelta(days=7)
+    query = '''
+        SELECT * FROM trade_logs
+        WHERE strategy_name = ? AND timestamp >= ?
+    '''
+
+    df = pd.read_sql_query(query, conn, params=(STRATEGY_NAME, date_last_week))
+
+    if df.empty:
+        print("[WEEKLY ANALYSIS] No trades found for the last week.")
+        return
+
+    matched_rate = (df['status'] == 'matched').mean()
+    total_pnl = df.apply(lambda row: row['stake'] if row['result'] == 'win' else -row['liability'], axis=1).sum()
+    avg_odds = df['odds'].mean()
+    avg_confidence = df['confidence_level'].mean()
+
+    print(f"[WEEKLY ANALYSIS - Week Ending {datetime.now().date()}]")
+    print(f"- Total Trades: {len(df)}")
+    print(f"- Matched Rate: {matched_rate:.2f}")
+    print(f"- Total P/L: {total_pnl:.2f}")
+    print(f"- Avg Odds: {avg_odds:.2f}")
+    print(f"- Avg Confidence: {avg_confidence:.2f}%")
+
+    conn.close()
+
+# Placeholder for adjusting strategy automatically
+def adjust_strategy():
+    # Implement logic to adjust entry/exit criteria based on logged performance
+    # This can include odds thresholds, staking adjustments, etc.
+    print("[STRATEGY ADJUSTMENT] Adjusting strategy parameters based on recent performance...")
+    # Logic to be implemented
+
+# Example function for running scheduled reviews
+def run_scheduled_reviews():
+    today = datetime.now().date()
+
+    # Daily Analysis
+    daily_analysis()
+
+    # Weekly Analysis every Monday
+    if today.weekday() == 0:  # Monday
+        weekly_analysis()
+        adjust_strategy()
+
+# Main Execution (for testing purposes)
+if __name__ == '__main__':
+    run_scheduled_reviews()

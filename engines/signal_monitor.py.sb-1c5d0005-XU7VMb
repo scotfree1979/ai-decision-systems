@@ -1,0 +1,46 @@
+# signal_monitor.py
+
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Function explicitly assigns signals to bots based on signal type
+def process_signal(signal):
+    bot_assignments = {
+        'Market Drifter Signal': ['OGHeadTrader', 'OGPreoff'],
+        'Market Steamer Signal': ['OGHeadTrader', 'OGPreoff'],
+        'Odds Spike Reversal': ['OGHeadTrader'],
+        'Early Pace Collapse': ['OG In-play'],
+        'Late Surge Fade': ['OGPreoff'],
+        'Drifter Recovery': ['OGPreoff'],
+        'Venue/Trainer/Jockey Signals': ['OGHeadTrader', 'OGPreoff'],
+        'ICE/FIRE In-Play Bets': ['OG In-play'],
+        'Horse Hits Fence': ['OG In-play'],
+        'Horse Rears Up': ['OG In-play'],
+        'Missed Break': ['OG In-play'],
+        'Jockey Loses Iron': ['OG In-play'],
+        'Horse Pulling Hard': ['OG In-play'],
+        'Favorite Struggling': ['OG In-play'],
+        'Loose Horse': ['OG In-play'],
+        'Horse Heavily Ridden': ['OG In-play'],
+        'Runner Pulling Up': ['OG In-play'],
+        'Heavy Ground Reaction': ['OG In-play'],
+        'Late-Race Equipment Failure': ['OG In-play'],
+        'Front Runner Comfortable': ['OG In-play'],
+        'Horse Traveling Strongly': ['OG In-play'],
+        'In-Play Lay Bets': ['OG In-play'],
+        'Close Finish Forecasts': ['OG In-play', 'OGPreoff']
+    }
+
+    signal_type = signal.get('signal_type')
+    assigned_bots = bot_assignments.get(signal_type, [])
+
+    processed_signals = []
+
+    for bot_name in assigned_bots:
+        new_signal = signal.copy()
+        new_signal['bot_name'] = bot_name
+        logging.info(f"Signal assigned to {bot_name}: {new_signal}")
+        processed_signals.append(new_signal)
+
+    return processed_signals

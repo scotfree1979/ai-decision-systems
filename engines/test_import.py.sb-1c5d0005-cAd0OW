@@ -1,0 +1,5 @@
+from analytics_beta.engines.risk_manager import RiskManager
+
+risk_manager = RiskManager(40,100,500,4,60,40)
+signal = {'stake': 10, 'odds': 3.5, 'confidence': 0.9, 'type': 'Test Signal'}
+risk_manager.evaluate_signal(signal)

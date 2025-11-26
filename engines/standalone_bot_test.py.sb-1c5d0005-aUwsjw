@@ -1,0 +1,74 @@
+# ✅ standalone_bot_test.py – Simulates full bot launcher flow with test signals
+
+import logging
+import time
+from queue import Queue
+from og_bot_family_launcher import launch_bot_family
+import upgrade_import_patch
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# ✅ Shared Queues
+signal_queue = Queue()
+bot_signal_queues = {
+    "OGHeadTrader": Queue(),
+    "OGPreoff": Queue(),
+    "OGInPlay": Queue()
+}
+
+# ✅ Patch queues into upgrade import patch for downstream use
+upgrade_import_patch.bot_signal_queues = bot_signal_queues
+
+# ✅ Dummy managers to satisfy launcher injection
+class DummyRiskManager:
+    pass
+
+class DummyBudgetManager:
+    pass
+
+# ✅ Test signal payloads (realistic structure pulled from database)
+from daily_config import SESSION_TOKEN
+
+now = datetime.utcnow().isoformat()
+
+# Realistic test data (bot_name determines routing)
+test_signals = [
+    # HeadTrader tests (all types)
+    {"status": "approved", "bet_type": "BASIC", "marketId": "1.TEST_HT", "selectionId": 101, "odds": 4.5, "stake": 10.0, "customerOrderRef": "HT_BASIC", "marketStartTime": now, "bot_name": "OGHeadTrader", "session_token": SESSION_TOKEN},
+    {"status": "approved", "bet_type": "LADDER", "marketId": "1.TEST_HT", "selectionId": 102, "odds": 5.5, "stake": 10.0, "customerOrderRef": "HT_LADDER", "marketStartTime": now, "bot_name": "OGHeadTrader", "session_token": SESSION_TOKEN},
+    {"status": "approved", "bet_type": "SCALP", "marketId": "1.TEST_HT", "selectionId": 103, "odds": 6.5, "stake": 10.0, "customerOrderRef": "HT_SCALP", "marketStartTime": now, "bot_name": "OGHeadTrader", "session_token": SESSION_TOKEN},
+    {"status": "approved", "bet_type": "GREENUP", "marketId": "1.TEST_HT", "selectionId": 104, "odds": 3.5, "stake": 10.0, "customerOrderRef": "HT_GREENUP", "marketStartTime": now, "bot_name": "OGHeadTrader", "session_token": SESSION_TOKEN},
+    {"status": "approved", "bet_type": "INPLAY", "marketId": "1.TEST_HT", "selectionId": 105, "odds": 7.0, "stake": 10.0, "customerOrderRef": "HT_INPLAY", "marketStartTime": now, "bot_name": "OGHeadTrader", "session_token": SESSION_TOKEN},
+
+    # Preoff tests (no greenup or inplay)
+    {"status": "approved", "bet_type": "BASIC", "marketId": "1.TEST_PO", "selectionId": 201, "odds": 4.5, "stake": 10.0, "customerOrderRef": "PO_BASIC", "marketStartTime": now, "bot_name": "OGPreoff", "session_token": SESSION_TOKEN},
+    {"status": "approved", "bet_type": "LADDER", "marketId": "1.TEST_PO", "selectionId": 202, "odds": 5.5, "stake": 10.0, "customerOrderRef": "PO_LADDER", "marketStartTime": now, "bot_name": "OGPreoff", "session_token": SESSION_TOKEN},
+    {"status": "approved", "bet_type": "SCALP", "marketId": "1.TEST_PO", "selectionId": 203, "odds": 6.5, "stake": 10.0, "customerOrderRef": "PO_SCALP", "marketStartTime": now, "bot_name": "OGPreoff", "session_token": SESSION_TOKEN},
+
+    # InPlay tests (only inplay)
+    {"status": "approved", "bet_type": "INPLAY", "marketId": "1.TEST_IP", "selectionId": 301, "odds": 3.3, "stake": 10.0, "customerOrderRef": "IP_INPLAY", "marketStartTime": now, "bot_name": "OGInPlay", "session_token": SESSION_TOKEN}
+]
+
+# ✅ Inject signals based on bot_name
+for signal in test_signals:
+    bot_signal_queues[signal["bot_name"]].put(signal)
+bot_signal_queues["OGHeadTrader"].put(test_signals[0])
+bot_signal_queues["OGPreoff"].put(test_signals[1])
+bot_signal_queues["OGInPlay"].put(test_signals[2])
+
+# ✅ Launch all bots through real launcher
+launch_bot_family(
+    headers={"X-Authentication": "TEST_TOKEN", "X-Application": "TEST_APP"},
+    risk_mgr=DummyRiskManager(),
+    bot_assignments={},
+    bot_budget_limits={},
+    toggles={},
+    budget_mgr=DummyBudgetManager(),
+    bot_signal_queues=bot_signal_queues
+)
+
+# Keep test running long enough to observe behavior
+logging.info("🧪 [Standalone Test] Bots launched with test signals. Watching for output...")
+time.sleep(10)

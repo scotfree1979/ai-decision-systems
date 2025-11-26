@@ -1,0 +1,28 @@
+def preoff_loop(risk_manager):
+    print("🔄 Pre-off loop started, waiting for signals...")
+    
+    while True:
+        signal = generate_signal()
+        print(f"📡 Signal received: {signal}")
+
+        market_id, selection_id, odds, stake, num_runners, signal_type = parse_signal(signal)
+        print(f"🔍 Evaluating: Market {market_id}, Odds {odds}, Stake {stake}")
+
+        approved = risk_manager.approve_trade(
+            bot_name="PreOffBot",
+            market_id=market_id,
+            selection_id=selection_id,
+            odds=odds,
+            stake=stake,
+            num_runners=num_runners,
+            signal_type=signal_type
+        )
+
+        if approved:
+            print(f"✅ Trade approved by Risk Manager: Market {market_id}, Odds {odds}")
+            execute_trade(market_id, selection_id, odds, stake)
+            print(f"🚀 Trade executed: Market {market_id}, Selection {selection_id}, Odds {odds}, Stake £{stake}")
+        else:
+            print(f"❌ Trade rejected by Risk Manager: Market {market_id}, Odds {odds}")
+
+        time.sleep(2)

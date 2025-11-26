@@ -1,0 +1,1680 @@
+Last login: Mon Nov  3 00:48:48 on ttys001
+You have new mail.
+malachikelly@Malachis-MBP-3 analytics_beta_dev % >....                          
+)
+SELECT '=== ' || name || ' ===' AS view_name
+FROM all_views;
+
+-- Step 2: dynamically print column info for each view
+-- (works even if some views fail; skips gracefully)
+-- For each view, we open PRAGMA table_info() and print.
+.output /tmp/view_schema_dump.txt
+SELECT '--' ;
+SELECT 'SCHEMA SNAPSHOT START' ;
+SELECT '--' ;
+END;
+
+.output stdout
+.print '\n=== SCHEMA DETAIL (views + columns) ==='
+SELECT name AS view_name FROM sqlite_master WHERE type='view' ORDER BY name;
+-- For each view, emit pragma output
+SELECT '\n=== ' || name || ' ===' FROM sqlite_master WHERE type='view';
+-- Generate pragma calls
+SELECT 'PRAGMA table_info(' || name || ');' FROM sqlite_master WHERE type='view';
+SQL
+
+=== FULL VIEW + COLUMN VERIFIER (schema-verified) ===
+view_name                            
+-------------------------------------
+=== bank_state ===                   
+=== bias_summary ===                 
+=== orders_effective ===             
+=== runner_form_canonical ===        
+=== v7_cashout ===                   
+=== v7_intelligence ===              
+=== v7_intelligence_expanded ===     
+=== v7_oc_drift_unfolded ===         
+=== v7_preoff_position ===           
+=== v7_race_position_final ===       
+=== v7_race_position_inferred ===    
+=== v7_race_position_named ===       
+=== v7_race_position_summary ===     
+=== v7_shape_summary ===             
+=== v7_timing_features_fixed ===     
+=== v_blueprint_playbook_train ===   
+=== v_fav_rank_form ===              
+=== v_liability_context ===          
+=== v_market_context ===             
+=== v_market_sentiment ===           
+=== v_mastery_core_results ===       
+=== v_mastery_intel_v7 ===           
+=== v_mastery_intelligence_runner ===
+=== v_mastery_live ===               
+=== v_mastery_pattern_train ===      
+=== v_mastery_training ===           
+=== v_mastery_training_base ===      
+=== v_mastery_training_unified ===   
+=== v_mastery_v7 ===                 
+=== v_match_metrics ===              
+=== v_oc_timing ===                  
+=== v_odds_first_last_today ===      
+=== v_odds_latest ===                
+=== v_order_settlements ===          
+=== v_orders_v7 ===                  
+=== v_phase_performance ===          
+=== v_phase_summary_market ===       
+=== v_plan_ledger_compat ===         
+=== v_playbooks_all ===              
+=== v_playbooks_norm ===             
+=== v_rank_bin ===                   
+=== v_runner_anchor_off ===          
+=== v_runner_context_form ===        
+=== v_runner_form_groups ===         
+=== v_runner_trading_zones ===       
+=== v_runner_truth ===               
+=== v_runner_zone_transitions ===    
+=== v_strategy_perf ===              
+=== v_timing_features_v7 ===         
+=== v_trading_zone_groups ===        
+=== v_weight_of_money ===            
+=== volatility_meta ===              
+Runtime error near line 22: cannot commit - no transaction is active
+\n=== SCHEMA DETAIL (views + columns) ===
+view_name                    
+-----------------------------
+bank_state                   
+bias_summary                 
+orders_effective             
+runner_form_canonical        
+v7_cashout                   
+v7_intelligence              
+v7_intelligence_expanded     
+v7_oc_drift_unfolded         
+v7_preoff_position           
+v7_race_position_final       
+v7_race_position_inferred    
+v7_race_position_named       
+v7_race_position_summary     
+v7_shape_summary             
+v7_timing_features_fixed     
+v_blueprint_playbook_train   
+v_fav_rank_form              
+v_liability_context          
+v_market_context             
+v_market_sentiment           
+v_mastery_core_results       
+v_mastery_intel_v7           
+v_mastery_intelligence_runner
+v_mastery_live               
+v_mastery_pattern_train      
+v_mastery_training           
+v_mastery_training_base      
+v_mastery_training_unified   
+v_mastery_v7                 
+v_match_metrics              
+v_oc_timing                  
+v_odds_first_last_today      
+v_odds_latest                
+v_order_settlements          
+v_orders_v7                  
+v_phase_performance          
+v_phase_summary_market       
+v_plan_ledger_compat         
+v_playbooks_all              
+v_playbooks_norm             
+v_rank_bin                   
+v_runner_anchor_off          
+v_runner_context_form        
+v_runner_form_groups         
+v_runner_trading_zones       
+v_runner_truth               
+v_runner_zone_transitions    
+v_strategy_perf              
+v_timing_features_v7         
+v_trading_zone_groups        
+v_weight_of_money            
+volatility_meta              
+'\n=== ' || name || ' ==='             
+---------------------------------------
+\n=== orders_effective ===             
+\n=== v_odds_latest ===                
+\n=== v_odds_first_last_today ===      
+\n=== bank_state ===                   
+\n=== v_plan_ledger_compat ===         
+\n=== v_strategy_perf ===              
+\n=== v_mastery_live ===               
+\n=== v_liability_context ===          
+\n=== v_mastery_training ===           
+\n=== v_orders_v7 ===                  
+\n=== v_oc_timing ===                  
+\n=== v_phase_performance ===          
+\n=== v_phase_summary_market ===       
+\n=== v_timing_features_v7 ===         
+\n=== volatility_meta ===              
+\n=== v_market_sentiment ===           
+\n=== v_weight_of_money ===            
+\n=== v_rank_bin ===                   
+\n=== v_playbooks_norm ===             
+\n=== v_mastery_intelligence_runner ===
+\n=== runner_form_canonical ===        
+\n=== v_runner_form_groups ===         
+\n=== v_runner_anchor_off ===          
+\n=== v_fav_rank_form ===              
+\n=== v_runner_trading_zones ===       
+\n=== v_runner_context_form ===        
+\n=== v_trading_zone_groups ===        
+\n=== v_runner_zone_transitions ===    
+\n=== v_mastery_core_results ===       
+\n=== v_mastery_pattern_train ===      
+\n=== v_market_context ===             
+\n=== v_runner_truth ===               
+\n=== v_mastery_training_base ===      
+\n=== v_match_metrics ===              
+\n=== v_blueprint_playbook_train ===   
+\n=== v_mastery_intel_v7 ===           
+\n=== v_mastery_v7 ===                 
+\n=== v7_cashout ===                   
+\n=== v7_intelligence ===              
+\n=== v_order_settlements ===          
+\n=== v7_race_position_named ===       
+\n=== v7_race_position_final ===       
+\n=== v7_intelligence_expanded ===     
+\n=== v7_oc_drift_unfolded ===         
+\n=== v7_race_position_inferred ===    
+\n=== v7_race_position_summary ===     
+\n=== v7_preoff_position ===           
+\n=== v7_shape_summary ===             
+\n=== v7_timing_features_fixed ===     
+\n=== v_mastery_training_unified ===   
+\n=== bias_summary ===                 
+\n=== v_playbooks_all ===              
+'PRAGMA table_info(' || name || ');'             
+-------------------------------------------------
+PRAGMA table_info(orders_effective);             
+PRAGMA table_info(v_odds_latest);                
+PRAGMA table_info(v_odds_first_last_today);      
+PRAGMA table_info(bank_state);                   
+PRAGMA table_info(v_plan_ledger_compat);         
+PRAGMA table_info(v_strategy_perf);              
+PRAGMA table_info(v_mastery_live);               
+PRAGMA table_info(v_liability_context);          
+PRAGMA table_info(v_mastery_training);           
+PRAGMA table_info(v_orders_v7);                  
+PRAGMA table_info(v_oc_timing);                  
+PRAGMA table_info(v_phase_performance);          
+PRAGMA table_info(v_phase_summary_market);       
+PRAGMA table_info(v_timing_features_v7);         
+PRAGMA table_info(volatility_meta);              
+PRAGMA table_info(v_market_sentiment);           
+PRAGMA table_info(v_weight_of_money);            
+PRAGMA table_info(v_rank_bin);                   
+PRAGMA table_info(v_playbooks_norm);             
+PRAGMA table_info(v_mastery_intelligence_runner);
+PRAGMA table_info(runner_form_canonical);        
+PRAGMA table_info(v_runner_form_groups);         
+PRAGMA table_info(v_runner_anchor_off);          
+PRAGMA table_info(v_fav_rank_form);              
+PRAGMA table_info(v_runner_trading_zones);       
+PRAGMA table_info(v_runner_context_form);        
+PRAGMA table_info(v_trading_zone_groups);        
+PRAGMA table_info(v_runner_zone_transitions);    
+PRAGMA table_info(v_mastery_core_results);       
+PRAGMA table_info(v_mastery_pattern_train);      
+PRAGMA table_info(v_market_context);             
+PRAGMA table_info(v_runner_truth);               
+PRAGMA table_info(v_mastery_training_base);      
+PRAGMA table_info(v_match_metrics);              
+PRAGMA table_info(v_blueprint_playbook_train);   
+PRAGMA table_info(v_mastery_intel_v7);           
+PRAGMA table_info(v_mastery_v7);                 
+PRAGMA table_info(v7_cashout);                   
+PRAGMA table_info(v7_intelligence);              
+PRAGMA table_info(v_order_settlements);          
+PRAGMA table_info(v7_race_position_named);       
+PRAGMA table_info(v7_race_position_final);       
+PRAGMA table_info(v7_intelligence_expanded);     
+PRAGMA table_info(v7_oc_drift_unfolded);         
+PRAGMA table_info(v7_race_position_inferred);    
+PRAGMA table_info(v7_race_position_summary);     
+PRAGMA table_info(v7_preoff_position);           
+PRAGMA table_info(v7_shape_summary);             
+PRAGMA table_info(v7_timing_features_fixed);     
+PRAGMA table_info(v_mastery_training_unified);   
+PRAGMA table_info(bias_summary);                 
+PRAGMA table_info(v_playbooks_all);              
+malachikelly@Malachis-MBP-3 analytics_beta_dev % >....                          
+SELECT * FROM pragma_table_info('v_odds_first_last_today');
+SELECT * FROM pragma_table_info('v_odds_latest');
+SELECT * FROM pragma_table_info('v_order_settlements');
+SELECT * FROM pragma_table_info('v_orders_v7');
+SELECT * FROM pragma_table_info('v_phase_performance');
+SELECT * FROM pragma_table_info('v_phase_summary_market');
+SELECT * FROM pragma_table_info('v_plan_ledger_compat');
+SELECT * FROM pragma_table_info('v_playbooks_all');
+SELECT * FROM pragma_table_info('v_playbooks_norm');
+SELECT * FROM pragma_table_info('v_rank_bin');
+SELECT * FROM pragma_table_info('v_runner_anchor_off');
+SELECT * FROM pragma_table_info('v_runner_context_form');
+SELECT * FROM pragma_table_info('v_runner_form_groups');
+SELECT * FROM pragma_table_info('v_runner_trading_zones');
+SELECT * FROM pragma_table_info('v_runner_truth');
+SELECT * FROM pragma_table_info('v_runner_zone_transitions');
+SELECT * FROM pragma_table_info('v_strategy_perf');
+SELECT * FROM pragma_table_info('v_timing_features_v7');
+SELECT * FROM pragma_table_info('v_trading_zone_groups');
+SELECT * FROM pragma_table_info('v_weight_of_money');
+SELECT * FROM pragma_table_info('volatility_meta');
+SQL
+
+=== FULL SCHEMA SNAPSHOT — ALL VIEWS AND COLUMNS ===
+'-- ' || name || ' -------------------------'             
+----------------------------------------------------------
+-- bank_state -------------------------                   
+-- bias_summary -------------------------                 
+-- orders_effective -------------------------             
+-- runner_form_canonical -------------------------        
+-- v7_cashout -------------------------                   
+-- v7_intelligence -------------------------              
+-- v7_intelligence_expanded -------------------------     
+-- v7_oc_drift_unfolded -------------------------         
+-- v7_preoff_position -------------------------           
+-- v7_race_position_final -------------------------       
+-- v7_race_position_inferred -------------------------    
+-- v7_race_position_named -------------------------       
+-- v7_race_position_summary -------------------------     
+-- v7_shape_summary -------------------------             
+-- v7_timing_features_fixed -------------------------     
+-- v_blueprint_playbook_train -------------------------   
+-- v_fav_rank_form -------------------------              
+-- v_liability_context -------------------------          
+-- v_market_context -------------------------             
+-- v_market_sentiment -------------------------           
+-- v_mastery_core_results -------------------------       
+-- v_mastery_intel_v7 -------------------------           
+-- v_mastery_intelligence_runner -------------------------
+-- v_mastery_live -------------------------               
+-- v_mastery_pattern_train -------------------------      
+-- v_mastery_training -------------------------           
+-- v_mastery_training_base -------------------------      
+-- v_mastery_training_unified -------------------------   
+-- v_mastery_v7 -------------------------                 
+-- v_match_metrics -------------------------              
+-- v_oc_timing -------------------------                  
+-- v_odds_first_last_today -------------------------      
+-- v_odds_latest -------------------------                
+-- v_order_settlements -------------------------          
+-- v_orders_v7 -------------------------                  
+-- v_phase_performance -------------------------          
+-- v_phase_summary_market -------------------------       
+-- v_plan_ledger_compat -------------------------         
+-- v_playbooks_all -------------------------              
+-- v_playbooks_norm -------------------------             
+-- v_rank_bin -------------------------                   
+-- v_runner_anchor_off -------------------------          
+-- v_runner_context_form -------------------------        
+-- v_runner_form_groups -------------------------         
+-- v_runner_trading_zones -------------------------       
+-- v_runner_truth -------------------------               
+-- v_runner_zone_transitions -------------------------    
+-- v_strategy_perf -------------------------              
+-- v_timing_features_v7 -------------------------         
+-- v_trading_zone_groups -------------------------        
+-- v_weight_of_money -------------------------            
+-- volatility_meta -------------------------              
+cid  name           type  notnull  dflt_value  pk
+---  -------------  ----  -------  ----------  --
+0    day            TEXT  0                    0 
+1    balance        REAL  0                    0 
+2    start_balance  REAL  0                    0 
+3    updated_at     TEXT  0                    0 
+cid  name         type     notnull  dflt_value  pk
+---  -----------  -------  -------  ----------  --
+0    marketId     TEXT     0                    0 
+1    selectionId  INTEGER  0                    0 
+2    bias_value            0                    0 
+3    bias_dir              0                    0 
+4    bias_conf             0                    0 
+cid  name                 type     notnull  dflt_value  pk
+---  -------------------  -------  -------  ----------  --
+0    id                   INTEGER  0                    0 
+1    customerOrderRef     TEXT     0                    0 
+2    mode                 TEXT     0                    0 
+3    run_id               INTEGER  0                    0 
+4    marketId             TEXT     0                    0 
+5    selectionId          TEXT     0                    0 
+6    side                 TEXT     0                    0 
+7    entry_odds           REAL     0                    0 
+8    entry_stake          REAL     0                    0 
+9    entry_status         TEXT     0                    0 
+10   entry_bet_id         TEXT     0                    0 
+11   opened_at            TEXT     0                    0 
+12   exit_status          TEXT     0                    0 
+13   exit_bet_id          TEXT     0                    0 
+14   exit_odds            REAL     0                    0 
+15   exit_stake           REAL     0                    0 
+16   closed_at            TEXT     0                    0 
+17   realized_pnl         REAL     0                    0 
+18   net_pl               REAL     0                    0 
+19   error                TEXT     0                    0 
+20   role                 TEXT     0                    0 
+21   hedge_of             INTEGER  0                    0 
+22   source               TEXT     0                    0 
+23   ts                   TEXT     0                    0 
+24   bf_bet_id            TEXT     0                    0 
+25   customer_ref         TEXT     0                    0 
+26   entry_matched_odds   REAL     0                    0 
+27   entry_matched_stake  REAL     0                    0 
+28   exit_matched_odds    REAL     0                    0 
+29   exit_matched_stake   REAL     0                    0 
+30   child_bf_bet_id      TEXT     0                    0 
+31   notes                TEXT     0                    0 
+32   stop_ticks           INTEGER  0                    0 
+33   stop_loss_triggered  INTEGER  0                    0 
+34   greened_up           INTEGER  0                    0 
+35   exit_kind            TEXT     0                    0 
+cid  name         type     notnull  dflt_value  pk
+---  -----------  -------  -------  ----------  --
+0    selectionId  INTEGER  0                    0 
+1    marketId     TEXT     0                    0 
+2    runs                  0                    0 
+3    wins                  0                    0 
+4    losses                0                    0 
+5    avg_pnl               0                    0 
+6    win_rate              0                    0 
+cid  name               type  notnull  dflt_value  pk
+---  -----------------  ----  -------  ----------  --
+0    marketId           TEXT  0                    0 
+1    potential_cashout        0                    0 
+2    avg_cashout              0                    0 
+3    worst_cashout            0                    0 
+4    spread_now               0                    0 
+5    snapshot_ts              0                    0 
+cid  name               type     notnull  dflt_value  pk
+---  -----------------  -------  -------  ----------  --
+0    day                TEXT     0                    0 
+1    marketId           TEXT     0                    0 
+2    selectionId        INTEGER  0                    0 
+3    letter             TEXT     0                    0 
+4    pnl                REAL     0                    0 
+5    success            INTEGER  0                    0 
+6    slope_ppm          REAL     0                    0 
+7    tick_vel_3s_up     REAL     0                    0 
+8    momentum_class     TEXT     0                    0 
+9    distance           TEXT     0                    0 
+10   going              TEXT     0                    0 
+11   trainerName        TEXT     0                    0 
+12   jockeyName         TEXT     0                    0 
+13   mode                        0                    0 
+14   potential_cashout           0                    0 
+15   avg_cashout                 0                    0 
+16   worst_cashout               0                    0 
+17   spread_now                  0                    0 
+18   snapshot_ts                 0                    0 
+cid  name                type  notnull  dflt_value  pk
+---  ------------------  ----  -------  ----------  --
+0    marketId            TEXT  0                    0 
+1    selectionId         TEXT  0                    0 
+2    letter              TEXT  0                    0 
+3    distance_band       TEXT  0                    0 
+4    fav_rank            TEXT  0                    0 
+5    class_band          TEXT  0                    0 
+6    drift_speed               0                    0 
+7    inplay_progress           0                    0 
+8    expected_race_mins        0                    0 
+9    drift_ratio               0                    0 
+10   pos_inplay                0                    0 
+11   realized_pnl        REAL  0                    0 
+12   outcome                   0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    anchor_odd   REAL  0                    0 
+3    oc_idx             0                    0 
+4    oc_val       REAL  0                    0 
+5    drift_ratio        0                    0 
+cid  name          type  notnull  dflt_value  pk
+---  ------------  ----  -------  ----------  --
+0    marketId      TEXT  0                    0 
+1    selectionId   INT   0                    0 
+2    anchor_odd    REAL  0                    0 
+3    pre_avg_odds        0                    0 
+4    drift_ratio         0                    0 
+5    pre_shape           0                    0 
+6    odds_band           0                    0 
+cid  name        type  notnull  dflt_value  pk
+---  ----------  ----  -------  ----------  --
+0    venue       TEXT  0                    0 
+1    race_name   TEXT  0                    0 
+2    horse_name  TEXT  0                    0 
+3    anchor_odd  REAL  0                    0 
+4    drift_50          0                    0 
+5    pos_50            0                    0 
+6    outcome           0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    anchor_odd   REAL  0                    0 
+3    oc_idx             0                    0 
+4    oc_val       REAL  0                    0 
+5    drift_ratio        0                    0 
+6    pos_inplay         0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    day                0                    0 
+1    marketId     TEXT  0                    0 
+2    selectionId  TEXT  0                    0 
+3    venue        TEXT  0                    0 
+4    race_name    TEXT  0                    0 
+5    horse_name   TEXT  0                    0 
+6    anchor       REAL  0                    0 
+7    drift_50           0                    0 
+8    pos_50             0                    0 
+9    outcome            0                    0 
+cid  name          type  notnull  dflt_value  pk
+---  ------------  ----  -------  ----------  --
+0    marketId      TEXT  0                    0 
+1    selectionId   TEXT  0                    0 
+2    anchor_odd    REAL  0                    0 
+3    pos_1               0                    0 
+4    pos_5               0                    0 
+5    pos_10              0                    0 
+6    pos_15              0                    0 
+7    pos_19              0                    0 
+8    avg_drift           0                    0 
+9    race_pattern        0                    0 
+cid  name                type     notnull  dflt_value  pk
+---  ------------------  -------  -------  ----------  --
+0    marketId            TEXT     0                    0 
+1    selectionId         INT      0                    0 
+2    anchor_odd          REAL     0                    0 
+3    pre_avg_odds                 0                    0 
+4    drift_ratio                  0                    0 
+5    pre_shape                    0                    0 
+6    odds_band                    0                    0 
+7    avg_drift                    0                    0 
+8    race_pattern                 0                    0 
+9    inplay_progress              0                    0 
+10   expected_race_mins           0                    0 
+11   drift_speed                  0                    0 
+12   pos_inplay                   0                    0 
+13   realized_pnl        REAL     0                    0 
+14   outcome                      0                    0 
+15   success             INTEGER  0                    0 
+16   pnl                 REAL     0                    0 
+17   confidence          REAL     0                    0 
+18   distance_band       TEXT     0                    0 
+19   class_band          TEXT     0                    0 
+20   fav_rank            TEXT     0                    0 
+cid  name                type  notnull  dflt_value  pk
+---  ------------------  ----  -------  ----------  --
+0    marketId            TEXT  0                    0 
+1    selectionId         TEXT  0                    0 
+2    pre_avg_odds              0                    0 
+3    inplay_avg_odds           0                    0 
+4    post_avg_odds             0                    0 
+5    drift_speed               0                    0 
+6    expected_race_mins        0                    0 
+7    inplay_progress           0                    0 
+8    drift_ratio               0                    0 
+cid  name                  type     notnull  dflt_value  pk
+---  --------------------  -------  -------  ----------  --
+0    day                   TEXT     0                    0 
+1    surface_key           TEXT     0                    0 
+2    pattern_key           TEXT     0                    0 
+3    runner_name           TEXT     0                    0 
+4    marketId              TEXT     0                    0 
+5    selectionId           TEXT     0                    0 
+6    move                  TEXT     0                    0 
+7    trade_type            TEXT     0                    0 
+8    blueprint_confidence  REAL     0                    0 
+9    blueprint_entry       REAL     0                    0 
+10   blueprint_exit        REAL     0                    0 
+11   trend_ticks           INTEGER  0                    0 
+12   net_pl                REAL     0                    0 
+13   trade_result                   0                    0 
+14   outcome_bin           TEXT     0                    0 
+15   match_quality                  0                    0 
+16   event_count                    0                    0 
+17   market_win_rate                0                    0 
+18   avg_market_pnl                 0                    0 
+19   profit_rate                    0                    0 
+cid  name             type  notnull  dflt_value  pk
+---  ---------------  ----  -------  ----------  --
+0    fav_rank_bin           0                    0 
+1    odds_band              0                    0 
+2    runs                   0                    0 
+3    wins                   0                    0 
+4    win_rate               0                    0 
+5    avg_drift              0                    0 
+6    avg_anchor_odds        0                    0 
+7    avg_off_odds           0                    0 
+cid  name            type     notnull  dflt_value  pk
+---  --------------  -------  -------  ----------  --
+0    id              INTEGER  0                    0 
+1    day             TEXT     0                    0 
+2    marketId        TEXT     0                    0 
+3    selectionId     TEXT     0                    0 
+4    letter          TEXT     0                    0 
+5    distance_band   TEXT     0                    0 
+6    fav_rank        TEXT     0                    0 
+7    day_of_week     TEXT     0                    0 
+8    surface         TEXT     0                    0 
+9    class_band      TEXT     0                    0 
+10   target_ticks    INTEGER  0                    0 
+11   realized_ticks  INTEGER  0                    0 
+12   success         INTEGER  0                    0 
+13   stoploss_hit    INTEGER  0                    0 
+14   hedge_hit       INTEGER  0                    0 
+15   entry_px        REAL     0                    0 
+16   pnl             REAL     0                    0 
+17   weight          REAL     0                    0 
+18   priority        INTEGER  0                    0 
+19   liab_value               0                    0 
+20   liab_over250             0                    0 
+cid  name             type  notnull  dflt_value  pk
+---  ---------------  ----  -------  ----------  --
+0    marketId         TEXT  0                    0 
+1    runners                0                    0 
+2    market_win_rate        0                    0 
+3    avg_market_pnl         0                    0 
+4    profit_rate            0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    sentiment          0                    0 
+3    drift_pct          0                    0 
+cid  name          type     notnull  dflt_value  pk
+---  ------------  -------  -------  ----------  --
+0    day           TEXT     0                    0 
+1    marketId      TEXT     0                    0 
+2    selectionId   INTEGER  0                    0 
+3    net_pl        REAL     0                    0 
+4    trade_result           0                    0 
+5    outcome_bin   TEXT     0                    0 
+cid  name                type     notnull  dflt_value  pk
+---  ------------------  -------  -------  ----------  --
+0    day                 TEXT     0                    0 
+1    marketId            TEXT     0                    0 
+2    selectionId         INTEGER  0                    0 
+3    letter              TEXT     0                    0 
+4    pnl                 REAL     0                    0 
+5    success             INTEGER  0                    0 
+6    pre_drift           REAL     0                    0 
+7    band_width          REAL     0                    0 
+8    band_rel_vol        REAL     0                    0 
+9    band_bias           REAL     0                    0 
+10   band_skew           REAL     0                    0 
+11   band_stability      REAL     0                    0 
+12   slope_ppm           REAL     0                    0 
+13   tick_vel_3s_up      REAL     0                    0 
+14   momentum_class      TEXT     0                    0 
+15   expected_race_mins  REAL     0                    0 
+16   drift_speed         REAL     0                    0 
+17   inplay_progress     REAL     0                    0 
+18   win_rate            REAL     0                    0 
+19   form_avg_pnl        REAL     0                    0 
+20   form_avg_pnl_2               0                    0 
+21   form_win_rate                0                    0 
+22   trend_momentum      TEXT     0                    0 
+23   trainerName         TEXT     0                    0 
+24   jockeyName          TEXT     0                    0 
+25   distance            TEXT     0                    0 
+26   going               TEXT     0                    0 
+27   mode                         0                    0 
+cid  name                type     notnull  dflt_value  pk
+---  ------------------  -------  -------  ----------  --
+0    day                 TEXT     0                    0 
+1    marketId            TEXT     0                    0 
+2    selectionId         INTEGER  0                    0 
+3    strategy            TEXT     0                    0 
+4    oc_stage            TEXT     0                    0 
+5    entry_odds          REAL     0                    0 
+6    exit_odds           REAL     0                    0 
+7    pnl                 REAL     0                    0 
+8    outcome             TEXT     0                    0 
+9    confidence          REAL     0                    0 
+10   slope_ppm           REAL     0                    0 
+11   tick_vel_3s_up      REAL     0                    0 
+12   momentum_class      TEXT     0                    0 
+13   sentiment                    0                    0 
+14   drift_pct                    0                    0 
+15   wom_ratio                    0                    0 
+16   wom_state                    0                    0 
+17   runs                         0                    0 
+18   wins                         0                    0 
+19   win_rate                     0                    0 
+20   avg_pnl                      0                    0 
+21   expected_race_mins           0                    0 
+22   inplay_progress              0                    0 
+23   drift_speed                  0                    0 
+24   odds_change_pct              0                    0 
+25   odds_change_bin              0                    0 
+26   win_flag                     0                    0 
+27   mode                         0                    0 
+cid  name           type  notnull  dflt_value  pk
+---  -------------  ----  -------  ----------  --
+0    distance_band  TEXT  0                    0 
+1    fav_rank_bin   TEXT  0                    0 
+2    surface_type   TEXT  0                    0 
+3    day_of_week    TEXT  0                    0 
+4    bins                 0                    0 
+5    total_pnl            0                    0 
+6    avg_mae              0                    0 
+7    total_weight         0                    0 
+8    p1_mean              0                    0 
+9    p2_mean              0                    0 
+10   p3_mean              0                    0 
+cid  name          type     notnull  dflt_value  pk
+---  ------------  -------  -------  ----------  --
+0    day           TEXT     0                    0 
+1    marketId      TEXT     0                    0 
+2    selectionId   INTEGER  0                    0 
+3    net_pl        REAL     0                    0 
+4    trade_result           0                    0 
+5    outcome_bin   TEXT     0                    0 
+6    odds_band              0                    0 
+7    win_rate               0                    0 
+8    trading_zone           0                    0 
+9    form_class             0                    0 
+cid  name             type  notnull  dflt_value  pk
+---  ---------------  ----  -------  ----------  --
+0    marketId               0                    0 
+1    pnl_total              0                    0 
+2    liability_total        0                    0 
+3    ratio                  0                    0 
+4    slope_ppm              0                    0 
+5    tick_vel_3s_up         0                    0 
+6    mto_minutes            0                    0 
+7    action                 0                    0 
+8    reward                 0                    0 
+cid  name             type     notnull  dflt_value  pk
+---  ---------------  -------  -------  ----------  --
+0    day              TEXT     0                    0 
+1    marketId         TEXT     0                    0 
+2    selectionId      INTEGER  0                    0 
+3    net_pl           REAL     0                    0 
+4    trade_result              0                    0 
+5    outcome_bin      TEXT     0                    0 
+6    market_runners            0                    0 
+7    market_win_rate           0                    0 
+8    avg_market_pnl            0                    0 
+9    profit_rate               0                    0 
+Runtime error near line 34: no such column: m.band_width
+cid  name            type     notnull  dflt_value  pk
+---  --------------  -------  -------  ----------  --
+0    day             TEXT     0                    0 
+1    marketId        TEXT     0                    0 
+2    selectionId     TEXT     0                    0 
+3    letter          TEXT     0                    0 
+4    distance_band   TEXT     0                    0 
+5    fav_rank        TEXT     0                    0 
+6    day_of_week     TEXT     0                    0 
+7    surface         TEXT     0                    0 
+8    class_band      TEXT     0                    0 
+9    target_ticks    INTEGER  0                    0 
+10   realized_ticks  INTEGER  0                    0 
+11   success         INTEGER  0                    0 
+12   stoploss_hit    INTEGER  0                    0 
+13   hedge_hit       INTEGER  0                    0 
+14   entry_px        REAL     0                    0 
+15   pnl             REAL     0                    0 
+16   weight          REAL     0                    0 
+17   priority        INTEGER  0                    0 
+18   created_at      TEXT     0                    0 
+19   id              INTEGER  0                    0 
+20   source          TEXT     0                    0 
+21   confidence      REAL     0                    0 
+cid  name           type  notnull  dflt_value  pk
+---  -------------  ----  -------  ----------  --
+0    marketId             0                    0 
+1    selectionId          0                    0 
+2    match_quality        0                    0 
+3    event_count          0                    0 
+cid  name              type  notnull  dflt_value  pk
+---  ----------------  ----  -------  ----------  --
+0    marketId          TEXT  0                    0 
+1    selectionId       TEXT  0                    0 
+2    stage             TEXT  0                    0 
+3    snapshot_ts       TEXT  0                    0 
+4    surface_type            0                    0 
+5    expected_seconds        0                    0 
+6    delta_minutes           0                    0 
+7    progress_ratio          0                    0 
+8    phase                   0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    ltp_first          0                    0 
+3    ltp_last           0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    ltp                0                    0 
+3    snapshot_ts  TEXT  0                    0 
+cid  name               type     notnull  dflt_value  pk
+---  -----------------  -------  -------  ----------  --
+0    order_id           INTEGER  0                    0 
+1    marketId           TEXT     0                    0 
+2    selectionId        TEXT     0                    0 
+3    side               TEXT     0                    0 
+4    entry_odds         REAL     0                    0 
+5    entry_stake        REAL     0                    0 
+6    exit_status        TEXT     0                    0 
+7    closed_at          TEXT     0                    0 
+8    betId              TEXT     0                    0 
+9    settle_profit      REAL     0                    0 
+10   settle_commission  REAL     0                    0 
+11   settled_at         TEXT     0                    0 
+cid  name            type     notnull  dflt_value  pk
+---  --------------  -------  -------  ----------  --
+0    id              INTEGER  0                    0 
+1    marketId        TEXT     0                    0 
+2    selectionId     TEXT     0                    0 
+3    letter_raw               0                    0 
+4    letter                   0                    0 
+5    subtype                  0                    0 
+6    trade_index              0                    0 
+7    mode                     0                    0 
+8    entry_status             0                    0 
+9    exit_status              0                    0 
+10   entry_stake              0                    0 
+11   entry_odds               0                    0 
+12   net_pl                   0                    0 
+13   open_liability           0                    0 
+14   run_id                   0                    0 
+15   day                      0                    0 
+16   cap_scope                0                    0 
+cid  name                type  notnull  dflt_value  pk
+---  ------------------  ----  -------  ----------  --
+0    marketId            TEXT  0                    0 
+1    selectionId         TEXT  0                    0 
+2    surface_type              0                    0 
+3    phase                     0                    0 
+4    n_points                  0                    0 
+5    phase_start_min           0                    0 
+6    phase_end_min             0                    0 
+7    avg_progress_ratio        0                    0 
+8    avg_odds                  0                    0 
+9    rel_volatility            0                    0 
+10   odds_rate_per_min         0                    0 
+cid  name                  type  notnull  dflt_value  pk
+---  --------------------  ----  -------  ----------  --
+0    marketId              TEXT  0                    0 
+1    surface_type                0                    0 
+2    phase                       0                    0 
+3    n_runners                   0                    0 
+4    avg_vol                     0                    0 
+5    max_vol                     0                    0 
+6    avg_rate                    0                    0 
+7    max_rate                    0                    0 
+8    most_volatile_runner  TEXT  0                    0 
+cid  name             type     notnull  dflt_value  pk
+---  ---------------  -------  -------  ----------  --
+0    id               INTEGER  0                    0 
+1    day              TEXT     0                    0 
+2    run_id           TEXT     0                    0 
+3    plan_id          TEXT     0                    0 
+4    marketId         TEXT     0                    0 
+5    selectionId      TEXT     0                    0 
+6    letter           TEXT     0                    0 
+7    note             TEXT     0                    0 
+8    direction        TEXT     0                    0 
+9    px               REAL     0                    0 
+10   size             REAL     0                    0 
+11   confidence       REAL     0                    0 
+12   blueprint_match  TEXT     0                    0 
+13   window_tag       TEXT     0                    0 
+14   status           TEXT     0                    0 
+15   why              TEXT     0                    0 
+16   parent_order_id  INTEGER  0                    0 
+17   child_order_id   INTEGER  0                    0 
+18   epic_id          TEXT     0                    0 
+19   epic_stories     INTEGER  0                    0 
+20   epic_rank        INTEGER  0                    0 
+21   decided_at       TEXT     0                    0 
+22   updated_at       TEXT     0                    0 
+cid  name            type     notnull  dflt_value  pk
+---  --------------  -------  -------  ----------  --
+0    class_band      TEXT     0                    0 
+1    confidence      REAL     0                    0 
+2    created_at      TEXT     0                    0 
+3    day             TEXT     0                    0 
+4    entry_odds      REAL     0                    0 
+5    entry_stake     REAL     0                    0 
+6    exit_odds       REAL     0                    0 
+7    exit_stake      REAL     0                    0 
+8    letter          TEXT     0                    0 
+9    marketId        TEXT     0                    0 
+10   meta_json       TEXT     0                    0 
+11   net_pl          REAL     0                    0 
+12   oc_stage_entry  TEXT     0                    0 
+13   selectionId     INTEGER  0                    0 
+14   side            TEXT     0                    0 
+15   strategy        TEXT     0                    0 
+cid  name              type     notnull  dflt_value  pk
+---  ----------------  -------  -------  ----------  --
+0    marketId_norm              0                    0 
+1    selectionId_norm           0                    0 
+2    id                INTEGER  0                    0 
+3    day               TEXT     0                    0 
+4    marketId          TEXT     0                    0 
+5    selectionId       INTEGER  0                    0 
+6    strategy          TEXT     0                    0 
+7    oc_stage          TEXT     0                    0 
+8    pattern_key       TEXT     0                    0 
+9    band_low          REAL     0                    0 
+10   band_high         REAL     0                    0 
+11   entry_odds        REAL     0                    0 
+12   exit_odds         REAL     0                    0 
+13   pnl               REAL     0                    0 
+14   outcome           TEXT     0                    0 
+15   exposure          REAL     0                    0 
+16   confidence        REAL     0                    0 
+17   realized_at       TEXT     0                    0 
+18   meta_json         TEXT     0                    0 
+19   source            TEXT     0                    0 
+cid  name          type     notnull  dflt_value  pk
+---  ------------  -------  -------  ----------  --
+0    marketId      TEXT     0                    0 
+1    selectionId   TEXT     0                    0 
+2    fav_rank      INTEGER  0                    0 
+3    fav_rank_bin           0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    anchor_odds  REAL  0                    0 
+3    off_odds     REAL  0                    0 
+4    drift_ratio        0                    0 
+cid  name            type  notnull  dflt_value  pk
+---  --------------  ----  -------  ----------  --
+0    runner_name     TEXT  0                    0 
+1    fav_rank_bin          0                    0 
+2    odds_band             0                    0 
+3    runs                  0                    0 
+4    wins                  0                    0 
+5    losses                0                    0 
+6    win_rate              0                    0 
+7    avg_entry_odds        0                    0 
+cid  name          type  notnull  dflt_value  pk
+---  ------------  ----  -------  ----------  --
+0    form_class          0                    0 
+1    odds_band           0                    0 
+2    fav_rank_bin        0                    0 
+3    horses              0                    0 
+4    avg_win_rate        0                    0 
+5    avg_odds            0                    0 
+cid  name            type  notnull  dflt_value  pk
+---  --------------  ----  -------  ----------  --
+0    runner_name     TEXT  0                    0 
+1    fav_rank_bin          0                    0 
+2    odds_band             0                    0 
+3    trading_zone          0                    0 
+4    runs                  0                    0 
+5    wins                  0                    0 
+6    losses                0                    0 
+7    win_rate              0                    0 
+8    avg_entry_odds        0                    0 
+cid  name          type     notnull  dflt_value  pk
+---  ------------  -------  -------  ----------  --
+0    day           TEXT     0                    0 
+1    marketId      TEXT     0                    0 
+2    selectionId   INTEGER  0                    0 
+3    net_pl        REAL     0                    0 
+4    trade_result           0                    0 
+5    outcome_bin   TEXT     0                    0 
+cid  name             type  notnull  dflt_value  pk
+---  ---------------  ----  -------  ----------  --
+0    marketId         TEXT  0                    0 
+1    selectionId      TEXT  0                    0 
+2    runner_name      TEXT  0                    0 
+3    fav_rank_bin           0                    0 
+4    anchor_odds      REAL  0                    0 
+5    off_odds         REAL  0                    0 
+6    drift_ratio            0                    0 
+7    zone_transition        0                    0 
+cid  name            type  notnull  dflt_value  pk
+---  --------------  ----  -------  ----------  --
+0    strategy              0                    0 
+1    p_q                   0                    0 
+2    p_p                   0                    0 
+3    p_m                   0                    0 
+4    c_q                   0                    0 
+5    c_p                   0                    0 
+6    c_m                   0                    0 
+7    open_parents          0                    0 
+8    matched_liab          0                    0 
+9    unmatched_liab        0                    0 
+10   pnl_today             0                    0 
+11   last_trade_ts         0                    0 
+cid  name                type  notnull  dflt_value  pk
+---  ------------------  ----  -------  ----------  --
+0    marketId            TEXT  0                    0 
+1    selectionId         TEXT  0                    0 
+2    surface_type              0                    0 
+3    pre_avg_odds              0                    0 
+4    inplay_avg_odds           0                    0 
+5    post_avg_odds             0                    0 
+6    pre_vol                   0                    0 
+7    inplay_vol                0                    0 
+8    post_vol                  0                    0 
+9    drift_speed               0                    0 
+10   inplay_progress           0                    0 
+11   expected_race_mins        0                    0 
+cid  name            type  notnull  dflt_value  pk
+---  --------------  ----  -------  ----------  --
+0    trading_zone          0                    0 
+1    strength_label        0                    0 
+2    odds_band             0                    0 
+3    horses                0                    0 
+4    avg_win_rate          0                    0 
+5    avg_odds              0                    0 
+cid  name         type  notnull  dflt_value  pk
+---  -----------  ----  -------  ----------  --
+0    marketId     TEXT  0                    0 
+1    selectionId  TEXT  0                    0 
+2    wom_ratio          0                    0 
+3    wom_state          0                    0 
+cid  name            type  notnull  dflt_value  pk
+---  --------------  ----  -------  ----------  --
+0    marketId        TEXT  0                    0 
+1    selectionId     TEXT  0                    0 
+2    avg_volatility        0                    0 
+3    range_low             0                    0 
+4    range_high            0                    0 
+malachikelly@Malachis-MBP-3 analytics_beta_dev % python3 - <<'PY'
+import sqlite3, json
+db = "data/autoscalp_gui.db"
+con = sqlite3.connect(db)
+con.row_factory = sqlite3.Row
+
+views = [r["name"] for r in con.execute("SELECT name FROM sqlite_master WHERE type='view'").fetchall()]
+schema_map = {}
+for v in views:
+    try:
+        cols = [r["name"] for r in con.execute(f"PRAGMA table_info({v});")]
+        schema_map[v] = cols
+    except Exception as e:
+        schema_map[v] = [f"⚠<fe0f> {e}"]
+
+print(json.dumps(schema_map, indent=2))
+con.close()
+PY
+
+{
+  "orders_effective": [
+    "id",
+    "customerOrderRef",
+    "mode",
+    "run_id",
+    "marketId",
+    "selectionId",
+    "side",
+    "entry_odds",
+    "entry_stake",
+    "entry_status",
+    "entry_bet_id",
+    "opened_at",
+    "exit_status",
+    "exit_bet_id",
+    "exit_odds",
+    "exit_stake",
+    "closed_at",
+    "realized_pnl",
+    "net_pl",
+    "error",
+    "role",
+    "hedge_of",
+    "source",
+    "ts",
+    "bf_bet_id",
+    "customer_ref",
+    "entry_matched_odds",
+    "entry_matched_stake",
+    "exit_matched_odds",
+    "exit_matched_stake",
+    "child_bf_bet_id",
+    "notes",
+    "stop_ticks",
+    "stop_loss_triggered",
+    "greened_up",
+    "exit_kind"
+  ],
+  "v_odds_latest": [
+    "marketId",
+    "selectionId",
+    "ltp",
+    "snapshot_ts"
+  ],
+  "v_odds_first_last_today": [
+    "marketId",
+    "selectionId",
+    "ltp_first",
+    "ltp_last"
+  ],
+  "bank_state": [
+    "day",
+    "balance",
+    "start_balance",
+    "updated_at"
+  ],
+  "v_plan_ledger_compat": [
+    "id",
+    "day",
+    "run_id",
+    "plan_id",
+    "marketId",
+    "selectionId",
+    "letter",
+    "note",
+    "direction",
+    "px",
+    "size",
+    "confidence",
+    "blueprint_match",
+    "window_tag",
+    "status",
+    "why",
+    "parent_order_id",
+    "child_order_id",
+    "epic_id",
+    "epic_stories",
+    "epic_rank",
+    "decided_at",
+    "updated_at"
+  ],
+  "v_strategy_perf": [
+    "strategy",
+    "p_q",
+    "p_p",
+    "p_m",
+    "c_q",
+    "c_p",
+    "c_m",
+    "open_parents",
+    "matched_liab",
+    "unmatched_liab",
+    "pnl_today",
+    "last_trade_ts"
+  ],
+  "v_mastery_live": [
+    "distance_band",
+    "fav_rank_bin",
+    "surface_type",
+    "day_of_week",
+    "bins",
+    "total_pnl",
+    "avg_mae",
+    "total_weight",
+    "p1_mean",
+    "p2_mean",
+    "p3_mean"
+  ],
+  "v_liability_context": [
+    "id",
+    "day",
+    "marketId",
+    "selectionId",
+    "letter",
+    "distance_band",
+    "fav_rank",
+    "day_of_week",
+    "surface",
+    "class_band",
+    "target_ticks",
+    "realized_ticks",
+    "success",
+    "stoploss_hit",
+    "hedge_hit",
+    "entry_px",
+    "pnl",
+    "weight",
+    "priority",
+    "liab_value",
+    "liab_over250"
+  ],
+  "v_mastery_training": [
+    "marketId",
+    "pnl_total",
+    "liability_total",
+    "ratio",
+    "slope_ppm",
+    "tick_vel_3s_up",
+    "mto_minutes",
+    "action",
+    "reward"
+  ],
+  "v_orders_v7": [
+    "id",
+    "marketId",
+    "selectionId",
+    "letter_raw",
+    "letter",
+    "subtype",
+    "trade_index",
+    "mode",
+    "entry_status",
+    "exit_status",
+    "entry_stake",
+    "entry_odds",
+    "net_pl",
+    "open_liability",
+    "run_id",
+    "day",
+    "cap_scope"
+  ],
+  "v_oc_timing": [
+    "marketId",
+    "selectionId",
+    "stage",
+    "snapshot_ts",
+    "surface_type",
+    "expected_seconds",
+    "delta_minutes",
+    "progress_ratio",
+    "phase"
+  ],
+  "v_phase_performance": [
+    "marketId",
+    "selectionId",
+    "surface_type",
+    "phase",
+    "n_points",
+    "phase_start_min",
+    "phase_end_min",
+    "avg_progress_ratio",
+    "avg_odds",
+    "rel_volatility",
+    "odds_rate_per_min"
+  ],
+  "v_phase_summary_market": [
+    "marketId",
+    "surface_type",
+    "phase",
+    "n_runners",
+    "avg_vol",
+    "max_vol",
+    "avg_rate",
+    "max_rate",
+    "most_volatile_runner"
+  ],
+  "v_timing_features_v7": [
+    "marketId",
+    "selectionId",
+    "surface_type",
+    "pre_avg_odds",
+    "inplay_avg_odds",
+    "post_avg_odds",
+    "pre_vol",
+    "inplay_vol",
+    "post_vol",
+    "drift_speed",
+    "inplay_progress",
+    "expected_race_mins"
+  ],
+  "volatility_meta": [
+    "marketId",
+    "selectionId",
+    "avg_volatility",
+    "range_low",
+    "range_high"
+  ],
+  "v_market_sentiment": [
+    "marketId",
+    "selectionId",
+    "sentiment",
+    "drift_pct"
+  ],
+  "v_weight_of_money": [
+    "marketId",
+    "selectionId",
+    "wom_ratio",
+    "wom_state"
+  ],
+  "v_rank_bin": [
+    "marketId",
+    "selectionId",
+    "fav_rank",
+    "fav_rank_bin"
+  ],
+  "v_playbooks_norm": [
+    "marketId_norm",
+    "selectionId_norm",
+    "id",
+    "day",
+    "marketId",
+    "selectionId",
+    "strategy",
+    "oc_stage",
+    "pattern_key",
+    "band_low",
+    "band_high",
+    "entry_odds",
+    "exit_odds",
+    "pnl",
+    "outcome",
+    "exposure",
+    "confidence",
+    "realized_at",
+    "meta_json",
+    "source"
+  ],
+  "v_mastery_intelligence_runner": [
+    "day",
+    "marketId",
+    "selectionId",
+    "strategy",
+    "oc_stage",
+    "entry_odds",
+    "exit_odds",
+    "pnl",
+    "outcome",
+    "confidence",
+    "slope_ppm",
+    "tick_vel_3s_up",
+    "momentum_class",
+    "sentiment",
+    "drift_pct",
+    "wom_ratio",
+    "wom_state",
+    "runs",
+    "wins",
+    "win_rate",
+    "avg_pnl",
+    "expected_race_mins",
+    "inplay_progress",
+    "drift_speed",
+    "odds_change_pct",
+    "odds_change_bin",
+    "win_flag",
+    "mode"
+  ],
+  "runner_form_canonical": [
+    "selectionId",
+    "marketId",
+    "runs",
+    "wins",
+    "losses",
+    "avg_pnl",
+    "win_rate"
+  ],
+  "v_runner_form_groups": [
+    "form_class",
+    "odds_band",
+    "fav_rank_bin",
+    "horses",
+    "avg_win_rate",
+    "avg_odds"
+  ],
+  "v_runner_anchor_off": [
+    "marketId",
+    "selectionId",
+    "anchor_odds",
+    "off_odds",
+    "drift_ratio"
+  ],
+  "v_fav_rank_form": [
+    "fav_rank_bin",
+    "odds_band",
+    "runs",
+    "wins",
+    "win_rate",
+    "avg_drift",
+    "avg_anchor_odds",
+    "avg_off_odds"
+  ],
+  "v_runner_trading_zones": [
+    "runner_name",
+    "fav_rank_bin",
+    "odds_band",
+    "trading_zone",
+    "runs",
+    "wins",
+    "losses",
+    "win_rate",
+    "avg_entry_odds"
+  ],
+  "v_runner_context_form": [
+    "runner_name",
+    "fav_rank_bin",
+    "odds_band",
+    "runs",
+    "wins",
+    "losses",
+    "win_rate",
+    "avg_entry_odds"
+  ],
+  "v_trading_zone_groups": [
+    "trading_zone",
+    "strength_label",
+    "odds_band",
+    "horses",
+    "avg_win_rate",
+    "avg_odds"
+  ],
+  "v_runner_zone_transitions": [
+    "marketId",
+    "selectionId",
+    "runner_name",
+    "fav_rank_bin",
+    "anchor_odds",
+    "off_odds",
+    "drift_ratio",
+    "zone_transition"
+  ],
+  "v_mastery_core_results": [
+    "day",
+    "marketId",
+    "selectionId",
+    "net_pl",
+    "trade_result",
+    "outcome_bin"
+  ],
+  "v_mastery_pattern_train": [
+    "day",
+    "marketId",
+    "selectionId",
+    "net_pl",
+    "trade_result",
+    "outcome_bin",
+    "odds_band",
+    "win_rate",
+    "trading_zone",
+    "form_class"
+  ],
+  "v_market_context": [
+    "marketId",
+    "runners",
+    "market_win_rate",
+    "avg_market_pnl",
+    "profit_rate"
+  ],
+  "v_runner_truth": [
+    "day",
+    "marketId",
+    "selectionId",
+    "net_pl",
+    "trade_result",
+    "outcome_bin"
+  ],
+  "v_mastery_training_base": [
+    "day",
+    "marketId",
+    "selectionId",
+    "net_pl",
+    "trade_result",
+    "outcome_bin",
+    "market_runners",
+    "market_win_rate",
+    "avg_market_pnl",
+    "profit_rate"
+  ],
+  "v_match_metrics": [
+    "marketId",
+    "selectionId",
+    "match_quality",
+    "event_count"
+  ],
+  "v_blueprint_playbook_train": [
+    "day",
+    "surface_key",
+    "pattern_key",
+    "runner_name",
+    "marketId",
+    "selectionId",
+    "move",
+    "trade_type",
+    "blueprint_confidence",
+    "blueprint_entry",
+    "blueprint_exit",
+    "trend_ticks",
+    "net_pl",
+    "trade_result",
+    "outcome_bin",
+    "match_quality",
+    "event_count",
+    "market_win_rate",
+    "avg_market_pnl",
+    "profit_rate"
+  ],
+  "v_mastery_intel_v7": [
+    "day",
+    "marketId",
+    "selectionId",
+    "letter",
+    "pnl",
+    "success",
+    "pre_drift",
+    "band_width",
+    "band_rel_vol",
+    "band_bias",
+    "band_skew",
+    "band_stability",
+    "slope_ppm",
+    "tick_vel_3s_up",
+    "momentum_class",
+    "expected_race_mins",
+    "drift_speed",
+    "inplay_progress",
+    "win_rate",
+    "form_avg_pnl",
+    "form_avg_pnl_2",
+    "form_win_rate",
+    "trend_momentum",
+    "trainerName",
+    "jockeyName",
+    "distance",
+    "going",
+    "mode"
+  ],
+  "v_mastery_v7": [
+    "day",
+    "marketId",
+    "selectionId",
+    "letter",
+    "distance_band",
+    "fav_rank",
+    "day_of_week",
+    "surface",
+    "class_band",
+    "target_ticks",
+    "realized_ticks",
+    "success",
+    "stoploss_hit",
+    "hedge_hit",
+    "entry_px",
+    "pnl",
+    "weight",
+    "priority",
+    "created_at",
+    "id",
+    "source",
+    "confidence"
+  ],
+  "v7_cashout": [
+    "marketId",
+    "potential_cashout",
+    "avg_cashout",
+    "worst_cashout",
+    "spread_now",
+    "snapshot_ts"
+  ],
+  "v7_intelligence": [
+    "day",
+    "marketId",
+    "selectionId",
+    "letter",
+    "pnl",
+    "success",
+    "slope_ppm",
+    "tick_vel_3s_up",
+    "momentum_class",
+    "distance",
+    "going",
+    "trainerName",
+    "jockeyName",
+    "mode",
+    "potential_cashout",
+    "avg_cashout",
+    "worst_cashout",
+    "spread_now",
+    "snapshot_ts"
+  ],
+  "v_order_settlements": [
+    "order_id",
+    "marketId",
+    "selectionId",
+    "side",
+    "entry_odds",
+    "entry_stake",
+    "exit_status",
+    "closed_at",
+    "betId",
+    "settle_profit",
+    "settle_commission",
+    "settled_at"
+  ],
+  "v7_race_position_named": [
+    "day",
+    "marketId",
+    "selectionId",
+    "venue",
+    "race_name",
+    "horse_name",
+    "anchor",
+    "drift_50",
+    "pos_50",
+    "outcome"
+  ],
+  "v7_race_position_final": [
+    "venue",
+    "race_name",
+    "horse_name",
+    "anchor_odd",
+    "drift_50",
+    "pos_50",
+    "outcome"
+  ],
+  "v7_intelligence_expanded": [
+    "marketId",
+    "selectionId",
+    "letter",
+    "distance_band",
+    "fav_rank",
+    "class_band",
+    "drift_speed",
+    "inplay_progress",
+    "expected_race_mins",
+    "drift_ratio",
+    "pos_inplay",
+    "realized_pnl",
+    "outcome"
+  ],
+  "v7_oc_drift_unfolded": [
+    "marketId",
+    "selectionId",
+    "anchor_odd",
+    "oc_idx",
+    "oc_val",
+    "drift_ratio"
+  ],
+  "v7_race_position_inferred": [
+    "marketId",
+    "selectionId",
+    "anchor_odd",
+    "oc_idx",
+    "oc_val",
+    "drift_ratio",
+    "pos_inplay"
+  ],
+  "v7_race_position_summary": [
+    "marketId",
+    "selectionId",
+    "anchor_odd",
+    "pos_1",
+    "pos_5",
+    "pos_10",
+    "pos_15",
+    "pos_19",
+    "avg_drift",
+    "race_pattern"
+  ],
+  "v7_preoff_position": [
+    "marketId",
+    "selectionId",
+    "anchor_odd",
+    "pre_avg_odds",
+    "drift_ratio",
+    "pre_shape",
+    "odds_band"
+  ],
+  "v7_shape_summary": [
+    "marketId",
+    "selectionId",
+    "anchor_odd",
+    "pre_avg_odds",
+    "drift_ratio",
+    "pre_shape",
+    "odds_band",
+    "avg_drift",
+    "race_pattern",
+    "inplay_progress",
+    "expected_race_mins",
+    "drift_speed",
+    "pos_inplay",
+    "realized_pnl",
+    "outcome",
+    "success",
+    "pnl",
+    "confidence",
+    "distance_band",
+    "class_band",
+    "fav_rank"
+  ],
+  "v7_timing_features_fixed": [
+    "marketId",
+    "selectionId",
+    "pre_avg_odds",
+    "inplay_avg_odds",
+    "post_avg_odds",
+    "drift_speed",
+    "expected_race_mins",
+    "inplay_progress",
+    "drift_ratio"
+  ],
+  "v_mastery_training_unified": [
+    "\u26a0\ufe0f no such column: m.band_width"
+  ],
+  "bias_summary": [
+    "marketId",
+    "selectionId",
+    "bias_value",
+    "bias_dir",
+    "bias_conf"
+  ],
+  "v_playbooks_all": [
+    "class_band",
+    "confidence",
+    "created_at",
+    "day",
+    "entry_odds",
+    "entry_stake",
+    "exit_odds",
+    "exit_stake",
+    "letter",
+    "marketId",
+    "meta_json",
+    "net_pl",
+    "oc_stage_entry",
+    "selectionId",
+    "side",
+    "strategy"
+  ]
+}
+
+

@@ -1,0 +1,28 @@
+# og_bot_family/og_inplay_bot.py
+
+import logging
+from threading import Thread
+from .og_inplay_logic import inplay_loop
+
+class OGInPlayBot:
+    def __init__(self, risk_manager, signal_queue):
+        self.risk_manager = risk_manager
+        self.signal_queue = signal_queue
+        self.active = True
+        logging.info('In-Play Bot: Initialized successfully with centralized Risk Manager and signal queue.')
+
+    def bot_loop(self):
+        logging.info('In-Play Bot: Continuous loop started explicitly.')
+        while self.active:
+            signal = self.signal_queue.get()
+            logging.info(f'In-Play Bot: Received signal explicitly: {signal}')
+            try:
+                inplay_loop(self.risk_manager, signal)
+            except Exception as e:
+                logging.error(f'In-Play Bot: Error processing signal explicitly: {e}')
+            finally:
+                self.signal_queue.task_done()
+
+    def start_loop(self):
+        logging.info('In-Play Bot: Loop starting explicitly.')
+        Thread(target=self.bot_loop, daemon=True).start()

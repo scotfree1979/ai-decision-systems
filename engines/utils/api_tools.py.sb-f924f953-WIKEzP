@@ -1,0 +1,188 @@
+# ✅ api_tools.py – Shared API Functions (Updated with check_market_off_flag)
+
+import json
+import requests
+import logging
+import os
+import time
+from datetime import datetime, timedelta
+
+# -----------------------------
+# ✅ LIVE ODDS FETCH (Refactored)
+# -----------------------------
+
+def fetch_live_odds(session_token, marketId, selectionId):
+    if not session_token:
+        raise ValueError("❌ fetch_live_odds() called without a session_token")
+
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": "CZHojduNWa3kxWIn",
+        "X-Authentication": session_token,
+        "Content-Type": "application/json"
+    }
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketBook",
+            "params": {
+                "marketIds": [marketId],
+                "priceProjection": {
+                    "priceData": ["EX_BEST_OFFERS"],
+                    "virtualise": True
+                }
+            },
+            "id": 1
+        }
+    ])
+
+    try:
+        response = requests.post(url, headers=headers, data=payload)
+        if response.status_code != 200:
+            logging.error(f"❌ API error {response.status_code}: {response.text}")
+            return None
+
+        json_data = response.json()
+        if not isinstance(json_data, list) or not json_data:
+            logging.error(f"❌ Invalid Betfair response format: {json_data}")
+            return None
+
+        market_book = json_data[0].get("result", [])[0] if json_data[0].get("result") else {}
+        runners = market_book.get("runners", [])
+        if not runners:
+            logging.warning(f"⚠️ No runners returned for market {marketId}. Market may be closed or malformed.")
+            return None
+
+        for runner in runners:
+            if runner.get("selectionId") == selectionId:
+                lay = runner.get("ex", {}).get("availableToLay", [])
+                back = runner.get("ex", {}).get("availableToBack", [])
+                lay_price = lay[0].get("price") if lay else None
+                back_price = back[0].get("price") if back else None
+                return {"lay": lay_price, "back": back_price}
+
+        logging.warning(f"⚠️ Runner {selectionId} not found in market {marketId}. Available: {[r.get('selectionId') for r in runners]}")
+        return None
+
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch odds for market {marketId}, selection {selectionId}: {e}")
+        return None
+
+# -----------------------------
+# ✅ CHECK IF MARKET IS IN-PLAY (Refactored)
+# -----------------------------
+
+def check_market_off_flag(marketId, session_token):
+    if not session_token:
+        raise ValueError("❌ check_market_off_flag() requires a session_token")
+
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": "CZHojduNWa3kxWIn",
+        "X-Authentication": session_token,
+        "Content-Type": "application/json"
+    }
+
+    payload = json.dumps([
+        {
+            "jsonrpc": "2.0",
+            "method": "SportsAPING/v1.0/listMarketBook",
+            "params": {
+                "marketIds": [marketId],
+                "priceProjection": {},
+                "virtualise": True
+            },
+            "id": 1
+        }
+    ])
+
+    try:
+        response = requests.post(url, headers=headers, data=payload)
+        if response.status_code != 200:
+            logging.error(f"❌ OFF flag fetch failed: {response.status_code}: {response.text}")
+            return False
+
+        result = response.json()[0].get("result", [])
+        if not result:
+            logging.warning(f"⚠️ Empty OFF result for {marketId}")
+            return False
+
+        return result[0].get("inplay", False)
+
+    except Exception as e:
+        logging.error(f"❌ Error checking in-play flag: {e}")
+        return False
+
+# -----------------------------
+# ✅ STANDALONE TEST TOOL (SCRAPER)
+# -----------------------------
+
+if __name__ == "__main__":
+    import os
+    import time
+    import json
+    from datetime import datetime, timedelta
+    import requests
+
+    SESSION_TOKEN = os.getenv("SESSION_TOKEN") or input("🔐 Enter your Betfair session token: ")
+    os.environ["SESSION_TOKEN"] = SESSION_TOKEN
+
+    print("⏳ Initializing...")
+    time.sleep(3)
+    print("📱 Fetching live UK/IE WIN markets with 7+ runners...")
+
+    try:
+        response = requests.post(
+            url="https://api.betfair.com/exchange/betting/json-rpc/v1",
+            headers={
+                "X-Application": "CZHojduNWa3kxWIn",
+                "X-Authentication": SESSION_TOKEN,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketCatalogue",
+                    "params": {
+                        "filter": {
+                            "eventTypeIds": ["7"],
+                            "marketCountries": ["GB", "IE"],
+                            "marketTypeCodes": ["WIN"],
+                            "marketStartTime": {
+                                "from": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            }
+                        },
+                        "marketProjection": ["RUNNER_DESCRIPTION", "MARKET_START_TIME", "EVENT"],
+                        "sort": "FIRST_TO_START",
+                        "maxResults": "1"
+                    },
+                    "id": 1
+                }
+            ])
+        )
+
+        result = response.json()[0].get("result", [])
+        if not result:
+            print("⚠️ No markets returned. Are you logged in?")
+            exit()
+
+        market = result[0]
+        market_id = market["marketId"]
+        runner = market["runners"][0]
+        selection_id = runner["selectionId"]
+
+        print(f"✅ Test Market: {market_id}")
+        print(f"🐎 Test Runner: {runner['runnerName']} (SelectionId: {selection_id})")
+
+        print("\n⭯️ Fetching live odds...\n")
+        odds = fetch_live_odds(
+            marketId=market_id,
+            selectionId=selection_id,
+            session_token=SESSION_TOKEN
+        )
+
+        print(f"✅ Live Odds for {runner['runnerName']}: {odds}")
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
