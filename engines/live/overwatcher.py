@@ -3,6 +3,8 @@
 import time, threading, sqlite3, json
 from datetime import datetime, timezone
 from engines.config_paths import auto_conn, q_retry as _q, autoscalp_db
+from engines.stoploss_engine import StopLossInputs, evaluate_stoploss
+
 try:
     from engines.live.live_router import _round_odds, _calc_hedge_stake, _ref, _place, _cancel
 except ImportError:
@@ -149,54 +151,136 @@ def _open_orders():
 
 # --- Stop-Loss ---------------------------------------------------------------
 
-# 📍 TARGET: engines/live/overwatcher.py
-# 🔎 SEARCH: def enforce_stop_losses\(default_ticks: int = 4\):\n[\s\S]*?except Exception as e:\n            print\("\[OVERWATCHER\]\[STOPLOSS\]", e\)
-# 📆 PATCHED: 2025-09-29T21:55Z
+# 📍 TARGET: engines/live/overwatcher.py:enforce_stop_losses
+# 📆 PATCHED: 2025-11-26Z — wire v7.9.5 StopLoss engine (no direct Betfair I/O)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def enforce_stop_losses(default_ticks: int = 4):
-    """Check open parents against current odds; emit stop-loss signal if breached."""
+    """
+    Evaluate stop-loss for each live parent entry using the v7.9.5 StopLoss engine.
+
+    This function:
+      • reads open parent orders from autoscalp_gui.db
+      • reads latest odds from odds_current for those (marketId, selectionId)
+      • calls stoploss_engine.evaluate_stoploss(..)
+      • emits a 'stop_loss_breached' decision event when threshold is hit
+
+    It does NOT place or cancel orders directly; live_router_bridge is responsible
+    for turning the decision event into a STOPLOSS child order.
+    """
+    # 1) Get all live, matched parents which are not fully exited yet
     rows = _open_orders()
     if not rows:
         return
+
+    # 2) Preload latest prices from odds_current for all markets in scope
+    mids = {str(r["marketId"]) for r in rows}
+
+    try:
+        with auto_conn(rw=False) as con:
+            con.row_factory = sqlite3.Row
+            if not mids:
+                return
+
+            placeholders = ",".join("?" * len(mids))
+            # Prefer lay1/back1, fall back to ltp; only for today's data to keep it tight
+            sql = f"""
+                SELECT marketId, selectionId,
+                       COALESCE(lay1, back1, ltp) AS px
+                  FROM odds_current
+                 WHERE day = date('now','utc')
+                   AND (lay1 IS NOT NULL OR back1 IS NOT NULL OR ltp IS NOT NULL)
+                   AND marketId IN ({placeholders})
+            """
+            cur = con.execute(sql, tuple(mids))
+            price_map = {}
+            for rec in cur:
+                mid = str(rec["marketId"])
+                sid = str(rec["selectionId"])
+                px = rec["px"]
+                if px is None:
+                    continue
+                # odds_current is already the latest snapshot per (mid,sid)
+                try:
+                    price_map[(mid, sid)] = float(px)
+                except (TypeError, ValueError):
+                    continue
+    except Exception as e:
+        # If price lookup fails, we skip this tick rather than throwing.
+        print(f"[OVERWATCHER][STOPLOSS] price scan error: {e}")
+        return
+
+    # 3) For each parent, run the StopLoss engine and emit decision events
     for r in rows:
         try:
-            mid, sid = str(r["marketId"]), str(r["selectionId"])
-            app_key, token = _keys()
-            odds = fetch_live_odds(token, mid, sid) or {}
-            odds_now = odds.get("lay") or odds.get("back")
-
-            if odds_now is None:
+            # Skip if we have already marked this parent as having triggered a stop-loss
+            if r["stop_loss_triggered"]:
                 continue
-            try:
-                odds_now = float(odds_now)
-            except Exception:
+
+            mid = str(r["marketId"])
+            sid = str(r["selectionId"])
+            current = price_map.get((mid, sid))
+            if current is None:
+                # No price yet for this runner in odds_current
                 continue
 
             entry_odds = float(r["entry_odds"] or 0.0)
-            if entry_odds <= 0.0:
+            stake = float(r["entry_stake"] or 0.0)
+            if entry_odds <= 0.0 or stake <= 0.0:
                 continue
 
-            from engines.daily_config import get_stop_ticks
-            stop_ticks = get_stop_ticks(entry_odds)
+            # For now all parents here are treated as Legacy, BALANCED mode.
+            # MicroScalper will call the engine separately with is_micro=True.
+            sl_in = StopLossInputs(
+                marketId=mid,
+                selectionId=sid,
+                side=(r["side"] or "").upper(),
+                entry_odds=entry_odds,
+                stake=stake,
+                is_micro=False,
+                risk_mode="BALANCED",
+            )
 
-            move_ticks = abs(_tick_distance(entry_odds, odds_now))
+            state = evaluate_stoploss(sl_in, current_odds=current)
 
-            if move_ticks >= stop_ticks and not r["stop_loss_triggered"]:
-                # 🔑 Instead of placing here, emit a structured event
-                event_sink.on_decision({
-                    "type": "stop_loss_breached",
-                    "parent_id": r["id"],
-                    "customerOrderRef": r["customerOrderRef"],
-                    "mid": mid,
-                    "sid": sid,
-                    "entry_odds": entry_odds,
-                    "odds_now": odds_now,
-                    "ticks_breached": move_ticks,
-                    "side": r["side"],
-                    "entry_stake": float(r["entry_stake"] or 0.0),
-                })
+            # Honour a hard minimum from default_ticks as a safety floor
+            hard_min = max(1, int(default_ticks or 0))
+            effective_threshold = max(state.final_stop_ticks, hard_min)
+            ticks_against = state.ticks_against
+            should_fire = ticks_against >= effective_threshold
+
+            if not should_fire:
+                continue
+
+            # Build a rich, but backwards-compatible, decision event.
+            # We include both marketId/selectionId and mid/sid for older handlers.
+            event = {
+                "type": "stop_loss_breached",
+                "parent_id": r["id"],
+                "customerOrderRef": r["customerOrderRef"],
+                "marketId": mid,
+                "mid": mid,
+                "selectionId": sid,
+                "sid": sid,
+                "side": (r["side"] or "").upper(),
+                "entry_odds": entry_odds,
+                "odds_now": current,
+                "ticks_breached": ticks_against,
+                "stop_ticks": effective_threshold,
+                "entry_stake": stake,
+                # v7.9.5 StopLoss diagnostics
+                "sleq": state.sleq,
+                "widening_factor": state.widening_factor,
+                "good_rate": state.good_rate,
+                "bad_rate": state.bad_rate,
+                "loss_per_tick": state.loss_per_tick,
+            }
+
+            event_sink.on_decision(event)
+
         except Exception as e:
+            # Do not let one bad row kill the whole Overwatcher loop
             print("[OVERWATCHER][STOPLOSS]", e)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def risk_weight(market_id: str, selection_id: str) -> float:

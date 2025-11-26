@@ -25,6 +25,14 @@ _SCOPE_STATE = {
 import sqlite3
 from datetime import datetime, timezone
 
+# === PATCH START ===
+# 📍 TARGET: engines/mastery/mastery_policy.py (global flags)
+# 📆 PATCHED: 2025-11-26 — Legacy-only mode enable
+ENABLE_LEGACY_ONLY = True
+LEGACY_FAMILIES = {"S","B","G","R","X","F","P","L","I","T","C","E","K","A","M"}  # Legacy letters only
+# === PATCH END ===
+
+
 # === PATCH: fav/field tags, movement, blueprint conf =========================
 import glob
 
@@ -93,171 +101,20 @@ def _fav_tags_for_market(mid: str, *, lo: float = 1.5, hi: float = 12.0) -> dict
             pass
 
 
-# === PATCH START ===
+# === PATCH: disable Overwatcher ingestion (A) ===
 # 📍 TARGET: engines/mastery/mastery_policy.py
-# 🔎 SEARCH: def consume_overwatcher_events(
-# ⛏️ ACTION: replace entire function with mastery_v7.db reader
-# 📆 PATCHED: 2025-11-21 — correct LIVE event ingestion (mastery_v7.db)
+# 🔎 SEARCH: def consume_overwatcher_events():
+# ⛏️ ACTION: replace entire function body
 def consume_overwatcher_events():
     """
-    Consume Overwatcher → Mastery signals from mastery_v7.db (events table).
-    Previously incorrect DB (bets.db) caused LIVE signals to be invisible.
-    Now reads only from mastery_v7.db via event_sink._open_mastery_conn().
+    Legacy-only mode:
+    Overwatcher-driven plans (stop-loss signals, emergency bailout,
+    credit updates, MLM liability hits) are disabled.
+    This function intentionally does nothing in legacy mode.
     """
-
-    try:
-        from engines.mastery.event_sink import _open_mastery_conn
-        con = _open_mastery_conn()           # <-- correct DB
-        con.row_factory = sqlite3.Row
-
-        rows = con.execute("""
-            SELECT rowid AS id, ts, message
-              FROM events
-             WHERE source='Mastery'
-               AND message LIKE 'MASTERY%'
-             ORDER BY rowid ASC
-             LIMIT 50
-        """).fetchall()
-
-        if not rows:
-            con.close()
-            return
-
-        for r in rows:
-            # message is "MASTERY {json...}"
-            try:
-                raw = r["message"].split(" ", 1)[1]
-                payload = json.loads(raw)
-            except Exception:
-                continue
-
-            etype = payload.get("type")
-
-            # ------------------------------------------------------------
-            # STOPLOSS EVENTS
-            # ------------------------------------------------------------
-            if etype in ("stop_loss_triggered", "stop_loss_breached"):
-                from engines.mastery.plan_ledger import record_plan
-
-                plan = {
-                    "enter": True,
-                    "marketId": payload.get("mid"),
-                    "selectionId": payload.get("sid"),
-                    "letter": "S",
-                    "direction": "BACK" if payload.get("side") == "LAY" else "LAY",
-                    "px": payload.get("odds_now"),
-                    "size": payload.get("hedge_stake", payload.get("entry_stake", 2.0)),
-                    "plan_why": etype,
-                }
-                record_plan(plan)
-
-                # re-emit to bridge so live_router sees it
-                try:
-                    from engines.mastery import event_sink
-                    event_sink.on_decision(plan)
-                except Exception as e:
-                    print(f"[consume_overwatcher_events] re-emit warn: {e}")
-
-            # ------------------------------------------------------------
-            # CREDIT UPDATES
-            # ------------------------------------------------------------
-            elif etype == "credit_update":
-                from engines.mastery.plan_ledger import record_plan
-
-                record_plan({
-                    "enter": False,
-                    "marketId": payload.get("mid"),
-                    "letter": "S",
-                    "direction": "",
-                    "px": 0.0,
-                    "size": 0.0,
-                    "plan_why": f"credit_update net={payload.get('net_credits')}",
-                })
-
-                try:
-                    from engines.mastery import event_sink
-                    event_sink.on_decision({
-                        "type": "credit_update",
-                        "mid": payload.get("mid"),
-                        "net_credits": payload.get("net_credits"),
-                    })
-                except Exception as e:
-                    print(f"[consume_overwatcher_events] re-emit warn: {e}")
-
-            # ------------------------------------------------------------
-            # STOPLOSS THRESHOLD HITS
-            # ------------------------------------------------------------
-            elif etype == "stop_loss_threshold_hit":
-                from engines.mastery.plan_ledger import record_plan
-
-                record_plan({
-                    "enter": False,
-                    "marketId": payload.get("mid"),
-                    "letter": "S",
-                    "direction": "",
-                    "px": 0.0,
-                    "size": 0.0,
-                    "plan_why": "market_bailout",
-                })
-
-                try:
-                    from engines.mastery import event_sink
-                    event_sink.on_decision({
-                        "type": "stop_loss_threshold_hit",
-                        "mid": payload.get("mid"),
-                        "net_credits": payload.get("net_credits"),
-                    })
-                except Exception as e:
-                    print(f"[consume_overwatcher_events] re-emit warn: {e}")
-
-            # ------------------------------------------------------------
-            # MLM LIABILITY SIGNALS (ALERT / EMERGENCY / CAP)
-            # ------------------------------------------------------------
-            elif etype == "liability_signal":
-                level = payload.get("level")
-                mid   = payload.get("marketId")
-                sid   = payload.get("selectionId")
-                liab  = float(payload.get("liability") or 0.0)
-
-                from engines.mastery.plan_ledger import record_plan
-                record_plan({
-                    "enter": False,
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "letter": "M",
-                    "direction": "",
-                    "px": 0.0,
-                    "size": 0.0,
-                    "confidence": 0.0,
-                    "plan_why": f"liability_{level}_£{liab:.2f}",
-                })
-
-                if level == "ALERT":
-                    print(f"[MASTERY][MLM] alert mid={mid} £{liab:.2f}")
-
-                elif level == "EMERGENCY":
-                    print(f"[MASTERY][MLM] emergency mid={mid} £{liab:.2f}")
-
-                elif level == "CAP":
-                    print(f"[MASTERY][MLM] cap-hit mid={mid} £{liab:.2f}")
-                    from engines.mastery import event_sink
-                    event_sink.on_decision({
-                        "type": "mlm_cap_hit",
-                        "marketId": mid,
-                        "liability": liab,
-                        "limit": 250.0,
-                        "ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-                    })
-
-        # cleanup consumed rows
-        last_id = rows[-1]["id"]
-        con.execute("DELETE FROM events WHERE rowid<=?", (last_id,))
-        con.commit()
-        con.close()
-
-    except Exception as e:
-        print(f"[Mastery] consume_overwatcher_events warn: {e}")
+    return None
 # === PATCH END ===
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1659,6 +1516,12 @@ def size_for_letter(ctx: dict, letter: str, *, confidence: float, direction: str
 # -----------------------------------------------------------------------------
 # Public planner (used by orchestrator): returns a plan with plan_why
 def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
+    # === PATCH START ===
+    # 📍 TARGET: mastery_policy.propose_trade
+    if ENABLE_LEGACY_ONLY:
+        return _legacy_only_propose(_enrich_ctx(context))
+    # === PATCH END ===
+
     """
     Mastery planner:
       • Enrich context (odds/time/WOM)
@@ -1964,9 +1827,53 @@ def _ensure_plan(fam: str, ctx: dict, plan: dict | None) -> dict:
 
     return p
 
+# === PATCH: future stubs for microscalp/MLM/stoploss (E) ===
+# 📍 TARGET: bottom of mastery_policy.py (before plan_for_strategy)
+# ⛏️ ACTION: add stub functions
+
+def _microscalp_plan(ctx: dict) -> dict | None:
+    """
+    FUTURE FEATURE:
+    Microscalping engine should produce ultra-low-latency scalp signatures.
+    Legacy-only mode disables this – return None.
+    """
+    return None
+
+def _mlm_live_plan(ctx: dict) -> dict | None:
+    """
+    FUTURE FEATURE:
+    Live MLM (liability manager) would create protection hedges.
+    Disabled in legacy mode – return None.
+    """
+    return None
+
+def _stoploss_exit_plan(ctx: dict) -> dict | None:
+    """
+    FUTURE FEATURE:
+    Stop-loss nodes (Overwatcher → Mastery) historically generated exits.
+    Legacy-only mode disables this – return None.
+    """
+    return None
+# === PATCH END ===
 
 # === PATCH: expose alias for decide_once / lanes ===
 def plan_for_strategy(fam: str, ctx: dict) -> dict:
+    # === PATCH START ===
+    # 📍 TARGET: mastery_policy.plan_for_strategy
+    if ENABLE_LEGACY_ONLY:
+        # Master letter extracted same way orchestrator does
+        letter = _FAM_LETTER.get(fam, fam[:1]).upper()
+        if letter not in LEGACY_FAMILIES:
+            return {
+                "enter": False,
+                "letter": letter,
+                "why": "legacy_only_disabled",
+                "px": float(ctx.get("odds") or ctx.get("px") or 0.0),
+                "target_ticks": 0,
+                "size": 0.0,
+            }
+    # === PATCH END ===
+
     mid = str(ctx.get("marketId") or "")
     sid = str(ctx.get("selectionId") or "")
     letter = _FAM_LETTER.get(fam, fam[:1])
