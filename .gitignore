@@ -49,3 +49,5 @@ reviews/**
 blueprint_signals_*.json
 mastery_snapshot*.json
 
+*.sb-*
+
