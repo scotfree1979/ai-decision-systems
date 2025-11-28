@@ -297,7 +297,21 @@ def _insert_pending_parent(*, mid: str, sid: str, letter: str, side: str,
         if "notes" in cols:
             add("notes", f"{letter}{trade_index:02d}")
 
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py:_insert_pending_parent
+# 🔎 SEARCH: add("source", str(letter))
+# 📆 PATCHED: 2025-11-28 — write stoploss_mode into pending parent row
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         add("source", str(letter))
+
+        # NEW: stop-loss mode from Mastery (Legacy: 3/4/5 ticks, MSC: 1/2/3)
+        try:
+            slm = str(plan.get("stoploss_mode") or "BALANCED").upper()
+        except Exception:
+            slm = "BALANCED"
+        add("stoploss_mode", slm)
+# === PATCH END ===
+
         add("opened_at", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
 
         # ensure this stays as “pre-claim” marker

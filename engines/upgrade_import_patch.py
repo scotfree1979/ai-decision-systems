@@ -20,8 +20,26 @@ def set_mode(m: str) -> None:
         m = "learning"
     _mode = m
 
+# === PATCH START ===
+# 📍 TARGET: engines/upgrade_import_patch.py
+# 🔎 SEARCH: def get_mode()
+# 📆 PATCHED: 2025-11-27Z — Delegate global mode to orchestrator._current_source
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_mode() -> str:
-    return _mode
+    """
+    Unified mode resolver.
+    Delegates to orchestrator._current_source()
+    so all engines (Mastery, Scope, ContextBuilder, DecideOnce) stay in-sync.
+    """
+    try:
+        # Late import avoids circular at module load time
+        from engines.decision_engine.orchestrator import _current_source
+        return _current_source().lower()
+    except Exception:
+        # absolute fallback to the legacy _mode
+        return _mode
+# === PATCH END ===
+
 
 # 📍 TARGET: engines/upgrade_import_patch.py
 # 🔎 SEARCH: def get_session_token

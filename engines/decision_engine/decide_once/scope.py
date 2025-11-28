@@ -533,6 +533,8 @@ from engines.market_monitor import monitor
 _SCOPE_STATE = {"markets": [], "active_sids": {}}
 
 def build_and_maintain_scope(*, inplay_window_min: int = 15, show_dashboard: bool = True) -> dict:
+    global _SCOPE_STATE
+
     """
     Build live-time-aware scope for TODAY only.
 

@@ -719,10 +719,25 @@ def run_all(run_id: str, *, source: str = "LIVE", logger=None) -> Optional[int]:
                 letter = _FAM_LETTER.get(fam_name, "?")
                 tick_report.setdefault(letter, "❌")  # ensure visible even if skipped
 
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/decide_once/decide_once.py:run_all
+# 🔎 SEARCH: fam_plan = fn(ctx)
+# 📆 PATCHED: 2025-11-28 — preserve stoploss_mode from Mastery in plan
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 try:
                     fam_plan = fn(ctx) if callable(fn) else mp.plan_for_strategy(fam_name, ctx)
                 except Exception:
                     fam_plan = {}
+
+                # NEW: ensure stoploss_mode persists from Mastery → DecideOnce → placement
+                try:
+                    slm = fam_plan.get("stoploss_mode")
+                    if slm:
+                        fam_plan["stoploss_mode"] = str(slm).upper()
+                except Exception:
+                    pass
+# === PATCH END ===
+
 
                 if not fam_plan or not fam_plan.get("enter"):
                     continue

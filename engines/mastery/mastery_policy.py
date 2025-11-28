@@ -1519,7 +1519,7 @@ def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
     # === PATCH START ===
     # 📍 TARGET: mastery_policy.propose_trade
     if ENABLE_LEGACY_ONLY:
-        return _legacy_only_propose(_enrich_ctx(context))
+        context = _enrich_ctx(context)
     # === PATCH END ===
 
     """

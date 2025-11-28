@@ -291,43 +291,230 @@ def emit(event_type: str, payload: dict):
 # ───────────────────────────────────────────────────────────────────────
 # 3️⃣  HIGH-LEVEL WRAPPERS (decision + feedback)
 # ───────────────────────────────────────────────────────────────────────
-def on_decision(payload: dict):
-    """Unified decision logger (redirected to mastery_v7.db)."""
-    try:
-        msg = "MASTERY " + json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    except Exception:
-        msg = "MASTERY {\"error\":\"serialize\"}"
+# ======================================================================
+# 📍 TARGET: engines/mastery/event_sink.py
+# 🔎 SEARCH: def on_decision(
+# 🛠 ACTION: add TSL integration inside on_decision() dispatcher
+# 📆 PATCHED: 2025-11-30
+# ======================================================================
+
+# === PATCH START =======================================================
+# 📆 PATCHED: 2025-11-30 — Trailing Stop-Loss → Mastery Training Layer
+
+def _ingest_tsl_event(ev: dict):
+    """
+    Normalise trailing stop-loss events for Mastery training.
+    This categorises TS-POS vs TS-NEG and logs into mastery_events,
+    playbooks, and v_mastery_intel_v7 (if available).
+    """
 
     try:
-        con = _open_mastery_conn()
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS events(
-                ts TEXT, level TEXT, source TEXT, message TEXT
+        parent_id = ev.get("parent_id")
+        mid       = str(ev.get("marketId"))
+        sid       = str(ev.get("selectionId"))
+        entry_odds = float(ev.get("entry_odds") or 0.0)
+        curr_odds  = float(ev.get("current_odds") or 0.0)
+        cls        = ev.get("classification") or "TS-UNK"
+        sleq_val   = float(ev.get("sleq") or 0.0)
+        reason     = ev.get("reason") or "TRAILING"
+
+        # ------------------------
+        # 1) mastery_events table
+        # ------------------------
+        try:
+            from engines.config_paths import connect_db
+            con = connect_db(ro=False)
+            con.row_factory = __import__("sqlite3").Row
+
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS mastery_events(
+                    event_type TEXT,
+                    details_json TEXT,
+                    created_at TEXT
+                )
+            """)
+
+            import json
+            payload = {
+                "kind": "trailing_stoploss",
+                "classification": cls,
+                "sleq": sleq_val,
+                "parent_id": parent_id,
+                "marketId": mid,
+                "selectionId": sid,
+                "entry_odds": entry_odds,
+                "current_odds": curr_odds,
+                "reason": reason,
+            }
+
+            con.execute(
+                "INSERT INTO mastery_events(event_type, details_json, created_at) "
+                "VALUES (?, ?, datetime('now','utc'))",
+                ("tsl_event", json.dumps(payload, separators=(',',':')) )
             )
-        """)
-        con.execute(
-            "INSERT INTO events(ts, level, source, message) VALUES (datetime('now','utc'),'INFO','Mastery',?)",
-            (msg,)
-        )
-        con.commit(); con.close()
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+
+        # ------------------------
+        # 2) Playbooks integration
+        # ------------------------
+        try:
+            from engines.config_paths import auto_conn as _adb
+            import json
+            adb = _adb()
+            adb.row_factory = __import__("sqlite3").Row
+
+            adb.execute("""
+                CREATE TABLE IF NOT EXISTS playbooks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day TEXT NOT NULL,
+                    marketId TEXT NOT NULL,
+                    selectionId INTEGER NOT NULL,
+                    strategy TEXT,
+                    oc_stage TEXT,
+                    pattern_key TEXT,
+                    band_low REAL,
+                    band_high REAL,
+                    entry_odds REAL,
+                    exit_odds REAL,
+                    pnl REAL,
+                    outcome TEXT,
+                    exposure REAL,
+                    confidence REAL,
+                    realized_at TEXT DEFAULT (datetime('now','utc')),
+                    meta_json TEXT,
+                    source TEXT DEFAULT 'LIVE'
+                )
+            """)
+
+            meta = json.dumps({
+                "classification": cls,
+                "sleq": sleq_val,
+                "reason": reason,
+                "created_by": "TSL-Engine",
+            }, separators=(',',':'))
+
+            adb.execute("""
+                INSERT INTO playbooks(
+                    day, marketId, selectionId,
+                    strategy, oc_stage, pattern_key,
+                    band_low, band_high,
+                    entry_odds, exit_odds, pnl, outcome,
+                    exposure, confidence, meta_json, source
+                )
+                VALUES(date('now','utc'), ?, ?, 'TSL', 'TSL',
+                       ?, NULL, NULL,
+                       ?, ?, 0.0, ?, 0.0, 1.0, ?, 'LIVE')
+            """, (
+                mid, sid,
+                f"TSL-{cls}",
+                entry_odds, curr_odds,
+                cls,
+                meta
+            ))
+            adb.commit()
+            adb.close()
+        except Exception:
+            pass
+
+        # ------------------------
+        # 3) v_mastery_intel_v7 (best-effort)
+        # ------------------------
+        try:
+            from engines.mastery.intel_updater import record_tsl_event
+            record_tsl_event({
+                "marketId": mid,
+                "selectionId": sid,
+                "classification": cls,
+                "sleq": sleq_val,
+                "entry_odds": entry_odds,
+                "current_odds": curr_odds,
+            })
+        except Exception:
+            # optional module; ignore silently
+            pass
+
     except Exception as e:
-        print(f"[event_sink] warn (on_decision): {e}")
+        print(f"[MASTERY][TSL] warn: {e}")
 
-    # ──────────────────────────────────────────────────────────────
-    # 🔁 NEW: broadcast payload to all live listeners immediately
-    # ──────────────────────────────────────────────────────────────
-    evt = dict(payload)
-    evt["type"] = payload.get("type", "decision")
 
+# hook into the main dispatcher
+# ============================================================================
+# 📍 TARGET: engines/mastery/event_sink.py
+# 🔎 SEARCH: (insert BEFORE the TSL wrapper block where `_original_on_decision`
+#             was previously referencing an undefined name)
+# 📆 PATCHED: 2025-12-01 — Restore original on_decision(), then wrap it.
+# ============================================================================
+
+# === PATCH START =============================================================
+# ORIGINAL on_decision restored (required before applying TSL wrapper)
+def on_decision(ev: dict):
+    """
+    Default Pass-Through Decision Dispatcher (pre-TSL).
+    This simply broadcasts the decision event to any listeners
+    and mirrors it through the unified event pipeline.
+    """
     try:
+        # Mirror into event queue
+        evt = dict(ev)
+        evt_type = evt.get("type")
+        from engines.mastery.event_sink import emit
+
+        # Let Mastery record non-TSL events via canonical emitter
+        if evt_type and isinstance(evt_type, str):
+            try:
+                emit(evt_type, evt)
+            except Exception:
+                pass
+
+        # Notify local listeners (GUI/Overwatcher, etc.)
+        global _listeners, _lock
         with _lock:
             for fn in list(_listeners):
                 try:
                     fn(evt)
-                except Exception as sub_e:
-                    print(f"[event_sink] listener warn (on_decision): {sub_e}")
-    except Exception as e:
-        print(f"[event_sink] broadcast warn (on_decision): {e}")
+                except Exception:
+                    pass
+
+    except Exception as _e:
+        print(f"[event_sink][default_on_decision] warn: {_e}")
+# === PATCH END ==============================================================
+
+
+# ============================================================================
+# 📍 TARGET: engines/mastery/event_sink.py
+# 🔎 SEARCH: the existing TSL wrapper block beginning with:
+#            `_original_on_decision = on_decision`
+# 📆 PATCHED: 2025-12-01 — Correct capture of original on_decision + wrapper
+# ============================================================================
+
+# === PATCH START =============================================================
+_original_on_decision = on_decision   # ← now safe; original exists above
+
+def on_decision(ev: dict):
+    """
+    Wrapper around original on_decision() that also ingests
+    Trailing Stop-Loss events into Mastery (TS-POS / TS-NEG).
+    """
+    try:
+        # TSL event detection
+        if isinstance(ev, dict) and ev.get("type") == "stop_loss_triggered":
+            try:
+                _ingest_tsl_event(ev)
+            except Exception as _tsl_e:
+                print(f"[MASTERY][TSL] wrap warn: {_tsl_e}")
+    except Exception:
+        pass
+
+    # Always call original dispatcher
+    return _original_on_decision(ev)
+# === PATCH END ===============================================================
+
+
+# === PATCH END =========================================================
+
 
 
 

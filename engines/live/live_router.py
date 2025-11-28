@@ -1678,6 +1678,120 @@ def _orders_insert_child_live(parent_cor: str, *, market_id: str, selection_id: 
 
 
 # --- PATCH END ----------------------------------------------------------
+# === PATCH START ==========================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _orders_insert_child_live
+# ⛏ ACTION: Insert new STOPLOSS helper immediately after this function
+# 📆 PATCHED: 2025-12-01
+# ==========================================================================
+
+def _place_stoploss_child_now(
+    parent_cor: str,
+    *,
+    market_id: str,
+    selection_id: str,
+    exit_side: str,
+    exit_odds: float,
+    parent_stake: float,
+    run_id: str | None = None
+) -> Optional[int]:
+    """
+    Immediate STOPLOSS child executor.
+    Called synchronously from Overwatcher trailing-stop-loss events.
+
+    - Does NOT use the background hedge thread
+    - Places stop-loss as a full flatten
+    - Uses 'STOPLOSS' exit_kind for DB clarity
+    - Returns child_id if placed, else None
+    """
+
+    try:
+        # 1) load parent row
+        con = _orders_conn(); con.row_factory = sqlite3.Row
+        parent = _q_retry(con, """
+            SELECT id, run_id
+              FROM orders
+             WHERE customerOrderRef=? LIMIT 1
+        """, (str(parent_cor),)).fetchone()
+        if not parent:
+            con.close()
+            return None
+
+        pid = int(parent["id"])
+        fk_run = int(parent["run_id"] or 0)
+
+        app_key, token = _keys()
+
+        # 2) prepare immediate STOPLOSS flatten stake (equal exposure)
+        exit_stake = float(parent_stake)
+
+        # 3) Betfair placeOrders (synchronous)
+        cref = _ref("SL")
+        bet_id, detail = _place(
+            app_key, token,
+            market_id, selection_id,
+            exit_side, float(exit_odds), float(exit_stake),
+            cref, persistence="LAPSE"
+        )
+
+        if not bet_id:
+            con.close()
+            return None
+
+        # 4) Insert CHILD row now
+        cur = con.cursor()
+        _q_retry(cur, """
+            INSERT INTO orders(
+              customerOrderRef, run_id, mode,
+              marketId, selectionId,
+              side, entry_odds, entry_stake,
+              entry_status, opened_at,
+              entry_bet_id,
+              role, hedge_of, source, exit_kind
+            )
+            VALUES (?, ?, 'LIVE',
+                    ?, ?,
+                    ?, ?, ?,
+                    'matched', datetime('now','utc'),
+                    ?,
+                    'CHILD', ?, 'S', 'STOPLOSS')
+        """, (
+            cref, fk_run,
+            str(market_id), str(selection_id),
+            exit_side.upper(), float(exit_odds), float(exit_stake),
+            str(bet_id), pid
+        ))
+        child_id = cur.lastrowid
+        con.commit()
+
+        # 5) Update parent exit fields
+        _q_retry(cur, """
+            UPDATE orders
+               SET exit_status='matched',
+                   exit_kind='STOPLOSS',
+                   closed_at=datetime('now','utc'),
+                   exit_odds=?, exit_stake=?
+             WHERE customerOrderRef=?
+        """, (float(exit_odds), float(exit_stake), str(parent_cor)))
+        con.commit()
+        con.close()
+
+        _log_event("INFO", "live_router",
+                   f"[SL-IMMEDIATE] parent={parent_cor} bet={bet_id} exit_odds={exit_odds}")
+
+        return int(child_id)
+
+    except Exception as e:
+        try:
+            con.close()
+        except:
+            pass
+        _log_event("ERROR", "live_router",
+                   f"_place_stoploss_child_now failed ref={parent_cor}: {e}")
+        return None
+
+# === PATCH END ============================================================
+
 
 def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
     """

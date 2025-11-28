@@ -79,6 +79,38 @@ from engines.decision_engine.decide_once.helpers import (
 import sqlite3
 from engines.config_paths import auto_conn as __cp_auto_conn, q_retry as __cp_q_retry
 
+# === PATCH START (EARLY LOAD) ===
+# Canonical mode resolver - DAL is source of truth.
+try:
+    from engines.config_paths import DAL_MODE
+except Exception:
+    DAL_MODE = "TEST"
+
+def _current_source() -> str:
+    """
+    EARLY-LOADED mode resolver.
+    DAL is authoritative:
+        LIVE DAL      -> LIVE
+        TEST DAL      -> TEST
+        SETUP/LEARNING -> LEARNING
+    """
+    try:
+        dm = str(DAL_MODE).upper()
+        if dm in ("LIVE", "TEST", "LEARNING", "SETUP"):
+            # SETUP means LIVE about to start, but we treat SETUP as LIVE
+            return "LIVE" if dm == "SETUP" else dm
+    except Exception:
+        pass
+
+    # Fallback to upgrade_import_patch shim
+    try:
+        from engines.upgrade_import_patch import get_mode
+        return str(get_mode()).upper()
+    except Exception:
+        return "TEST"
+# === PATCH END (EARLY LOAD) ===
+
+
 def auto_conn(*_args, **_kwargs):
     con = __cp_auto_conn()
     try: con.row_factory = sqlite3.Row
@@ -263,55 +295,6 @@ def _can_open_scalp(market_id: str, selection_id: str, *,
 # ── Source / Mode resolver (TEST | LEARNING | LIVE) ──────────────────────────
 _SOURCE_OVERRIDE: str | None = None
 
-def _current_source() -> str:
-    """
-    Return the process' current mode tag: 'TEST' | 'LEARNING' | 'LIVE'.
-    Resolution order (first hit wins), always UPPERCASE:
-      1) Explicit override set via _set_current_source_override(...)
-      2) engines.upgrade_import_patch.get_mode() (if available)
-      3) Environment: AUTOSCALP_MODE (or MODE)
-         - accepts 'REPLAY' as an alias of 'TEST'
-      4) engines.daily_config.MODE (if present)
-      5) Default: 'TEST'
-    """
-    # 1) explicit override (used by tests/tools)
-    if _SOURCE_OVERRIDE:
-        return str(_SOURCE_OVERRIDE).upper()
-
-    # 2) upgrade shim (GUI/Step buttons usually set this)
-    try:
-        from engines.upgrade_import_patch import get_mode  # type: ignore
-        m = get_mode()
-        if m:
-            mu = str(m).upper()
-            if mu in ("TEST", "LEARNING", "LIVE"):
-                return mu
-    except Exception:
-        pass
-
-    # 3) environment
-    import os
-    m = os.environ.get("AUTOSCALP_MODE") or os.environ.get("MODE")
-    if m:
-        mu = str(m).upper()
-        if mu in ("TEST", "LEARNING", "LIVE"):
-            return mu
-        if mu == "REPLAY":
-            return "TEST"  # friendly alias
-
-    # 4) daily_config fallback
-    try:
-        import engines.daily_config as dc
-        m = getattr(dc, "MODE", None)
-        if m:
-            mu = str(m).upper()
-            if mu in ("TEST", "LEARNING", "LIVE"):
-                return mu
-    except Exception:
-        pass
-
-    # 5) default
-    return "TEST"
 
 def _set_current_source_override(mode: str | None) -> None:
     """
@@ -3135,12 +3118,192 @@ def start_learning_loop(run_id: str, hz: int = 2, logger=None) -> None:
 
         time.sleep(interval)
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: def start_live_loop(*args, **kwargs):
+# ⛏️ ACTION: INSERT the following block **above** start_live_loop
+# 📆 PATCHED: 2025-11-27 — Storage Housekeeper (WAL/SHM cleanup + VACUUM)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# === STORAGE HOUSEKEEPER (LOCAL + CLOUD) ===================================
+import threading, signal, sqlite3, glob
+
+# Absolute cloud DB path (you provided this explicitly)
+_CLOUD_GUI_DB = "/Users/malachikelly/Library/Mobile Documents/com~apple~CloudDocs/AutoScalpCache/autoscalp_gui_cache.db"
+
+# List of DBs to maintain
+_DB_TARGETS = [
+    "data/autoscalp_gui.db",
+    "data/bets.db",
+    "data/settlements.db",
+    "data/mastery_v7.db",
+]
+
+# Local + cloud DBs for WAL/SHM deletion
+_WAL_SHM_TARGETS = [
+    "data/autoscalp_gui.db",
+    "data/bets.db",
+    "data/settlements.db",
+    "data/mastery_v7.db",
+    _CLOUD_GUI_DB,
+]
+
+def _safe_checkpoint(path: str):
+    """Run FULL checkpoint safely on a DB path (local or cloud)."""
+    try:
+        con = sqlite3.connect(path, timeout=5)
+        con.execute("PRAGMA wal_checkpoint(FULL);")
+        con.close()
+    except Exception:
+        pass
+
+def _safe_checkpoint_all():
+    """Checkpoint all databases to minimise WAL growth."""
+    for db in _DB_TARGETS + [_CLOUD_GUI_DB]:
+        _safe_checkpoint(db)
+
+def _delete_wal_shm(path: str):
+    """Delete WAL and SHM for a specific database path."""
+    try:
+        if path.endswith(".db"):
+            wal = path + "-wal"
+            shm = path + "-shm"
+            for f in (wal, shm):
+                if os.path.exists(f):
+                    os.remove(f)
+    except Exception:
+        pass
+
+def _delete_wal_shm_all():
+    """Delete WAL/SHM for all DBs (local + cloud)."""
+    for db in _WAL_SHM_TARGETS:
+        _delete_wal_shm(db)
+
+def _vacuum_db(path: str):
+    """VACUUM a database after WAL/SHM deletion."""
+    try:
+        con = sqlite3.connect(path, timeout=10)
+        con.execute("VACUUM;")
+        con.close()
+    except Exception:
+        pass
+
+def _prune_blueprint_jsons():
+    """Keep only the latest 3 blueprint files and latest 3 JSON files."""
+    base = os.path.join(_ROOT, "data")
+    # Blueprints
+    bp = sorted(glob.glob(os.path.join(base, "blueprint_*.json")), key=os.path.getmtime, reverse=True)
+    for old in bp[3:]:
+        try: os.remove(old)
+        except Exception: pass
+
+    # General JSON dumps
+    js = sorted(glob.glob(os.path.join(base, "*.json")), key=os.path.getmtime, reverse=True)
+    for old in js[3:]:
+        try: os.remove(old)
+        except Exception: pass
+
+def _storage_housekeeper_worker(interval=300):
+    """
+    Background thread:
+      • Checkpoint every 5 minutes (reduce WAL)
+      • Prune old JSON/blueprints
+    """
+    while True:
+        try:
+            _safe_checkpoint_all()
+            _prune_blueprint_jsons()
+        except Exception:
+            pass
+        time.sleep(max(60, int(interval)))
+
+
+def _clean_shutdown_handler(signum, frame):
+    """
+    SAFE SHUTDOWN:
+      1. Checkpoint all DBs
+      2. Close orchestrator DB connections
+      3. Delete WAL/SHM
+      4. VACUUM local DBs
+      5. Exit immediately
+    """
+    print("[HOUSEKEEPER] Clean shutdown requested — running DB cleanup...", flush=True)
+
+    try:
+        _safe_checkpoint_all()
+    except Exception:
+        pass
+
+    try:
+        _close_conns()
+    except Exception:
+        pass
+
+    try:
+        _delete_wal_shm_all()
+    except Exception:
+        pass
+
+    # Vacuum only local DBs
+    for db in _DB_TARGETS:
+        _vacuum_db(db)
+
+    print("[HOUSEKEEPER] Cleanup complete. Exiting safely.", flush=True)
+    os._exit(0)
+
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: def start_live_loop(
+# 📆 PATCHED: 2025-11-28 — Integrate MicroScalper v7 (Exploratory, Risk, In-Play)
+
 def start_live_loop(*args, **kwargs):
+    # ─────────────────────────────────────────────────────────
+    # NEW: Instantiate MicroScalperEngine v7
+    # ─────────────────────────────────────────────────────────
+    from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+    msc = MicroScalperEngine()
+
+    # Force orchestrator source mode = LIVE (existing code preserved)
+    from engines.decision_engine.orchestrator import _set_current_source_override
+    _set_current_source_override("LIVE")
+    # === PATCH END INSERTION ===
+    # REMOVE these two lines:
+    # signal.signal(signal.SIGINT, _clean_shutdown_handler)
+    # signal.signal(signal.SIGTERM, _clean_shutdown_handler)
+
+
+    # ADD this instead:
+    import atexit
+    atexit.register(_clean_shutdown_handler)
+    print("[HOUSEKEEPER] atexit shutdown hook registered")
+
+
+    # HOUSEKEEPER: Launch background WAL/SHM minimiser
+    try:
+        import threading
+        t = threading.Thread(
+            target=_storage_housekeeper_worker,
+            kwargs={"interval": 300},
+            name="StorageHousekeeper",
+            daemon=True,
+        )
+        t.start()
+        print("[HOUSEKEEPER] Background WAL/SHM cleaner started")
+    except Exception as e:
+        print(f"[HOUSEKEEPER] warn: {e}")
     # Pre-bind logger to avoid UnboundLocalError if it’s assigned later in this function
     logger = kwargs.get("logger", None)
     run_id = kwargs.get("run_id", None)
     hz = float(kwargs.get("hz", 2))
     interval = max(0.25, 1.0 / (hz or 2.0))
+
+    # === PATCH START ===
+    # 📍 TARGET: engines/decision_engine/orchestrator.py
+    # 🔎 SEARCH: def start_live_loop(
+    # 📆 PATCHED: 2025-11-27Z — explicitly set global mode=LIVE
+    #from engines.upgrade_import_patch import set_mode
+    #set_mode("live")
+    # === PATCH END ===
 
     # === PATCH START ===
     # 📍 TARGET: engines/decision_engine/orchestrator.py:start_live_loop
@@ -3229,8 +3392,25 @@ def start_live_loop(*args, **kwargs):
     import engines.decision_engine.decide_once.helpers as _r_helpers
     importlib.reload(_r_helpers)
 
-    print("[LIVE DAL] reload complete (11 writer modules)")
+
     # === PATCH END ===
+
+    # === PATCH START ===
+    # 📍 TARGET: engines/decision_engine/orchestrator.py
+    # 🔎 SEARCH: "[LIVE DAL] reload complete (11 writer modules)"
+    # 📆 PATCHED: 2025-11-27 — Set mode to LIVE after reload
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    print("[LIVE DAL] reload complete (11 writer modules)")
+
+    # Force orchestrator + upgrade_import_patch into LIVE mode after reload
+    from engines.upgrade_import_patch import set_mode
+    set_mode("live")
+
+    from engines.decision_engine.orchestrator import _set_current_source_override
+    _set_current_source_override("LIVE")
+
+    # === PATCH END ===
+
 
 
 
@@ -3333,6 +3513,36 @@ def start_live_loop(*args, **kwargs):
                         _ = _refresh_odds_cache_for_scope(sc)
             except Exception as _e:
                 if logger: logger(f"[odds] refresh warn: {_e}")
+
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: # 1) Core decision engine
+# 📆 PATCHED: 2025-11-28 — MicroScalper tick + routing
+
+            # 0.5) MicroScalperEngine — PRE-OFF, RISK, IN-PLAY
+            try:
+                # Build ctx for MicroScalper
+                ctx = {
+                    "marketId": current_mid,
+                    "selectionId": current_sid,
+                    "current_price": current_price,
+                    "oc_phase": oc_phase,
+                    "legacy_parent_id": getattr(_pf, "last_parent_id", None),
+                    "legacy_entry_side": getattr(_pf, "last_parent_entry", None),
+                    "stoploss_triggered_for_parent": _r_overwatcher.get_stoploss_trigger(),
+                    "dynamic_stake_fn": dynamic_stake_v7,
+                    # include ALL enriched v7-intel fields already injected by context_builder
+                    **current_ctx_v7
+                }
+
+                msc_plan = msc.tick(ctx)
+                if msc_plan:
+                    # Route micro-scalper plan to LiveRouter
+                    from engines.live.live_router import queue_order
+                    queue_order(msc_plan, logger=logger)
+            except Exception as e:
+                logger(f"[MSC] warn: {e}")
+
 
 
             # 1) Core decision engine

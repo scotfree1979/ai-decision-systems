@@ -154,67 +154,79 @@ SPRINT = {
     },
 
     # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.5 — EXECUTION ARCHITECTURE (LEGACY + OVERWATCHER)
+    # PHASE 7.9.5 — EXECUTION ARCHITECTURE REBUILD (LEGACY UNCOUPLED)
     # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.5 – Brain-Integrated Execution Architecture": {
-        "status": "🧭",
+    "Phase 7.9.5 – Execution Architecture Rebuild (Legacy Uncoupled)": {
+        "status": "✔",
         "tasks": [
-            "🧠 Lock in unified architecture: Legacy + Overwatcher + MicroScalper + StopLoss + v7 Brain",
-            "📚 Finalise contracts: ctx → Plan → PlanLedger → LiveRouter → orders",
-            "🔤 Finalise letter / subtype model (A/B/G… and AA/BB/SS overlays)",
-            "📌 Define per-runner/per-letter caps and slot model (A1/A2/A3, 3 parents max)",
-            "📌 Define per-trade tick-based StopLoss (entry_odds + stop_ticks via price_math)",
-            "📌 Define MicroScalper behaviour inside stop corridor (drift/steam ebbs and flows)",
-            "📚 Freeze this spec as the reference for all 7.9.5–7.9.8 work"
+            "✔ Fully decouple Legacy execution — Legacy now only opens the parent; all management external",
+            "✔ Install unified execution flow: CTX → MicroScalper v7 → Overwatcher → LiveRouter → orders",
+            "✔ Replace entire stop-loss layer with dynamic Trailing Stop-Loss Engine (TSL)",
+            "✔ Install new MicroScalper v7 folder structure (exploratory, risk, inplay, intel, utils, state machine)",
+            "✔ Standardise mid/sid/ltp/anchor/phase/oc_phase model across all engines",
+            "✔ Remove old enforced stop-ticks and hard-coded stop-loss paths from all components",
+            "✔ Freeze new architecture as the foundation for remaining 7.9.x phases"
         ]
     },
 
     # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.6 — LEGACY DECISION ENGINE & CTX REBUILD
+    # PHASE 7.9.6 — CTX v7 REBUILD + LANES NORMALISATION
     # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.6 – Legacy Decision Engine & CTX v7 Integration": {
-        "status": "🧭",
+    "Phase 7.9.6 – CTX v7 Rebuild + Lanes Normalisation": {
+        "status": "✔",
         "tasks": [
-            "🧱 Clean up context_builder/context_builder_next to use live schema only",
-            "🧱 Ensure ctx includes v7 features (v_mastery_intel_v7, v_timing_features_v7, v_mastery_brain_input)",
-            "🧠 Prune/adjust lanes so they only reference real ctx fields and views",
-            "📋 Normalise plans: letter, family, direction, px, size, target_ticks, stop_ticks, confidence",
-            "📚 Wire mastery_policy to enforce per-letter stake rules and caps (max_open_parents per letter/runner)",
-            "📁 Ensure PlanLedger writes complete plan rows (plan_json, plan_why, letter, family, target_ticks…)",
-            "📦 Ensure placement.py picks up READY plans and calls place_parent_and_hedge() with _plan/_ctx"
+            "✔ Rebuild CTX to use only real schema-backed fields (odds_current, inbound_oc_cache, mastery views)",
+            "✔ Add v7 intelligence signals into CTX: slope_ppm, drift_speed, WOM, anchor, oc bands, p_fill, timing",
+            "✔ Ensure ctx uses modern OC-phase (OC0–OC7 pre-off, OC7+ in-play) across engines",
+            "✔ Clean all lanes of deprecated fields and incorrect ctx lookups",
+            "✔ Normalise plan structure: letter, family, subtype, direction, px, size, target_ticks, hedge_ticks",
+            "✔ Ensure MasteryPolicy governs confidence, family-level logic, and stake rules",
+            "✔ Update PlanLedger to store complete plan rows, plan_json, plan_why, metadata",
+            "✔ Ensure placement.py uses unified ctx/plan and routes correctly into place_parent_and_hedge",
+            "✔ Add robust px resolvers (odds_current → inbound_oc_cache → oc_series → API fallback)"
         ]
     },
 
     # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.7 — OVERWATCHER, EVENTSYNC & MICROSCALPER
+    # PHASE 7.9.7 — OVERWATCHER v7, EVENT SINK v7 & MICROSCALPER v7
     # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.7 – Overwatcher, EventSync & MicroScalper": {
-        "status": "🧭",
+    "Phase 7.9.7 – Overwatcher v7, EventSink v7 & MicroScalper v7": {
+        "status": "✔",
         "tasks": [
-            "🧠 Audit Overwatcher event types vs live_router_bridge handlers (type → plan mapping)",
-            "📡 Standardise decision event shape: type, marketId, selectionId, side/direction, stake, odds, letter, ts",
-            "📶 Wire MicroScalper to drift/steam signals (trend_features, v7_intelligence, microscope_feed)",
-            "📉 Implement micro_scalp events: stack/hedge scalps within stop corridor",
-            "🔤 Ensure MicroScalper emits correct letters/subtypes (AA/BB overlays on base letters)",
-            "📡 Ensure Overwatcher Guardian events (loss_cut_signal, greenup, mlm_cap_hit) are cleanly separated from per-trade StopLoss",
-            "📚 Wire EventSync so actionable events always hit live_router_bridge.handle_mastery_event()"
+            "✔ Rewrite Overwatcher as full market intelligence layer (Guardian, MLM, probability risk, green-up, cooldown)",
+            "✔ EventSink v7 rewrite: WAL-safe queue writer, mastery_v7.db routing, unified event mirror + caching",
+            "✔ Install unified bridge: Overwatcher → LiveRouterBridge → _place functions",
+            "✔ Add v7 bridge subscription to event_sink (handle_mastery_event)",
+            "✔ Add TSL→RiskEngine bridge: stop-loss events now feed MicroScalper’s parent-specific cleanup",
+            "✔ Integrate MicroScalper v7: Exploratory pre-off engine, Risk engine (per-parent), In-Play intelligent layer",
+            "✔ Add micro-scalper ctx injection: stoploss_triggered_for_parent, legacy_entry_side, expected_direction",
+            "✔ Add correct MSC family/subtype codes: MSC_EXPLORE / MSC_RISK / MSC_IP",
+            "✔ Update Overwatcher to print and forward micro events without interfering with STOPLOSS",
+            "✔ Upgrade price_math to full Betfair tick ladder (353 ticks), walk_ticks(), snap_to_tick(), tick_distance()",
+            "✔ Ensure MicroScalper v7 feeds drift/steam, microstructure, band features, breakout, WOM, range tracking",
+            "✔ Add complete diagnostic engine (non-trading), fully CTX-compatible"
         ]
     },
 
     # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.8 — STOPLOSS ENGINE & EXECUTION
+    # PHASE 7.9.8 — DYNAMIC TRAILING STOP-LOSS ENGINE (TSL) v1.0
     # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.8 – Per-Trade StopLoss & Risk Execution": {
-        "status": "🧭",
+    "Phase 7.9.8 – Dynamic Trailing Stop-Loss (TSL) Engine v1.0": {
+        "status": "✔",
         "tasks": [
-            "🧮 Implement per-parent StopLoss loop (ticks_moved_against_entry ≥ stop_ticks via price_math)",
-            "📡 Emit stoploss decision events with parent_ref, parent_side, entry_odds, entry_stake, stop_ticks, trigger_ticks",
-            "🧠 Map stoploss events through live_router_bridge to place STOPLOSS children via place_parent_and_hedge()",
-            "📋 Ensure exit_kind='STOPLOSS' flows through orders, playbooks_settled, training views",
-            "⚖️ Ensure MicroScalper operates inside stop corridor while StopLoss is hard boundary",
-            "🔍 Confirm separation between per-trade StopLoss and global/budget risk (BudgetManager/Guardian)",
+            "✔ Implement unified TSL Engine (BOUNDARY, TRAILING, SLEQ widening, TS-POS / TS-NEG classification)",
+            "✔ Add dynamic trailing logic: 10% of movement, BASE_MIN_TRAIL_TICKS, SLEQ wideners",
+            "✔ Add SLEQ reinforcement learning (positive stops increase SLEQ, negative stops decrease)",
+            "✔ Add classification for Mastery training: trailing_positive vs trailing_negative",
+            "✔ Integrate immediate STOPLOSS execution in Overwatcher → LiveRouter (_place_stoploss_child_now)",
+            "✔ Install global TSL bridge: stop-loss events become ctx inputs for RiskEngine cleanup",
+            "✔ Remove all legacy stop-ticks and hard-coded stop-loss logic from LiveRouter & Overwatcher",
+            "✔ Add TSL ingestion to EventSink v7: mastery_events, playbooks, intel_updater, v_mastery_intel_v7",
+            "✔ Validate full end-to-end path: TSL → Overwatcher → LiveRouter → orders (exit_kind='STOPLOSS')",
+            "✔ Completed trailing tests: boundary_low/high, favourable-move, pullback scenarios, SLEQ behaviour"
         ]
     },
+
 
     # ───────────────────────────────────────────────────────────────
     # PHASE 7.9.9 — DASHBOARD INTELLIGENCE & GUI SYNC (old 7.9.5)

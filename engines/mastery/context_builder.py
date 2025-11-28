@@ -49,13 +49,56 @@ def _iso(ts: Optional[datetime]) -> str:
     if not ts: return ""
     return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+# === PATCH START ===
+# 📍 TARGET: engines/mastery/context_builder.py:_current_source_upper
+# 📆 PATCHED: 2025-11-27 — unify source resolver without importing orchestrator
+
 def _current_source_upper() -> str:
+    """
+    Unified mode resolver — identical to orchestrator._current_source()
+    but implemented locally to avoid circular imports.
+    
+    Order:
+      1) engines.upgrade_import_patch.get_mode()
+      2) AUTOSCALP_MODE / MODE env vars
+      3) engines.daily_config.MODE
+      4) default TEST
+    """
+    # 1) upgrade_import_patch.get_mode()
     try:
         from engines.upgrade_import_patch import get_mode  # type: ignore
-        m = (get_mode() or os.environ.get("AUTOSCALP_MODE") or "TEST").upper()
+        m = get_mode()
+        if m:
+            mu = str(m).upper()
+            if mu in ("TEST", "LEARNING", "LIVE"):
+                return mu
     except Exception:
-        m = (os.environ.get("AUTOSCALP_MODE") or "TEST").upper()
-    return "TEST" if m not in ("TEST", "LEARNING", "LIVE") else m
+        pass
+
+    # 2) environment variables
+    import os
+    m = os.environ.get("AUTOSCALP_MODE") or os.environ.get("MODE")
+    if m:
+        mu = str(m).upper()
+        if mu in ("TEST", "LEARNING", "LIVE"):
+            return mu
+        if mu == "REPLAY":
+            return "TEST"
+
+    # 3) daily_config fallback
+    try:
+        import engines.daily_config as dc
+        m = getattr(dc, "MODE", None)
+        if m:
+            mu = str(m).upper()
+            if mu in ("TEST", "LEARNING", "LIVE"):
+                return mu
+    except Exception:
+        pass
+
+    # 4) default
+    return "TEST"
+# === PATCH END ===
 
 # === PATCH START ===
 # 📍 TARGET: engines/mastery/context_builder.py:_open_adb
@@ -627,7 +670,8 @@ def build_context(source: str | None = None) -> tuple[dict, dict]:
     Unified context builder using global Scope + MarketMonitor + Bias.
     Always defers market/runner selection to Scope.
     """
-    from engines.decision_engine.decide_once.scope import _SCOPE_STATE
+    from engines.mastery.mastery_policy import _SCOPE_STATE
+
     from engines.market_monitor.monitor import get_market_state
     from engines.bias.engine import compute_bias
 

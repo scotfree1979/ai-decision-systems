@@ -96,3 +96,13 @@ def walk_ticks(start_odds: float, ticks: int, direction: str = "up") -> float:
     except ValueError:
         return round(start_odds, 2)
 # === PATCH END ===
+
+def odds_plus_ticks(start_odds: float, ticks: int) -> float:
+    """
+    Universal wrapper used everywhere (TSL, router, Overwatcher).
+    Adds or subtracts ticks FROM the price (up = drift, down = steam).
+    """
+    if ticks == 0:
+        return round(float(start_odds), 2)
+    return walk_ticks(start_odds, abs(int(ticks)),
+                      direction="up" if ticks > 0 else "down")
