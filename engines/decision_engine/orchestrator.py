@@ -3514,35 +3514,23 @@ def start_live_loop(*args, **kwargs):
             except Exception as _e:
                 if logger: logger(f"[odds] refresh warn: {_e}")
 
-# === PATCH START ===
+# === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: # 1) Core decision engine
-# 📆 PATCHED: 2025-11-28 — MicroScalper tick + routing
+# 🔎 SEARCH: # 0.5) MicroScalperEngine — PRE-OFF, RISK, IN-PLAY
+# 📆 PATCHED: 2025-11-29 — REMOVE invalid MSC ctx in start_live_loop
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-            # 0.5) MicroScalperEngine — PRE-OFF, RISK, IN-PLAY
-            try:
-                # Build ctx for MicroScalper
-                ctx = {
-                    "marketId": current_mid,
-                    "selectionId": current_sid,
-                    "current_price": current_price,
-                    "oc_phase": oc_phase,
-                    "legacy_parent_id": getattr(_pf, "last_parent_id", None),
-                    "legacy_entry_side": getattr(_pf, "last_parent_entry", None),
-                    "stoploss_triggered_for_parent": _r_overwatcher.get_stoploss_trigger(),
-                    "dynamic_stake_fn": dynamic_stake_v7,
-                    # include ALL enriched v7-intel fields already injected by context_builder
-                    **current_ctx_v7
-                }
+# REMOVE the entire block beginning with:
+#   # 0.5) MicroScalperEngine — PRE-OFF, RISK, IN-PLAY
+# and ending right before:
+#   # 1) Core decision engine
 
-                msc_plan = msc.tick(ctx)
-                if msc_plan:
-                    # Route micro-scalper plan to LiveRouter
-                    from engines.live.live_router import queue_order
-                    queue_order(msc_plan, logger=logger)
-            except Exception as e:
-                logger(f"[MSC] warn: {e}")
+# Replace it with a no-op (keeps structure clean):
 
+# 0.5) MicroScalperEngine — removed (handled inside lanes.run_all)
+
+
+# === PATCH END ==============================================================
 
 
             # 1) Core decision engine
@@ -3564,6 +3552,46 @@ def start_live_loop(*args, **kwargs):
                         logger(f"[dbg] {line}")
 
             # ---------------------------------------------------------------------
+# === PATCH END ===
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH:     # 1) Core decision engine
+# 📆 PATCHED: 2025-11-29 — Restore DecideOnce + MSC per-tick execution
+# ====================================================================
+
+            # ----------------------------------------------------------
+            # LIVE DECISION ENGINE (Legacy + MicroScalper)
+            # ----------------------------------------------------------
+            try:
+                from engines.decision_engine.decide_once.decide_once import decide_once
+                decide_once(run_id, source_override="LIVE", logger=logger)
+            except Exception as e:
+                logger and logger(f"[HEALTH] decide_once FAIL: {e}")
+
+            # ----------------------------------------------------------
+            # DIRECT MICROSCALPER TICK (safety net — should be redundant,
+            # but ensures MSC always fires even if legacy has no parents)
+            # ----------------------------------------------------------
+            try:
+                from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+                msc = start_live_loop.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+
+                # Build minimal ctx for MSC when legacy is silent
+                _ctx = {
+                    "marketId": current_mid,
+                    "selectionId": current_sid,
+                    "current_price": current_price,
+                    "oc_phase": oc_phase,
+                    "dynamic_stake_fn": dynamic_stake_v7,
+                    **current_ctx_v7
+                }
+                plan = msc.tick(_ctx)
+                if plan:
+                    from engines.live.live_router import queue_order
+                    queue_order(plan, logger=logger)
+            except Exception as e:
+                logger and logger(f"[MSC] tick warn: {e}")
+
 # === PATCH END ===
 
 

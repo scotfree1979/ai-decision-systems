@@ -70,10 +70,11 @@ def check_overwatcher_state():
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/overwatcher.py:_on_bridge_pulse
-# 📆 PATCHED: 2025-11-10Z — ignore empty brain pulses (no mid/sid)
+# 📆 PATCHED: 2025-12-01 — store last valid brain pulse for MSC + ignore empty pulses
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import time
-_last_brain_note = [0]  # module-level mutable container
+_last_brain_note = [0]       # module-level mutable container (existing)
+_last_brain_pulse = [None]   # NEW: stores last full valid pulse (same style)
 
 def _on_bridge_pulse(payload):
     try:
@@ -104,6 +105,9 @@ def _on_bridge_pulse(payload):
             "target_ticks": 1,
             "ts": ts,
         }
+
+        # NEW: store the last full valid pulse for MSC consumption
+        _last_brain_pulse[0] = dict(plan)
 
         print(f"[OVERWATCHER][BRAIN] 🧠 bridge pulse mid={mid} sid={sid} coh={coh:.2f} adj={adj:+.2f}")
         send_plan_through_bridge(plan)

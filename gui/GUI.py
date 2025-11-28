@@ -1353,42 +1353,43 @@ def _update_bets_anchor(mid: str, sid: int | str, lay: float, dbg=lambda *_a, **
     finally:
         try: con_ro.close()
         except Exception: pass
-# === PATCH START ===
-# 📍 TARGET: gui/GUI.py
-# 🔎 SEARCH: if not row:
-# 📆 PATCHED: 2025-10-08T23:15Z — one-time daily non-runner print cache (🐎)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if not row:
+            try:
+                # LTP-aware non-runner check:
+                # A runner with ANY LTP is NOT a non-runner.
+                if ltp is not None:
+                    return (True, "ok")
 
+                # daily uid cache
+                key = _today_key()
+                if key not in _SEEN_NONRUNNERS:
+                    _SEEN_NONRUNNERS.clear()
+                    _SEEN_NONRUNNERS[key] = set()
+                seen = _SEEN_NONRUNNERS[key]
+                uid = f"{mid}-{sid}"
 
-    # inside _update_bets_anchor(...)
-    if not row:
-        try:
-            key = _today_key()
-            if key not in _SEEN_NONRUNNERS:
-                _SEEN_NONRUNNERS.clear()
-                _SEEN_NONRUNNERS[key] = set()
-            seen = _SEEN_NONRUNNERS[key]
-            uid = f"{mid}-{sid}"
+                if uid not in seen:
+                    # fetch horse + event names (optional)
+                    try:
+                        from engines.config_paths import connect_db as _conn
+                        con = _conn(ro=True); con.row_factory = __import__("sqlite3").Row
+                        r = con.execute(
+                            "SELECT horse_name, event_name FROM bets "
+                            "WHERE marketId=? AND selectionId=? LIMIT 1",
+                            (mid, sid)
+                        ).fetchone()
+                        con.close()
+                        name = r["horse_name"] if r and r["horse_name"] else sid
+                        ev   = r["event_name"] if r and r["event_name"] else "?"
+                    except Exception:
+                        name, ev = sid, "?"
 
-            if uid not in seen:
-                # try get horse name and event name for clarity
-                try:
-                    from engines.config_paths import connect_db as _conn
-                    con = _conn(ro=True); con.row_factory = __import__("sqlite3").Row
-                    r = con.execute(
-                        "SELECT horse_name, event_name FROM bets WHERE marketId=? AND selectionId=? LIMIT 1",
-                        (mid, sid)
-                    ).fetchone()
-                    con.close()
-                    name = r["horse_name"] if r and r["horse_name"] else sid
-                    ev   = r["event_name"] if r and r["event_name"] else "?"
-                except Exception:
-                    name, ev = sid, "?"
-                print(f"🐎 Non-Runner detected — {name} ({ev}) mid={mid} sid={sid}")
-                seen.add(uid)
-        except Exception:
-            pass
-        return (False, "row_missing")
+                    print(f"🐎 Non-Runner detected — {name} ({ev}) mid={mid} sid={sid}")
+                    seen.add(uid)
+
+                return (False, "row_missing")
+            except Exception:
+                return (False, "row_missing")
 # === PATCH END ===
 
 

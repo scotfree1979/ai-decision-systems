@@ -9,6 +9,54 @@ from .state_machine import MSCGlobalState
 from .utils import classify_direction_from_legacy
 
 # === PATCH START ============================================================
+# 📍 TARGET: engines/micro_scalaper_v7/micro_scalper_engine.py (module scope)
+# 📆 PATCHED: 2025-12-01 — Consume Brain Pulse from Overwatcher
+# ----------------------------------------------------------------------------
+# We safely import the pulse container from Overwatcher. It always exists because
+# Overwatcher defines `_last_brain_pulse = [None]` in the previous patch.
+try:
+    from engines.live.overwatcher import _last_brain_pulse
+except Exception:
+    _last_brain_pulse = [None]
+
+def _consume_brain_pulse(ctx: dict) -> None:
+    """
+    Inject the latest Overwatcher Brain Pulse into the MicroScalper context.
+    Non-intrusive:
+        - If no pulse exists, does nothing.
+        - If pulse is for a different runner, does nothing.
+        - If present, adds:
+              ctx["brain_coherence"]
+              ctx["brain_adjustment"]
+              ctx["brain_side"]
+              ctx["brain_ts"]
+              ctx["brain_reason"]
+              ctx["brain_stake"]
+    MSC engines can then incorporate this into directional logic or multipliers.
+    """
+    try:
+        pulse = _last_brain_pulse[0]
+        if not pulse:
+            return
+
+        # Only apply if pulse matches THIS runner
+        if str(pulse.get("marketId")) != str(ctx.get("marketId")):
+            return
+        if str(pulse.get("selectionId")) != str(ctx.get("selectionId")):
+            return
+
+        ctx["brain_coherence"]  = float(pulse.get("confidence", 0.0))
+        ctx["brain_adjustment"] = float(pulse.get("adjustment", 0.0))
+        ctx["brain_side"]       = pulse.get("side")
+        ctx["brain_ts"]         = pulse.get("ts")
+        ctx["brain_reason"]     = pulse.get("reason")
+        ctx["brain_stake"]      = float(pulse.get("stake", 2.0))
+    except Exception:
+        pass
+# === PATCH END ===============================================================
+
+
+# === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalper_v7/micro_scalper_engine.py
 # 🔎 SEARCH: class MicroScalperEngine:
 # 📆 PATCHED: 2025-11-28 — Add SLEQ Multiplier + stake scaling
@@ -133,6 +181,14 @@ class MicroScalperEngine:
             - v7-intel enriched fields
         """
         oc_phase = ctx.get("oc_phase", 0)
+
+        # === PATCH START (BrainPulse → MSC injection) =========================
+        try:
+            _consume_brain_pulse(ctx)
+        except Exception:
+            pass
+        # === PATCH END ========================================================
+
 
         # 1) PHASE SWITCHING
         if oc_phase < 7:

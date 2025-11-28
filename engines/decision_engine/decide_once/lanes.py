@@ -475,158 +475,182 @@ def _market_alive(mid: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Public entrypoint: called by the orchestration wrapper per tick
 # ─────────────────────────────────────────────────────────────────────────────
-# === PATCH BLOCK: refresh live scope each tick (build_and_maintain_scope)
-# 📍 FILE: engines/decision_engine/decide_once/lanes.py
-# 🔎 ANCHOR: def run_all(run_id:
-# 🧩 TYPE: REPLACEMENT (top section only)
-# 📆 DATE: 2025-10-10T20:45Z
-# ---------------------------------------------------------------------
 
-def run_all(run_id: str, *, source: str = "LIVE", logger=None) -> Optional[int]:
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: def run_all(
+# 🛠 ACTION: replace entire run_all() implementation
+# 📆 PATCHED: 2025-11-29 — Unified DecideOnce + MSC tick engine
+# ============================================================================
+
+def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
     """
-    DecideOnce main loop (LIVE edition).
-    Ensures live scope is rebuilt each tick so strategies see current markets.
-    Prints:
-      • [LANES] scope refreshed (n markets)
-      • [TICK] course — runner | A=✅ P=❌ …
-      • [PLACE] fam mid=… sid=… letter dir px stake
+    Unified DecideOnce + MSC Tick Engine
+    ------------------------------------
+    This version guarantees:
+        • ACTIVE + PASSIVE runner processing
+        • correct v7-intel context for all families
+        • correct MSC + Legacy plan routing
+        • clear tick output for debugging
     """
     import sys
-
-    # --- banner --------------------------------------------------------
-    try:
-        if not hasattr(run_all, "_banner"):
-            print("[LANES] run_all active — LIVE mode (Scope refresh each tick)")
-            run_all._banner = True
-    except Exception:
-        pass
-
-    # --- refresh live scope -------------------------------------------
     from engines.decision_engine.decide_once import scope
-    try:
-        snap = scope.build_and_maintain_scope(show_dashboard=False) or scope._SCOPE_STATE
-        # normalise shape like dryrun does
-        if isinstance(snap, dict):
-            live = snap
-        elif hasattr(scope, "_SCOPE_STATE"):
-            live = scope._SCOPE_STATE or {}
-        else:
-            live = {}
+    from engines.decision_engine.decide_once.context_builder import build_context
+    from engines.decision_engine.decide_once.candidates import active_candidates_for_market, cands_for_market
+    from engines.decision_engine.decide_once.placement import queue_plan
+    from engines.decision_engine.microscalper.context_adapter import build_msc_context
+    from engines.decision_engine.microscalper.plan_builder import build_plan_from_msc
+    from engines.live.live_router import queue_order as queue_live_order
 
-        markets = live.get("markets") or []
-        active_map = live.get("active_sids") or {}
-        n = len(markets)
-        print(f"[LANES] scope refreshed ({n} markets in state)")
+    # ------------------------------------------------------------------
+    # 1) SCOPE REFRESH
+    # ------------------------------------------------------------------
+    try:
+        live_scope = scope.build_and_maintain_scope(show_dashboard=False) or {}
+        markets = live_scope.get("markets", [])
+        print(f"[LANES] scope refreshed ({len(markets)} markets in state)")
     except Exception as e:
-        live, markets, active_map = {}, [], {}
         print(f"[LANES] scope refresh warn: {e}")
+        return None
 
-    mids = [m["marketId"] if isinstance(m, dict) else str(m)
-            for m in markets]
+    if not markets:
+        print("[LANES] warn: no markets in scope")
+        return None
 
-    if not mids:
-        print("[LANES] warn: live scope empty — no active markets")
-# ---------------------------------------------------------------------
-
-    try:
-        mp.ingest_scope(live)
-    except Exception as e:
-        raise RuntimeError(f"[DECIDE] Mastery ingest failed: {type(e).__name__}: {e}")
-
-    # if scope is empty, synthesize candidates from NEXT-5 (bets.db) + inbound_oc_cache
-    if not mids:
-        raise RuntimeError("[DECIDE] mids empty after scope refresh")
-        status_once("decide_once:tick", True, "scope empty — deferring to Mastery")
-        try:
-            from engines.fallbackscope import _next5_from_bets_with_active as _next5
-            # feed Mastery something to chew on every tick:
-            mids = _next5(max_items=5) or []
-        except Exception:
-            mids = []
-
-    # --- Optional monitor
-    try:
-        if marketmon:
-            marketmon.refresh(mids, max_runners=8)
-    except Exception:
-        pass
-
+    # ------------------------------------------------------------------
+    # 2) BASE CONTEXT (shared legacy + MSC)
+    # ------------------------------------------------------------------
     base_ctx, _ = build_context(source=source)
-    assert isinstance(base_ctx, dict), "[DECIDE] base_ctx invalid"
+    if not isinstance(base_ctx, dict):
+        print("[DECIDE] invalid base_ctx")
+        return None
 
-    # --- Build EPICs (sorted odds per market)
-    all_pairs: List[Tuple[str, List[Tuple[str, float]]]] = []
+    # ------------------------------------------------------------------
+    # 3) PER-MARKET LOOP
+    # ------------------------------------------------------------------
+    for mid in markets:
+        mids = str(mid)
+        active = live_scope.get("active_sids", {}).get(mids, [])
+        passive = live_scope.get("passive_sids", {}).get(mids, [])
 
-    # === FIXED LOOP: preserve dict structure so active_sids are not lost ===
-    for m_entry in (live.get("markets") or []):
-        # normalise marketId and active_sids exactly like dryrun()
-        if isinstance(m_entry, dict):
-            mid = str(m_entry.get("marketId"))
-            sids = list(m_entry.get("active_sids") or [])
-        else:
-            mid = str(m_entry)
-            sids = list(live.get("active_sids", {}).get(mid, []))
+        # ACTIVE + PASSIVE combined routing
+        sids = list(active) + list(passive)
 
-        # ✅ local odds helpers
-        from engines.decision_engine.decide_once.placement import (
-            _fetch_px_from_odds_current as _px_oc,
-            _fetch_px_from_inbound      as _px_ib,
-        )
+        if not sids:
+            print(f"[LANES] no runners for {mids}")
+            continue
 
+        # --------------------------------------------------------------
+        # BUILD ORDERED PAIRS (sid → price)
+        # --------------------------------------------------------------
         pairs = []
         for sid in sids:
-            # 1️⃣ Try odds_current first
-            px = _px_oc(mid, sid)
-            # 2️⃣ Then inbound_oc_cache
-            if px is None:
-                px = _px_ib(mid, sid)
-            # 3️⃣ If still empty, fetch from Betfair API (verified working)
-            if px is None or px == 0.0:
-                try:
+            try:
+                from engines.decision_engine.decide_once.placement import (
+                    _fetch_px_from_odds_current as _px_oc,
+                    _fetch_px_from_inbound      as _px_ib,
+                )
+                px = _px_oc(mids, sid)
+                if px is None:
+                    px = _px_ib(mids, sid)
+
+                if px is None:
                     from engines.utils.api_tools import fetch_live_odds
-                    odds = fetch_live_odds(None, mid, sid)
+                    odds = fetch_live_odds(None, mids, sid)
                     if isinstance(odds, dict):
                         px = float(odds.get("lay") or odds.get("back") or 0.0)
-                except Exception as e:
-                    print(f"[LANES][WARN] live API fallback failed mid={mid} sid={sid}: {e}")
-            # Always append, even if px=0.0, so ticks still print
-            pairs.append((sid, float(px or 0.0)))
 
-        # === DEBUG: Verify scope linkage and odds retrieval ===
-        if not sids:
-            print(f"[LANES][DEBUG] no sids for {mid} "
-                  f"(markets={len(live.get('markets', []))}, "
-                  f"active_sids keys={len(live.get('active_sids', {}))})")
-        elif not pairs or all(px == 0.0 for _, px in pairs):
-            print(f"[LANES][DEBUG] no prices for {mid} sids={len(sids)} "
-                  f"sample={sids[:5]}")
+                pairs.append((sid, float(px or 0.0)))
+            except Exception:
+                pairs.append((sid, 0.0))
 
-        # fallback: odds_current if empty
-        if not pairs:
+        pairs.sort(key=lambda t: (t[1], t[0]))
+
+        # ------------------------------------------------------------------
+        # PRINT TICK HEADER (UPGRADED)
+        # ------------------------------------------------------------------
+        px_str = ", ".join(f"{sid}:{px}" for sid, px in pairs[:8])
+        print(f"[TICK] {mids}  runners={len(pairs)}  {px_str}")
+
+        # ----------------------------------------------------------------------
+        # 4) LEGACY DECIDEONCE PROCESSING
+        # ----------------------------------------------------------------------
+        for sid, px in pairs:
+            ctx = dict(base_ctx)
+            ctx["marketId"] = mids
+            ctx["selectionId"] = sid
+            ctx["current_price"] = px
+            ctx["is_passive"] = sid in passive
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: ctx["ltp"] = float(px)
+# 📆 PATCHED: 2025-11-29 — Correct MSC tick hook (safe location)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+            # --- MicroScalper v7 tick (correct location: full ctx available) ---
+            try:
+                from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+                msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+
+                # MSC tick uses the SAME ctx we pass into legacy lanes
+                msc_plan = msc.tick(ctx)
+
+                if msc_plan:
+                    from engines.live.live_router import queue_order
+                    queue_order(msc_plan, logger=logger)
+                    print(f"[MSC] {mid}:{sid} → {msc_plan.get('direction')} size={msc_plan.get('size')} why={msc_plan.get('why','')}")
+            except Exception as e:
+                print(f"[MSC] warn mid={mid} sid={sid}: {e}")
+
+# === PATCH END ==============================================================
+
 
             try:
-                from engines.config_paths import auto_conn, q_retry as _q
-                con = auto_conn(); con.row_factory = __import__("sqlite3").Row
-                rows = _q(con, """
-                    SELECT DISTINCT selectionId, ltp
-                      FROM odds_current
-                     WHERE marketId=? AND ltp BETWEEN 1.5 AND 12.0
-                     ORDER BY CAST(ltp AS REAL) ASC
-                     LIMIT 12
-                """, (mid,)).fetchall()
-                con.close()
-                pairs = [(str(r["selectionId"]), float(r["ltp"])) for r in rows if r["ltp"] is not None]
-                if pairs:
-                    print(f"[PATCH] odds_current fallback used for {mid} → {len(pairs)} runners")
+                plan = _run_single_letter_family(ctx, logger=logger)   # existing logic
+                if plan:
+                    queue_plan(plan, logger=logger)
             except Exception as e:
-                print(f"[PATCH WARN] odds_current fallback failed: {e}")
-                pairs = []
+                print(f"[DECIDE] legacy warn mid={mids} sid={sid} {e}")
 
-        pairs.sort(key=lambda x: float(x[1] or 9999))
-        all_pairs.append((mid, pairs))
+        # ----------------------------------------------------------------------
+        # 5) MICROSCALPER PROCESSING
+        # ----------------------------------------------------------------------
+        try:
+            from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+            msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+        except Exception as e:
+            print(f"[MSC] init warn: {e}")
+            continue
 
+        for sid, px in pairs:
+            try:
+                ctx_legacy = {
+                    "marketId": mids,
+                    "selectionId": sid,
+                    "current_price": px,
+                    "oc_phase": live_scope.get("minutes_to_off", {}).get(mids, 10),
+                    "legacy_parent_id": base_ctx.get("legacy_parent_id"),
+                    "legacy_entry_side": base_ctx.get("legacy_entry_side"),
+                    "dynamic_stake_fn": base_ctx.get("dynamic_stake_fn"),
+                    "stoploss_triggered_for_parent": None,
+                    **{k:v for k,v in base_ctx.items() if k.startswith("v7_")}
+                }
+
+                msc_ctx = build_msc_context(ctx_legacy)
+                msc_plan = msc.tick(msc_ctx)
+
+                if msc_plan:
+                    routable = build_plan_from_msc(msc_plan)
+                    queue_live_order(routable, logger=logger)
+                    print(f"[MSC] {mids}:{sid} {routable['why']} → {routable['direction']} {routable['size']}")
+            except Exception as e:
+                print(f"[MSC] warn mid={mids} sid={sid}: {e}")
+
+    return 1
 
 # === PATCH END ===
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
