@@ -292,7 +292,9 @@ def _today_utc() -> str:
     # day key matches sqlite date('now','utc')
     import sqlite3
     try:
-        con = open_auto_db(ro=True)
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
+
         day = _q_retry(con, "SELECT date('now','utc') AS d").fetchone()["d"]
         con.close()
         return str(day)
@@ -960,7 +962,8 @@ def _market_odds(mid: str, sid: str) -> float | None:
     """
     # 1) inbound_oc_cache.oc1
     try:
-        con = open_auto_db(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         r = _q_retry(con,
             "SELECT oc1 FROM inbound_oc_cache WHERE marketId=? AND selectionId=? "
             "ORDER BY id DESC LIMIT 1",
@@ -975,7 +978,8 @@ def _market_odds(mid: str, sid: str) -> float | None:
 
     # 2) AUTO_DB oc_series (today)
     try:
-        con = open_auto_db(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         r = _q_retry(con,
             "SELECT odd FROM oc_series WHERE marketId=? AND selectionId=? "
             "AND date(snapshot_ts)=date('now','utc') "
@@ -1027,7 +1031,8 @@ def _runner_ids_for_market(mid: str, limit: int = 24) -> list[str]:
     """
     sids: list[str] = []
     try:
-        con = open_auto_db(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         rows = _q_retry(con,
             "SELECT selectionId, MIN(oc1) AS m FROM inbound_oc_cache "
             "WHERE marketId=? AND oc1 IS NOT NULL GROUP BY selectionId "
@@ -1045,7 +1050,8 @@ def _runner_ids_for_market(mid: str, limit: int = 24) -> list[str]:
 
     # fallback to any known runners table
     try:
-        con = open_auto_db(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         rows = _q_retry(con,
             "SELECT selectionId FROM runners WHERE marketId=? LIMIT ?",
             (str(mid), int(limit))
@@ -1194,7 +1200,8 @@ def latest_prices_for_market(market_id: str) -> Dict[str, float]:
 
     # 1) inbound_oc_cache (latest row per selection)
     try:
-        con = open_auto_db(ro=True)
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         if con:
             rows = _q_retry(con, """
                 SELECT t.selectionId AS sid,
@@ -1240,7 +1247,8 @@ def latest_prices_for_market(market_id: str) -> Dict[str, float]:
 
     # 2) AUTO_DB.oc_series (today)
     try:
-        con = open_auto_db(ro=True)
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         if con:
             rows = _q_retry(con, """
                 SELECT selectionId, odd

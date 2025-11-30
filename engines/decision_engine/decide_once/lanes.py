@@ -400,7 +400,8 @@ def _fallback_plan_for_A(ctx: dict) -> dict:
 # ── Small utility: recent 'not placed' summary for health line ───────────────
 def _recent_no_place_summary(run_id: str, seconds: int = 30) -> str:
     try:
-        con = _adb(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=False); con.row_factory = sqlite3.Row
         rows = _q(con, """
             SELECT meta_json
               FROM decisions
@@ -444,7 +445,8 @@ from datetime import datetime, timezone
 
 def _minutes_to_off_from_schedule(mid: str) -> Optional[float]:
     try:
-        con = _adb(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=False); con.row_factory = sqlite3.Row
         r = _q(con, "SELECT off_at_utc FROM markets_schedule WHERE marketId=? LIMIT 1", (str(mid),)).fetchone()
         try: con.close()
         except Exception: pass
@@ -459,7 +461,8 @@ def _minutes_to_off_from_schedule(mid: str) -> Optional[float]:
 
 def _market_alive(mid: str) -> bool:
     try:
-        con = _adb(ro=True); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=False); con.row_factory = sqlite3.Row
         # either OFF is in schedule
         off = con.execute("SELECT off_at_utc FROM markets_schedule WHERE marketId=? LIMIT 1", (mid,)).fetchone()
         if off and off["off_at_utc"]:
@@ -495,27 +498,41 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
     """
     import sys
     from engines.decision_engine.decide_once import scope
-    from engines.decision_engine.decide_once.context_builder import build_context
+    from engines.decision_engine.decide_once.scope import build_and_maintain_scope
+
     from engines.decision_engine.decide_once.candidates import active_candidates_for_market, cands_for_market
-    from engines.decision_engine.decide_once.placement import queue_plan
+    from engines.decision_engine.decide_once.placement import place_from_plan
     from engines.decision_engine.microscalper.context_adapter import build_msc_context
     from engines.decision_engine.microscalper.plan_builder import build_plan_from_msc
-    from engines.live.live_router import queue_order as queue_live_order
+    from engines.live.live_router import place_parent_and_hedge
+
 
     # ------------------------------------------------------------------
-    # 1) SCOPE REFRESH
+    # 1) SCOPE REFRESH  (canonical: build_and_maintain_scope)
     # ------------------------------------------------------------------
     try:
-        live_scope = scope.build_and_maintain_scope(show_dashboard=False) or {}
-        markets = live_scope.get("markets", [])
+        from engines.decision_engine.decide_once.scope import (
+            build_and_maintain_scope,
+            ordered_markets_for_tick,
+        )
+
+        # full scope snapshot (PRE + INPLAY + ACTIVE/PASSIVE maps)
+        live_scope = build_and_maintain_scope(show_dashboard=False) or {}
+
+        # canonical ordered MID list for this tick
+        markets = ordered_markets_for_tick(live_scope) or []
+
         print(f"[LANES] scope refreshed ({len(markets)} markets in state)")
+
     except Exception as e:
         print(f"[LANES] scope refresh warn: {e}")
         return None
 
+    # early abort: nothing in scope
     if not markets:
         print("[LANES] warn: no markets in scope")
         return None
+
 
     # ------------------------------------------------------------------
     # 2) BASE CONTEXT (shared legacy + MSC)
@@ -582,12 +599,6 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
             ctx["current_price"] = px
             ctx["is_passive"] = sid in passive
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
-# 🔎 SEARCH: ctx["ltp"] = float(px)
-# 📆 PATCHED: 2025-11-29 — Correct MSC tick hook (safe location)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
             # --- MicroScalper v7 tick (correct location: full ctx available) ---
             try:
                 from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
@@ -597,24 +608,104 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
                 msc_plan = msc.tick(ctx)
 
                 if msc_plan:
-                    from engines.live.live_router import queue_order
-                    queue_order(msc_plan, logger=logger)
-                    print(f"[MSC] {mid}:{sid} → {msc_plan.get('direction')} size={msc_plan.get('size')} why={msc_plan.get('why','')}")
+                    # store last MSC plan for unified tick report (epic output block)
+                    run_all.__dict__["_LAST_MSC_PLAN"] = msc_plan
+
+                    # ROUTE THROUGH LIVE ROUTER (correct — replaces queue_order)
+                    from engines.live.live_router import place_parent_and_hedge
+
+                    try:
+                        place_parent_and_hedge(
+                            market_id    = msc_plan.get("marketId")    or mid,
+                            selection_id = msc_plan.get("selectionId") or sid,
+                            side         = "LAY" if str(msc_plan.get("direction","")).upper().startswith("LAY") else "BACK",
+                            entry_odds   = float(msc_plan.get("px")   or
+                                                 msc_plan.get("odds") or
+                                                 ctx.get("current_price") or 0.0),
+                            stake        = float(msc_plan.get("size") or 0.0),
+                            hedge_ticks  = int(msc_plan.get("target_ticks") or 1),
+                            run_id       = run_id,
+                            source       = str(msc_plan.get("letter") or "A")
+                        )
+
+                        print(
+                            f"[MSC][EXEC] {mid}:{sid} "
+                            f"dir={msc_plan.get('direction')} "
+                            f"px={msc_plan.get('px')} "
+                            f"size={msc_plan.get('size')} "
+                            f"why={msc_plan.get('why','')}"
+                        )
+
+                    except Exception as e:
+                        print(f"[MSC][EXEC] router fail mid={mid} sid={sid}: {e}")
             except Exception as e:
                 print(f"[MSC] warn mid={mid} sid={sid}: {e}")
+
 
 # === PATCH END ==============================================================
 
 
+            # --- LEGACY DECIDEONCE: Correct candidate-driven execution -------
             try:
-                plan = _run_single_letter_family(ctx, logger=logger)   # existing logic
-                if plan:
-                    queue_plan(plan, logger=logger)
+                # Load real candidate engines (no invented names)
+                from engines.decision_engine.decide_once.candidates import (
+                    active_candidates_for_market,
+                    cands_for_market,
+                )
+
+                # Pull price map for candidates in this market
+                try:
+                    cand_px = dict(cands_for_market(mids, max_runners=20))
+                except Exception:
+                    cand_px = {}
+
+                # If this runner is NOT in candidate set → skip
+                px_cand = cand_px.get(str(sid))
+                if px_cand is None:
+                    continue
+
+                # If this runner is a candidate, run ALL family policies
+                for fam_name, fn in ORDER:
+                    try:
+                        fam_plan = fn(ctx)
+                    except Exception as e:
+                        print(f"[DECIDE] fam {fam_name} failed mid={mids} sid={sid}: {e}")
+                        continue
+
+                    if not fam_plan or not fam_plan.get("enter"):
+                        continue
+
+                    # Family → letter code
+                    letter = _FAM_LETTER.get(fam_name, fam_name[:1].upper())
+
+                    # Attach bias + veto
+                    plan = _attach_bias(dict(fam_plan), ctx)
+                    veto, reason = _bias_veto(plan)
+                    if veto:
+                        continue
+
+                    plan.setdefault("marketId", mids)
+                    plan.setdefault("selectionId", sid)
+                    plan.setdefault("letter", letter)
+                    harden_plan(plan)
+
+                    # Final placement through legacy placement engine
+                    try:
+                        from engines.decision_engine.decide_once.placement import place_from_plan
+                        place_from_plan(fam_name, plan, ctx)
+
+                        if logger:
+                            logger(f"[PLACE] {fam_name} mid={mids} sid={sid} plan={plan}")
+
+                    except Exception as e:
+                        print(f"[LANE-ERR] place {fam_name} mid={mids} sid={sid} err={e}")
+
             except Exception as e:
                 print(f"[DECIDE] legacy warn mid={mids} sid={sid} {e}")
 
+
         # ----------------------------------------------------------------------
-        # 5) MICROSCALPER PROCESSING
+        # 5) MICROSCALPER PROCESSING  (FINAL – LIVE ROUTER INTEGRATION)
         # ----------------------------------------------------------------------
         try:
             from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
@@ -625,29 +716,53 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
 
         for sid, px in pairs:
             try:
+                # --- Build MSC context using available DecideOnce base_ctx ---
                 ctx_legacy = {
                     "marketId": mids,
                     "selectionId": sid,
                     "current_price": px,
-                    "oc_phase": live_scope.get("minutes_to_off", {}).get(mids, 10),
+                    "oc_phase": (live_scope.get("minutes_to_off", {}) or {}).get(mids, 10),
                     "legacy_parent_id": base_ctx.get("legacy_parent_id"),
                     "legacy_entry_side": base_ctx.get("legacy_entry_side"),
                     "dynamic_stake_fn": base_ctx.get("dynamic_stake_fn"),
                     "stoploss_triggered_for_parent": None,
-                    **{k:v for k,v in base_ctx.items() if k.startswith("v7_")}
+                    **{k: v for k, v in base_ctx.items() if k.startswith("v7_")}
                 }
 
+                # --- MSC tick ---------------------------------------------------
                 msc_ctx = build_msc_context(ctx_legacy)
                 msc_plan = msc.tick(msc_ctx)
 
-                if msc_plan:
-                    routable = build_plan_from_msc(msc_plan)
-                    queue_live_order(routable, logger=logger)
-                    print(f"[MSC] {mids}:{sid} {routable['why']} → {routable['direction']} {routable['size']}")
+                if not msc_plan:
+                    continue
+
+                # ===============================================================
+                # LIVE ROUTER EXECUTION (REPLACES queue_live_order)
+                # ===============================================================
+                from engines.live.live_router import place_parent_and_hedge
+
+                try:
+                    place_parent_and_hedge(
+                        market_id   = msc_plan.get("marketId")    or mids,
+                        selection_id= msc_plan.get("selectionId") or sid,
+                        side        = "LAY" if str(msc_plan.get("direction","")).upper().startswith("LAY") else "BACK",
+                        entry_odds  = float(msc_plan.get("px") or msc_plan.get("odds") or px or 0.0),
+                        stake       = float(msc_plan.get("size") or 0.0),
+                        hedge_ticks = int(msc_plan.get("target_ticks") or 1),
+                        run_id      = run_id,
+                        source      = msc_plan.get("letter") or "A"
+                    )
+
+                    print(f"[MSC] {mids}:{sid} EXEC → dir={msc_plan.get('direction')} "
+                          f"px={msc_plan.get('px')} size={msc_plan.get('size')} why={msc_plan.get('why','')}")
+                except Exception as e:
+                    print(f"[MSC][EXEC] router fail mid={mids} sid={sid}: {e}")
+
             except Exception as e:
                 print(f"[MSC] warn mid={mids} sid={sid}: {e}")
 
     return 1
+
 
 # === PATCH END ===
 
@@ -715,12 +830,15 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
 
             # --- skip if already placed today
             try:
-                con = _adb(ro=True); con.row_factory = sqlite3.Row
+                from engines.config_paths import auto_conn
+                con = auto_conn(rw=False); con.row_factory = sqlite3.Row
                 r = _q(con, """
                     SELECT 1 FROM orders
-                     WHERE marketId=? AND selectionId=? AND date(opened_at)=date('now','utc')
-                       AND UPPER(COALESCE(entry_status,status,'')) IN ('PLACED','MATCHED','LIVE')
-                     LIMIT 1
+                    WHERE marketId=? AND selectionId=?
+                      AND date(opened_at)=date('now','utc')
+                      AND UPPER(COALESCE(entry_status,'')) IN ('PLACED','MATCHED','LIVE')
+                LIMIT 1
+
                 """, (mid, sid)).fetchone()
                 con.close()
                 if r:
@@ -731,127 +849,116 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
             letters = _allowed_letters_for_tick(ctx)
             proposed_any = False
 
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
-# 🔎 SEARCH: try:\n                    oid = place_from_plan\(fam_name, plan, ctx\)
-# 📆 PATCHED: 2025-10-08T20:15Z — visual tick report (✅❌) with names, no duplicates
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # --- multi-letter decision + visual tick summary --------------------
-            tick_report = {L: "❌" for L in _FAM_LETTER.values()}  # pre-seed all letters ❌
+        # ----------------------------------------------------------------------
+        # 5) EPIC UNIFIED TICK REPORT (MSC + LEGACY + BAND + TIMING + CONTEXT)
+        # ----------------------------------------------------------------------
+        try:
+            from engines.market_monitor.monitor import classify as _mm_classify
+        except Exception:
+            def _mm_classify(mid, sid): return {"band": "?"}
 
-            for fam_name, fn in ORDER:
-                letter = _FAM_LETTER.get(fam_name, "?")
-                tick_report.setdefault(letter, "❌")  # ensure visible even if skipped
+        from engines.mastery.mastery_policy import _SCOPE_STATE
 
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/decide_once.py:run_all
-# 🔎 SEARCH: fam_plan = fn(ctx)
-# 📆 PATCHED: 2025-11-28 — preserve stoploss_mode from Mastery in plan
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                try:
-                    fam_plan = fn(ctx) if callable(fn) else mp.plan_for_strategy(fam_name, ctx)
-                except Exception:
-                    fam_plan = {}
+        print(f"\n=================== [TICK][{mids}] ===================")
 
-                # NEW: ensure stoploss_mode persists from Mastery → DecideOnce → placement
-                try:
-                    slm = fam_plan.get("stoploss_mode")
-                    if slm:
-                        fam_plan["stoploss_mode"] = str(slm).upper()
-                except Exception:
-                    pass
-# === PATCH END ===
+        # Market name lookup (same logic you already use)
+        try:
+            from engines.config_paths import auto_conn, q_retry as _q
+            con = auto_conn(rw=False); con.row_factory = __import__("sqlite3").Row
+            row = _q(con,
+                "SELECT COALESCE(market_name,event_name) AS mname "
+                "FROM bets WHERE marketId=? LIMIT 1",
+                (mids,)
+            ).fetchone()
+            con.close()
+            mname = row["mname"] if row and row["mname"] else mids
+        except Exception:
+            mname = mids
 
+        print(f"[MARKET] {mname}  | runners={len(pairs)}")
 
-                if not fam_plan or not fam_plan.get("enter"):
-                    continue
+        # Timing (Mastery scope timing)
+        timing = (_SCOPE_STATE.get("timing", {}) or {}).get(mids, {})
+        mto = timing.get("minutes_to_off")
+        phase = timing.get("phase", "PRE")
+        print(f"[TIME]   minutes_to_off={mto}  phase={phase}")
 
-                proposed_any = True
-                plan = _attach_bias(dict(fam_plan), ctx)
-                veto, reason = _bias_veto(plan)
-                if veto:
-                    continue
-
-                plan.setdefault("marketId", mid)
-                plan.setdefault("selectionId", sid)
-                plan.setdefault("letter", letter)
-                harden_plan(plan)
-
-                try:
-                    oid = place_from_plan(fam_name, plan, ctx)
-                    if oid:
-                        tick_report[letter] = "✅"
-                        placed_any = True
-                        if logger:
-                            logger(f"[PLACE] {fam_name} mid={mid} sid={sid} plan={plan}")
-                except Exception as e:
-                    print(f"[LANE-ERR] place {fam_name} mid={mid} sid={sid} err={e}")
-
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
-# 🔎 SEARCH: # === A-lane fallback (run at END when no family entered) ============
-# 📆 PATCHED: 2025-10-08T22:40Z — “A” always fires every tick (executed last)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # === A-lane (always-on baseline; fires last) ===
+        # Build pretty runner table
+        for sid, px in pairs:
+            # Horse name lookup
             try:
-                odds_val = float(ctx.get("odds") or 0.0)
-                if odds_val > 0.0:
-                    direction = "LAY->BACK" if odds_val >= 4.0 else "BACK->LAY"
-                    a_plan = {
-                        "enter": True,
-                        "letter": "A",
-                        "direction": direction,
-                        "target_ticks": 1,
-                        "hedge_ticks": 1,
-                        "size": 2.0,
-                        "px": odds_val,
-                        "plan_why": "A-always-on baseline",
-                    }
-                    oid = place_from_plan("ALWAYS_ON", a_plan, ctx)
-                    if oid:
-                        tick_report["A"] = "✅"
-                        placed_any = True
-                    else:
-                        tick_report["A"] = "❌"
-                else:
-                    tick_report["A"] = "❌"  # no px → no attempt
-            except Exception as e:
-                print(f"[A-LANE] fail mid={mid} sid={sid}: {e}")
-
-# === PATCH END ===
-
-            # --- print all letters even if blocked ---
-            try:
-                from engines.config_paths import connect_db, q_retry as _q
-                con = connect_db(ro=True); con.row_factory = __import__("sqlite3").Row
+                from engines.config_paths import auto_conn, q_retry as _q
+                con = auto_conn(rw=False); con.row_factory = __import__("sqlite3").Row
                 row = _q(con,
-                    "SELECT COALESCE(market_name,event_name) AS mname, horse_name "
-                    "FROM bets WHERE marketId=? AND selectionId=? LIMIT 1",
-                    (mid, sid)
-                ).fetchone(); con.close()
-                mname = row["mname"] if row and row["mname"] else mid
+                    "SELECT horse_name FROM bets WHERE marketId=? AND selectionId=? LIMIT 1",
+                    (mids, sid)
+                ).fetchone()
+                con.close()
                 rname = row["horse_name"] if row and row["horse_name"] else sid
             except Exception:
-                mname, rname = mid, sid
+                rname = sid
 
-            status_line = "  ".join(f"{ltr}={tick_report[ltr]}" for ltr in sorted(tick_report))
-            print(f"[TICK] {mname} — {rname} | {status_line}")
+            # Band lookup (ACTIVE / PASSIVE / IGNORED / etc.)
+            try:
+                band = _mm_classify(mids, sid).get("band", "?")
+            except Exception:
+                band = "?"
 
-    # --- post-loop status line -----------------------------------------
-    if not any_candidates:
-        status_once("decide_once:tick", True, "no candidates — skip")
-    elif placed_any:
-        status_once("decide_once:tick", True, "OK — placed")
-    else:
-        summary = _recent_no_place_summary(run_id, seconds=30)
-        status_once("decide_once:tick", True, f"OK — no placement ({summary})")
+            # Price source detail
+            src_note = ""
+            try:
+                from engines.decision_engine.decide_once.placement import (
+                    _fetch_px_from_odds_current as _px_oc,
+                    _fetch_px_from_inbound      as _px_ib,
+                )
+                oc_px = _px_oc(mids, sid)
+                ib_px = _px_ib(mids, sid)
+                if oc_px is not None:
+                    src_note = "oc"
+                elif ib_px is not None:
+                    src_note = "in"
+                else:
+                    src_note = "api?"
+            except Exception:
+                src_note = "?"
 
-    try:
-        advance_scope_cursor(step=1)
-    except Exception:
-        pass
+            # Render row
+            print(f"[RUNNER] sid={sid:<6}  px={px:<6}  src={src_note:<3}  band={band:<8}  name={rname}")
 
-    return None
+        print("-------------------------------------------------------")
+
+        # MSC summary (if MSC tick generated a plan earlier)
+        try:
+            # This relies on the earlier MSC block storing its last plan:
+            msc_plan = run_all.__dict__.get("_LAST_MSC_PLAN", None)
+            if msc_plan:
+                print(f"[MSC] {msc_plan.get('marketId')}:{msc_plan.get('selectionId')} "
+                      f"{msc_plan.get('why','')} → {msc_plan.get('direction')} "
+                      f"size={msc_plan.get('size')}")
+            else:
+                print("[MSC] no MSC plan this tick")
+        except Exception:
+            print("[MSC] n/a")
+
+        # Legacy decide_once summary — direct flag from placed_any
+        if placed_any:
+            print("[LEGACY] placement fired this tick ✔")
+        else:
+            print("[LEGACY] no placement this tick")
+
+        # Visual check: number of active + passive from live_scope
+        try:
+            act = live_scope.get("active_sids", {}).get(mids, [])
+            pas = live_scope.get("passive_sids", {}).get(mids, [])
+            print(f"[SCOPE] active={len(act)}  passive={len(pas)}")
+        except Exception:
+            print("[SCOPE] n/a")
+
+        print("=======================================================\n")
+
+        # No return here — let the loop finish normally
+        continue
+
 # === PATCH END (final runtime fix) ===
 
 if __name__ == "__main__":

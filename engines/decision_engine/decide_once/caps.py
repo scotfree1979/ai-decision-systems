@@ -421,27 +421,22 @@ def cap_ok_v7(market_id: str, selection_id: str, letter: str, *, mode: str = "LI
         con.close()
 # === PATCH END ===
 
-# =============================================================================
+# === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/decide_once/caps.py
 # 🔎 SEARCH: def cap_ok_v8(
-# ⛏️ ACTION: replace entire function to fix f-string syntax error
-# 📆 PATCHED: 2025-11-25T08:45Z
-# =============================================================================
+# 📆 PATCHED: 2025-12-02 — expand cap check to MSC letters D/J/V
+# ---------------------------------------------------------------------------
 
-def cap_ok_v8(market_id: str, selection_id: str, letter: str, *, mode: str = "LIVE", cap_limit: int = 3) -> tuple[bool, str, dict]:
-    """
-    Return whether the number of active unhedged parents for (market,selection,letter)
-    is below the configured cap_limit.
+def cap_ok_v8(market_id: str, selection_id: str, letter: str,
+              *, mode: str = "LIVE", cap_limit: int = 3) -> tuple[bool,str,dict]:
 
-    active = PARENT rows in PLACED or MATCHED state, whose hedge (CHILD) has NOT
-             yet been matched. 
-    """
+    # normalise + accept MSC letters
+    letter = str(letter).upper()
+    if letter not in ("A","B","C","D","E","F","G","H","I","J","K","L","P","R","S","T","V","X","Z"):
+        return True, "cap_skip_unknown_letter", {}
+
     con = _auto_conn(rw=True); con.row_factory = sqlite3.Row
     try:
-        cols = {r["name"] for r in con.execute("PRAGMA table_info(orders)")}
-        if "role" not in cols or "hedge_of" not in cols:
-            return cap_ok_v7(market_id, selection_id, letter, mode=mode)
-
         q = f"""
         SELECT COUNT(*) AS active
           FROM orders p
@@ -463,18 +458,17 @@ def cap_ok_v8(market_id: str, selection_id: str, letter: str, *, mode: str = "LI
         active = int(row["active"] or 0)
 
         ok = active < cap_limit
-        reason = "cap_ok_v8" if ok else f"cap_block: {letter} has {active}/{cap_limit} active unhedged"
+        reason = "cap_ok" if ok else f"cap_block {letter}: {active}/{cap_limit}"
         return ok, reason, {"active": active, "cap_limit": cap_limit}
 
     except Exception as e:
-        # FIXED: properly closed f-string
         return True, f"cap_v8_err:{type(e).__name__}", {}
 
     finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+        con.close()
+
+# === PATCH END ==============================================================
+
 
 
 

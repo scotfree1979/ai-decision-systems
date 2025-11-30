@@ -15,11 +15,6 @@ from engines.decision_engine.decide_once.helpers import (
 # 📆 PATCHED: 2025-10-18Z — fix undefined budget_manager reference
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 from engines.risk import budget_manager
-# === PATCH END ===
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 ANCHOR: just below the existing imports (after sqlite3/json/datetime)
-# 📆 PATCHED: 2025-11-19 — direct writer for AUTOSCALP GUI
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
     """
     Direct writable connection to AUTOSCALP_GUI (autoscalp_gui.db),
@@ -27,8 +22,10 @@ def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
     DAL has been giving us read-only connections.
     """
     from engines.config_paths import autoscalp_db
-    path = autoscalp_db()
-    con = sqlite3.connect(path, timeout=timeout, isolation_level=None)
+    path = autoscalp_db
+    from engines.config_paths import auto_conn
+    con = auto_conn(rw=True)
+
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA busy_timeout=8000;")
@@ -37,6 +34,7 @@ def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
     except Exception:
         pass
     return con
+
 
 
 # ---------- tiny safe getters
@@ -58,29 +56,35 @@ def _f(v, d=0.0):
     try: return float(v)
     except Exception: return float(d)
 
-# === PATCH START ===
+# === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 📆 PATCHED: 2025-10-29Z — assign trade_index per (market, selection, letter)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-from engines.v7_shims import v7_order_shim  # ensure this import exists (safe no-op if already loaded)
+# 🔎 SEARCH: def _next_trade_index(
+# 📆 PATCHED: 2025-11-29 — replace raw sqlite3.connect() with DAL-safe _adb()
+# ===========================================================================
 
 def _next_trade_index(mid: str, sid: str, letter: str) -> int:
-    """Return next trade_index (per marketId, selectionId, letter)."""
+    """DAL-safe: return next trade_index (per marketId, selectionId, letter)."""
+    con = None
     try:
-        import sqlite3
-        from engines.config_paths import autoscalp_db
-        con = sqlite3.connect(autoscalp_db()); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         row = con.execute("""
             SELECT COUNT(*) AS n
               FROM orders
              WHERE marketId=? AND selectionId=? AND UPPER(source)=UPPER(?)
                AND date(opened_at)=date('now','utc')
         """, (str(mid), str(sid), str(letter))).fetchone()
-        con.close()
         return int(row["n"] or 0) + 1
     except Exception:
         return 1
-# === PATCH END ===
+    finally:
+        try:
+            if con: con.close()
+        except Exception:
+            pass
+
+# === PATCH END ==============================================================
+
 
 
 # Plan ledger hooks (guarded)
@@ -95,7 +99,9 @@ except Exception:
 def _orders_has_status() -> bool:
     con = None
     try:
-        con = _adb(); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
+
         for r in con.execute("PRAGMA table_info(orders)"):
             name = r["name"] if hasattr(r, "keys") else r[1]
             if str(name).lower() == "status":
@@ -117,7 +123,8 @@ def _fetch_px_from_odds_current(mid: str, sid: str) -> Optional[float]:
     """
     con = None
     try:
-        con = _adb(); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         r = con.execute("""
             SELECT ltp
               FROM odds_current
@@ -142,7 +149,8 @@ def _fetch_px_from_inbound(mid: str, sid: str) -> Optional[float]:
     """
     con = None
     try:
-        con = _adb(); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         r = con.execute("""
             SELECT oc1, anchor_odd, oc1_band_json
               FROM inbound_oc_cache
@@ -175,7 +183,8 @@ def _fetch_px_from_inbound(mid: str, sid: str) -> Optional[float]:
 def _orders_cols() -> dict:
     con = None
     try:
-        con = _adb(); con.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=True)
         out = {}
         for r in con.execute("PRAGMA table_info(orders)"):
             name = r["name"] if hasattr(r, "keys") else r[1]
@@ -347,7 +356,8 @@ def _insert_pending_parent(*, mid: str, sid: str, letter: str, side: str,
 
 
 def _cancel_stale_parents(mid: str, sid: str, *, older_than_sec: int = 70) -> None:
-    con = _adb(); con.row_factory = sqlite3.Row
+    from engines.config_paths import auto_conn
+    con = auto_conn(rw=True)
     try:
         con.execute("""
           UPDATE orders
@@ -395,7 +405,8 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     if px is None or float(px) <= 0:
         # last-ditch: try odds_current
         try:
-            con = _adb(ro=True); con.row_factory = sqlite3.Row
+            from engines.config_paths import auto_conn
+            con = auto_conn(rw=True)
             row = _q(con, """
                 SELECT ltp
                   FROM odds_current

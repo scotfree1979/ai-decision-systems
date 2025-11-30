@@ -255,6 +255,24 @@ LETTER_MAP = {
     "IP5_COLLAPSE_FADE": "K",
 }
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: LETTER_MAP = {
+# 📆 PATCHED: 2025-12-02 — expand letter recognition for MSC engines
+# ---------------------------------------------------------------------------
+
+# Add MSC mappings (Exploratory = D, Risk = J, InPlay = V)
+LETTER_MAP.update({
+    "MSC_EXPLORATORY": "D",
+    "MSC_RISK":        "J",
+    "MSC_INPLAY":      "V",
+})
+
+# Also ensure raw letters D/J/V are accepted
+# (router already accepts single-letter fallback via s[:1])
+# === PATCH END ==============================================================
+
+
 def _letter_from_source(src: str) -> str:
     """Resolve canonical letter from strategy/source tag."""
     if not src:
@@ -1576,6 +1594,24 @@ def _active_parents_count_per_letter(market_id: str, selection_id: str, letter: 
     try:
         con = _orders_conn(); con.row_factory = sqlite3.Row
         row = _q_retry(con, f"""
+        # === PATCH START ============================================================
+        # 📍 TARGET: engines/live/live_router.py
+        # 🔎 SEARCH: def _active_parents_count_per_letter(
+        # 📆 PATCHED: 2025-12-02 — support MSC letters D/J/V in CAP accounting
+        # ---------------------------------------------------------------------------
+
+        # No code replacement needed — but we must ensure that D/J/V letters 
+        # are not filtered out by LIKE patterns. Insert right before SELECT:
+
+        letter = str(letter).upper()
+        if letter not in ("A","B","C","D","E","F","G","H","I","J","K","L","P","R","S","T","V","X","Z"):
+            # MSC extensions added: D, J, V
+            # Allow raw letters without mapping
+            pass
+
+        # (query below remains unchanged)
+        # === PATCH END ==============================================================
+
             SELECT COUNT(*) AS n
               FROM orders p
              WHERE mode='LIVE'

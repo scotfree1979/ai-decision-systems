@@ -227,24 +227,30 @@ from engines.live.stoploss_engine import StopLossEngine, ParentState
 _TSL_ENGINE = StopLossEngine()
 
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: def enforce_stop_losses_trailing(
+# 📆 PATCHED: 2025-12-01 — MSC-only trailing SL (Legacy excluded)
+# ============================================================================
+
 def enforce_stop_losses_trailing():
     """
-    Trailing Stop-Loss integration layer.
-    Replaces legacy tick-based stop-loss logic with the unified trailing engine.
+    Trailing Stop-Loss — MSC ONLY
+    -----------------------------
+    Applies trailing SL ONLY to:
+        • MSC-EXPLORATORY children
+        • MSC-RISK children
 
-    Responsibilities:
-      • Iterate all active parents
-      • Query latest odds_current values
-      • Build ParentState
-      • Call TSL engine → emit stop-loss events
-      • No DB writes here (router handles order placement/cancel)
+    Legacy parents:
+        ❌ NEVER receive stop-loss
+        ✔ Use boundaries (1.5 / 12.0)
+        ✔ Use trailing for hedge-only behaviour
     """
 
-    # 1️⃣ Fetch open matched parents
     con = _orders_conn(); con.row_factory = sqlite3.Row
     parents = _q_retry(con, """
-        SELECT id, marketId, selectionId, side,
-               entry_odds, entry_stake
+        SELECT id, customerOrderRef, marketId, selectionId, side,
+               entry_odds, entry_stake, source
           FROM orders
          WHERE role='PARENT'
            AND entry_status='matched'
@@ -255,38 +261,38 @@ def enforce_stop_losses_trailing():
     if not parents:
         return
 
-    # 2️⃣ Preload latest odds_current snapshot
-    try:
-        con = _orders_conn(); con.row_factory = sqlite3.Row
-        px_rows = _q_retry(con, """
-            SELECT marketId, selectionId, 
-                   COALESCE(lay1, back1, ltp) AS px
-              FROM odds_current
-             WHERE date(updated_ts)=date('now','utc')
-        """).fetchall()
-        con.close()
-    except Exception as e:
-        print(f"[TSL] odds snapshot failed: {e}")
+    # === MSC-ONLY FILTER ====================================================
+    msc_parents = [
+        p for p in parents
+        if str(p["source"] or "").upper().startswith("MSC")
+    ]
+
+    if not msc_parents:
         return
 
-    price_map = {}
-    for r in px_rows:
-        try:
-            key = (str(r["marketId"]), str(r["selectionId"]))
-            price_map[key] = float(r["px"])
-        except Exception:
-            pass
+    # === Preload prices =====================================================
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    px_rows = _q_retry(con, """
+        SELECT marketId, selectionId,
+               COALESCE(lay1, back1, ltp) AS px
+          FROM odds_current
+         WHERE date(updated_ts)=date('now','utc')
+    """).fetchall()
+    con.close()
 
-    # 3️⃣ Evaluate trailing stop for each parent
-    for p in parents:
+    price_map = {
+        (str(r["marketId"]), str(r["selectionId"])): float(r["px"])
+        for r in px_rows if r["px"] is not None
+    }
+
+    # === Evaluate SL ========================================================
+    for p in msc_parents:
         mid = str(p["marketId"])
         sid = str(p["selectionId"])
-        key = (mid, sid)
 
-        if key not in price_map:
+        px = price_map.get((mid, sid))
+        if px is None:
             continue
-
-        px = price_map[key]
 
         parent_state = ParentState(
             parent_id=int(p["id"]),
@@ -295,53 +301,119 @@ def enforce_stop_losses_trailing():
             entry_stake=float(p["entry_stake"])
         )
 
-        # oc_phase ≈ 0–8 from markets_schedule; for now treat as PRE only
-        oc_phase = 0
-
-        event = _TSL_ENGINE.evaluate(
+        ev = MSC_STOPLOSS.evaluate(
             parent_state,
             mid,
             sid,
             current_odds=px,
-            oc_phase=oc_phase
+            oc_phase=0
         )
 
-        if event:
-            # Forward to Mastery + Risk/MicroScalper
-            try:
-                from engines.mastery import event_sink
-                event_sink.on_decision(event)
-            except Exception:
-                pass
+        if not ev:
+            continue
 
-            print(f"[TSL] STOP mid={mid} sid={sid} px={px} reason={event.get('reason')} class={event.get('classification')}")
-        # === PATCH END ===
-        # === PATCH START ==========================================================
-        # 📍 TARGET: engines/live/overwatcher.py
-        # 🔎 SEARCH: print(f"[TSL] STOP mid=
-        # 📆 PATCHED: 2025-12-01 — immediate STOPLOSS execution
-        # ==========================================================================
-
-        from engines.live.live_router import _place_stoploss_child_now
-
-        # Immediate STOPLOSS child placement
+        # Forward to RiskEngine + router
         try:
-            parent_cor = event.get("parent_id")
-            exit_side  = "BACK" if event.get("entry_side") == "LAY" else "LAY"
-            entry_stake = float(event.get("entry_stake", 0.0))
-            _place_stoploss_child_now(
-                parent_cor,
-                market_id=mid,
-                selection_id=sid,
-                exit_side=exit_side,
-                exit_odds=px,
-                parent_stake=entry_stake,
-                run_id=None
-            )
-        except Exception as _e:
-            print(f"[TSL][WARN] immediate SL error: {_e}")
+            event_sink.on_decision(ev)
+        except Exception:
+            pass
 
-# === PATCH END ============================================================
+        print(f"[TSL] MSC STOP mid={mid} sid={sid} px={px} reason={ev.get('reason')} class={ev.get('classification')}")
+
+# === PATCH END ==============================================================
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 📆 PATCHED: 2025-12-01 — Legacy-only boundary exits
+# ============================================================================
+
+def enforce_legacy_boundaries_and_trailing():
+    """
+    Legacy Exit Rules
+    -----------------
+    Legacy parents DO NOT use stop-loss.
+
+    Instead:
+        ✔ Boundary exit at LTP <= 1.5  (BACK side)
+        ✔ Boundary exit at LTP >= 12.0 (LAY side)
+        ✔ Trailing only for hedge-follow behaviour (never stops)
+    """
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    parents = _q_retry(con, """
+        SELECT id, customerOrderRef, marketId, selectionId,
+               side, entry_odds, entry_stake, source
+          FROM orders
+         WHERE role='PARENT'
+           AND entry_status='matched'
+           AND (exit_status IS NULL OR exit_status <> 'matched')
+    """).fetchall()
+    con.close()
+
+    legacy = [
+        p for p in parents
+        if not str(p["source"] or "").upper().startswith("MSC")
+    ]
+
+    if not legacy:
+        return
+
+    # Load prices
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    px_map = {
+        (str(r["marketId"]), str(r["selectionId"])): float(r["ltp"])
+        for r in _q_retry(con, """
+            SELECT marketId, selectionId, ltp
+              FROM odds_current
+             WHERE date(updated_ts)=date('now','utc')
+        """).fetchall()
+        if r["ltp"] is not None
+    }
+    con.close()
+
+    # Boundary exit evaluation
+    for p in legacy:
+        mid = str(p["marketId"])
+        sid = str(p["selectionId"])
+        side = p["side"].upper()
+
+        ltp = px_map.get((mid, sid))
+        if ltp is None:
+            continue
+
+        boundary_hit = (
+            (side == "BACK" and ltp <= 1.5) or
+            (side == "LAY"  and ltp >= 12.0)
+        )
+
+        if not boundary_hit:
+            continue
+
+        # Mark exit
+        con = _orders_conn()
+        _q_retry(con, """
+            UPDATE orders
+               SET exit_status='matched',
+                   exit_kind='BOUNDARY',
+                   exit_odds=?, exit_stake=entry_stake,
+                   closed_at=datetime('now','utc')
+             WHERE customerOrderRef=?
+        """, (ltp, p["customerOrderRef"]))
+        con.commit()
+        con.close()
+
+        event_sink.on_decision({
+            "type": "legacy_boundary_exit",
+            "marketId": mid,
+            "selectionId": sid,
+            "entry_side": side,
+            "exit_odds": ltp,
+            "ts": datetime.now(timezone.utc).isoformat()
+        })
+
+        print(f"[LEGACY] boundary exit mid={mid} sid={sid} ltp={ltp}")
+
+# === PATCH END ===============================================================
+
 
 # === PATCH START ===============================================================
 # 📍 TARGET: engines/live/overwatcher.py
@@ -1207,6 +1279,11 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
 
     def loop():
         while True:
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py:start_overwatcher loop
+# 📆 PATCHED: 2025-12-01 — split legacy vs MSC stop-loss handlers
+# ============================================================================
+
             try:
                 with auto_conn() as conn:
                     _evaluate_market_guardian(conn)
@@ -1214,13 +1291,17 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
                     _evaluate_liability_alerts(conn)
                     _evaluate_probability_risk(conn)
                     _evaluate_micro_scalper_balance(conn)
-                from engines.live.stoploss_engine import enforce_stop_losses_trailing
+
+                # MSC — trailing stop-loss only
                 enforce_stop_losses_trailing()
 
-        
+                # Legacy — boundary exits only
+                enforce_legacy_boundaries_and_trailing()
 
             except Exception as e:
                 print("[OVERWATCHER] loop error", e)
+# === PATCH END ===============================================================
+
             time.sleep(max(1.0 / hz, 0.5))
 
     t = threading.Thread(target=loop, name="OverwatcherLoop", daemon=True)

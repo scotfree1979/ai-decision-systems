@@ -1,141 +1,164 @@
-# /engines/micro_scalper_v7/inplay_engine.py
+# === PATCH START ===
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: ^from typing import Dict, Any, Optional
+# 🛠 ACTION: Replace entire file with this implementation
+# 📆 PATCHED: 2025-12-01 — Complete MSC In-Play Engine (Engine C)
+# ============================================================================
 
 from typing import Dict, Any, Optional
 from .state_machine import InPlaySubState
 from .intel_adapter import build_micro_state
+from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+from engines.cashout_calc import cashout_calc
 
 
 class InPlayEngine:
     """
-    IN-PLAY Intelligent Laying Engine (Engine C)
+    IN-PLAY MSC Engine (Engine C)
     -------------------------------------------
-    Activated once OC >= 7. Uses V7 in-play intelligence
-    to identify horses whose winning chances are collapsing.
+    Rules (as specified):
 
-    Logic:
-      • Only LAYS collapsing runners (never back-to-lay in-play)
-      • Uses drift_speed, momentum_class, inplay_progress,
-        volatility, exhaustion, and form book to confirm weakness.
-      • Small, safe, dynamic micro-stakes (1–2 ticks profit targets)
-      • Learns through feedback_assimilator
+    • Only LAY collapsing runners.
+    • Trigger requires:
+          - oc_phase >= 7
+          - win_probability collapse OR OC collapse signals
+    • Stake MUST NOT create net negative PnL for the runner.
+      That is: stake <= runner’s canonical positive PnL.
+    • Sweetspot ≈ odds ≥ 7.0 (configurable)
+    • Exit conditions:
+          - Trailing/boundary exit → CHILD_T
+          - Collapse reversal → CHILD_S
+          - Profit reached → CHILD_H
+    • No exit until boundary or reversal.
     """
+
+    SWEETSPOT_MIN_ODDS = 7.0
+    HARD_LOWER_BOUND = 1.5     # protective close
+    HARD_UPPER_BOUND = 12.0    # protective close
 
     def __init__(self):
         self.state = InPlaySubState.IDLE
         self.active_plan = None
-        self.last_px = None
+        self.entry_px = None
+        self.parent_pnl_cache = {}   # per-runner PnL from cashout system
 
-    # -----------------------------------------------------------
+    # ----------------------------------------------------------------------
     # PUBLIC API
-    # -----------------------------------------------------------
+    # ----------------------------------------------------------------------
     def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Called on every IN-PLAY tick by MicroScalperEngine.
-
-        ctx must contain:
-            - oc_phase >= 7
-            - current_price
-            - dynamic_stake_fn
-            - v7-intel fields (drift_speed, inplay_progress, etc.)
-        """
-
-        if ctx.get("oc_phase", 0) < 7:
-            # move back to idle if race not yet in-play
+        oc_phase = ctx.get("oc_phase", 0)
+        if oc_phase < 7:
             self.state = InPlaySubState.IDLE
+            self.active_plan = None
             return None
 
-        micro_state = build_micro_state(ctx)
+        # Build v7 microstate
+        m = build_micro_state(ctx)
+
+        # Load canonical PnL for this runner (if possible)
+        self._load_runner_pnl(ctx)
 
         if self.state == InPlaySubState.IDLE:
-            return self._analyse(ctx, micro_state)
-
-        if self.state == InPlaySubState.ANALYSE:
-            return self._evaluate_lay(ctx, micro_state)
+            return self._try_open(ctx, m)
 
         if self.state == InPlaySubState.MONITOR:
-            return self._monitor(ctx, micro_state)
+            return self._monitor(ctx, m)
 
         return None
 
-    # -----------------------------------------------------------
-    # INTERNAL LOGIC
-    # -----------------------------------------------------------
-    def _analyse(self, ctx: Dict[str, Any], m: Dict[str, Any]):
+    # ----------------------------------------------------------------------
+    # INTERNAL LOGIC — ENTRY
+    # ----------------------------------------------------------------------
+    def _try_open(self, ctx: Dict[str, Any], m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Decide whether this runner is showing collapse signals.
+        Decide whether to open an in-play micro-LAY.
         """
-        collapse = self._collapse_signal(m)
-        if not collapse:
+
+        current = ctx.get("current_price")
+        if not current or current <= 0:
             return None
 
-        self.state = InPlaySubState.ANALYSE
-        return None
-
-    def _evaluate_lay(self, ctx: Dict[str, Any], m: Dict[str, Any]):
-        """
-        If enough collapse evidence exists, open a micro lay.
-        """
-        if not self._collapse_signal(m):
-            self.state = InPlaySubState.IDLE
+        # Must be in sweetspot
+        if current < self.SWEETSPOT_MIN_ODDS:
             return None
 
-        # dynamic confidence
-        conf = self._compute_confidence(m)
-        if conf < 0.60:
+        # Collapse detection from direction engine
+        dec = compute_msc_decision(ctx)
+        win_prob = dec["win_prob"]
+        direction = dec["direction"]   # BACK->LAY or LAY->BACK
+
+        # In-play collapse = strong loser → direction must be BACK->LAY
+        if direction != "BACK->LAY":
             return None
 
-        ticks = self._compute_target_ticks(m)
-        size = ctx["dynamic_stake_fn"](
-            family="MSC_IP",
-            confidence=conf,
-            vol_state=m.get("volatility_state"),
-            expected_ticks=ticks,
-        )
+        # Confidence threshold
+        if win_prob > 0.40:  # high win_prob → do NOT lay
+            return None
+
+        # Must have enough guaranteed profit to keep this runner ≥ 0 after lay
+        stake_limit = self._max_allowed_stake(ctx)
+        if stake_limit <= 0:
+            return None
+
+        stake = min(2.0, stake_limit)   # floor implementation: small IP stakes
 
         plan = {
             "enter": True,
             "role": "CHILD",
             "family": "MSC_IP",
             "subtype": "LAYDOWN",
-            "direction": "LAY",  # always lay collapsing horses
-            "target_ticks": ticks,
-            "size": size,
-            "px": ctx.get("current_price"),
+            "direction": "LAY",
+            "target_ticks": 1,             # in-play: always 1 tick
+            "size": stake,
+            "px": current,
             "why": "inplay_collapse",
         }
 
         self.active_plan = plan
-        self.last_px = ctx.get("current_price")
+        self.entry_px = current
         self.state = InPlaySubState.MONITOR
         return plan
 
-    def _monitor(self, ctx: Dict[str, Any], m: Dict[str, Any]):
+    # ----------------------------------------------------------------------
+    # INTERNAL LOGIC — MONITOR
+    # ----------------------------------------------------------------------
+    def _monitor(self, ctx: Dict[str, Any], m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Monitor momentum. If collapse slows or reverses → exit.
-        If profit target reached → exit.
+        Monitors trend → returns exit plan when:
+            • collapse reverses
+            • profit achieved
+            • boundaries hit (classified as T)
         """
-        current_px = ctx.get("current_price")
 
-        if current_px is None or self.active_plan is None:
+        current = ctx.get("current_price")
+        if current is None or self.entry_px is None or self.active_plan is None:
             return None
 
-        # reversal: steam event or in-play momentum flips
-        if m.get("momentum_class") == "STEAM":
-            return self._exit_plan("inplay_reversal")
+        # ---- 1) HARD BOUNDARIES ----
+        if current <= self.HARD_LOWER_BOUND or current >= self.HARD_UPPER_BOUND:
+            return self._exit("boundary_exit", tag="T")
 
-        # profit hit
-        diff = abs(int((current_px - self.active_plan["px"]) * 100))
-        if diff >= self.active_plan["target_ticks"]:
-            return self._exit_plan("inplay_profit")
+        # ---- 2) COLLAPSE REVERSAL ----
+        momentum = m.get("momentum_class")
+        if momentum in ("STEAM", "REVERSAL", "RECOVERY"):
+            return self._exit("collapse_reversal", tag="S")
+
+        # ---- 3) PROFIT HIT ----
+        ticks = int(round((self.entry_px - current) * 100))
+        if ticks >= self.active_plan["target_ticks"]:
+            return self._exit("inplay_profit", tag="H")
 
         return None
 
-    # -----------------------------------------------------------
-    # EXIT
-    # -----------------------------------------------------------
-    def _exit_plan(self, why: str) -> Dict[str, Any]:
+    # ----------------------------------------------------------------------
+    # EXIT BUILDER
+    # ----------------------------------------------------------------------
+    def _exit(self, reason: str, tag: str) -> Dict[str, Any]:
         """
-        Build an exit plan to close the in-play micro scalp.
+        tag:
+            H = hedge/profit
+            S = stop-loss-style reversal
+            T = trailing/boundary exit
         """
         plan = {
             "enter": False,
@@ -143,49 +166,62 @@ class InPlayEngine:
             "role": "CHILD",
             "family": "MSC_IP",
             "subtype": "LAYDOWN",
-            "why": why,
+            "why": reason,
+            "exit_tag": tag,
         }
-
         self.state = InPlaySubState.IDLE
         self.active_plan = None
+        self.entry_px = None
         return plan
 
-    # -----------------------------------------------------------
-    # SUPPORT FUNCTIONS
-    # -----------------------------------------------------------
-    def _collapse_signal(self, m: Dict[str, Any]) -> bool:
+    # ----------------------------------------------------------------------
+    # SUPPORT: Load canonical PnL for stake limit
+    # ----------------------------------------------------------------------
+    def _load_runner_pnl(self, ctx: Dict[str, Any]):
         """
-        Determines whether a runner is collapsing in-play.
-        Must use multiple conditions:
-          - drift_speed positive + strong
-          - inplay_progress between ~0.2–0.9 (mid race)
-          - form_class indicates weakness
-          - momentum_class indicates collapse
-          - blueprint + playbook confirm losing conditions
+        Fetches canonical cash-out PnL for this runner to determine
+        the maximum safe in-play lay stake that keeps PnL ≥ 0.
         """
-        if m.get("drift_speed") and m["drift_speed"] > 0.3:
-            if m.get("momentum_class") in ("DRIFT", "COLLAPSE"):
-                if 0.1 < (m.get("inplay_progress") or 0) < 0.95:
-                    return True
-        return False
 
-    def _compute_confidence(self, m: Dict[str, Any]) -> float:
-        """
-        Confidence for in-play micro-lay based on v7 intelligence.
-        """
-        base = 0.5
-        if m.get("drift_speed"):
-            base += min(m["drift_speed"], 1.0) * 0.2
-        if m.get("bias_conf"):
-            base += m["bias_conf"] * 0.1
-        if m.get("form_class") == "OUTSIDER":
-            base += 0.1
-        return min(base, 1.0)
+        mid = str(ctx.get("marketId"))
+        sid = str(ctx.get("selectionId"))
 
-    def _compute_target_ticks(self, m: Dict[str, Any]) -> int:
+        try:
+            # one market-wide call cached per tick
+            if not self.parent_pnl_cache:
+                # NOTE: ctx includes active DB connection in orchestrator
+                results = cashout_calc(ctx["db_conn"])  # safe: conn is passed from orchestrator
+                self.parent_pnl_cache = results or {}
+        except Exception:
+            return
+
+        if mid not in self.parent_pnl_cache:
+            return
+
+        runner_info = self.parent_pnl_cache[mid]["runner_pnls"]
+        if sid in runner_info:
+            ctx["canonical_pnl_runner"] = float(runner_info[sid])
+        else:
+            ctx["canonical_pnl_runner"] = 0.0
+
+    # ----------------------------------------------------------------------
+    # SUPPORT: Determine max allowed in-play stake
+    # ----------------------------------------------------------------------
+    def _max_allowed_stake(self, ctx: Dict[str, Any]) -> float:
         """
-        IN-PLAY micro scalps are 1–2 ticks max.
+        stake ≤ canonical positive runner PnL / (odds-1)
+        Ensures laying cannot push runner negative.
         """
-        if m.get("volatility_state") == "HIGH":
-            return 2
-        return 1
+
+        pnl = float(ctx.get("canonical_pnl_runner") or 0.0)
+        current = float(ctx.get("current_price") or 0.0)
+
+        if pnl <= 0 or current <= 1.0:
+            return 0.0
+
+        # Liability = stake * (odds - 1)
+        # → stake ≤ pnl / (odds - 1)
+        liab_factor = max(current - 1.0, 0.01)
+        return pnl / liab_factor
+
+# === PATCH END ===

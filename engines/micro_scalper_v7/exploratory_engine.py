@@ -60,18 +60,25 @@ class ExploratoryEngine:
             return None
 
         micro_state = build_micro_state(ctx)
-        direction = classify_direction_from_legacy(
-            ctx.get("legacy_entry_side")
-        )
-        order_side = same_direction_microtrade(direction)
+        from .direction_engine import compute_msc_decision
 
-        if self.state == ExploratorySubState.IDLE:
-            return self._evaluate(ctx, micro_state, order_side)
+        # Compute full MSC direction + mode
+        msc_decision   = compute_msc_decision(ctx)
+        direction_label = msc_decision["direction"]       # "LAY->BACK" or "BACK->LAY"
+        mode            = msc_decision["mode"]
+        ticks_override  = msc_decision["entry_ticks"]
+        stop_ticks      = msc_decision["stop_ticks"]
 
-        if self.state == ExploratorySubState.MONITOR:
-            return self._monitor(ctx, micro_state)
+        # Convert LAY->BACK into actual order SIDE
+        order_side = "LAY" if direction_label == "LAY->BACK" else "BACK"
 
-        return None
+        # Override target ticks in ctx (used by MSC plan builders)
+        ctx["msc_direction"]  = direction_label
+        ctx["msc_mode"]       = mode
+        ctx["msc_entry_ticks"] = ticks_override
+        ctx["msc_stop_ticks"]  = stop_ticks
+        # === PATCH END ==============================================================
+
 
     # -----------------------------------------------------------
     # INTERNAL LOGIC
@@ -175,6 +182,17 @@ class ExploratoryEngine:
         return min(max(base, 0.0), 1.0)
 
     def _compute_target_ticks(self, m: Dict[str, Any]) -> int:
+        # === PATCH START ============================================================
+        # 📍 TARGET: exploratory_engine._compute_target_ticks
+        # 📆 PATCHED: 2025-12-01 — obey direction_engine entry ticks
+        override = m.get("msc_entry_ticks")
+        if override is not None:
+            try:
+                return int(override)
+            except Exception:
+                pass
+        # === PATCH END ==============================================================
+
         """
         PRE-OFF micro scalps are always 1–3 ticks.
         """

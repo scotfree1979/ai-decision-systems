@@ -161,6 +161,19 @@ BASE_STAKE_E = 3.00;  STAKE_MAX_E = 6.00    # IP4 Fence Error
 BASE_STAKE_K = 3.00;  STAKE_MAX_K = 6.00    # IP5 Collapse Fade
 
 # ============================================================
+# 🧠 MSC Families (MicroScalper v7 Engines)
+# ============================================================
+# D → Exploratory (PRE-OFF micro scalp)
+BASE_STAKE_D = 3.50;  STAKE_MAX_D = 10.00
+
+# J → Risk-Reactive (PRE-OFF shadowing legacy)
+BASE_STAKE_J = 4.00;  STAKE_MAX_J = 12.00
+
+# V → Intelligent In-Play Laying Engine
+BASE_STAKE_V = 3.00;  STAKE_MAX_V = 8.00
+
+
+# ============================================================
 # 📉 Passive Zone Scaling
 # ============================================================
 # Multiplier for stake sizing when odds fall in the PASSIVE band (8.0 < odds <= 12.0).

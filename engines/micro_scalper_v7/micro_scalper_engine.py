@@ -253,6 +253,7 @@ class MicroScalperEngine:
         for parent_id, engine in list(self.risk_engines.items()):
             plan = engine.tick(ctx)
             if plan:
+                plan["source"] = "J"
                 return _apply_multiplier(plan, ctx)
 
         # ---------------------------------------------------------
@@ -265,9 +266,22 @@ class MicroScalperEngine:
             ctx["legacy_expected_direction"] = classify_direction_from_legacy(
                 ctx["legacy_entry_side"]
             )
+        # === PATCH START ============================================================
+        # 📍 TARGET: micro_scalper_engine._tick_preoff
+        # 📆 PATCHED: 2025-12-01 — enrich ctx with MSC direction/mode
+        from .direction_engine import compute_msc_decision
+
+        msc_dec = compute_msc_decision(ctx)
+        ctx["msc_direction"]    = msc_dec["direction"]
+        ctx["msc_mode"]         = msc_dec["mode"]
+        ctx["msc_entry_ticks"]  = msc_dec["entry_ticks"]
+        ctx["msc_stop_ticks"]   = msc_dec["stop_ticks"]
+        # === PATCH END ==============================================================
+
 
         plan = self.exploratory.tick(ctx)
         if plan:
+            plan["source"] = "D"
             return _apply_multiplier(plan, ctx)
 
         return None
@@ -281,6 +295,7 @@ class MicroScalperEngine:
         """
         plan = self.inplay.tick(ctx)
         if plan:
+            plan["source"] = "V"
             return _apply_multiplier(plan, ctx)
         return None
 

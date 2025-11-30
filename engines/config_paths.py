@@ -1179,37 +1179,34 @@ def _cloud_db(path: str):
 # 📌 RW-only ATTACH Model (final)
 # ----------------------------------------------------------------------
 def _attach_all_four(con: sqlite3.Connection, rw_primary: str):
-    """
-    FINAL RW-ONLY ATTACH:
-
-        PRIMARY family   → CLOUD
-        NON-PRIMARY      → LOCAL
-
-    No RO anywhere. No cloud-RO. No read-only mounts.
-    AlphaX + Hijack serialize all writes, so full RW is safe.
-    """
-
     fam_to_cloud = {
-        "auto":        CLOUD_AUTO,
-        "bets":        CLOUD_BETS,
-        "mastery":     CLOUD_MASTERY,
+        "auto": CLOUD_AUTO,
+        "bets": CLOUD_BETS,
+        "mastery": CLOUD_MASTERY,
         "settlements": CLOUD_SETTLE,
     }
 
     fam_to_local = {
-        "auto":        LOCAL_AUTO,
-        "bets":        LOCAL_BETS,
-        "mastery":     LOCAL_MASTERY,
+        "auto": LOCAL_AUTO,
+        "bets": LOCAL_BETS,
+        "mastery": LOCAL_MASTERY,
         "settlements": LOCAL_SETTLE,
     }
 
+    # --- ATTACH with retries ---
+    import time
     for fam in ("auto", "bets", "mastery", "settlements"):
-        if fam == rw_primary:
-            path = fam_to_cloud[fam]    # primary → CLOUD
-        else:
-            path = fam_to_local[fam]    # others → LOCAL
+        path = fam_to_cloud[fam] if fam == rw_primary else fam_to_local[fam]
 
-        con.execute(f"ATTACH DATABASE ? AS {fam}", (path,))
+        for attempt in range(5):
+            try:
+                con.execute(f"ATTACH DATABASE ? AS {fam}", (path,))
+                break  # success
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+
 
 
 # ----------------------------------------------------------------------

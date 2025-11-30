@@ -3254,33 +3254,25 @@ def _clean_shutdown_handler(signum, frame):
 # === PATCH START ===
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: def start_live_loop(
-# 📆 PATCHED: 2025-11-28 — Integrate MicroScalper v7 (Exploratory, Risk, In-Play)
+# 📆 PATCHED: 2025-11-29 — Clean unified tick driver (RunAll + Overwatcher)
 
 def start_live_loop(*args, **kwargs):
-    # ─────────────────────────────────────────────────────────
-    # NEW: Instantiate MicroScalperEngine v7
-    # ─────────────────────────────────────────────────────────
-    from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
-    msc = MicroScalperEngine()
+    import atexit, threading, time
 
-    # Force orchestrator source mode = LIVE (existing code preserved)
+    # ------------------------------------------------------------------
+    # 0) GLOBAL MODE → LIVE
+    # ------------------------------------------------------------------
     from engines.decision_engine.orchestrator import _set_current_source_override
     _set_current_source_override("LIVE")
-    # === PATCH END INSERTION ===
-    # REMOVE these two lines:
-    # signal.signal(signal.SIGINT, _clean_shutdown_handler)
-    # signal.signal(signal.SIGTERM, _clean_shutdown_handler)
 
-
-    # ADD this instead:
-    import atexit
+    # Safe shutdown handler
     atexit.register(_clean_shutdown_handler)
     print("[HOUSEKEEPER] atexit shutdown hook registered")
 
-
-    # HOUSEKEEPER: Launch background WAL/SHM minimiser
+    # ------------------------------------------------------------------
+    # 1) BACKGROUND HOUSEKEEPER (WAL/SHM cleanup)
+    # ------------------------------------------------------------------
     try:
-        import threading
         t = threading.Thread(
             target=_storage_housekeeper_worker,
             kwargs={"interval": 300},
@@ -3291,354 +3283,125 @@ def start_live_loop(*args, **kwargs):
         print("[HOUSEKEEPER] Background WAL/SHM cleaner started")
     except Exception as e:
         print(f"[HOUSEKEEPER] warn: {e}")
-    # Pre-bind logger to avoid UnboundLocalError if it’s assigned later in this function
+
+    # ------------------------------------------------------------------
+    # 2) BIND LOGGER + CORE ARGUMENTS
+    # ------------------------------------------------------------------
     logger = kwargs.get("logger", None)
     run_id = kwargs.get("run_id", None)
     hz = float(kwargs.get("hz", 2))
     interval = max(0.25, 1.0 / (hz or 2.0))
 
-    # === PATCH START ===
-    # 📍 TARGET: engines/decision_engine/orchestrator.py
-    # 🔎 SEARCH: def start_live_loop(
-    # 📆 PATCHED: 2025-11-27Z — explicitly set global mode=LIVE
-    #from engines.upgrade_import_patch import set_mode
-    #set_mode("live")
-    # === PATCH END ===
-
-    # === PATCH START ===
-    # 📍 TARGET: engines/decision_engine/orchestrator.py:start_live_loop
-    # 📆 PATCHED: 2025-11-22Z — Activate DAL + kill stale writers + reload writers
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    # 1) Enable connection hijack
+    # ------------------------------------------------------------------
+    # 3) ENABLE DAL + HIJACK + RELOAD WRITER MODULES
+    # ------------------------------------------------------------------
     try:
         from engines.database_hijack_monitor import activate_hijack
         activate_hijack()
-        print("[HIJACK] enabled for LIVE mode (all raw DB opens routed → DAL)")
+        print("[HIJACK] enabled for LIVE mode")
     except Exception as e:
         print(f"[HIJACK] warn: {e}")
 
-    # 2) Enable DAL LIVE routing
     try:
         from engines.config_paths import enable_live_dal
         enable_live_dal()
-        print("[LIVE DAL] switched → LIVE (cloud-write mode enabled)")
+        print("[LIVE DAL] switched → LIVE")
     except Exception as e:
-        print(f"[LIVE DAL] enable warn: {e}")
+        print(f"[LIVE DAL] warn: {e}")
 
-    # 3) Kill stale writer threads spawned before DAL activation
-    import threading
-    def _kill_stale_threads():
-        killers = (
-            "OddsServiceWriter",
-            "MarketDataThread",
-            "BudgetWatcher",
-            "FeedbackScheduler",
-            "odds",
-            "market_data",
-            "writer",
-        )
-        killed = []
-        for t in threading.enumerate():
-            name = t.name or ""
-            if any(k in name for k in killers):
-                try:
-                    if hasattr(t, "_stop"):
-                        t._stop()
-                    t.daemon = True
-                    killed.append(name)
-                except Exception:
-                    pass
-        if killed:
-            print(f"[LIVE DAL] killed stale writer threads → {killed}")
-        else:
-            print("[LIVE DAL] no stale writer threads detected")
+    # purge stale threads
+    try:
+        _kill_stale_threads()
+    except Exception:
+        pass
 
-    _kill_stale_threads()
+    # reload writers using DAL
+    try:
+        import importlib
+        import engines.odds.writers as _rw
+        import engines.odds.odds_service as _os
+        import engines.risk.budget_manager as _bm
+        import engines.indicators.market_data as _md
+        import engines.market_monitor.monitor as _mm
+        import engines.live.live_router as _lr
+        import engines.live.settlements as _ls
+        import engines.live.overwatcher as _ow
+        import engines.mastery.feedback_scheduler as _fs
+        import engines.decision_engine.decide_once.helpers as _dh
 
-    # 4) Reload all writer modules so they reopen using DAL connections
-    import importlib
+        for m in (_rw, _os, _bm, _md, _mm, _lr, _ls, _ow, _fs, _dh):
+            importlib.reload(m)
 
-    import engines.odds.writers as _r_odds_writers
-    importlib.reload(_r_odds_writers)
+        print("[LIVE DAL] reload complete (writers reopened)")
+    except Exception as e:
+        print(f"[LIVE DAL] reload warn: {e}")
 
-    import engines.odds.odds_service as _r_odds_service
-    importlib.reload(_r_odds_service)
-
-    import engines.risk.budget_manager as _r_budget_manager
-    importlib.reload(_r_budget_manager)
-
-    import engines.indicators.market_data as _r_market_data
-    importlib.reload(_r_market_data)
-
-    import engines.market_monitor.monitor as _r_monitor
-    importlib.reload(_r_monitor)
-
-    import engines.live.live_router as _r_live_router
-    importlib.reload(_r_live_router)
-
-    import engines.live.settlements as _r_live_settlements
-    importlib.reload(_r_live_settlements)
-
-    import engines.live.overwatcher as _r_overwatcher
-    importlib.reload(_r_overwatcher)
-
-    import engines.mastery.feedback_scheduler as _r_feedback_scheduler
-    importlib.reload(_r_feedback_scheduler)
-
-    import engines.decision_engine.orchestrator as _r_orchestrator
-    importlib.reload(_r_orchestrator)
-
-    import engines.decision_engine.decide_once.helpers as _r_helpers
-    importlib.reload(_r_helpers)
-
-
-    # === PATCH END ===
-
-    # === PATCH START ===
-    # 📍 TARGET: engines/decision_engine/orchestrator.py
-    # 🔎 SEARCH: "[LIVE DAL] reload complete (11 writer modules)"
-    # 📆 PATCHED: 2025-11-27 — Set mode to LIVE after reload
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    print("[LIVE DAL] reload complete (11 writer modules)")
-
-    # Force orchestrator + upgrade_import_patch into LIVE mode after reload
-    from engines.upgrade_import_patch import set_mode
-    set_mode("live")
-
-    from engines.decision_engine.orchestrator import _set_current_source_override
-    _set_current_source_override("LIVE")
-
-    # === PATCH END ===
-
-
-
-
-    # Run Blueprints once/day (no-op if already ran), then warm the cache
-    # Warm the in-process blueprint cache (idempotent, fast)
+    # ------------------------------------------------------------------
+    # 4) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY
+    # ------------------------------------------------------------------
     try:
         from engines.blueprint.runtime import load_blueprints
-        obj = load_blueprints()  # uses _BP_CACHE inside runtime.py
-        patt = obj.get("pattern_dict_export") if isinstance(obj, dict) else None
-        if not patt:
-            patt = obj  # fallback: top-level dict is already patterns
-        k0 = next(iter(patt.keys()), "").lower()
-        fp = "drift" if "drift" in k0 else "steam" if "steam" in k0 else "flat" if "flat" in k0 else "bp"
-        total = len(patt) or len(obj.get("prefix_index") or {})
-        print(f"[blueprints] cache ready {total} patterns key={fp}")
-    except Exception as ee:
-        print(f"[blueprints] cache warn: {ee}")
+        obj = load_blueprints()
+        total = len(obj.get("pattern_dict_export") or obj)
+        print(f"[blueprints] cache ready {total}")
+    except Exception as e:
+        print(f"[blueprints] warn: {e}")
 
-    # Always warm the in-process cache (cheap & idempotent)
-    try:
-        from engines.blueprint.runtime import load_blueprints as _bp_load
-    except Exception as ee:
-        print(f"[blueprints] cache warn: {ee}")
-        _bp_load = lambda: {}
-
-    try:
-        obj = _bp_load()  # uses _BP_CACHE internally
-        patt = obj.get("pattern_dict_export") if isinstance(obj, dict) else None
-        if not patt:
-            patt = obj  # fallback: top-level dict is already patterns
-        k0 = next(iter(patt.keys()), "").lower()
-        # tiny, human-friendly fingerprint (first pattern’s first token)
-        k0 = next(iter(patt.keys()), "").lower()
-        if   "drift" in k0:  fp = "drift"
-        elif "steam" in k0:  fp = "steam"
-        elif "flat"  in k0:  fp = "flat"
-        else:                fp = "bp"
-        total = len(patt) or len(obj.get("prefix_index") or {})
-        print(f"[blueprints] cache ready {total} patterns key={fp}")
-    except Exception as ee:
-        print(f"[blueprints] cache warn: {ee}")
-
-
-
-    # Safe import mastery sink
-    try:
-        from engines.mastery.event_sink import drain_new_events  # type: ignore
-    except Exception:
-        def drain_new_events(max_rows: int = 500) -> int: return 0
-
-    # Settlement loop every 5 minutes
     try:
         from engines.settlement.loop import _start_settlement_loop
         _start_settlement_loop(period_s=300)
     except Exception:
         pass
 
-    # ───────────────────────── IMPORTANT ─────────────────────────
-    # Disable the old run_active_strategies path.
-    # decide_once() now owns all placements (via registry/letters).
+    # disable old paths
     global F_ENABLE_STRATS
     F_ENABLE_STRATS = False
-    # ─────────────────────────────────────────────────────────────
+
+    # ------------------------------------------------------------------
+    # 5) MAIN LIVE LOOP — CLEAN VERSION
+    # ------------------------------------------------------------------
+    from engines.decision_engine.decide_once.lanes import run_all
+
 
     while True:
         try:
-            # === PATCH START ===
-            # 📍 TARGET: engines/decision_engine/orchestrator.py
-            # 🔎 SEARCH: while True:\n        try:\n            # 1) Core decision engine
-            # ⛏️ ACTION: insert just before decide_once(...)
-            # 0) Update odds & blueprints for current scope (WIN5 + …)
-            # 0) Update canonical tape for current scope (cheap)
+            # ----------------------------------------------------------
+            # A) RUNALL — FULL DECISION ENGINE (legacy + MSC + v7)
+            # ----------------------------------------------------------
             try:
-                sc = _build_scope(now_utc=_utcnow(), inplay_window_min=15)
-                _refresh_odds_cache_for_scope(sc)
-            except Exception as _e:
-                if logger: logger(f"[odds_current] warn: {_e}")
-            try:
-                from engines.odds.odds_service import tick_update_for_scope
-                tick_update_for_scope(inplay_window_min=15)
-            except Exception as _e:
-                logger(f"[odds] warn: {_e}")
-
-            try:
-                refresh_scope_tape_once(inplay_window_min=15)
-            except Exception as _e:
-                logger and logger(f"[odds] refresh warn: {_e}")
-
-            from engines.decision_engine.decide_once.helpers import refresh_odds_current_for_markets
-            from engines.decision_engine.decide_once.scope import SCOPE_WINDOW
-
-            # … inside the while True tick, just before decide_once(…):
-            try:
-                mids = list(SCOPE_WINDOW)  # your win5 window
-                if mids:
-                    n = refresh_odds_current_for_markets(mids, max_runners=12)
-                    if n == 0:
-                        # fallback to orchestrator’s local writer if needed
-                        sc = _build_scope(now_utc=_utcnow(), inplay_window_min=15)
-                        _ = _refresh_odds_cache_for_scope(sc)
-            except Exception as _e:
-                if logger: logger(f"[odds] refresh warn: {_e}")
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: # 0.5) MicroScalperEngine — PRE-OFF, RISK, IN-PLAY
-# 📆 PATCHED: 2025-11-29 — REMOVE invalid MSC ctx in start_live_loop
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# REMOVE the entire block beginning with:
-#   # 0.5) MicroScalperEngine — PRE-OFF, RISK, IN-PLAY
-# and ending right before:
-#   # 1) Core decision engine
-
-# Replace it with a no-op (keeps structure clean):
-
-# 0.5) MicroScalperEngine — removed (handled inside lanes.run_all)
-
-
-# === PATCH END ==============================================================
-
-
-            # 1) Core decision engine
-
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: ^def start_live_loop\(
-# ⛏️ ACTION: insert/replace inside the main while-loop where the live tick runs
-# (Minimal context; place this call after scope/odds writers and before sleep)
-            # ── DECISIONS: always run once per tick, even if upstream had issues ──
-            try:
-                decide_once(run_id, source_override="LIVE", logger=logger)
+                run_all(run_id, source="LIVE", logger=logger)
             except Exception as e:
-                import traceback as _tb
-                # Emit a truthful health line so we never go silent
                 if logger:
-                    logger(f"[HEALTH] decide_once:tick => FAIL — exception: {e}")
-                    for line in _tb.format_exc().splitlines():
-                        logger(f"[dbg] {line}")
-
-            # ---------------------------------------------------------------------
-# === PATCH END ===
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH:     # 1) Core decision engine
-# 📆 PATCHED: 2025-11-29 — Restore DecideOnce + MSC per-tick execution
-# ====================================================================
+                    logger(f"[DECIDE] run_all warn: {e}")
 
             # ----------------------------------------------------------
-            # LIVE DECISION ENGINE (Legacy + MicroScalper)
+            # B) OVERWATCHER (stop-loss, guardian, brain pulse etc.)
             # ----------------------------------------------------------
-            try:
-                from engines.decision_engine.decide_once.decide_once import decide_once
-                decide_once(run_id, source_override="LIVE", logger=logger)
-            except Exception as e:
-                logger and logger(f"[HEALTH] decide_once FAIL: {e}")
+
+
+
 
             # ----------------------------------------------------------
-            # DIRECT MICROSCALPER TICK (safety net — should be redundant,
-            # but ensures MSC always fires even if legacy has no parents)
+            # C) MATCH / HEDGE SYNC
             # ----------------------------------------------------------
-            try:
-                from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
-                msc = start_live_loop.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
-
-                # Build minimal ctx for MSC when legacy is silent
-                _ctx = {
-                    "marketId": current_mid,
-                    "selectionId": current_sid,
-                    "current_price": current_price,
-                    "oc_phase": oc_phase,
-                    "dynamic_stake_fn": dynamic_stake_v7,
-                    **current_ctx_v7
-                }
-                plan = msc.tick(_ctx)
-                if plan:
-                    from engines.live.live_router import queue_order
-                    queue_order(plan, logger=logger)
-            except Exception as e:
-                logger and logger(f"[MSC] tick warn: {e}")
-
-# === PATCH END ===
-
-
-            # 2) Lifecycle sync (matches/hedges) — throttle to once per 5s
             try:
                 now_mono = time.monotonic()
                 last = getattr(start_live_loop, "_last_sync", 0.0)
-                if (now_mono - last) >= 5.0:
+                if now_mono - last >= 5.0:
                     _sync_live_matches(logger=logger)
                     _sync_hedge_matches(logger=logger)
                     start_live_loop._last_sync = now_mono
             except Exception as e:
-                logger(f"[sync] warn: {e}")
-
-            # 3) Advisory green sweep (suggest hedges, no orders)
-            try:
-                from engines.live.live_router import maybe_green_sweep_market
-                mid = _next_market_id_today()
-                if mid:
-                    mto_tuple = _compute_minutes_to_off(str(mid), source=_current_source())
-                    mto_val = mto_tuple[0] if isinstance(mto_tuple, tuple) else mto_tuple
-                    if mto_val is not None:
-                        _con = None
-                        try:
-                            _con = _auto_conn()
-                            maybe_green_sweep_market(_con, str(mid), tto_min=float(mto_val), max_disp=5.0)
-                        finally:
-                            try:
-                                if _con: _con.close()
-                            except Exception:
-                                pass
-            except Exception as e:
-                logger(f"[green-sweep] advise warn: {e}")
-
-            # 4) Mastery ingestion (opt-in)
-            if F_ENABLE_MASTERY:
-                try:
-                    n = drain_new_events(max_rows=500)
-                    if n:
-                        logger(f"[mastery] ingested events={n}")
-                except Exception as e:
-                    logger(f"[mastery] sink warn: {e}")
+                if logger:
+                    logger(f"[sync] warn: {e}")
 
         except Exception as e:
-            logger(f"[live] loop warn: {e}")
+            if logger:
+                logger(f"[live] loop warn: {e}")
 
         time.sleep(interval)
+
+# === PATCH END ===
 
 
 def run_test_day(run_id: str, seconds: int = 600, hz: int = 4, logger=None) -> None:
