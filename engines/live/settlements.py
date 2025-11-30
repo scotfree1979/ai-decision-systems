@@ -30,26 +30,110 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import urllib.request, urllib.error
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py
-# 📆 PATCHED: 2025-11-14T22:00Z — decouple Settlements from auto_conn (use direct sqlite3)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import sqlite3
+# 📍 engines/live/settlements.py
+# === PATCH: HYBRID DB CONNECTIONS (Schema V3 aligned) ===
 
-def _settle_conn(rw: bool = True) -> sqlite3.Connection:
+from engines.config_paths import (
+    auto_conn as _auto_conn,        # GUI DB (autoscalp_gui.db)
+    connect_bets_db as _bets_conn,  # Bets DB (bets.db)
+    DATA_DIR,                       # Base folder for DBs
+)
+
+import sqlite3, os
+
+def _settle_conn(rw: bool = True, timeout: float = 8.0) -> sqlite3.Connection:
     """
-    Direct connection to data/settlements.db (never via auto_conn).
-    This guarantees Settlements runs independently of the iCloud WAL file.
+    RAW SETTLEMENTS DB WRITER
+    ----------------------------------
+    - Writes only to settlements.db
+    - Never routed via DAL
+    - Never touches cloud
+    - WAL + busy_timeout
     """
-    path = settlements_db_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    con = sqlite3.connect(path, timeout=30.0, isolation_level=None, check_same_thread=False)
+    path = os.path.join(DATA_DIR, "settlements.db")
+    con = sqlite3.connect(
+        path,
+        timeout=timeout,
+        isolation_level=None,
+        check_same_thread=False
+    )
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys=ON;")
     con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA synchronous=NORMAL;")
-    con.execute("PRAGMA busy_timeout=8000;")
+    con.execute("PRAGMA foreign_keys=ON;")
+    con.execute("PRAGMA busy_timeout=6000;")
     return con
+
+def _auto_local():
+    """Read GUI DB through DAL (autoscalp_gui.db)"""
+    return _auto_conn(rw=False)
+
+def _bets_local():
+    """Read bets.db through DAL"""
+    return _bets_conn(ro=True)
+
+
+
+def _auto_local_conn(timeout: float = 8.0) -> sqlite3.Connection:
+    """
+    Read-only LOCAL autoscalp_gui.db reader.
+    - No DAL
+    - No cloud attach
+    - Used for fetching session token / app key
+    """
+    path = autoscalp_gui_db_path()  # always LOCAL path
+    con = sqlite3.connect(
+        path,
+        timeout=timeout,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("PRAGMA busy_timeout=6000;")
+    except Exception:
+        pass
+    return con
+
+# 📍 engines/live/settlements.py
+# === PATCH: LOCAL CREDENTIAL RESOLVER ===
+
+def _resolve_betfair_creds_localonly() -> tuple[str|None, str|None]:
+    """
+    Settlements must read the SAME credentials the GUI validated.
+    Always local → autoscalp_gui.db.app_kv
+    """
+    ak = None
+    ss = None
+
+    # Read from autoscalp_gui.db -> app_kv
+    try:
+        con = _auto_local()
+        rows = con.execute("""
+            SELECT key, value FROM app_kv
+            WHERE key IN ('APP_KEY','SESSION_TOKEN')
+        """).fetchall()
+        con.close()
+        kv = {r["key"]: r["value"] for r in rows}
+        ak = kv.get("APP_KEY") or ak
+        ss = kv.get("SESSION_TOKEN") or ss
+    except Exception:
+        pass
+
+    # fallback daily_config
+    try:
+        import engines.daily_config as dc
+        if not ak:
+            ak = getattr(dc, "APP_KEY", None)
+        if not ss and hasattr(dc, "get_session_token"):
+            ss = dc.get_session_token()
+    except Exception:
+        pass
+
+    # fallback env
+    ak = ak or os.getenv("BETFAIR_APP_KEY")
+    ss = ss or os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION")
+
+    return (ak, ss)
 
 
 # 🧩 Monkey-patch safeguard:
@@ -788,128 +872,145 @@ def rebuild_runner_day_totals(day_utc: Optional[str] = None) -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 # Betfair API client (minimal)
 # ──────────────────────────────────────────────────────────────────────────────
+# 📍 engines/live/settlements.py
+# === PATCH: STABLE RPC CLIENT (RAW, LOCAL CREDS, CORRECT URL) ===
 
 class BetfairClient:
     API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 
-    def __init__(self, app_key: Optional[str] = None, session: Optional[str] = None):
-        """
-        Resolve creds in the same order as GUI/feeder:
-          1) explicit args
-          2) engines.session_secrets (DB)
-          3) engines.daily_config (APP_KEY/get_session_token)
-          4) JSON next to autoscalp_gui.db (betfair_creds.json)
-          5) environment variables
-        """
-        ak = (app_key or "").strip() if isinstance(app_key, str) else None
-        ss = (session or "").strip()  if isinstance(session, str)  else None
-
+    def __init__(self):
+        ak, ss = _resolve_betfair_creds_localonly()
         if not ak or not ss:
-            try:
-                ak2, ss2 = _resolve_betfair_creds()
-            except Exception:
-                ak2, ss2 = (None, None)
-            ak = ak or ak2
-            ss = ss or ss2
+            raise RuntimeError("Missing Betfair APP_KEY / SESSION_TOKEN")
 
-        self.app_key = ak or ""
-        self.session = ss or ""
+        self.app_key = ak
+        self.session = ss
 
-        if not self.app_key or not self.session:
-            raise RuntimeError("Betfair credentials missing: set BETFAIR_APP_KEY and BETFAIR_SESSION")
+    def _reload_creds(self):
+        ak, ss = _resolve_betfair_creds_localonly()
+        if ak:
+            self.app_key = ak
+        if ss:
+            self.session = ss
 
-        # export to env so child calls inherit
-        try:
-            os.environ["BETFAIR_APP_KEY"] = self.app_key
-            os.environ["BETFAIR_SESSION"] = self.session
-        except Exception:
-            pass
+    def _rpc(self, method: str, params: dict):
+        self._reload_creds()
 
-
-
-    def _rpc(self, method: str, params: Dict[str, Any]) -> Any:
         payload = [{
             "jsonrpc": "2.0",
             "method": f"SportsAPING/v1.0/{method}",
             "params": params,
-            "id": 1
+            "id": 1,
         }]
+
         req = urllib.request.Request(
             self.API_URL,
             data=json.dumps(payload).encode("utf-8"),
             headers={
-                "Content-Type":"application/json",
-                "Accept":"application/json",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
                 "X-Application": self.app_key,
                 "X-Authentication": self.session,
             },
             method="POST",
         )
+
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read()
-                obj = json.loads(raw)
-                if isinstance(obj, list) and obj and "result" in obj[0]:
+                body = resp.read()
+                obj = json.loads(body)
+                if isinstance(obj, list) and "result" in obj[0]:
                     return obj[0]["result"]
-                # error surface
-                raise RuntimeError(f"RPC error: {obj}")
+                raise RuntimeError(obj)
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
         except Exception as e:
             raise RuntimeError(f"RPC exception {method}: {e}")
 
-    # --- Endpoints ---
+    # === RESTORED PUBLIC API METHODS (required by settlements.py) ===
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/settlements.py: class BetfairClient
+# 🔎 SEARCH: class BetfairClient:
+# 📆 PATCHED: 2025-11-30 — Restore public API wrappers (list_cleared_orders, list_market_catalogue, list_market_book)
+# ============================================================================
 
     def list_cleared_orders(
         self,
-        from_iso: Optional[str]=None,
-        to_iso: Optional[str]=None,
-        bet_status: str="SETTLED",
-        event_type_ids: Optional[List[str]]=None,
-        market_ids: Optional[List[str]]=None,
-        side: Optional[str]=None,
-        customer_order_refs: Optional[List[str]]=None,
-        include_item_description: bool=True,
-        from_record: int=0,
-        record_count: int=1000,
-        ) -> Dict[str, Any]:
+        from_iso: Optional[str] = None,
+        to_iso: Optional[str] = None,
+        bet_status: str = "SETTLED",
+        event_type_ids: Optional[List[str]] = None,
+        market_ids: Optional[List[str]] = None,
+        side: Optional[str] = None,
+        customer_order_refs: Optional[List[str]] = None,
+        include_item_description: bool = True,
+        from_record: int = 0,
+        record_count: int = 1000,
+    ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "betStatus": bet_status,
             "fromRecord": from_record,
             "recordCount": record_count,
-            "includeItemDescription": include_item_description
+            "includeItemDescription": include_item_description,
         }
+
         if from_iso or to_iso:
             params["settledDateRange"] = {}
-            if from_iso: params["settledDateRange"]["from"] = from_iso
-            if to_iso:   params["settledDateRange"]["to"]   = to_iso
-        if event_type_ids:      params["eventTypeIds"]     = event_type_ids
-        if market_ids:          params["marketIds"]        = market_ids
-        if side:                params["side"]             = side
-        if customer_order_refs: params["customerOrderRefs"] = customer_order_refs
+            if from_iso:
+                params["settledDateRange"]["from"] = from_iso
+            if to_iso:
+                params["settledDateRange"]["to"] = to_iso
+
+        if event_type_ids:
+            params["eventTypeIds"] = event_type_ids
+        if market_ids:
+            params["marketIds"] = market_ids
+        if side:
+            params["side"] = side
+        if customer_order_refs:
+            params["customerOrderRefs"] = customer_order_refs
+
         return self._rpc("listClearedOrders", params)
 
 
     def list_market_catalogue(
-        self, market_ids: List[str], max_results: int=200
+        self,
+        market_ids: List[str],
+        max_results: int = 200,
     ) -> List[Dict[str, Any]]:
         params = {
             "filter": {"marketIds": market_ids},
             "maxResults": max_results,
             "marketProjection": [
-                "EVENT", "COMPETITION", "MARKET_START_TIME", "RUNNER_DESCRIPTION"
-            ]
+                "EVENT",
+                "COMPETITION",
+                "MARKET_START_TIME",
+                "RUNNER_DESCRIPTION",
+            ],
         }
         return self._rpc("listMarketCatalogue", params)
 
-    def list_market_book(self, market_ids: List[str]) -> List[Dict[str, Any]]:
+
+    def list_market_book(
+        self,
+        market_ids: List[str],
+    ) -> List[Dict[str, Any]]:
         params = {
             "marketIds": market_ids,
-            "priceProjection": {"priceData": ["SP_AVAILABLE","EX_TRADED","EX_BEST_OFFERS"]},
+            "priceProjection": {
+                "priceData": [
+                    "SP_AVAILABLE",
+                    "EX_TRADED",
+                    "EX_BEST_OFFERS",
+                ]
+            },
             "orderProjection": "EXECUTION_COMPLETE",
-            "matchProjection": "ROLLED_UP_BY_PRICE"
+            "matchProjection": "ROLLED_UP_BY_PRICE",
         }
         return self._rpc("listMarketBook", params)
+
+# === PATCH END ==============================================================
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CSV ingest (optional)
@@ -1269,13 +1370,19 @@ def reconcile_orders() -> Tuple[int,int]:
                 profit = row["profit"]
                 settled = row["settledDate"]
                 o.execute("""
-                  UPDATE orders
-                     SET realized_pnl = ?,
-                         net_pl       = ?,
-                         exit_status  = COALESCE(exit_status, 'matched'),
-                         closed_at    = COALESCE(closed_at, ?)
-                   WHERE bf_bet_id = ?
-                """, (profit, profit, settled, betId))
+                    UPDATE orders
+                       SET realized_pnl = ?,
+                           net_pl       = ?,
+                           exit_status  = COALESCE(exit_status, 'matched'),
+                           closed_at    = COALESCE(closed_at, ?)
+                     WHERE bf_bet_id = ?
+                """, (
+                    profit,
+                    profit,
+                    settled,
+                    betId
+                ))
+
                 record_playbook_pattern(order_row=row, pnl_row=row, oc_snapshot=None)
 
                 if o.total_changes:
@@ -1839,80 +1946,52 @@ from datetime import datetime, timezone, timedelta
 # 📍 TARGET: engines/live/settlements.py : start_settlement_daemon
 # 📆 PATCHED: 2025-11-06Z — unified settlement + winners + expiry loop
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📍 engines/live/settlements.py
+# === PATCH: SAFE SETTLEMENTS DAEMON (NO BLOCKING) ===
+
 def start_settlement_daemon(interval_s: int = 300):
-    """
-    Background thread that:
-      • fetches Betfair cleared orders
-      • reconciles them into autoscalp_gui.db
-      • updates the form book with winners
-      • expires all orders in closed markets
-    """
     def _loop():
         while True:
             try:
-                to_dt = datetime.now(timezone.utc)
-                from_dt = to_dt - timedelta(hours=2)
-                from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                to_iso   = to_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-                print(f"[settlements-loop] checking clearedOrders {from_iso} → {to_iso}")
-                n = fetch_cleared_orders_api(from_iso, to_iso)
-                print(f"[settlements-loop] fetched {n} cleared orders")
-
-                winners_added = 0
-                markets_expired = 0
-
-                if n > 0:
-                    updated, _ = reconcile_orders()
-                    print(f"[settlements-loop] reconciled {updated} orders")
-
-                # 🏇 Collect winners from recently closed markets
-                try:
-                    client = BetfairClient()
-                    books = client.list_market_book([])  # API returns recent books automatically
-                    winners = []
-                    for b in books or []:
-                        mid = b.get("marketId")
-                        for r in b.get("runners", []):
-                            if r.get("status") == "WINNER":
-                                winners.append((mid, str(r.get("selectionId"))))
-                    if winners:
-                        with connect_db(settlements_db_path()) as con:
-                            for mid, sid in winners:
-                                con.execute("""
-                                    INSERT INTO runner_form_canonical(
-                                        marketId, selectionId, day, status, profit, runs, wins, win_rate
-                                    ) VALUES (?, ?, date('now','utc'), 'WIN', 1.0, 1, 1, 1.0)
-                                    ON CONFLICT(marketId, selectionId)
-                                    DO UPDATE SET
-                                        runs = runs + 1,
-                                        wins = wins + 1,
-                                        win_rate = ROUND(1.0 * wins / runs, 3),
-                                        last_seen = datetime('now','utc')
-                                """, (mid, sid))
-                            con.commit()
-                        winners_added = len(winners)
-                except Exception as e:
-                    print(f"[settlements-loop] warn: winners update failed — {e}")
-
-                # 🧹 Expire all closed markets
-                try:
-                    markets_expired = close_settled_markets()
-                except Exception as e:
-                    print(f"[settlements-loop] warn: close_settled_markets failed — {e}")
-
-                # 🧾 Unified summary log
-                print(f"[settlements-loop] summary — "
-                      f"orders_settled={n}, winners_added={winners_added}, markets_expired={markets_expired}")
-
+                _run_single_settlement_cycle()
             except Exception as e:
-                print(f"[settlements-loop] warn: {e}")
-            time.sleep(interval_s)
+                print(f"[settlements-loop] error: {e}")
+            finally:
+                time.sleep(interval_s)
 
     t = threading.Thread(target=_loop, name="SettlementsDaemon", daemon=True)
     t.start()
     print(f"[settlements-loop] daemon started (interval={interval_s}s)")
-# === PATCH END ===
+
+def _run_single_settlement_cycle():
+    to_dt = datetime.now(timezone.utc)
+    from_iso = (to_dt - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_iso   = to_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    print(f"[settlements] window {from_iso} → {to_iso}")
+
+    # --- API fetch ---
+    try:
+        n = fetch_cleared_orders_api(from_iso, to_iso)
+        print(f"[settlements] fetched={n}")
+    except Exception as e:
+        print(f"[settlements] fetch failed: {e}")
+        return  # SAFETY EXIT
+
+    # --- reconcile ---
+    if n > 0:
+        try:
+            updated, _ = reconcile_orders()
+            print(f"[settlements] reconciled={updated}")
+        except Exception as e:
+            print(f"[settlements] reconcile failed: {e}")
+
+    # --- expire closed markets ---
+    try:
+        expired = close_settled_markets()
+        print(f"[settlements] expired={expired}")
+    except Exception as e:
+        print(f"[settlements] expire failed: {e}")
 
 
 # === PATCH START ===

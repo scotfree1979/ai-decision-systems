@@ -1,0 +1,2085 @@
+malachikelly@Malachis-MBP-3 analytics_beta_dev % echo "---- AUTOSCALP_GUI (tables + views) ----"
+sqlite3 data/autoscalp_gui.db "
+.headers on
+.mode column
+SELECT type, name FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY type, name;
+"
+
+echo "---- AUTOSCALP_GUI (schemas) ----"
+sqlite3 data/autoscalp_gui.db "
+SELECT name, sql
+FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY name;
+"
+
+---- AUTOSCALP_GUI (tables + views) ----
+Error: in prepare, near ".": syntax error
+   .headers on .mode column SELECT type, name FROM sqlite_master WHERE type IN (
+   ^--- error here
+---- AUTOSCALP_GUI (schemas) ----
+__gui_probe|CREATE TABLE __gui_probe(k TEXT PRIMARY KEY, v TEXT)
+app_kv|CREATE TABLE app_kv(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)
+bank_state|CREATE VIEW bank_state AS
+ SELECT day,
+        current_balance AS balance,
+        start_balance,
+        updated_at
+ FROM internal_bank
+bf_matched_live|CREATE TABLE bf_matched_live (
+        betId TEXT PRIMARY KEY,
+        marketId TEXT,
+        selectionId INTEGER,
+        side TEXT,
+        priceMatched REAL,
+        sizeMatched REAL,
+        matchedDate TEXT,
+        updated_at TEXT DEFAULT (datetime('now','utc'))
+    )
+bias_summary|CREATE VIEW bias_summary AS
+    SELECT
+        marketId,
+        selectionId,
+        AVG(bias_value) AS bias_value,
+        MAX(bias_dir)   AS bias_dir,
+        AVG(bias_conf)  AS bias_conf
+      FROM bias_signals
+     WHERE date(updated_at)=date('now','utc')
+     GROUP BY marketId,selectionId
+blueprint_events|CREATE TABLE blueprint_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT NOT NULL,
+        marketId TEXT NOT NULL,
+        selectionId TEXT,
+        blueprint_key TEXT NOT NULL,
+        strength REAL NOT NULL,
+        detected_at TEXT NOT NULL,
+        window_tag TEXT,
+        context_json TEXT NOT NULL
+      )
+blueprint_flat|CREATE TABLE blueprint_flat (
+    day TEXT,
+    surface_key TEXT,
+    pattern_key TEXT,
+    runner_name TEXT,
+    marketId TEXT,
+    selectionId TEXT,
+    move TEXT,
+    trade_type TEXT,
+    confidence REAL,
+    entry REAL,
+    exit REAL,
+    trend_ticks INTEGER
+)
+blueprint_state|CREATE TABLE blueprint_state (
+        day TEXT NOT NULL,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        blueprint_key TEXT,
+        score REAL,
+        features_json TEXT NOT NULL,
+        PRIMARY KEY(day, marketId, selectionId)
+      )
+book_state|CREATE TABLE book_state(
+              day TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              letter TEXT NOT NULL,
+              open_parents INTEGER DEFAULT 0,
+              matched_children INTEGER DEFAULT 0,
+              open_liability REAL DEFAULT 0.0,
+              net_pl REAL DEFAULT 0.0,
+              updated_at TEXT,
+              PRIMARY KEY(day, run_id, letter)
+            )
+cache_blueprint_train|CREATE TABLE cache_blueprint_train(
+  day TEXT,
+  surface_key TEXT,
+  pattern_key TEXT,
+  runner_name TEXT,
+  marketId TEXT,
+  selectionId TEXT,
+  move TEXT,
+  trade_type TEXT,
+  blueprint_confidence REAL,
+  blueprint_entry REAL,
+  blueprint_exit REAL,
+  trend_ticks INT,
+  net_pl REAL,
+  trade_result,
+  outcome_bin TEXT,
+  match_quality,
+  event_count,
+  market_win_rate,
+  avg_market_pnl,
+  profit_rate
+)
+cache_mastery_outcomes|CREATE TABLE cache_mastery_outcomes (
+            day TEXT, marketId TEXT, selectionId INTEGER, letter TEXT,
+            pnl REAL, success INTEGER, pre_drift REAL,
+            band_width REAL, band_rel_vol REAL, band_bias REAL,
+            band_skew REAL, band_stability REAL,
+            slope_ppm REAL, tick_vel_3s_up REAL, momentum_class TEXT,
+            expected_race_mins REAL, drift_speed REAL, inplay_progress REAL,
+            win_rate REAL, form_avg_pnl REAL, bucket TEXT
+        )
+cashout_series|CREATE TABLE cashout_series (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    marketId TEXT NOT NULL,
+    selectionId INTEGER NOT NULL,
+    order_id INTEGER,
+    oc_stage TEXT,
+    snapshot_ts TEXT,
+    ltp REAL,
+    cashout_pnl REAL,
+    total_pnl_now REAL,
+    source TEXT DEFAULT 'SIM',
+    created_at TEXT DEFAULT (datetime('now','utc'))
+)
+dashboard_activity|CREATE TABLE dashboard_activity(
+  day TEXT PRIMARY KEY,
+  window_start_ts TEXT,
+  runners_scanned INTEGER,
+  decisions INTEGER,
+  proposals INTEGER,
+  parents_placed INTEGER,
+  hedges_matched INTEGER,
+  cancels INTEGER,
+  timeouts INTEGER,
+  open_parents INTEGER,
+  recent_events_json TEXT,
+  gate_reasons_json TEXT,
+  last_refreshed_ts TEXT
+, id INTEGER)
+dashboard_markets|CREATE TABLE dashboard_markets(
+              day TEXT,
+              marketId TEXT,
+              course TEXT,
+              market_name TEXT,
+              off_at_utc TEXT,
+              status TEXT,
+              t_minus_sec INTEGER,
+              is_next INTEGER,
+              runners_total INTEGER,
+              source TEXT,
+              betfair_status TEXT,
+              betfair_status_mapped TEXT,
+              betfair_status_age_sec INTEGER,
+              status_source TEXT,
+              last_api_ok_ts TEXT,
+              last_api_err TEXT,
+              discovered_ts TEXT,
+              last_refreshed_ts TEXT, t0_phase TEXT, t0_color TEXT, t0_sec INTEGER, inplay_start_ts TEXT, late_since_ts TEXT, is_concurrent INTEGER, concurrent_rank INTEGER,
+              PRIMARY KEY(day, marketId)
+            )
+dashboard_orders_tape|CREATE TABLE dashboard_orders_tape(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT,
+              marketId TEXT,
+              selectionId TEXT,
+              runner_name TEXT,
+              side TEXT,
+              status TEXT,
+              price REAL,
+              amount REAL,
+              realized_pnl REAL,
+              order_id TEXT,
+              mode TEXT,
+              day TEXT
+            )
+dashboard_runners|CREATE TABLE dashboard_runners(
+                      day TEXT,
+                      marketId TEXT,
+                      selectionId TEXT, runner_name TEXT, odd REAL, implied_prob REAL, band_low REAL, band_high REAL, last_snapshot_ts TEXT, source TEXT, top6_rank INTEGER, first_seen_rank INTEGER, first_seen_ts TEXT, in_top6 INTEGER, bar_pre_norm REAL, bar_post_norm REAL, bar_display_norm REAL, bar_color TEXT, flow_ppm REAL, vol_1m REAL, trend TEXT,
+                      -- other columns…
+                      PRIMARY KEY(day, marketId, selectionId)
+                    )
+dashboard_runs|CREATE TABLE dashboard_runs(
+              run_id TEXT PRIMARY KEY,
+              mode TEXT,
+              source_mode TEXT,
+              day TEXT,
+              speed_x REAL,
+              now_ts TEXT,
+              status TEXT,
+              last_heartbeat_ts TEXT
+            )
+dashboard_strategy_perf|CREATE TABLE dashboard_strategy_perf(
+    strategy TEXT,
+    p_q INTEGER, p_p INTEGER, p_m INTEGER,
+    c_q INTEGER, c_p INTEGER, c_m INTEGER,
+    open_parents INTEGER,
+    matched_liab REAL, unmatched_liab REAL,
+    pnl_today REAL,
+    last_trade_ts TEXT,
+    mode TEXT
+)
+dashboard_tiles|CREATE TABLE dashboard_tiles(
+    tile_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric TEXT UNIQUE,
+    value REAL DEFAULT 0.0,
+    delta REAL DEFAULT 0.0,
+    unit TEXT DEFAULT '',
+    colour TEXT DEFAULT 'GREY',
+    updated_at TEXT DEFAULT (datetime('now','utc'))
+)
+dashboard_tiles_legacy|CREATE TABLE "dashboard_tiles_legacy"(
+              day TEXT,
+              mode TEXT,
+              total REAL,
+              yesterday REAL,
+              today REAL,
+              d7 REAL,
+              d30 REAL,
+              hit_rate REAL,
+              pnl_per_hour REAL,
+              avg_gain REAL,
+              win_pct_mkt REAL,
+              bank REAL,
+              used_exposure REAL,
+              last_refreshed_ts TEXT,
+              PRIMARY KEY(day, mode)
+            )
+decisions|CREATE TABLE decisions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id          TEXT,
+  marketId        TEXT,
+  selectionId     TEXT,
+  decided_at      TEXT,
+  signal_type     TEXT,
+  blueprint_match TEXT,
+  confidence      REAL,
+  scalp_direction TEXT,
+  proposed_odds   REAL,
+  proposed_stake  REAL,
+  notes           TEXT,
+  meta_json       TEXT,
+  order_id        INTEGER
+, why TEXT)
+events|CREATE TABLE events(
+              ts TEXT, level TEXT, source TEXT, message TEXT
+            )
+exposure_log|CREATE TABLE exposure_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day TEXT NOT NULL,
+            exposure REAL NOT NULL,
+            sampled_at TEXT NOT NULL DEFAULT (datetime('now','utc'))
+        )
+inbound_bets_min|CREATE TABLE inbound_bets_min (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        placed_at TEXT,
+        anchor_odd REAL,
+        odds_check_1 REAL, odds_check_2 REAL, odds_check_3 REAL,
+        odds_check_4 REAL, odds_check_5 REAL, odds_check_6 REAL,
+        horse_name TEXT,
+        meta_json TEXT
+    )
+inbound_oc_cache|CREATE TABLE inbound_oc_cache(
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      marketId TEXT NOT NULL,
+                      selectionId TEXT NOT NULL,
+                      anchor_odd REAL,
+                      last_sync_ts TEXT
+                      -- OCn columns can already exist; we don't redeclare them here
+                    , oc1 REAL, oc1_band_json TEXT, oc2 REAL, oc2_band_json TEXT, oc3 REAL, oc3_band_json TEXT, oc4 REAL, oc4_band_json TEXT, oc5 REAL, oc5_band_json TEXT, oc6 REAL, oc6_band_json TEXT, oc7 REAL, oc7_band_json TEXT, oc8 REAL, oc8_band_json TEXT, oc9 REAL, oc9_band_json TEXT, oc10 REAL, oc10_band_json TEXT, oc11 REAL, oc11_band_json TEXT, oc12 REAL, oc12_band_json TEXT, oc13 REAL, oc13_band_json TEXT, oc14 REAL, oc14_band_json TEXT, oc15 REAL, oc15_band_json TEXT, oc16 REAL, oc16_band_json TEXT, oc17 REAL, oc17_band_json TEXT, oc18 REAL, oc18_band_json TEXT, oc19 REAL, oc19_band_json TEXT, oc20 REAL, oc20_band_json TEXT)
+indicators_opportunities|CREATE TABLE indicators_opportunities(
+            day TEXT,
+            marketId TEXT,
+            selectionId TEXT,
+            runner_name TEXT,
+            opportunities INTEGER DEFAULT 0,
+            taken INTEGER DEFAULT 0,
+            conversion INTEGER DEFAULT 0,
+            last_ts TEXT,
+            PRIMARY KEY(day, marketId, selectionId)
+        )
+internal_bank|CREATE TABLE internal_bank(
+            day TEXT PRIMARY KEY,
+            start_balance REAL NOT NULL,
+            current_balance REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+liability_signals|CREATE TABLE liability_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT,
+    marketId TEXT,
+    selectionId TEXT,
+    liability REAL DEFAULT 0.0,
+    created_at TEXT DEFAULT (datetime('now','utc'))
+, "limit" REAL DEFAULT 250.0)
+live_state|CREATE TABLE live_state (
+            marketId TEXT PRIMARY KEY,
+            pnl_now REAL,
+            liability REAL,
+            status TEXT,
+            updated_at TEXT DEFAULT (datetime('now','utc'))
+        )
+live_state_table|CREATE TABLE "live_state_table" (
+    marketId TEXT PRIMARY KEY,
+    pnl_now REAL,
+    liability REAL,
+    status TEXT,
+    updated_at TEXT DEFAULT (datetime('now','utc'))
+)
+loss_tags|CREATE TABLE loss_tags(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    marketId TEXT NOT NULL,
+    selectionId TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now','utc'))
+, dow TEXT DEFAULT '')
+market_data|CREATE TABLE market_data (
+  marketId        TEXT NOT NULL,
+  selectionId     INTEGER NOT NULL,
+  runnerName      TEXT,
+  trainerName     TEXT,
+  jockeyName      TEXT,
+  age             TEXT,
+  stallDraw       TEXT,
+  officialRating  TEXT,
+  weightValue     TEXT,
+  venue           TEXT,
+  eventName       TEXT,
+  marketName      TEXT,
+  marketStartTime TEXT,    -- ISO8601 UTC
+  distance        TEXT,
+  going           TEXT,
+  raw_json        TEXT,
+  PRIMARY KEY(marketId, selectionId)
+)
+markets_schedule|CREATE TABLE markets_schedule(
+          marketId TEXT PRIMARY KEY,
+          venue TEXT,
+          course TEXT,
+          event_name TEXT,
+          market_name TEXT,
+          off_at_utc TEXT,
+          country_code TEXT
+        , off_ts TEXT, source TEXT, eventId TEXT, marketTypeCode TEXT)
+mastery_cache|CREATE TABLE mastery_cache (
+                ts TEXT,
+                event_type TEXT,
+                marketId TEXT,
+                json_payload TEXT
+            )
+mastery_feedback|CREATE TABLE mastery_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now','utc')),
+            marketId TEXT,
+            plan_bias REAL,
+            actual_bias REAL,
+            bias_delta REAL,
+            exposure_target REAL,
+            exposure_actual REAL,
+            exposure_gap REAL,
+            hedge_eff REAL,
+            pnl_now REAL,
+            status TEXT
+        , pnl_delta REAL DEFAULT 0.0)
+mastery_outcomes_raw|CREATE TABLE mastery_outcomes_raw(
+        day TEXT,
+        marketId TEXT,
+        selectionId TEXT,
+        letter TEXT,
+        distance_band TEXT,
+        fav_rank TEXT,
+        day_of_week TEXT,
+        surface TEXT,
+        class_band TEXT,
+        target_ticks INTEGER,
+        realized_ticks INTEGER,
+        success INTEGER,
+        stoploss_hit INTEGER,
+        hedge_hit INTEGER,
+        entry_px REAL,
+        pnl REAL,
+        weight REAL,
+        priority INTEGER,
+        created_at TEXT
+    , id INTEGER, source TEXT DEFAULT 'REPLAY', confidence REAL)
+mastery_posterior_adjustments|CREATE TABLE mastery_posterior_adjustments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now','utc')),
+            bin_key TEXT,
+            letter TEXT,
+            bucket TEXT,
+            prior_weight REAL,
+            delta REAL,
+            proposed_weight REAL,
+            reason TEXT
+        )
+mastery_posteriors|CREATE TABLE mastery_posteriors (
+  bin_key TEXT PRIMARY KEY,
+  p1_alpha REAL NOT NULL DEFAULT 0, p1_beta REAL NOT NULL DEFAULT 0,
+  p2_alpha REAL NOT NULL DEFAULT 0, p2_beta REAL NOT NULL DEFAULT 0,
+  p3_alpha REAL NOT NULL DEFAULT 0, p3_beta REAL NOT NULL DEFAULT 0,
+  fill_alpha REAL NOT NULL DEFAULT 0, fill_beta REAL NOT NULL DEFAULT 0,
+  mae_n INTEGER NOT NULL DEFAULT 0,
+  mae_mean REAL NOT NULL DEFAULT 0.0,
+  mae_m2 REAL NOT NULL DEFAULT 0.0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  source TEXT NOT NULL DEFAULT 'TEST'
+, day_of_week TEXT DEFAULT 'unk', surface_type TEXT DEFAULT 'unk', priority INTEGER NOT NULL DEFAULT 99, weight_applied REAL NOT NULL DEFAULT 1.0, net_pnl REAL NOT NULL DEFAULT 0.0, distance_band TEXT DEFAULT 'unk', fav_rank_bin TEXT DEFAULT 'unk', trainer TEXT, jockey TEXT, venue TEXT, going TEXT, race_type TEXT, distance REAL, market_liquidity REAL, age INTEGER, stall INTEGER, official_rating INTEGER, weight REAL, trainer_form REAL, jockey_form REAL, winners TEXT DEFAULT '[]', letter TEXT, band TEXT, confidence REAL DEFAULT 0.5, expected_value REAL DEFAULT 0.0, target_ticks INTEGER DEFAULT 1, n_total INTEGER DEFAULT 0, n_success INTEGER DEFAULT 0, bias_score REAL DEFAULT 0.0, mae_ticks REAL DEFAULT 0.0, source_last TEXT, live_pnl_ratio REAL DEFAULT 0.0)
+mastery_posteriors_progress|CREATE TABLE mastery_posteriors_progress(
+            processed_outcome_id INTEGER
+        )
+mastery_replay_summary|CREATE TABLE mastery_replay_summary (
+    epoch_type TEXT NOT NULL,              -- '100d' or '365d'
+    day TEXT NOT NULL,                     -- replay day
+    first_id INTEGER,
+    last_id INTEGER,
+    outcomes INTEGER,
+    processed_id INTEGER,
+    posterior_day TEXT,
+    status TEXT,
+    updated_at TEXT DEFAULT (datetime('now','utc')),
+    PRIMARY KEY(epoch_type, day)
+)
+mastery_state|CREATE TABLE mastery_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT DEFAULT (datetime('now','utc')),
+    progress INTEGER DEFAULT 0,
+    thresholds_json TEXT,
+    version INTEGER DEFAULT 1,
+    source TEXT DEFAULT 'INIT'
+, goal_alignment REAL DEFAULT 0.0, pnl_today REAL DEFAULT 0.0, win_rate_today REAL DEFAULT 0.0)
+mastery_training_metrics|CREATE TABLE mastery_training_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now','utc')),
+            bucket TEXT,
+            question_id TEXT,
+            metric TEXT,
+            value REAL,
+            weight REAL,
+            source TEXT,
+            notes TEXT
+        )
+ml_features_daily|CREATE TABLE ml_features_daily (
+            day TEXT,
+            feature_json TEXT,
+            created_at TEXT DEFAULT (datetime('now','utc'))
+        )
+ml_models|CREATE TABLE ml_models (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trained_at TEXT,
+            model_type TEXT,
+            features_json TEXT,
+            metrics_json TEXT,
+            weights_json TEXT
+        )
+oc_series|CREATE TABLE oc_series(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        snapshot_ts TEXT NOT NULL,
+        odd REAL,
+        band_low REAL,
+        band_high REAL,
+        band_json TEXT,
+        meta_json TEXT,
+        source TEXT
+      )
+odds_current|CREATE TABLE odds_current(
+      day TEXT NOT NULL,
+      marketId TEXT NOT NULL,
+      selectionId TEXT NOT NULL,
+      updated_ts TEXT,
+      ltp REAL, back1 REAL, lay1 REAL, fav_rank_now INTEGER, mto_minutes REAL, slope_ppm REAL, tick_vel_1s_up INTEGER, tick_vel_3s_up INTEGER,
+      PRIMARY KEY(day, marketId, selectionId)
+    )
+odds_snapshots|CREATE TABLE odds_snapshots(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        marketId TEXT NOT NULL, selectionId TEXT NOT NULL,
+        ltp REAL, back1 REAL, lay1 REAL,
+        slope_ppm REAL, tick_vel_1s_up INTEGER, tick_vel_3s_up INTEGER,
+        fav_rank_now INTEGER, fav_rank_30s INTEGER,
+        mto_minutes REAL,
+        source TEXT
+      )
+orders|CREATE TABLE orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customerOrderRef TEXT UNIQUE,
+        mode TEXT, run_id INTEGER,
+        marketId TEXT, selectionId TEXT, side TEXT,
+        entry_odds REAL, entry_stake REAL,
+        entry_status TEXT, entry_bet_id TEXT, opened_at TEXT,
+        exit_status TEXT, exit_bet_id TEXT, exit_odds REAL, exit_stake REAL,
+        closed_at TEXT,
+        realized_pnl REAL, net_pl REAL, error TEXT,
+        role TEXT, hedge_of INTEGER, source TEXT,
+        ts TEXT
+      , bf_bet_id TEXT, customer_ref TEXT, entry_matched_odds REAL, entry_matched_stake REAL, exit_matched_odds REAL, exit_matched_stake REAL, child_bf_bet_id TEXT, notes TEXT, stop_ticks INTEGER DEFAULT 4, stop_loss_triggered INTEGER DEFAULT 0, greened_up INTEGER DEFAULT 0, exit_kind TEXT)
+orders_effective|CREATE VIEW orders_effective AS
+SELECT *
+  FROM orders
+ WHERE UPPER(COALESCE(entry_status,''))='PLACED'
+   AND entry_bet_id IS NOT NULL
+plan_ledger|CREATE TABLE plan_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,
+  run_id TEXT,
+  plan_id TEXT UNIQUE NOT NULL,
+  marketId TEXT NOT NULL,
+  selectionId TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'field',
+  allow_letters TEXT NOT NULL DEFAULT '[]',
+  budget_units INTEGER NOT NULL DEFAULT 1,
+  max_open_parents INTEGER NOT NULL DEFAULT 1,
+  letter TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  scalp_direction TEXT,
+  proposed_odds REAL,
+  proposed_stake REAL,
+  confidence REAL,
+  blueprint_match TEXT,
+  window_tag TEXT,
+  anchor_odd REAL,
+  oc_stage TEXT,
+  decided_at TEXT NOT NULL DEFAULT (datetime('now','utc')),
+  status TEXT NOT NULL,
+  why TEXT,
+  parent_order_id INTEGER,
+  child_order_id INTEGER,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','utc'))
+, epic_id TEXT, epic_stories INTEGER, epic_rank INTEGER, family TEXT, direction TEXT, target_ticks INTEGER, px REAL, size REAL, plan_json TEXT, plan_why TEXT)
+playbooks|CREATE TABLE playbooks (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ day TEXT NOT NULL,
+ marketId TEXT NOT NULL,
+ selectionId INTEGER NOT NULL,
+ strategy TEXT,
+ oc_stage TEXT,
+ pattern_key TEXT,
+ band_low REAL,
+ band_high REAL,
+ entry_odds REAL,
+ exit_odds REAL,
+ pnl REAL,
+ outcome TEXT,
+ exposure REAL,
+ confidence REAL,
+ realized_at TEXT DEFAULT (datetime('now','utc')),
+ meta_json TEXT,
+ source TEXT DEFAULT 'TEST'
+)
+playbooks_diagnostics|CREATE TABLE playbooks_diagnostics(
+        day TEXT, plan_id TEXT, letter TEXT, strategy TEXT,
+        marketId TEXT, selectionId INTEGER, pair_complete INTEGER,
+        green_up_before_off INTEGER, time_to_match_s REAL,
+        expected_ticks REAL, realized_ticks REAL, net_pl REAL,
+        cause_tag TEXT, meta_json TEXT,
+        created_at TEXT DEFAULT (datetime('now','utc')),
+        PRIMARY KEY(day, plan_id)
+    )
+playbooks_insights|CREATE TABLE playbooks_insights(
+        day TEXT, letter TEXT, strategy TEXT, trades INTEGER,
+        pair_complete_rate REAL, green_rate REAL, win_rate REAL,
+        avg_pnl REAL, total_pnl REAL, avg_slippage REAL,
+        avg_latency_ms REAL, avg_confidence REAL, avg_volatility REAL,
+        recommendation_json TEXT,
+        updated_at TEXT DEFAULT (datetime('now','utc')),
+        PRIMARY KEY(day, letter, strategy)
+    )
+playbooks_learning|CREATE TABLE playbooks_learning (
+            day TEXT, marketId TEXT, selectionId TEXT,
+            letter TEXT, strategy TEXT, side TEXT,
+            entry_odds REAL, entry_stake REAL,
+            exit_odds REAL, exit_stake REAL,
+            net_pl REAL, confidence REAL,
+            oc_stage_entry TEXT, class_band TEXT,
+            source TEXT DEFAULT 'REPLAY',
+            replay_run_id TEXT,
+            meta_json TEXT,
+            created_at TEXT DEFAULT (datetime('now','utc')),
+            PRIMARY KEY(day, marketId, selectionId, replay_run_id)
+        )
+playbooks_settled|CREATE TABLE playbooks_settled(
+        day TEXT, betId TEXT PRIMARY KEY, marketId TEXT, selectionId INTEGER,
+        letter TEXT, strategy TEXT, side TEXT,
+        entry_odds REAL, entry_stake REAL, exit_odds REAL, exit_stake REAL,
+        profit REAL, commission REAL, net_pl REAL, pnl_pct REAL,
+        odds_diff REAL, odds_ticks INTEGER, mto_minutes REAL,
+        oc_stage_entry TEXT, oc_stage_exit TEXT,
+        band_low_entry REAL, band_high_entry REAL,
+        fav_rank_entry INTEGER, volatility_band TEXT,
+        venue TEXT, going TEXT, distance TEXT, class_band TEXT,
+        trainer TEXT, jockey TEXT, exit_kind TEXT,
+        confidence REAL, slippage REAL, latency_ms REAL,
+        pair_id INTEGER, child_id INTEGER, pair_complete INTEGER,
+        hedge_ratio REAL, green_up_pnl REAL, liability_released REAL,
+        risk_state TEXT, outcome_bin TEXT, meta_json TEXT,
+        created_at TEXT DEFAULT (datetime('now','utc'))
+    , segment_key TEXT DEFAULT 'unknown')
+replay_reports_ingested|CREATE TABLE replay_reports_ingested(
+                    filename TEXT PRIMARY KEY,
+                    outcomes INTEGER,
+                    ingested_at TEXT
+                )
+replay_resume_progress|CREATE TABLE replay_resume_progress(
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        last_epoch INTEGER,
+        last_day_idx INTEGER,
+        updated_at TEXT
+    )
+runner_activity|CREATE TABLE runner_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    marketId TEXT NOT NULL,
+    selectionId TEXT NOT NULL,
+    status TEXT NOT NULL,
+    ts TEXT DEFAULT (datetime('now','utc'))
+)
+runner_form_canonical|CREATE VIEW runner_form_canonical AS
+SELECT
+    selectionId,
+    marketId,
+    COALESCE(runs,0)   AS runs,
+    COALESCE(wins,0)   AS wins,
+    COALESCE(losses,0) AS losses,
+    ROUND(COALESCE(net_pnl,0.0),3) AS avg_pnl,
+    ROUND(
+      CASE WHEN runs > 0 THEN CAST(wins AS REAL)/runs ELSE 0 END,
+      3
+    ) AS win_rate
+FROM runner_history
+runner_history|CREATE TABLE runner_history (
+        runner_name     TEXT NOT NULL,
+        selectionId     INTEGER NOT NULL,
+        marketId        TEXT NOT NULL,
+        runs            INTEGER DEFAULT 0,
+        wins            INTEGER DEFAULT 0,
+        losses          INTEGER DEFAULT 0,
+        net_pnl         REAL DEFAULT 0.0,
+        last_run_date   TEXT,
+        last_win_date   TEXT,
+        form_string     TEXT,
+        trainerName     TEXT,
+        jockeyName      TEXT,
+        age             INTEGER,
+        stallDraw       INTEGER,
+        officialRating  INTEGER,
+        weightValue     REAL,
+        updated_at      TEXT DEFAULT (datetime('now','utc')),
+        PRIMARY KEY (runner_name, selectionId)
+    )
+runners|CREATE TABLE runners(
+          marketId TEXT,
+          selectionId TEXT,
+          runner_name TEXT,
+          PRIMARY KEY (marketId, selectionId)
+        )
+runs|CREATE TABLE runs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        mode TEXT,
+        blueprint_file TEXT,
+        notes TEXT
+      )
+sqlite_sequence|CREATE TABLE sqlite_sequence(name,seq)
+sqlite_stat1|CREATE TABLE sqlite_stat1(tbl,idx,stat)
+sqlite_stat4|CREATE TABLE sqlite_stat4(tbl,idx,neq,nlt,ndlt,sample)
+strategies_performance|CREATE TABLE strategies_performance(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id     TEXT,
+          ts         TEXT NOT NULL,      -- UTC timestamp
+          mode       TEXT,               -- LIVE | SIM | TEST | LEARNING
+          strategy   TEXT NOT NULL,      -- human/readable strategy key
+          marketId   TEXT,
+          selectionId TEXT,
+          action     TEXT,               -- ENTER/LAY/BACK/EXIT...
+          stake      REAL,
+          price      REAL,
+          pnl        REAL DEFAULT 0.0,   -- realized contribution (+/-)
+          source     TEXT                -- optional tag (e.g., X3 / B1, or same as strategy)
+        )
+training_events|CREATE TABLE training_events(
+  event_type,
+  marketId,
+  selectionId,
+  liability,
+  pnl,
+  ratio,
+  level,
+  reason,
+  direction,
+  letter,
+  bias_dir,
+  bias_conf,
+  ts
+)
+trend_features|CREATE TABLE trend_features (
+  marketId TEXT,
+  selectionId TEXT,
+  slope_ppm REAL,
+  tick_vel_3s_up REAL,
+  momentum_class TEXT,
+  updated_at TEXT
+)
+v7_trade_index|CREATE TABLE v7_trade_index (
+            marketId TEXT,
+            selectionId TEXT,
+            letter TEXT,
+            subtype TEXT,
+            trade_index INTEGER,
+            updated_at TEXT DEFAULT (datetime('now','utc')),
+            PRIMARY KEY (marketId, selectionId, letter, trade_index)
+        )
+v_blueprint_playbook_train|CREATE VIEW v_blueprint_playbook_train AS
+SELECT
+    bp.day,
+    bp.surface_key,
+    bp.pattern_key,
+    bp.runner_name,
+    bp.marketId,
+    bp.selectionId,
+    bp.move,
+    bp.trade_type,
+    bp.confidence AS blueprint_confidence,
+    bp.entry       AS blueprint_entry,
+    bp.exit        AS blueprint_exit,
+    bp.trend_ticks,
+    tb.net_pl,
+    tb.trade_result,
+    tb.outcome_bin,
+    mq.match_quality,
+    mq.event_count,
+    tb.market_win_rate,
+    tb.avg_market_pnl,
+    tb.profit_rate
+FROM blueprint_flat bp
+LEFT JOIN v_mastery_training_base tb
+       ON CAST(bp.marketId AS TEXT)=CAST(tb.marketId AS TEXT)
+      AND CAST(bp.selectionId AS TEXT)=CAST(tb.selectionId AS TEXT)
+LEFT JOIN v_match_metrics mq
+       ON CAST(bp.marketId AS TEXT)=CAST(mq.marketId AS TEXT)
+      AND (CAST(bp.selectionId AS TEXT)=CAST(mq.selectionId AS TEXT)
+           OR mq.selectionId IS NULL)
+v_fav_rank_form|CREATE VIEW v_fav_rank_form AS
+WITH enriched AS (
+  SELECT
+      r.fav_rank_bin,
+      CASE
+          WHEN ra.anchor_odds <= 1.5 THEN 'under_1_5'
+          WHEN ra.anchor_odds <= 3   THEN '1_5_to_3'
+          WHEN ra.anchor_odds <= 5   THEN '3_to_5'
+          WHEN ra.anchor_odds <= 7   THEN '5_to_7'
+          ELSE '7_plus'
+      END AS odds_band,
+      ra.drift_ratio,
+      ps.outcome_bin,
+      ra.anchor_odds,
+      ra.off_odds
+  FROM playbooks_settled ps
+  JOIN v_rank_bin r
+       ON ps.marketId = r.marketId
+      AND ps.selectionId = r.selectionId
+  JOIN v_runner_anchor_off ra
+       ON ps.marketId = ra.marketId
+      AND ps.selectionId = ra.selectionId
+  WHERE r.fav_rank_bin IN ('1','2','3','4','5','6')
+)
+SELECT
+    fav_rank_bin,
+    odds_band,
+    COUNT(*)                           AS runs,
+    SUM(CASE WHEN outcome_bin='WIN' THEN 1 ELSE 0 END) AS wins,
+    ROUND(SUM(CASE WHEN outcome_bin='WIN' THEN 1.0 ELSE 0 END)/COUNT(*),3) AS win_rate,
+    ROUND(AVG(drift_ratio),3)          AS avg_drift,
+    ROUND(AVG(anchor_odds),2)          AS avg_anchor_odds,
+    ROUND(AVG(off_odds),2)             AS avg_off_odds
+FROM enriched
+GROUP BY fav_rank_bin, odds_band
+ORDER BY fav_rank_bin, odds_band
+v_liability_context|CREATE VIEW v_liability_context AS
+SELECT 
+    m.id AS id,            -- expose internal id for checkpointing
+    m.day,
+    m.marketId,
+    m.selectionId,
+    m.letter,
+    m.distance_band,
+    m.fav_rank,
+    m.day_of_week,
+    m.surface,
+    m.class_band,
+    m.target_ticks,
+    m.realized_ticks,
+    m.success,
+    m.stoploss_hit,
+    m.hedge_hit,
+    m.entry_px,
+    m.pnl,
+    m.weight,
+    m.priority,
+    COALESCE(ls.liability, 0.0) AS liab_value,
+    CASE WHEN ls.liability > 250.0 THEN 1 ELSE 0 END AS liab_over250
+FROM mastery_outcomes_raw AS m
+LEFT JOIN liability_signals AS ls
+  ON m.marketId = ls.marketId
+ AND m.selectionId = ls.selectionId
+ AND m.day = ls.day
+v_market_context|CREATE VIEW v_market_context AS
+SELECT
+    marketId,
+    COUNT(DISTINCT selectionId) AS runners,
+    ROUND(SUM(CASE WHEN outcome_bin='WIN' THEN 1 ELSE 0 END) * 1.0 /
+          COUNT(DISTINCT selectionId), 3) AS market_win_rate,
+    ROUND(AVG(net_pl), 2) AS avg_market_pnl,
+    ROUND(SUM(CASE WHEN net_pl > 0 THEN 1 ELSE 0 END) * 1.0 /
+          COUNT(DISTINCT selectionId), 3) AS profit_rate
+FROM playbooks_settled
+GROUP BY marketId
+v_market_sentiment|CREATE VIEW v_market_sentiment AS
+SELECT
+    marketId,
+    selectionId,
+    CASE
+        WHEN momentum_class='STEAM' THEN 1.0
+        WHEN momentum_class='DRIFT' THEN -1.0
+        ELSE 0.0
+    END AS sentiment,
+    ROUND(slope_ppm * 100.0, 4) AS drift_pct
+FROM trend_features
+WHERE slope_ppm IS NOT NULL
+v_mastery_core_results|CREATE VIEW v_mastery_core_results AS
+SELECT
+    day,
+    marketId,
+    selectionId,
+    net_pl,
+    CASE WHEN net_pl > 0 THEN 'PROFIT' ELSE 'LOSS' END AS trade_result,
+    outcome_bin
+FROM playbooks_settled
+v_mastery_intel_v7|CREATE VIEW v_mastery_intel_v7 AS
+SELECT
+    m.day,
+    m.marketId,
+    m.selectionId,
+    m.letter,
+    m.pnl,
+    m.success,
+    m.pre_drift,
+    m.band_width,
+    m.band_rel_vol,
+    m.band_bias,
+    m.band_skew,
+    m.band_stability,
+    m.slope_ppm,
+    m.tick_vel_3s_up,
+    m.momentum_class,
+    m.expected_race_mins,
+    m.drift_speed,
+    m.inplay_progress,
+    m.win_rate,
+    m.form_avg_pnl,
+    r.avg_pnl       AS form_avg_pnl_2,
+    r.win_rate      AS form_win_rate,
+    t.momentum_class AS trend_momentum,
+    md.trainerName,
+    md.jockeyName,
+    md.distance,
+    md.going,
+    'LIVE' AS mode
+FROM cache_mastery_outcomes m
+LEFT JOIN trend_features        AS t  USING (marketId, selectionId)
+LEFT JOIN runner_form_canonical AS r  USING (marketId, selectionId)
+LEFT JOIN market_data           AS md USING (marketId, selectionId)
+v_mastery_intelligence_runner|CREATE VIEW v_mastery_intelligence_runner AS
+SELECT
+    pb.day,
+    pb.marketId,
+    pb.selectionId,
+    pb.strategy,
+    pb.oc_stage,
+    pb.entry_odds,
+    pb.exit_odds,
+    pb.pnl,
+    pb.outcome,
+    pb.confidence,
+    tf.slope_ppm,
+    tf.tick_vel_3s_up,
+    tf.momentum_class,
+    s.sentiment,
+    s.drift_pct,
+    w.wom_ratio,
+    w.wom_state,
+    f.runs,
+    f.wins,
+    f.win_rate,
+    f.avg_pnl,
+    t.expected_race_mins,
+    t.inplay_progress,
+    t.drift_speed,
+    ROUND((pb.exit_odds - pb.entry_odds)/NULLIF(pb.entry_odds,0),4) AS odds_change_pct,
+    CASE
+        WHEN (pb.exit_odds - pb.entry_odds)/NULLIF(pb.entry_odds,0) < -0.2 THEN 'Large_Steam'
+        WHEN ABS((pb.exit_odds - pb.entry_odds)/NULLIF(pb.entry_odds,0)) <= 0.2 THEN 'Flat'
+        ELSE 'Drift'
+    END AS odds_change_bin,
+    CASE WHEN pb.pnl > 0 THEN 1 ELSE 0 END AS win_flag,
+    'LIVE' AS mode
+FROM playbooks pb
+LEFT JOIN trend_features        AS tf USING (marketId, selectionId)
+LEFT JOIN v_market_sentiment    AS s  USING (marketId, selectionId)
+LEFT JOIN v_weight_of_money     AS w  USING (marketId, selectionId)
+LEFT JOIN runner_form_canonical AS f  USING (marketId, selectionId)
+LEFT JOIN v_timing_features_v7  AS t  USING (marketId, selectionId)
+v_mastery_live|CREATE VIEW v_mastery_live AS
+SELECT
+    distance_band,
+    fav_rank_bin,
+    surface_type,
+    day_of_week,
+    COUNT(*)            AS bins,
+    ROUND(SUM(net_pnl), 2) AS total_pnl,
+    ROUND(AVG(mae_mean), 3) AS avg_mae,
+    ROUND(SUM(weight_applied), 1) AS total_weight,
+    ROUND(SUM(p1_alpha) / NULLIF(SUM(p1_alpha + p1_beta), 0), 3) AS p1_mean,
+    ROUND(SUM(p2_alpha) / NULLIF(SUM(p2_alpha + p2_beta), 0), 3) AS p2_mean,
+    ROUND(SUM(p3_alpha) / NULLIF(SUM(p3_alpha + p3_beta), 0), 3) AS p3_mean
+FROM mastery_posteriors
+WHERE source IN ('PLAYBOOKS_LIVE', 'PLAYBOOKS')
+GROUP BY distance_band, fav_rank_bin, surface_type, day_of_week
+v_mastery_pattern_train|CREATE VIEW v_mastery_pattern_train AS
+SELECT
+    core.day,
+    core.marketId,
+    core.selectionId,
+    core.net_pl,
+    core.trade_result,
+    core.outcome_bin,
+    z.odds_band,
+    z.win_rate,
+    tg.trading_zone,
+    rg.form_class
+FROM v_mastery_core_results core
+LEFT JOIN dashboard_runners dr
+       ON core.marketId = dr.marketId
+      AND CAST(core.selectionId AS TEXT)=dr.selectionId
+LEFT JOIN v_runner_context_form z
+       ON dr.runner_name = z.runner_name
+LEFT JOIN v_trading_zone_groups tg
+       ON z.odds_band = tg.odds_band
+LEFT JOIN v_runner_form_groups rg
+       ON z.odds_band = rg.odds_band
+v_mastery_training|CREATE VIEW v_mastery_training AS
+WITH
+  cash AS (
+    SELECT 
+        marketId,
+        MAX(CAST(json_extract(json_payload,'$.cashout_total') AS REAL))   AS cashout_total,
+        MAX(CAST(json_extract(json_payload,'$.liability_total') AS REAL)) AS liability_total
+      FROM mastery_cache
+     WHERE event_type='cashout_tick'
+     GROUP BY marketId
+  ),
+  fb AS (
+    SELECT 
+        marketId,
+        COALESCE(AVG(pnl_now),0) AS avg_pnl_now,
+        COALESCE(AVG(bias_delta),0) AS avg_bias_delta
+      FROM mastery_feedback
+     GROUP BY marketId
+  ),
+  ms AS (
+    SELECT 
+        marketId,
+        COALESCE((julianday(off_at_utc) - julianday('now'))*1440, 0) AS mto_minutes
+      FROM markets_schedule
+  )
+SELECT
+    COALESCE(fb.marketId, cash.marketId, ms.marketId) AS marketId,
+    COALESCE(cash.cashout_total,0)    AS pnl_total,
+    COALESCE(cash.liability_total,0)  AS liability_total,
+    ROUND(COALESCE(cash.cashout_total / NULLIF(cash.liability_total,0),0),5) AS ratio,
+    COALESCE(fb.avg_bias_delta,0)     AS slope_ppm,
+    0.0                               AS tick_vel_3s_up,
+    COALESCE(ms.mto_minutes,0)        AS mto_minutes,
+    'unknown'                         AS action,
+    COALESCE(fb.avg_pnl_now,0)        AS reward
+FROM fb
+LEFT JOIN cash ON fb.marketId = cash.marketId
+LEFT JOIN ms   ON fb.marketId = ms.marketId
+v_mastery_training_base|CREATE VIEW v_mastery_training_base AS
+SELECT
+    r.day,
+    r.marketId,
+    r.selectionId,
+    r.net_pl,
+    r.trade_result,
+    r.outcome_bin,
+    m.runners            AS market_runners,
+    m.market_win_rate,
+    m.avg_market_pnl,
+    m.profit_rate
+FROM v_runner_truth r
+LEFT JOIN v_market_context m USING (marketId)
+v_mastery_training_unified|CREATE VIEW v_mastery_training_unified AS
+SELECT
+    o.marketId,
+    o.selectionId,
+    m.letter,
+    o.role,
+    o.entry_side,
+    o.entry_odds,
+    o.exit_odds,
+    o.exit_kind,
+    o.pnl,
+    o.realized_ticks,
+    m.success,
+    m.stoploss_hit,
+    m.hedge_hit,
+    t.pre_vol,
+    t.inplay_vol,
+    t.drift_speed,
+    t.inplay_progress,
+    tr.slope_ppm,
+    tr.momentum_class,
+    v.liability,
+    -- Risk events (from parsed table)
+    SUM(CASE WHEN e.event_type='stop_loss_breached' THEN 1 ELSE 0 END) AS stoploss_event,
+    SUM(CASE WHEN e.event_type='mlm_cap_hit' THEN 1 ELSE 0 END)        AS mlm_event,
+    SUM(CASE WHEN e.event_type='micro_lay' THEN 1 ELSE 0 END)          AS scalp_event,
+    SUM(CASE WHEN e.event_type='greenup' THEN 1 ELSE 0 END)            AS greenup_event,
+    -- Match quality
+    CASE
+        WHEN o.exit_kind='hedge'
+             AND ((o.entry_side='LAY' AND o.exit_odds>o.entry_odds)
+               OR (o.entry_side='BACK' AND o.exit_odds<o.entry_odds))
+        THEN 'good'
+        ELSE 'bad'
+    END AS match_quality
+FROM orders o
+LEFT JOIN mastery_outcomes_raw m USING(marketId,selectionId)
+LEFT JOIN v_timing_features_v7 t USING(marketId,selectionId)
+LEFT JOIN trend_features tr USING(marketId,selectionId)
+LEFT JOIN v_liability_context v USING(marketId,selectionId)
+LEFT JOIN training_events e USING(marketId,selectionId)
+GROUP BY o.marketId, o.selectionId
+v_mastery_v7|CREATE VIEW v_mastery_v7 AS
+        SELECT *
+          FROM mastery_outcomes_raw
+         WHERE date(day) >= date('now','-90 day')
+v_match_metrics|CREATE VIEW v_match_metrics AS
+WITH parsed AS (
+  SELECT
+    ts,
+    json_extract(substr(message,9), '$.type')        AS event_type,
+    json_extract(substr(message,9), '$.marketId')    AS marketId,
+    json_extract(substr(message,9), '$.selectionId') AS selectionId
+  FROM events
+  WHERE message LIKE 'MASTERY %'
+)
+SELECT
+  marketId,
+  selectionId,
+  ROUND(AVG(
+        CASE
+          WHEN event_type IN ('greenup','micro_lay','hedge') THEN 1.0
+          WHEN event_type IN ('feedback_tick','cashout_tick') THEN 0.8
+          WHEN event_type IN ('market_risk','feedback_summary','feedback_assimilated','feedback_assimilated_summary') THEN 0.7
+          WHEN event_type IN ('liability_signal') THEN 0.4
+          WHEN event_type IN ('mlm_cap_hit') THEN 0.3
+          WHEN event_type IN ('stop_loss_breached','stoploss') THEN 0.0
+          ELSE NULL
+        END
+  ),3) AS match_quality,
+  COUNT(*) AS event_count
+FROM parsed
+WHERE marketId IS NOT NULL
+GROUP BY marketId, selectionId
+v_oc_timing|CREATE VIEW v_oc_timing AS
+SELECT
+    oc.marketId,
+    oc.selectionId,
+    oc.stage,
+    oc.snapshot_ts,
+    rt.surface_type,
+    rt.expected_seconds,
+    ROUND((julianday(oc.snapshot_ts) - julianday(rt.off_time_utc)) * 24 * 60, 2) AS delta_minutes,
+    ROUND(
+      ((julianday(oc.snapshot_ts) - julianday(rt.off_time_utc)) * 24 * 60 * 60)
+      / rt.expected_seconds,
+      4
+    ) AS progress_ratio,
+    CASE
+      WHEN ((julianday(oc.snapshot_ts) - julianday(rt.off_time_utc)) * 24 * 60) < 0 THEN 'PRE'
+      WHEN ((julianday(oc.snapshot_ts) - julianday(rt.off_time_utc)) * 24 * 60)
+           BETWEEN 0 AND (rt.expected_seconds / 60) THEN 'INPLAY'
+      WHEN ((julianday(oc.snapshot_ts) - julianday(rt.off_time_utc)) * 24 * 60)
+           > (rt.expected_seconds / 60) THEN 'POST'
+      ELSE 'UNKNOWN'
+    END AS phase
+FROM oc_series oc
+JOIN v_race_timing rt
+  ON oc.marketId = rt.marketId
+WHERE oc.snapshot_ts IS NOT NULL
+  AND rt.expected_seconds IS NOT NULL
+  AND (julianday(rt.off_time_utc) - julianday(oc.snapshot_ts)) * 24 * 60 BETWEEN -240 AND 30
+GROUP BY oc.marketId, oc.stage, oc.selectionId
+v_odds_first_last_today|CREATE VIEW v_odds_first_last_today AS
+WITH raw AS (
+  SELECT marketId, selectionId, snapshot_ts, odd, stage, id,
+         CASE WHEN stage GLOB 'OC[0-9]*' THEN CAST(SUBSTR(stage,3) AS INT) ELSE 0 END AS stage_n
+  FROM oc_series
+  WHERE date(snapshot_ts)=date('now','utc')
+),
+first_ts AS ( SELECT marketId, selectionId, MIN(snapshot_ts) AS first_ts FROM raw GROUP BY marketId, selectionId ),
+last_ts  AS ( SELECT marketId, selectionId, MAX(snapshot_ts) AS last_ts  FROM raw GROUP BY marketId, selectionId ),
+first_pick AS (
+  SELECT r.marketId, r.selectionId, r.snapshot_ts AS ts, r.odd AS ltp,
+         ROW_NUMBER() OVER (PARTITION BY r.marketId, r.selectionId, r.snapshot_ts ORDER BY r.stage_n DESC, r.id DESC) AS rn
+  FROM raw r JOIN first_ts f ON r.marketId=f.marketId AND r.selectionId=f.selectionId AND r.snapshot_ts=f.first_ts
+),
+last_pick AS (
+  SELECT r.marketId, r.selectionId, r.snapshot_ts AS ts, r.odd AS ltp,
+         ROW_NUMBER() OVER (PARTITION BY r.marketId, r.selectionId, r.snapshot_ts ORDER BY r.stage_n DESC, r.id DESC) AS rn
+  FROM raw r JOIN last_ts l ON r.marketId=l.marketId AND r.selectionId=l.selectionId AND r.snapshot_ts=l.last_ts
+)
+SELECT f.marketId, f.selectionId, CAST(f.ltp AS REAL) AS ltp_first, CAST(l.ltp AS REAL) AS ltp_last
+FROM first_pick f JOIN last_pick l ON f.marketId=l.marketId AND f.selectionId=l.selectionId
+WHERE f.rn=1 AND l.rn=1
+v_odds_latest|CREATE VIEW v_odds_latest AS
+WITH latest AS (
+  SELECT marketId, selectionId, MAX(snapshot_ts) AS max_ts
+  FROM oc_series
+  GROUP BY marketId, selectionId
+),
+stage_ordered AS (
+  SELECT o.*,
+         CASE WHEN o.stage GLOB 'OC[0-9]*' THEN CAST(SUBSTR(o.stage,3) AS INT) ELSE 0 END AS stage_n
+  FROM oc_series o
+  JOIN latest l
+    ON o.marketId=l.marketId AND o.selectionId=l.selectionId AND o.snapshot_ts=l.max_ts
+),
+one_per_sid AS (
+  SELECT marketId, selectionId, odd AS ltp, snapshot_ts,
+         ROW_NUMBER() OVER (
+            PARTITION BY marketId, selectionId, snapshot_ts
+            ORDER BY stage_n DESC, id DESC
+         ) AS rn
+  FROM stage_ordered
+)
+SELECT marketId, selectionId, CAST(ltp AS REAL) AS ltp, snapshot_ts
+FROM one_per_sid
+WHERE rn=1
+v_orders_v7|CREATE VIEW v_orders_v7 AS
+        WITH base AS (
+            SELECT
+                id,
+                marketId,
+                selectionId,
+                COALESCE(source,'') AS letter_raw,
+                UPPER(SUBSTR(COALESCE(source,''),1,1)) AS letter,
+                CASE
+                    WHEN LENGTH(COALESCE(source,''))>=2
+                         THEN UPPER(SUBSTR(source,1,2))
+                    ELSE UPPER(SUBSTR(COALESCE(source,''),1,1))
+                END AS subtype,
+                CAST(
+                    CASE
+                        WHEN source GLOB '*[0-9]*'
+                             THEN SUBSTR(source, -1)
+                        ELSE '0'
+                    END AS INTEGER
+                ) AS trade_index,
+                COALESCE(mode,'LIVE') AS mode,
+                COALESCE(entry_status,'') AS entry_status,
+                COALESCE(exit_status,'')  AS exit_status,
+                COALESCE(entry_stake,0.0) AS entry_stake,
+                COALESCE(entry_odds,0.0)  AS entry_odds,
+                COALESCE(net_pl,0.0) AS net_pl,
+                CASE
+                    WHEN UPPER(COALESCE(side,''))='LAY'
+                        THEN ABS((entry_odds-1.0)*entry_stake)
+                    ELSE ABS(entry_stake)
+                END AS open_liability,
+                COALESCE(run_id,'LIVE') AS run_id,
+                date(opened_at) AS day,
+                (marketId || '|' || selectionId || '|' || UPPER(SUBSTR(COALESCE(source,''),1,1))) AS cap_scope
+            FROM orders
+        )
+        SELECT * FROM base
+v_phase_performance|CREATE VIEW v_phase_performance AS
+SELECT
+    v.marketId,
+    v.selectionId,
+    v.surface_type,
+    v.phase,
+    COUNT(*)                         AS n_points,
+    MIN(v.delta_minutes)             AS phase_start_min,
+    MAX(v.delta_minutes)             AS phase_end_min,
+    ROUND(AVG(v.progress_ratio), 4)  AS avg_progress_ratio,
+    ROUND(
+      AVG(CASE WHEN oc.odd IS NOT NULL THEN oc.odd END),
+      4
+    ) AS avg_odds,
+    ROUND(
+      (MAX(oc.odd) - MIN(oc.odd)) / NULLIF(AVG(oc.odd),0),
+      4
+    ) AS rel_volatility,
+    ROUND(
+      (MAX(oc.odd) - MIN(oc.odd)) / 
+      NULLIF(MAX(v.delta_minutes) - MIN(v.delta_minutes),0),
+      4
+    ) AS odds_rate_per_min
+FROM v_oc_timing v
+JOIN oc_series oc
+  ON v.marketId=oc.marketId AND v.selectionId=oc.selectionId AND v.stage=oc.stage
+WHERE v.phase IN ('PRE','INPLAY','POST')
+GROUP BY v.marketId, v.selectionId, v.phase
+v_phase_summary_market|CREATE VIEW v_phase_summary_market AS
+SELECT
+    marketId,
+    surface_type,
+    phase,
+    COUNT(DISTINCT selectionId) AS n_runners,
+    ROUND(AVG(rel_volatility),4) AS avg_vol,
+    ROUND(MAX(rel_volatility),4) AS max_vol,
+    ROUND(AVG(odds_rate_per_min),4) AS avg_rate,
+    ROUND(MAX(odds_rate_per_min),4) AS max_rate,
+    (
+      SELECT selectionId
+      FROM v_phase_performance v2
+      WHERE v2.marketId=v1.marketId AND v2.phase=v1.phase
+      ORDER BY v2.rel_volatility DESC LIMIT 1
+    ) AS most_volatile_runner
+FROM v_phase_performance v1
+GROUP BY marketId, phase
+v_plan_ledger_compat|CREATE VIEW v_plan_ledger_compat AS
+SELECT
+    id,
+    day,
+    run_id,
+    plan_id,
+    marketId,
+    selectionId,
+    letter,
+    note,
+    scalp_direction AS direction,
+    proposed_odds   AS px,
+    proposed_stake  AS size,
+    confidence,
+    blueprint_match,
+    window_tag,
+    status,
+    why,
+    parent_order_id,
+    child_order_id,
+    epic_id,
+    epic_stories,
+    epic_rank,
+    decided_at,
+    updated_at
+FROM plan_ledger
+v_playbooks_all|CREATE VIEW v_playbooks_all AS
+        SELECT * FROM playbooks_settled
+        UNION ALL
+        SELECT * FROM playbooks_learning
+v_playbooks_norm|CREATE VIEW v_playbooks_norm AS
+SELECT
+  TRIM(REPLACE(REPLACE(marketId,'TEST.',''),'TEST-','')) AS marketId_norm,
+  CAST(selectionId AS TEXT) AS selectionId_norm,
+  *
+FROM playbooks
+v_race_timing|CREATE TABLE v_race_timing(
+  marketId TEXT,
+  event_name,
+  market_name,
+  date,
+  surface_type,
+  expected_seconds,
+  off_time_utc,
+  expected_finish_utc
+)
+v_rank_bin|CREATE VIEW v_rank_bin AS
+SELECT
+    marketId,
+    selectionId,
+    fav_rank_now AS fav_rank,
+    CASE
+        WHEN fav_rank_now IN (1,2) THEN '1_2'
+        WHEN fav_rank_now BETWEEN 3 AND 5 THEN '3_5'
+        WHEN fav_rank_now BETWEEN 6 AND 9 THEN '6_9'
+        ELSE '10_plus'
+    END AS fav_rank_bin
+FROM odds_current
+WHERE fav_rank_now IS NOT NULL
+v_runner_anchor_off|CREATE VIEW v_runner_anchor_off AS
+WITH anchor AS (
+    SELECT marketId, selectionId, odd AS anchor_odds
+    FROM oc_series
+    WHERE stage='OC0'
+),
+off AS (
+    SELECT marketId, selectionId, odd AS off_odds
+    FROM oc_series
+    WHERE stage='OC6'  -- replace with confirmed off-stage if different
+)
+SELECT
+    a.marketId,
+    a.selectionId,
+    a.anchor_odds,
+    o.off_odds,
+    ROUND((o.off_odds - a.anchor_odds) / NULLIF(a.anchor_odds,0),4) AS drift_ratio
+FROM anchor a
+JOIN off o USING (marketId, selectionId)
+v_runner_context_form|CREATE VIEW v_runner_context_form AS
+WITH odds_band AS (
+  SELECT
+      dr.runner_name,
+      r.fav_rank_bin,
+      CASE
+          WHEN ps.entry_odds <= 1.5 THEN 'below_1_5'
+          WHEN ps.entry_odds <= 3   THEN '1_5_to_3'
+          WHEN ps.entry_odds <= 5   THEN '3_to_5'
+          WHEN ps.entry_odds <= 7   THEN '5_to_7'
+          WHEN ps.entry_odds <= 12  THEN '8_to_12'
+          ELSE '12_plus'
+      END AS odds_band,
+      ps.outcome_bin,
+      ps.entry_odds
+  FROM playbooks_settled ps
+  JOIN dashboard_runners dr
+       ON ps.marketId = dr.marketId
+      AND CAST(ps.selectionId AS TEXT) = dr.selectionId
+  LEFT JOIN v_rank_bin r
+       ON dr.marketId = r.marketId
+      AND dr.selectionId = r.selectionId
+)
+SELECT
+    runner_name,
+    fav_rank_bin,
+    odds_band,
+    COUNT(*)                         AS runs,
+    SUM(CASE WHEN outcome_bin='WIN'  THEN 1 ELSE 0 END) AS wins,
+    SUM(CASE WHEN outcome_bin<>'WIN' THEN 1 ELSE 0 END) AS losses,
+    ROUND(SUM(CASE WHEN outcome_bin='WIN' THEN 1.0 ELSE 0 END)/COUNT(*),3) AS win_rate,
+    ROUND(AVG(entry_odds),2)         AS avg_entry_odds
+FROM odds_band
+GROUP BY runner_name, fav_rank_bin, odds_band
+v_runner_form_groups|CREATE VIEW v_runner_form_groups AS
+SELECT
+    CASE
+        WHEN win_rate >= 0.65 THEN 'ELITE'
+        WHEN win_rate >= 0.35 THEN 'CONSISTENT'
+        WHEN win_rate >= 0.15 THEN 'AVERAGE'
+        WHEN win_rate >= 0.05 THEN 'LOW'
+        ELSE 'OUTSIDER'
+    END AS form_class,
+    odds_band,
+    fav_rank_bin,
+    COUNT(*) AS horses,
+    ROUND(AVG(win_rate),3)  AS avg_win_rate,
+    ROUND(AVG(avg_entry_odds),2) AS avg_odds
+FROM v_runner_context_form
+GROUP BY form_class, odds_band, fav_rank_bin
+v_runner_trading_zones|CREATE VIEW v_runner_trading_zones AS
+SELECT
+    runner_name,
+    fav_rank_bin,
+    odds_band,
+    CASE
+        WHEN odds_band='below_1_5' THEN 'short_fav'
+        WHEN odds_band IN ('1_5_to_3','3_to_5','5_to_7') THEN 'active_zone'
+        WHEN odds_band='8_to_12' THEN 'passive_zone'
+        ELSE 'non_trade_zone'
+    END AS trading_zone,
+    runs,
+    wins,
+    losses,
+    win_rate,
+    avg_entry_odds
+FROM v_runner_context_form
+v_runner_truth|CREATE VIEW v_runner_truth AS
+SELECT
+    day,
+    marketId,
+    selectionId,
+    net_pl,
+    CASE WHEN net_pl > 0 THEN 'PROFIT' ELSE 'LOSS' END AS trade_result,
+    outcome_bin
+FROM playbooks_settled
+v_runner_zone_transitions|CREATE VIEW v_runner_zone_transitions AS
+SELECT
+    a.marketId,
+    a.selectionId,
+    dr.runner_name,
+    r.fav_rank_bin,
+    a.anchor_odds,
+    a.off_odds,
+    ROUND((a.off_odds - a.anchor_odds)/NULLIF(a.anchor_odds,0),4) AS drift_ratio,
+    CASE
+        WHEN a.anchor_odds > 12  AND a.off_odds <= 12 THEN 'entered_passive'
+        WHEN a.anchor_odds > 8   AND a.off_odds <= 8  THEN 'entered_active'
+        WHEN a.anchor_odds <= 8  AND a.off_odds > 12 THEN 'exited_active'
+        WHEN a.anchor_odds <= 12 AND a.off_odds > 12 THEN 'exited_passive'
+        ELSE 'no_change'
+    END AS zone_transition
+FROM v_runner_anchor_off a
+LEFT JOIN dashboard_runners dr
+       ON a.marketId = dr.marketId
+      AND CAST(a.selectionId AS TEXT) = dr.selectionId
+LEFT JOIN v_rank_bin r
+       ON dr.marketId = r.marketId
+      AND dr.selectionId = r.selectionId
+v_strategy_perf|CREATE VIEW v_strategy_perf AS
+        WITH base AS (
+          SELECT
+            id, role, hedge_of,
+            date(COALESCE(opened_at,ts))                 AS d,
+            UPPER(COALESCE(entry_status,''))             AS es,
+            UPPER(COALESCE(exit_status ,''))             AS xs,
+            UPPER(COALESCE(side,''))                     AS side,
+            COALESCE(entry_matched_odds,  entry_odds,  0.0) AS odds,
+            COALESCE(entry_matched_stake, entry_stake, 0.0) AS stake,
+            COALESCE(mode,'')                            AS mode,
+            CASE WHEN COALESCE(source,'')<>'' THEN UPPER(SUBSTR(source,1,1)) ELSE 'S' END AS letter,
+            CASE
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='A' THEN 'ALWAYS_ON'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='B' THEN 'BTL_SCOUT'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='G' THEN 'BTL_AGGR'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='X' THEN 'S4_CROSSOVER'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='R' THEN 'S5_BREAKOUT'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='F' THEN 'S6_STEAM_FADE'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='M' THEN 'LADDER_STRATEGY'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='Z' THEN 'OG_BIAS'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='I' THEN 'IP1_SHOCK_DRIFT'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='T' THEN 'IP2_TIRED_LEADER'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='C' THEN 'IP3_CLOSE_FINISH'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='E' THEN 'IP4_FENCE_ERROR'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='K' THEN 'IP5_COLLAPSE_FADE'
+              WHEN UPPER(SUBSTR(COALESCE(source,''),1,1))='S' THEN 'LEGACY_S'
+              ELSE 'UNKNOWN'
+            END AS strategy_name,
+            COALESCE(net_pl, realized_pnl, 0.0)          AS pnl,
+            COALESCE(opened_at,ts)                       AS opened_ts,
+            COALESCE(closed_at,opened_at,ts)             AS closed_ts
+          FROM orders
+          WHERE date(COALESCE(opened_at,ts)) = date('now')  -- today-only (unchanged)
+        ),
+        mode_sel AS (SELECT * FROM base WHERE UPPER(mode)=UPPER('TEST') ),
+        open_parents AS (
+          SELECT id FROM mode_sel
+           WHERE (role IS NULL OR role='PARENT')
+             AND es='MATCHED' AND xs<>'MATCHED'
+        ),
+        liab_unmatched AS (
+          SELECT letter,
+                 SUM(CASE WHEN side='LAY' THEN (odds-1.0)*stake ELSE stake END) AS v
+          FROM mode_sel
+          WHERE (role IS NULL OR role='PARENT') AND es IN ('QUEUED','PLACED')
+          GROUP BY letter
+        ),
+        liab_matched_open AS (
+          SELECT letter,
+                 SUM(CASE WHEN side='LAY' THEN (odds-1.0)*stake ELSE stake END) AS v
+          FROM mode_sel
+          WHERE (role IS NULL OR role='PARENT') AND es='MATCHED' AND xs NOT IN ('MATCHED','SETTLED')
+          GROUP BY letter
+        ),
+        pnl_today AS (
+          SELECT letter, ROUND(SUM(pnl),2) AS pnl
+          FROM mode_sel
+          WHERE (role IS NULL OR role='PARENT') AND xs='MATCHED'
+          GROUP BY letter
+        ),
+        last_trade AS (
+          SELECT letter, MAX(opened_ts) AS last_ts
+          FROM mode_sel WHERE (role IS NULL OR role='PARENT')
+          GROUP BY letter
+        )
+        SELECT
+          COALESCE(bl.strategy_name, bl.letter) AS strategy,
+          SUM((bl.role IS NULL OR bl.role='PARENT') AND bl.es='QUEUED')                                  AS p_q,
+          SUM((bl.role IS NULL OR bl.role='PARENT') AND bl.es='PLACED')                                  AS p_p,
+          SUM((bl.role IS NULL OR bl.role='PARENT') AND bl.es='MATCHED')                                 AS p_m,
+          SUM(UPPER(COALESCE(bl.role,''))='CHILD' AND bl.es='QUEUED')                                    AS c_q,
+          SUM(UPPER(COALESCE(bl.role,''))='CHILD' AND bl.es='PLACED')                                    AS c_p,
+          SUM(UPPER(COALESCE(bl.role,''))='CHILD' AND (bl.es='MATCHED' OR bl.xs='MATCHED'))              AS c_m,
+          (SELECT COUNT(*) FROM open_parents op JOIN mode_sel b2 ON b2.id=op.id AND b2.letter=bl.letter) AS open_parents,
+          ROUND(COALESCE((SELECT v FROM liab_matched_open WHERE letter=bl.letter),0),2)                  AS matched_liab,
+          ROUND(COALESCE((SELECT v FROM liab_unmatched   WHERE letter=bl.letter),0),2)                    AS unmatched_liab,
+          ROUND(COALESCE((SELECT pnl FROM pnl_today      WHERE letter=bl.letter),0),2)                    AS pnl_today,
+          COALESCE((SELECT last_ts FROM last_trade       WHERE letter=bl.letter),'')                      AS last_trade_ts
+        FROM mode_sel bl
+        GROUP BY bl.letter, bl.strategy_name
+        ORDER BY strategy
+v_timing_features_v7|CREATE VIEW v_timing_features_v7 AS
+SELECT
+    p.marketId,
+    p.selectionId,
+    p.surface_type,
+    MAX(CASE WHEN p.phase='PRE' THEN p.avg_odds END)        AS pre_avg_odds,
+    MAX(CASE WHEN p.phase='INPLAY' THEN p.avg_odds END)     AS inplay_avg_odds,
+    MAX(CASE WHEN p.phase='POST' THEN p.avg_odds END)       AS post_avg_odds,
+    MAX(CASE WHEN p.phase='PRE' THEN p.rel_volatility END)  AS pre_vol,
+    MAX(CASE WHEN p.phase='INPLAY' THEN p.rel_volatility END) AS inplay_vol,
+    MAX(CASE WHEN p.phase='POST' THEN p.rel_volatility END) AS post_vol,
+    MAX(CASE WHEN p.phase='INPLAY' THEN p.odds_rate_per_min END) AS drift_speed,
+    MAX(CASE WHEN p.phase='INPLAY' THEN p.avg_progress_ratio END) AS inplay_progress,
+    ROUND(
+        MAX(CASE WHEN p.phase='INPLAY' THEN p.phase_end_min - p.phase_start_min END),
+        1
+    ) AS expected_race_mins
+FROM v_phase_performance p
+GROUP BY p.marketId, p.selectionId
+v_trading_zone_groups|CREATE VIEW v_trading_zone_groups AS
+SELECT
+    CASE
+        WHEN odds_band='below_1_5' THEN 'short_fav'
+        WHEN odds_band IN ('1_5_to_3','3_to_5','5_to_7') THEN 'active_zone'
+        WHEN odds_band='8_to_12' THEN 'passive_zone'
+        ELSE 'non_trade_zone'
+    END AS trading_zone,
+    CASE
+        WHEN odds_band='below_1_5' THEN 'short_priced_favourite'
+        WHEN odds_band='1_5_to_3'  THEN 'strong_favourite'
+        WHEN odds_band='3_to_5'    THEN 'moderate_favourite'
+        WHEN odds_band='5_to_7'    THEN 'weak_favourite'
+        WHEN odds_band='8_to_12'   THEN 'passive_zone'
+        ELSE 'outsider'
+    END AS strength_label,
+    odds_band,
+    COUNT(*)                AS horses,
+    ROUND(AVG(win_rate),3)  AS avg_win_rate,
+    ROUND(AVG(avg_entry_odds),2) AS avg_odds
+FROM v_runner_context_form
+GROUP BY trading_zone, strength_label, odds_band
+v_weight_of_money|CREATE VIEW v_weight_of_money AS
+SELECT
+    marketId,
+    selectionId,
+    ROUND(
+        CASE 
+            WHEN (back1 + lay1) != 0 THEN (lay1 - back1) / (lay1 + back1)
+            ELSE 0.0
+        END, 4
+    ) AS wom_ratio,
+    CASE
+        WHEN (lay1 - back1) / (lay1 + back1) >  0.05 THEN 'LAY_DOMINANT'
+        WHEN (lay1 - back1) / (lay1 + back1) < -0.05 THEN 'BACK_DOMINANT'
+        ELSE 'BALANCED'
+    END AS wom_state
+FROM odds_current
+WHERE back1 IS NOT NULL AND lay1 IS NOT NULL
+volatility_meta|CREATE VIEW volatility_meta AS
+WITH prev AS (
+  SELECT
+      a.marketId,
+      a.selectionId,
+      a.id AS id_a,
+      MAX(b.id) AS id_prev
+  FROM oc_series a
+  JOIN oc_series b
+    ON a.marketId=b.marketId
+   AND a.selectionId=b.selectionId
+   AND b.id < a.id
+  GROUP BY a.marketId, a.selectionId, a.id
+),
+diffs AS (
+  SELECT
+      a.marketId,
+      a.selectionId,
+      ABS(a.odd - b.odd)/a.odd AS rel_change
+  FROM oc_series a
+  JOIN prev p  ON a.id=p.id_a
+  JOIN oc_series b ON b.id=p.id_prev
+  WHERE a.odd IS NOT NULL AND b.odd IS NOT NULL
+)
+SELECT
+    marketId,
+    selectionId,
+    ROUND(AVG(rel_change),4) AS avg_volatility,
+    MIN(a.odd) AS range_low,
+    MAX(a.odd) AS range_high
+FROM oc_series a
+LEFT JOIN diffs d USING(marketId,selectionId)
+GROUP BY marketId,selectionId
+malachikelly@Malachis-MBP-3 analytics_beta_dev % echo "---- BETS (tables + views) ----"
+sqlite3 data/bets.db "
+.headers on
+.mode column
+SELECT type, name FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY type, name;
+"
+
+echo "---- BETS (schemas) ----"
+sqlite3 data/bets.db "
+SELECT name, sql
+FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY name;
+"
+
+---- BETS (tables + views) ----
+Error: in prepare, near ".": syntax error
+   .headers on .mode column SELECT type, name FROM sqlite_master WHERE type IN (
+   ^--- error here
+---- BETS (schemas) ----
+__gui_probe|CREATE TABLE __gui_probe(k TEXT PRIMARY KEY, v TEXT)
+app_kv|CREATE TABLE app_kv(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)
+bets|CREATE TABLE bets(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            marketId        TEXT    NOT NULL,
+            selectionId     INTEGER NOT NULL,
+            horse_name      TEXT,
+            race_name       TEXT,
+            market_name     TEXT,
+            event_name      TEXT,
+            marketStartTime TEXT,     -- ISO8601
+            date            TEXT,     -- YYYY-MM-DD
+            timestamp       TEXT,     -- ISO8601
+            meta_json       TEXT,
+
+            -- anchor/OC0
+            anchor_odd      REAL,
+            placed_at       TEXT,     -- ISO8601 when anchor set
+            OC0             REAL,
+            OC0_band        TEXT,     -- JSON string
+
+            status          TEXT,
+            test_mode       INTEGER DEFAULT 0, customerOrderRef TEXT, runner_name TEXT,
+
+            UNIQUE(marketId, selectionId)
+        )
+blueprint_state|CREATE TABLE blueprint_state (
+        day TEXT NOT NULL,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        blueprint_key TEXT,
+        score REAL,
+        features_json TEXT NOT NULL,
+        PRIMARY KEY(day, marketId, selectionId)
+      )
+dashboard_runners|CREATE TABLE dashboard_runners(
+        day TEXT, marketId TEXT, selectionId TEXT,
+        runner_name TEXT,
+        odd REAL, implied_prob REAL,
+        band_low REAL, band_high REAL,
+        last_snapshot_ts TEXT, source TEXT,
+        top6_rank INTEGER, first_seen_rank INTEGER, first_seen_ts TEXT,
+        in_top6 INTEGER,
+        bar_pre_norm REAL, bar_post_norm REAL, bar_display_norm REAL, bar_color TEXT,
+        flow_ppm REAL, vol_1m REAL, trend TEXT,
+        PRIMARY KEY(day, marketId, selectionId)
+      )
+inbound_oc_cache|CREATE TABLE inbound_oc_cache(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketId TEXT NOT NULL,
+        selectionId TEXT NOT NULL,
+        anchor_odd REAL,
+        last_sync_ts TEXT
+      , oc1 REAL, oc1_band_json TEXT, oc2 REAL, oc2_band_json TEXT, oc3 REAL, oc3_band_json TEXT, oc4 REAL, oc4_band_json TEXT, oc5 REAL, oc5_band_json TEXT, oc6 REAL, oc6_band_json TEXT, oc7 REAL, oc7_band_json TEXT, oc8 REAL, oc8_band_json TEXT, oc9 REAL, oc9_band_json TEXT, oc10 REAL, oc10_band_json TEXT, oc11 REAL, oc11_band_json TEXT, oc12 REAL, oc12_band_json TEXT, oc13 REAL, oc13_band_json TEXT, oc14 REAL, oc14_band_json TEXT, oc15 REAL, oc15_band_json TEXT, oc16 REAL, oc16_band_json TEXT, oc17 REAL, oc17_band_json TEXT, oc18 REAL, oc18_band_json TEXT, oc19 REAL, oc19_band_json TEXT, oc20 REAL, oc20_band_json TEXT)
+letter_credits|CREATE TABLE letter_credits(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT,
+        marketId TEXT,
+        letter TEXT,
+        band TEXT,
+        delta REAL,
+        net REAL,
+        updated_at TEXT DEFAULT (datetime('now','utc'))
+      )
+markets_schedule|CREATE TABLE markets_schedule (
+  marketId     TEXT PRIMARY KEY,
+  off_at_utc   TEXT NOT NULL,               -- ISO UTC, e.g. 2025-09-21T13:13:00Z
+  venue        TEXT,
+  course       TEXT,
+  event_name   TEXT,
+  market_name  TEXT,
+  source       TEXT,
+  discovered_ts TEXT NOT NULL DEFAULT (datetime('now','utc'))
+)
+mastery_consolidator_progress|CREATE TABLE mastery_consolidator_progress(
+            run_id TEXT PRIMARY KEY,
+            last_id INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','utc'))
+        )
+mastery_events|CREATE TABLE mastery_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  happened_at TEXT NOT NULL DEFAULT (datetime('now')),
+  event_type TEXT NOT NULL,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  delta_progress INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'TEST'
+)
+mastery_posteriors|CREATE TABLE mastery_posteriors (
+  bin_key TEXT PRIMARY KEY,
+  p1_alpha REAL NOT NULL DEFAULT 0, p1_beta REAL NOT NULL DEFAULT 0,
+  p2_alpha REAL NOT NULL DEFAULT 0, p2_beta REAL NOT NULL DEFAULT 0,
+  p3_alpha REAL NOT NULL DEFAULT 0, p3_beta REAL NOT NULL DEFAULT 0,
+  fill_alpha REAL NOT NULL DEFAULT 0, fill_beta REAL NOT NULL DEFAULT 0,
+  mae_n INTEGER NOT NULL DEFAULT 0,
+  mae_mean REAL NOT NULL DEFAULT 0.0,
+  mae_m2 REAL NOT NULL DEFAULT 0.0,
+  -- NEW enrichment
+  letter TEXT DEFAULT '',
+  band   TEXT DEFAULT '',
+  epic_stories INT DEFAULT 0,
+  stop_losses  INT DEFAULT 0,
+  hedges       INT DEFAULT 0,
+  net_pnl      REAL DEFAULT 0.0,
+  source_run   TEXT DEFAULT 'LIVE',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  source TEXT NOT NULL DEFAULT 'TEST'
+, priority INTEGER NOT NULL DEFAULT 99, weight_applied REAL NOT NULL DEFAULT 1.0, day_of_week TEXT DEFAULT 'unk', surface_type TEXT DEFAULT 'unk', winners TEXT DEFAULT '[]')
+mastery_priors|CREATE TABLE mastery_priors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bin_key TEXT NOT NULL,
+  prior_p1_alpha REAL NOT NULL,
+  prior_p1_beta  REAL NOT NULL,
+  prior_p2_alpha REAL NOT NULL,
+  prior_p2_beta  REAL NOT NULL,
+  prior_p3_alpha REAL NOT NULL,
+  prior_p3_beta  REAL NOT NULL,
+  prior_fill_alpha REAL NOT NULL,
+  prior_fill_beta  REAL NOT NULL,
+  prior_mae_mean REAL NOT NULL,
+  prior_mae_std  REAL NOT NULL,
+  source TEXT NOT NULL DEFAULT 'PRIOR',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+mastery_state|CREATE TABLE mastery_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  progress INTEGER NOT NULL DEFAULT 0,
+  thresholds_json TEXT NOT NULL DEFAULT '{}',
+  volatility_json TEXT NOT NULL DEFAULT '{}',
+  liquidity_json TEXT NOT NULL DEFAULT '{}',
+  time_windows_json TEXT NOT NULL DEFAULT '{}',
+  exit_policy_json TEXT NOT NULL DEFAULT '{}',
+  confidence_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1,
+  source TEXT NOT NULL DEFAULT 'TEST',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+oc_series|CREATE TABLE oc_series(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            marketId    TEXT    NOT NULL,
+            selectionId INTEGER NOT NULL,
+            stage       TEXT    NOT NULL,      -- 'OC0', 'OC1', etc
+            snapshot_ts TEXT    NOT NULL,      -- ISO8601
+            odd         REAL,
+            band_low    REAL,
+            band_high   REAL,
+            band_json   TEXT,
+            meta_json   TEXT,
+            source      TEXT,
+            UNIQUE(marketId, selectionId, stage, snapshot_ts) ON CONFLICT IGNORE
+        )
+odds_snapshots|CREATE TABLE odds_snapshots(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        marketId TEXT NOT NULL, selectionId TEXT NOT NULL,
+        ltp REAL, back1 REAL, lay1 REAL,
+        slope_ppm REAL, tick_vel_1s_up INTEGER, tick_vel_3s_up INTEGER,
+        fav_rank_now INTEGER, fav_rank_30s INTEGER,
+        mto_minutes REAL,
+        source TEXT
+      )
+order_events|CREATE TABLE order_events(
+          id INTEGER PRIMARY KEY,
+          order_id INTEGER,
+          oco_group_id TEXT,
+          market_id TEXT,
+          runner_id TEXT,
+          side TEXT,
+          role TEXT,
+          event TEXT,
+          price REAL, size REAL,
+          ts TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY(order_id) REFERENCES orders(id)
+        )
+pnl_daily|CREATE TABLE pnl_daily (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_day INTEGER NOT NULL,
+      month_index INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      created_at TEXT NOT NULL,
+      run_id TEXT,
+      source TEXT
+    )
+pnl_trades|CREATE TABLE pnl_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      amount REAL,
+      created_at TEXT,
+      settled_at TEXT,
+      source TEXT
+    )
+replay_reports_ingested|CREATE TABLE replay_reports_ingested(
+                    filename TEXT PRIMARY KEY,
+                    outcomes INTEGER,
+                    ingested_at TEXT
+                )
+schema_meta|CREATE TABLE schema_meta(
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+sim_runs|CREATE TABLE sim_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_day INTEGER NOT NULL,
+      month_index INTEGER NOT NULL,
+      run_id TEXT NOT NULL UNIQUE,
+      started_at TEXT NOT NULL,
+      ended_at TEXT
+    )
+sqlite_sequence|CREATE TABLE sqlite_sequence(name,seq)
+synthetic_runs|CREATE TABLE synthetic_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scenario_id INTEGER NOT NULL REFERENCES synthetic_scenarios(id) ON DELETE CASCADE,
+  seed INTEGER NOT NULL,
+  outcomes_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+synthetic_scenarios|CREATE TABLE synthetic_scenarios (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE,
+  bin_key TEXT NOT NULL,
+  script_json TEXT NOT NULL,
+  notes TEXT DEFAULT ''
+)
+system_flags|CREATE TABLE system_flags(
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+malachikelly@Malachis-MBP-3 analytics_beta_dev % echo "---- SETTLEMENTS (tables + views) ----"
+sqlite3 data/settlements.db "
+.headers on
+.mode column
+SELECT type, name FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY type, name;
+"
+
+echo "---- SETTLEMENTS (schemas) ----"
+sqlite3 data/settlements.db "
+SELECT name, sql
+FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY name;
+"
+
+---- SETTLEMENTS (tables + views) ----
+Error: in prepare, near ".": syntax error
+   .headers on .mode column SELECT type, name FROM sqlite_master WHERE type IN (
+   ^--- error here
+---- SETTLEMENTS (schemas) ----
+bf_cleared_orders|CREATE TABLE bf_cleared_orders(
+  betId TEXT PRIMARY KEY,
+  marketId TEXT,
+  selectionId TEXT,
+  side TEXT,                            -- BACK|LAY
+  priceRequested REAL,
+  averagePriceMatched REAL,
+  priceMatched REAL,
+  sizeSettled REAL,
+  profit REAL,                          -- net of commission (Betfair)
+  commission REAL,
+  settledDate TEXT,
+  placedDate TEXT,
+  customerOrderRef TEXT,
+  customerStrategyRef TEXT,
+  persistenceType TEXT,
+  orderType TEXT,
+  bspLiability REAL,
+  eventTypeId TEXT,
+  handicap REAL,
+  json_raw TEXT
+)
+bf_cleared_orders_raw|CREATE TABLE bf_cleared_orders_raw(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,                 -- 'CSV' | 'API'
+  ingested_at TEXT NOT NULL,
+  betId TEXT,
+  payload_json TEXT NOT NULL
+)
+bf_market_book|CREATE TABLE bf_market_book(
+  marketId TEXT PRIMARY KEY,
+  isInplay INTEGER,
+  status TEXT,               -- OPEN|SUSPENDED|CLOSED
+  betDelay INTEGER,
+  totalMatched REAL,
+  lastMatchTime TEXT,
+  resultJson TEXT,           -- runners status/ltp/etc.
+  raw_json TEXT
+)
+bf_market_catalogue|CREATE TABLE bf_market_catalogue(
+  marketId TEXT PRIMARY KEY,
+  marketName TEXT,
+  eventName TEXT,
+  competition TEXT,
+  countryCode TEXT,
+  venue TEXT,
+  marketStartTime TEXT,
+  totalMatched REAL,
+  raceType TEXT,
+  distanceMeters REAL,
+  going TEXT,
+  class TEXT,
+  runnersJson TEXT,          -- runners metadata (ids, names)
+  raw_json TEXT
+)
+bf_runner_info|CREATE TABLE bf_runner_info(
+  marketId TEXT,
+  selectionId TEXT,
+  runnerName TEXT,
+  stallDraw INTEGER,
+  jockeyName TEXT,
+  trainerName TEXT,
+  age INTEGER,
+  weightCarried REAL,
+  officialRating INTEGER,
+  raw_json TEXT, status TEXT,
+  PRIMARY KEY(marketId, selectionId)
+)
+bf_settlement_runner_day|CREATE TABLE bf_settlement_runner_day(
+  day TEXT,
+  marketId TEXT,
+  selectionId TEXT,
+  trades INTEGER NOT NULL DEFAULT 0,
+  net REAL NOT NULL DEFAULT 0.0,
+  commission REAL NOT NULL DEFAULT 0.0,
+  win_rate REAL NOT NULL DEFAULT 0.0,
+  PRIMARY KEY(day, marketId, selectionId)
+)
+runner_form|CREATE TABLE runner_form (
+            day TEXT, marketId TEXT, selectionId TEXT,
+            runner_name TEXT, trainer_name TEXT, jockey_name TEXT,
+            age INTEGER, weightCarried REAL, officialRating INTEGER,
+            profit REAL, status TEXT, inferred_flag INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','utc'))
+        )
+runner_form_canonical|CREATE TABLE runner_form_canonical (
+            runner_name TEXT,
+            selectionId TEXT,
+            marketId TEXT,
+            day TEXT,
+            trainer TEXT,
+            jockey TEXT,
+            age INTEGER,
+            surface TEXT,
+            distance_band TEXT,
+            class_band TEXT,
+            profit REAL,
+            status TEXT,
+            inferred_flag INTEGER DEFAULT 0,
+            runs INTEGER,
+            wins INTEGER,
+            win_rate REAL,
+            avg_pnl REAL,
+            last_seen TEXT,
+            created_at TEXT DEFAULT (datetime('now','utc')),
+            PRIMARY KEY (marketId, selectionId)
+        )
+sqlite_sequence|CREATE TABLE sqlite_sequence(name,seq)
+st_order_ledger|CREATE TABLE st_order_ledger(
+            betId TEXT PRIMARY KEY,
+            source TEXT, mode TEXT,
+            marketId TEXT, selectionId TEXT, side TEXT,
+            price REAL, size REAL, status TEXT,
+            opened_at TEXT, placed_at TEXT, settled_at TEXT,
+            customerOrderRef TEXT, customerStrategyRef TEXT,
+            net_pl REAL, commission REAL, json_raw TEXT
+          )
+st_runner_day_totals|CREATE TABLE st_runner_day_totals(
+            day TEXT,
+            marketId TEXT,
+            selectionId TEXT,
+            parents_placed INTEGER NOT NULL DEFAULT 0,
+            children_placed INTEGER NOT NULL DEFAULT 0,
+            exits INTEGER NOT NULL DEFAULT 0,
+            cancels INTEGER NOT NULL DEFAULT 0,
+            fails INTEGER NOT NULL DEFAULT 0,
+            hedges_matched INTEGER NOT NULL DEFAULT 0,
+            successes INTEGER NOT NULL DEFAULT 0,
+            net REAL NOT NULL DEFAULT 0.0,
+            commission REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY(day, marketId, selectionId)
+          )
+v_settle_day|CREATE VIEW v_settle_day AS
+SELECT day, SUM(net) AS net, COUNT(*) AS mkts
+FROM v_settle_mkt_day
+GROUP BY 1
+v_settle_mkt_day|CREATE VIEW v_settle_mkt_day AS
+SELECT date(datetime(settledDate,'utc')) AS day,
+       marketId,
+       SUM(profit) AS net,
+       COUNT(*) AS bets
+FROM bf_cleared_orders
+WHERE settledDate IS NOT NULL
+GROUP BY 1,2
+malachikelly@Malachis-MBP-3 analytics_beta_dev % echo "---- MASTERY_V7 (tables + views) ----"
+sqlite3 data/mastery_v7.db "
+.headers on
+.mode column
+SELECT type, name FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY type, name;
+"
+
+echo "---- MASTERY_V7 (schemas) ----"
+sqlite3 data/mastery_v7.db "
+SELECT name, sql
+FROM sqlite_master
+WHERE type IN ('table','view')
+ORDER BY name;
+"
+
+---- MASTERY_V7 (tables + views) ----
+Error: in prepare, near ".": syntax error
+   .headers on .mode column SELECT type, name FROM sqlite_master WHERE type IN (
+   ^--- error here
+---- MASTERY_V7 (schemas) ----
+mastery_state|CREATE TABLE mastery_state(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now','utc')),
+            version INTEGER DEFAULT 0,
+            thresholds_json TEXT,
+            source TEXT
+        )
+mastery_v7_training|CREATE TABLE mastery_v7_training(
+  day TEXT,
+  marketId TEXT,
+  selectionId INT,
+  letter TEXT,
+  pnl REAL,
+  success INT,
+  pre_drift REAL,
+  band_width REAL,
+  band_rel_vol REAL,
+  band_bias REAL,
+  band_skew REAL,
+  band_stability REAL,
+  slope_ppm REAL,
+  tick_vel_3s_up REAL,
+  momentum_class TEXT,
+  expected_race_mins REAL,
+  drift_speed REAL,
+  inplay_progress REAL,
+  win_rate REAL,
+  form_avg_pnl REAL,
+  bucket TEXT,
+  runner_name TEXT,
+  form_runs INT,
+  form_wins INT,
+  form_win_rate REAL,
+  "form_avg_pnl:1" REAL,
+  pre_vol,
+  inplay_vol,
+  post_vol,
+  "drift_speed:1",
+  "inplay_progress:1",
+  "expected_race_mins:1"
+)
+sqlite_sequence|CREATE TABLE sqlite_sequence(name,seq)
+malachikelly@Malachis-MBP-3 analytics_beta_dev % 
