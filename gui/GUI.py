@@ -420,22 +420,70 @@ def start_keepalive_thread(app_key_getter=None,
                         continue
 # ============================================================
 
+# === PATCH START ============================================================
+# 📍 TARGET: gui/GUI.py  (bottom of file, replace old version)
+# 📆 PATCHED: 2025-12-01 — Unified OC timeline logger (single source of truth)
+# ----------------------------------------------------------------------------
 
+import time as _oc_time
+import logging as _oc_log
 
-def _oc_timeline_log(mid: str, sid: str, msg: str, lvl: int = logging.WARNING) -> None:
-    # map logging levels (ints) to the strings orchestrator._log_event expects
-    if   lvl <= logging.DEBUG:   s = "DEBUG"
-    elif lvl <= logging.INFO:    s = "INFO"
-    elif lvl <= logging.WARNING: s = "WARN"
-    elif lvl <= logging.ERROR:   s = "ERROR"
-    else:                        s = "ERROR"
+def _oc_timeline_log(mid: str,
+                     sid: str,
+                     msg: str,
+                     lvl: int = _oc_log.WARNING,
+                     *,
+                     benign: tuple[str, ...] = (
+                         "unable to open database file",
+                         "database is locked",
+                         "busy",
+                         "NameResolutionError",
+                         "Max retries exceeded",
+                         "No odds",
+                     ),
+                     period_s: float = 30.0) -> None:
+    """
+    Unified OC timeline logger (GUI).
+    This merges BOTH older implementations:
+      • supports orchestrator callers with lvl argument
+      • suppresses duplicates for (mid/sid) within period_s
+      • demotes known-benign errors to DEBUG
+      • forwards structured logs to orchestrator’s OC log sink
+
+    Always safe. Never crashes OC loop.
+    """
+
+    # Throttle logs by (market/runner)
+    if not hasattr(_oc_timeline_log, "_last"):
+        _oc_timeline_log._last = {}
+
+    key = f"{mid}/{sid}"
+    now = _oc_time.time()
+    last = _oc_timeline_log._last.get(key, 0.0)
+    if now - last < period_s:
+        return
+    _oc_timeline_log._last[key] = now
+
+    # Demote benign network/DB noise
+    if any(b in msg for b in benign):
+        lvl = _oc_log.DEBUG
+
+    # Map level → orchestrator event code
+    if lvl <= _oc_log.DEBUG:   s = "DEBUG"
+    elif lvl <= _oc_log.INFO:  s = "INFO"
+    elif lvl <= _oc_log.WARNING: s = "WARN"
+    elif lvl <= _oc_log.ERROR: s = "ERROR"
+    else:                      s = "ERROR"
+
+    # Structured log via orchestrator sink if present
     try:
+        from engines.decision_engine.orchestrator import _oc_orch_log
         _oc_orch_log(str(mid), str(sid), s, msg)
     except Exception:
-        # last-resort: still print something
-        logging.log(lvl, f"[OC_TIMELINE] {mid}/{sid} {msg}")
+        # Always safe fall-back print
+        _oc_log.log(lvl, f"[OC_TIMELINE] {mid}/{sid} {msg}")
 
-
+# === PATCH END ==============================================================
 
 
 import os, sys, json, threading, time, logging
@@ -2100,51 +2148,143 @@ class PhaseGUI(tk.Tk):
             print("[replay] banner clear skipped:", _e)
   
         m = (mode or "LIVE").upper()
-        if m in ("TEST", "REPLAY"):
-            # Configure compressed clock (timezone-aware; no utcnow() deprecation)
-            try:
-                from engines.replay_clock import configure_replay
-                yday = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)).isoformat()
-                # Optional speed control
-                speed_x = 60.0
-                if hasattr(self, "replay_speed_var"):
-                    try:
-                        speed_x = float(self.replay_speed_var.get() or 60.0)
-                    except Exception:
-                        pass
-                configure_replay(
-                    replay_day_iso=yday,
-                    start_at_iso=f"{yday}T10:30:00Z",
-                    speed_x=speed_x,
-                )
-                # Set banner if available
-                try:
-                    if hasattr(self, "banner_var") and hasattr(self.banner_var, "set"):
-                        self.banner_var.set(f"REPLAY x{speed_x:g}")
-                    elif hasattr(self, "banner") and hasattr(self.banner, "configure"):
-                        self.banner.configure(text=f"REPLAY x{speed_x:g}")
-                except Exception as _e2:
-                    print("[replay] banner set skipped:", _e2)
-            except Exception as e:
-                print("[replay] configure_replay failed:", e)
 
-            # ✅ Always open the dashboard (restores old behaviour of Launch TEST)
+        # ============================================================
+        # SYNTHETIC TEST MODE OVERRIDE
+        # ============================================================
+        if m == "TEST":
+            print("[SIM] TEST mode detected → launching synthetic simulation engine.")
+
+            # ---------------------------
+            # 1) Seed synthetic markets
+            # ---------------------------
             try:
+                if not getattr(self, "_markets", None):
+                    print("[SIM] Seeding synthetic markets…")
+                    self._seed_test_markets(n_markets=8, runners_range=(8, 12))
+                else:
+                    print("[SIM] Synthetic markets already present.")
+            except Exception as e:
+                print(f"[SIM] Market seed warn: {e}")
+
+            # ---------------------------
+            # 2) Synthetic OC generator
+            # ---------------------------
+            def _start_synthetic_oc_loop(markets):
+                import threading, time, random
+                from datetime import datetime, timezone
+
+                print("[SIM] Synthetic OC loop starting…")
+
+                def loop():
+                    while True:
+                        try:
+                            now_iso = datetime.now(timezone.utc).isoformat()
+
+                            for mkt in markets:
+                                mid = mkt.get("marketId")
+                                start_iso = mkt.get("marketStartTime")
+                                if not mid or not start_iso:
+                                    continue
+
+                                # minutes_to_off() is already imported
+                                try:
+                                    mto = minutes_to_off(start_iso)
+                                except Exception:
+                                    mto = 10
+
+                                # Determine OC number based on your schedule
+                                due = [
+                                    n for (n, thr)
+                                    in sorted(OC_SCHEDULE_MINUTES.items(), key=lambda kv: kv[1])
+                                    if n >= 1 and mto <= thr
+                                ]
+                                oc_n = max(due) if due else 0
+
+                                for r in (mkt.get("runners") or []):
+                                    sid = r.get("selectionId")
+                                    if sid is None:
+                                        continue
+
+                                    # --- synthetic odd (random walk) ---
+                                    base = random.uniform(2.0, 12.0)
+                                    noise = random.uniform(-0.10, 0.10)
+                                    synthetic_odd = round(base + noise, 2)
+                                    if synthetic_odd < 1.02:
+                                        synthetic_odd = 1.02
+
+                                    # --- Anchor (OC0) if missing ---
+                                    rows = _sqlite_exec(
+                                        "SELECT anchor_odd FROM inbound_oc_cache "
+                                        "WHERE marketId=? AND selectionId=? LIMIT 1",
+                                        [mid, sid], fetch=True
+                                    )
+                                    has_anchor = bool(rows and rows[0] and rows[0][0] is not None)
+
+                                    if not has_anchor:
+                                        _update_bets_anchor(mid, sid, synthetic_odd)
+                                        _autoscalp_upsert_cache_anchor(mid, sid, synthetic_odd)
+                                        _record_oc_series(mid, sid, "OC0", synthetic_odd, source="SIM")
+                                        continue
+
+                                    # --- OC1..OC20 synthetic ---
+                                    label = f"OC{oc_n}" if oc_n >= 1 else "OC0"
+                                    _autoscalp_update_cache_oc(mid, sid, label, synthetic_odd, band_json=[synthetic_odd])
+                                    _record_oc_series(mid, sid, label, synthetic_odd, source="SIM")
+
+                                    # --- odds_current update ---
+                                    try:
+                                        day = now_iso.split("T")[0]
+                                        _sqlite_exec(
+                                            "INSERT OR REPLACE INTO odds_current "
+                                            "(day, marketId, selectionId, updated_ts, ltp, back1, lay1) "
+                                            "VALUES (?,?,?,?,?,?,?)",
+                                            [day, mid, sid, now_iso, synthetic_odd, synthetic_odd, synthetic_odd],
+                                            fetch=False
+                                        )
+                                    except Exception:
+                                        pass
+
+                            time.sleep(1.0)
+
+                        except Exception as e:
+                            print(f"[SIM] Synthetic OC warn: {e}")
+                            time.sleep(1.0)
+
+                t = threading.Thread(target=loop, name="SyntheticOC", daemon=True)
+                t.start()
+                print("[SIM] Synthetic OC loop ACTIVE (thread name: SyntheticOC).")
+
+            # Start synthetic OC loop
+            try:
+                _start_synthetic_oc_loop(self._markets)
+            except Exception as e:
+                print(f"[SIM] Failed to start synthetic OC loop: {e}")
+
+            # ---------------------------
+            # 3) Start orchestration loops (LearningLoop or LiveLoop)
+            # ---------------------------
+            try:
+                print("[SIM] Starting orchestration loops (LiveLoop/LearningLoop)…")
+                if hasattr(self, "_start_loops"):
+                    self._start_loops()
+            except Exception as e:
+                print(f"[SIM] start_loops warn: {e}")
+
+            # ---------------------------
+            # 4) Auto-open dashboard
+            # ---------------------------
+            try:
+                print("[SIM] Opening dashboard…")
                 if hasattr(self, "_open_dashboard_window"):
                     self._open_dashboard_window()
-                else:
-                    # Fallback if method name changes in future
-                    from dashboard import DashboardView
-                    win = tk.Toplevel(self)
-                    win.title("Auto Scalping — Live Dashboard")
-                    container = ttk.Frame(win); container.pack(fill="both", expand=True)
-                    view = DashboardView(parent=container, app=self); view.pack(fill="both", expand=True)
             except Exception as e:
-                print("[GUI] Failed to open dashboard:", e)
+                print(f"[SIM] Dashboard warn: {e}")
 
-        # Kick your existing loops
-        if hasattr(self, "_start_loops"):
-            self._start_loops()
+            print("[SIM] Synthetic simulation engine fully active.")
+            return
+        # ============================================================
+
 
     def _ensure_creds_and_launch_feeder(self) -> bool:
         """
@@ -2436,7 +2576,6 @@ class PhaseGUI(tk.Tk):
 # 🔎 SEARCH: ^\s*def _step1\(self\):\n(?:[ \t].*\n)+?
 # ─────────────────────────────────────────────────────────────────────────────
     def _step1(self):
-        set_step("STEP1")
         from tkinter import messagebox
         """Persist creds + mode to the shim and (if not TEST) start keep-alive."""
         import os, sys
@@ -3139,12 +3278,21 @@ class PhaseGUI(tk.Tk):
         # 📆 PATCHED: 2025-11-22 — Move LiveLoop start BEFORE any writer threads
 
         # --- Start Live/Learning loops (must occur BEFORE writers start) ---
+        # In LEARNING mode, we SKIP the legacy LearningLoop entirely.
+        # The standalone LearningEngine (later in Step 4) handles all learning.
         if not any(t.name in ("LiveLoop", "LearningLoop") and t.is_alive()
                    for t in threading.enumerate()):
+
             from datetime import datetime, timezone
             run_id_prefix = "LIVE" if mode_now == "live" else "LEARN"
             run_id = f"{run_id_prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
 
+
+
+
+            # ------------------------------------------------------------------
+            # LIVE MODE — UNCHANGED, KEEP FULLY OPERATIONAL
+            # ------------------------------------------------------------------
             if mode_now == "live":
                 def _live_target():
                     import traceback
@@ -3155,6 +3303,7 @@ class PhaseGUI(tk.Tk):
                     except Exception as e:
                         print(f"[LOOP] prereq probe warn (LIVE): {e}")
 
+  
                     try:
                         from engines.upgrade_import_patch import set_session_token, set_app_key
                         set_session_token(os.environ.get("BETFAIR_SESSION") or "")
@@ -3170,6 +3319,7 @@ class PhaseGUI(tk.Tk):
                     finally:
                         print(f"[LOOP] LiveLoop thread exited run_id={run_id}")
 
+
                 t = threading.Thread(target=_live_target,
                                      name="LiveLoop", daemon=True)
                 t.start()
@@ -3180,37 +3330,16 @@ class PhaseGUI(tk.Tk):
                 except Exception:
                     pass
 
+            # ------------------------------------------------------------------
+            # LEARNING MODE — SKIP THE OLD LEGACY LEARNINGLOOP
+            # ------------------------------------------------------------------
             else:
-                def _learn_target():
-                    import traceback
-                    print(f"[LOOP] LearningLoop thread booting run_id={run_id}")
+                # ❗ DO NOT START the old orchestrator.start_learning_loop
+                # The standalone LearningEngine (below) runs instead.
+                print("[LOOP] Learning mode: skipping legacy LearningLoop startup.")
+                # Nothing else to start here for learning.
+                pass
 
-                    try:
-                        self._log_decision_prereq_probe(mode="LEARNING")
-                    except Exception as e:
-                        print(f"[LOOP] prereq probe warn (LEARNING): {e}")
-
-                    try:
-                        from engines.decision_engine.orchestrator import start_learning_loop
-                        start_learning_loop(run_id=run_id, hz=2, logger=lambda m: print(m))
-
-                    except BaseException as e:
-                        print(f"[LOOP] LearningLoop fatal: {e}")
-                        traceback.print_exc()
-                    finally:
-                        print(f"[LOOP] LearningLoop thread exited run_id={run_id}")
-
-                t = threading.Thread(target=_learn_target,
-                                     name="LearningLoop", daemon=True)
-                t.start()
-                print(f"[LOOP] LearningLoop start requested (run_id={run_id})")
-
-                try:
-                    self.after(1500, lambda: self._check_loop_alive("LearningLoop", run_id))
-                except Exception:
-                    pass
-
-        # === PATCH END ===
 
 
         from engines.live import settlements
@@ -3359,6 +3488,144 @@ class PhaseGUI(tk.Tk):
             )
             return
 
+        # ============================================================
+        # LEARNING MODE — FULL HISTORICAL REPLAY ENGINE
+        # ============================================================
+        if mode_now == "learning":
+            print("[GUI] Starting LearningEngine…")
+            from engines.sim.learning_engine import start_learning
+            start_learning(n_days=10, logger=lambda m: print(m))
+            return
+
+
+            import sqlite3, threading, time
+            from datetime import datetime, timezone
+            from engines.config_paths import autoscalp_db
+            from engines.replay_clock import configure_replay, replay_now_utc
+
+            # --------------------------------------------------------
+            # 1) Pick MOST COMPLETE historical day from oc_series
+            # --------------------------------------------------------
+            try:
+                con = sqlite3.connect(autoscalp_db(), timeout=8)
+                con.row_factory = sqlite3.Row
+                row = con.execute("""
+                    SELECT date(snapshot_ts) AS d, COUNT(*) AS n
+                    FROM oc_series
+                    GROUP BY date(snapshot_ts)
+                    ORDER BY n DESC
+                    LIMIT 1
+                """).fetchone()
+                con.close()
+            except Exception as e:
+                print(f"[LEARNING] oc_series access error: {e}")
+                return
+
+            if not row:
+                print("[LEARNING] No oc_series data available.")
+                return
+
+            replay_day = row["d"]
+            print(f"[LEARNING] Replaying day: {replay_day}")
+
+            # --------------------------------------------------------
+            # 2) Configure replay clock (accelerated timeline)
+            # Full day in ~10 minutes → speed_x = 120
+            # --------------------------------------------------------
+            try:
+                configure_replay(
+                    replay_day_iso=replay_day,
+                    start_at_iso=f"{replay_day}T08:00:00Z",
+                    speed_x=120.0,   # 120x faster → 12 minutes per day
+                )
+                print("[LEARNING] Replay clock configured.")
+            except Exception as e:
+                print(f"[LEARNING] replay_clock error: {e}")
+                return
+
+            # --------------------------------------------------------
+            # 3) Load sorted OC snapshots for that day
+            # --------------------------------------------------------
+            try:
+                con = sqlite3.connect(autoscalp_db(), timeout=8)
+                con.row_factory = sqlite3.Row
+                rows = con.execute("""
+                    SELECT *
+                    FROM oc_series
+                    WHERE date(snapshot_ts)=?
+                    ORDER BY snapshot_ts ASC
+                """, (replay_day,)).fetchall()
+                con.close()
+            except Exception as e:
+                print(f"[LEARNING] Failed loading oc_series rows: {e}")
+                return
+
+            if not rows:
+                print("[LEARNING] No snapshots for replay day.")
+                return
+
+            print(f"[LEARNING] Loaded {len(rows)} OC snapshots.")
+
+            # --------------------------------------------------------
+            # Helper: apply an OC snapshot into inbound_oc_cache + odds_current
+            # Using replay clock as "now"
+            # --------------------------------------------------------
+            def _apply_snapshot(r):
+                mid = r["marketId"]
+                sid = r["selectionId"]
+                odd = r["odd"]
+                if odd is None:
+                    return
+
+                stage = r["stage"] if r["stage"] else "OC0"
+
+                # inbound_oc_cache update
+                try:
+                    _autoscalp_update_cache_oc(mid, sid, stage, float(odd), band_json=r["band_json"])
+                except Exception as e:
+                    print(f"[LEARNING] inbound_oc_cache warn {mid}/{sid}: {e}")
+
+                # odds_current update
+                try:
+                    now_iso = replay_now_utc().isoformat()
+                    day = now_iso.split("T")[0]
+                    _sqlite_exec(
+                        "INSERT OR REPLACE INTO odds_current "
+                        "(day, marketId, selectionId, updated_ts, ltp, back1, lay1) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        [day, mid, sid, now_iso, odd, odd, odd],
+                        fetch=False
+                    )
+                except Exception as e:
+                    print(f"[LEARNING] odds_current warn {mid}/{sid}: {e}")
+
+            # --------------------------------------------------------
+            # 4) Start replay thread (feeds CTX + Scope + DecideOnce)
+            # --------------------------------------------------------
+            def replay_thread():
+                print("[LEARNING] Replay thread started.")
+
+                for snap in rows:
+                    try:
+                        _apply_snapshot(snap)
+                    except Exception as e:
+                        print(f"[LEARNING] Snapshot warn: {e}")
+
+                    # Timing: accelerate real day timing
+                    time.sleep(0.02)
+
+                print("[LEARNING] Replay complete — full day fed into the system.")
+
+            t = threading.Thread(target=replay_thread, daemon=True, name="OC_REPLAY")
+            t.start()
+
+            print("[LEARNING] Replay engine ACTIVE — LearningLoop will now take over.")
+
+            # STOP: skip LIVE OC timeline entirely
+            return
+
+
+
         # --- guards you already had ---
         if not self._markets:
             messagebox.showwarning("OC Loop", "No markets in memory. Run Step 2 first.")
@@ -3398,6 +3665,46 @@ class PhaseGUI(tk.Tk):
                 for m in self._markets:
                     mid = m.get("marketId")
                     start_iso = m.get("marketStartTime")
+                    # ------------------------------------------------------
+                    # LEARNING MODE: remap start times + override minutes_to_off
+                    # ------------------------------------------------------
+                    if mode_now == "learning":
+                        # 1) Remap marketStartTime → replay_day (keeps HH:MM:SS)
+                        try:
+                            # replay_day comes from earlier detection
+                            # e.g., "2025-10-21"
+                            orig = m.get("marketStartTime")
+                            if orig:
+                                # Extract time portion only
+                                try:
+                                    time_part = orig.split("T")[1]
+                                except Exception:
+                                    time_part = "10:00:00Z"
+
+                                # Generate new replay-day timestamp
+                                start_iso = f"{replay_day}T{time_part}"
+                                m["marketStartTime"] = start_iso
+                        except Exception as _e:
+                            print(f"[LEARNING] remap start warn: {_e}")
+
+                        # 2) Use replay clock for "now" instead of UTC
+                        try:
+                            from engines.replay_clock import replay_now_utc
+                            now_learning = replay_now_utc()
+
+                            # minutes_to_off uses synthetic time
+                            from engines.utils.datetime_norm import to_iso_utc
+
+                            iso_start = to_iso_utc(start_iso)
+                            mto = (datetime.fromisoformat(iso_start.replace("Z","+00:00")) -
+                                   now_learning).total_seconds() / 60.0
+                        except Exception as _e:
+                            print(f"[LEARNING] mto override warn: {_e}")
+                            continue
+                    # ------------------------------------------------------
+                    # END LEARNING MODE OVERRIDE
+                    # ------------------------------------------------------
+
                     if not mid or not start_iso:
                         continue
 
@@ -3562,23 +3869,31 @@ class PhaseGUI(tk.Tk):
                 """Continuously repopulate markets_schedule from bets.db (failsafe)."""
                 while True:
                     try:
-                        con = sqlite3.connect(autoscalp_db(), timeout=6)
-                        con.row_factory = sqlite3.Row
+                        # Safe for _SafeConn (Hijack/DAL) — do NOT set row_factory
+                        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+
                         row = con.execute(
                             "SELECT COUNT(*) AS n FROM markets_schedule "
                             "WHERE date(off_at_utc)=date('now','utc')"
                         ).fetchone()
-                        cnt = int(row["n"] if row else 0)
-                        con.close()
+
+                        # row is a tuple because row_factory cannot be set
+                        cnt = int(row[0] if row else 0)
+
+                        try:
+                            con.close()
+                        except Exception:
+                            pass
 
                         # If the schedule is too small → rebuild it
                         if cnt < 10:
-                            mkts = _load_markets_from_bets_today()   # ← global, already defined
+                            mkts = _load_markets_from_bets_today()
                             if mkts:
                                 _upsert_schedule_from_plan(mkts)
                                 print(f"[SCHEDULE] refreshed {len(mkts)} markets into markets_schedule")
                     except Exception as e:
                         print(f"[SCHEDULE] keeper warn: {e}")
+
                     time.sleep(period_s)
 
             # start background schedule keeper
@@ -3706,10 +4021,6 @@ class PhaseGUI(tk.Tk):
             print("[OVERWATCHER] started (hz=2, stop_ticks=4)")
         except Exception as e:
             print(f"[OVERWATCHER] failed to launch: {e}")
-
-
-
-
 
 
     def _ready_for_learning(self) -> bool:
@@ -3864,41 +4175,34 @@ class PhaseGUI(tk.Tk):
         self._watch_thread.start()
 
     def _start_learning_loop_background(self):
-        """Start orchestrator's learning loop once OC1 exists; retry until ready."""
-        import threading
+        """
+        Learning Mode patch:
+        DO NOT start the old orchestrator learning loop.
+        LearningEngine will run instead (from Step 4).
+        """
         mode = (self._mode.get() or "learning").lower()
-        if mode != "learning":
-            return
-        # don't double-start
-        if getattr(self, "_learn_thread", None) and self._learn_thread.is_alive():
-            return
-        # wait for OC1 to appear (validator already checks this)
-        if not self._ready_for_learning():
-            # retry in 3 seconds
-            try: self.after(3000, self._start_learning_loop_background)
-            except Exception: pass
+
+        # 🚫 In learning mode, we completely bypass the legacy LearningLoop
+        if mode == "learning":
+            print("[GUI] Learning Mode: skipping old orchestrator LearningLoop.")
             return
 
-        from engines.decision_engine.orchestrator import start_live_loop, start_learning_loop
-        mode = (os.environ.get("AUTOSCALP_MODE") or "learning").lower()
-        prefix = "LIVE" if mode == "live" else "LEARN"
+        # LIVE mode (unchanged)
+        import threading, os
+        from engines.decision_engine.orchestrator import start_live_loop
+
+        prefix = "LIVE"
+        from engines.utils.datetime_norm import now_utc
         run_id = f"{prefix}-{now_utc().strftime('%Y%m%d-%H%M%S')}"
 
-        if mode == "live":
-            start_live_loop(run_id=run_id, hz=2, logger=print)
-        else:
-            start_learning_loop(run_id=run_id, hz=2, logger=print)
-
-        def _logger(msg: str):
-            try: self._append(msg)
-            except Exception: print(msg)
-
+        # Start only live loop here
         self._learn_thread = threading.Thread(
-            target=lambda: start_learning_loop(run_id=run_id, hz=2, logger=_logger),
+            target=lambda: start_live_loop(run_id=run_id, hz=2, logger=print),
             name="LearningLoop",
-            daemon=True,
+            daemon=True
         )
         self._learn_thread.start()
+
 
 
 

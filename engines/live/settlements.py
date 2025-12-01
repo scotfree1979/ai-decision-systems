@@ -214,7 +214,12 @@ def close_settled_markets() -> int:
     ensure_schema()
     closed = 0
 
-    with connect_db(set_db) as s, connect_db(auto_db) as o:
+    from engines.config_paths import auto_conn as _auto_conn
+
+    with connect_db(set_db) as s:
+        o = _auto_conn(rw=True)  # MUST use DAL
+        o.row_factory = sqlite3.Row
+
         mids = [r["marketId"] for r in s.execute(
             "SELECT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
         ).fetchall()]
@@ -233,6 +238,7 @@ def close_settled_markets() -> int:
             closed += o.total_changes
 
         o.commit()
+        
     print(f"[settlements] expired all orders in {len(mids)} closed markets → {closed} rows updated")
     return closed
 # === PATCH END ===
@@ -571,11 +577,16 @@ def sync_orders_into_ledger_from_auto(day_utc: Optional[str] = None) -> int:
         auto = os.path.join(os.path.dirname(settlements_db_path()), "autoscalp_gui.db")
 
     n = 0
-    with connect_db(auto) as a, connect_db(settlements_db_path()) as s:
+    a = _auto_conn(rw=False)
+    with connect_db(settlements_db_path()) as s:
+
         cols = {r["name"] for r in a.execute("PRAGMA table_info(orders)")}
         date_col = "opened_at" if "opened_at" in cols else ("ts" if "ts" in cols else None)
         if not date_col:
+            
+            a.close()
             return 0
+
 
         rows = a.execute(f"""
           SELECT id, mode, marketId, selectionId, side,
@@ -791,10 +802,14 @@ def rebuild_runner_day_totals(day_utc: Optional[str] = None) -> int:
         """)
         s.commit()
 
-    with connect_db(auto) as a, connect_db(settlements_db_path()) as s:
+    a = _auto_conn(rw=False)
+    with connect_db(settlements_db_path()) as s:
+
         cols = {r["name"] for r in a.execute("PRAGMA table_info(orders)")}
         link = "hedge_of" if "hedge_of" in cols else ("parent_id" if "parent_id" in cols else None)
         if not link:
+            
+            a.close()
             return 0
 
         parents = a.execute(f"""
@@ -1565,40 +1580,6 @@ def record_playbook_pattern(order_row, pnl_row, oc_snapshot=None):
 # === PATCH END ===
 
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py
-# 📆 PATCHED: 2025-10-17Z — auto-close orders for settled markets (exposure release)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def close_settled_markets() -> int:
-    """
-    Mark all orders in markets whose Betfair status is CLOSED as closed,
-    releasing their exposure from the live CAP calculation.
-    """
-    auto_db = autoscalp_gui_db_path()
-    set_db  = settlements_db_path()
-    ensure_schema()
-    closed = 0
-
-    with connect_db(set_db) as s, connect_db(auto_db) as o:
-        # find closed markets in settlements metadata
-        mids = [r["marketId"] for r in s.execute(
-            "SELECT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
-        ).fetchall()]
-
-        if not mids:
-            return 0
-
-        for mid in mids:
-            o.execute("""
-              UPDATE orders
-                 SET exit_status = 'SETTLED',
-                     closed_at   = COALESCE(closed_at, datetime('now','utc'))
-               WHERE marketId=? AND (exit_status IS NULL OR exit_status='')
-            """, (mid,))
-            closed += o.total_changes
-        o.commit()
-    return closed
-# === PATCH END ===
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1634,7 +1615,9 @@ def pick_one_market_id_from_orders(day_utc: Optional[str] = None) -> Optional[st
     Chooses the market with the most parent rows (hedge_of IS NULL).
     """
     day = (day_utc or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
-    with connect_db(autoscalp_gui_db_path()) as con:
+
+    con = _auto_conn(rw=False)
+    try:
         r = con.execute("""
             SELECT marketId, COUNT(*) AS n
               FROM orders
@@ -1644,7 +1627,12 @@ def pick_one_market_id_from_orders(day_utc: Optional[str] = None) -> Optional[st
              ORDER BY n DESC, marketId
              LIMIT 1
         """, (day,)).fetchone()
+
         return r["marketId"] if r and r["marketId"] else None
+    finally:
+        con.close()
+
+
 
 
 def pick_one_market_id_from_settlements(from_iso: Optional[str], to_iso: Optional[str]) -> Optional[str]:

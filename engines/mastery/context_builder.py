@@ -676,6 +676,20 @@ def build_context(source: str | None = None) -> tuple[dict, dict]:
     from engines.bias.engine import compute_bias
 
     src = (source or _current_source_upper()).upper()
+    # ------------------------------------------------------------
+    # LEARNING MODE OVERRIDE
+    # Always use the TEST-style builder instead of scope-based ctx.
+    # ------------------------------------------------------------
+    # LEARNING MODE OVERRIDE (critical)
+    if src == "LEARNING":
+        try:
+            from engines.sim.learning_engine import grab_latest_ctx
+            return grab_latest_ctx()
+        except Exception as e:
+            print("[LEARNING] ctx override failed:", e)
+            return {}, {}
+
+
     now = _now_utc()
 
     mids = _SCOPE_STATE.get("markets", [])

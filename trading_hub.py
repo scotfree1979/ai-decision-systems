@@ -69,8 +69,11 @@ def show_menu():
     print(f"{GREY}4. Data Health [planned]{RESET}")
     print(f"{GREY}5. Strategy Sandbox [planned]{RESET}")
     print(f"{GREY}6. Reports & Exports [planned]{RESET}")
-    print(f"{GREY}7. System Tools [planned]{RESET}")
+    print(f"{GREEN}{UNDER}7. System Tools{RESET}")
+    print("   a. Run DB Repair (AutoScalp DB Doctor)")
+    print("   b. Sprint")
     print("──────────────────────────────────────────────")
+
 
     # Quit
     print(" q. Quit")
@@ -490,6 +493,55 @@ def handle_choice(choice: str):
         '''
         subprocess.run(["osascript", "-e", osa])
 
+    # === PATCH START ================================================================
+    # 📍 TARGET: engines/control_center.py
+    # 🔎 SEARCH: def control_center_main(
+    # 📆 PATCHED: 2025-12-03 — Add menu entry “Run DB Repair”
+    # ================================================================================
+
+    # Insert this block INSIDE the main menu dispatcher, just after existing options:
+
+# === PATCH START ============================================================
+# 📍 TARGET: trading_hub.py:handle_choice("7a")
+# 📆 PATCHED: 2025-12-03 — Proper System Tools → DB Repair integration
+# ============================================================================
+
+    elif choice == "7a":    # System Tools → DB Repair
+        print("[system] Running full DB repair (AutoScalp DB Doctor)…")
+
+        import subprocess, datetime
+        from pathlib import Path
+
+        # Correct project root
+        root = Path(__file__).resolve().parent
+        script = root / "scripts" / "db_repair_all.py"
+
+
+        # timestamped logfile in data/db_repair_logs
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        logdir = root / "data" / "db_repair_logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"repair-{ts}.log"
+
+        print(f"[system] Log: {logfile}")
+
+        try:
+            with open(logfile, "w") as f:
+                proc = subprocess.Popen(
+                    ["python3", str(script)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                for line in proc.stdout:
+                    print(line, end="")
+                    f.write(line)
+            print("[system] DB Repair complete.")
+        except Exception as e:
+            print(f"[system] ERROR running DB repair: {e}")
+# === PATCH END ============================================================
 
     else:
         print("Invalid option or not yet implemented.")

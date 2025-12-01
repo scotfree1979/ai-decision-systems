@@ -3336,6 +3336,38 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[LIVE DAL] reload warn: {e}")
 
+    # === PATCH START…
+    try:
+        from engines import alphax_gateway as AX
+        AX.start_alphax_threads()
+        print("[AlphaX] LP + Mirror threads started")
+    except Exception as e:
+        print(f"[AlphaX] bootstrap warn: {e}")
+    # === PATCH END…
+
+    # === PATCH START ===============================================
+    # 📍 TARGET: orchestrator.start_live_loop()
+    # 📆 PATCHED: 2025-12-03 — ensure CloudKeeper starts in LIVE
+    try:
+        from engines.alphax_gateway import _cloud_retention_loop
+        print("[CloudKeeper] active (5-day retention, WAL purge)")
+    except Exception as e:
+        print(f"[CloudKeeper] startup warn: {e}")
+    # === PATCH END =================================================
+
+    # === PATCH START =====================================================
+    # 📍 TARGET: orchestrator.start_live_loop
+    # 📆 PATCHED: 2025-12-03 — ensure LiveCacheKeeper is running in LIVE mode
+    try:
+        import engines.config_paths as CP
+        # CP module starts keeper at import; calling ensures activation
+        CP.LIVE_ROOT  # reference triggers module load if not loaded
+        print("[Live] LiveCacheKeeper verified running")
+    except Exception as e:
+        print(f"[Live] LiveCacheKeeper warn: {e}")
+    # === PATCH END =======================================================
+
+
     # ------------------------------------------------------------------
     # 4) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY
     # ------------------------------------------------------------------

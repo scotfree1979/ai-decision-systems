@@ -564,6 +564,31 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
 
 
     # --- Route to live placement
+    # === PATCH START (MSC letter routing fix) ===================================
+    # Insert this RIGHT BEFORE calling place_parent_and_hedge
+
+    # MSC engines must use their proper family letters:
+    #  - Exploratory: D
+    #  - Risk:        J
+    #  - InPlay:      V
+    if plan.get("family") == "MSC":
+        msc_mode = plan.get("msc_mode") or ctx.get("msc_mode")
+
+        if msc_mode == "EXPLORATORY":
+            letter = "D"
+        elif msc_mode == "RISK":
+            letter = "J"
+        elif msc_mode == "INPLAY":
+            letter = "V"
+        else:
+            # default to Exploratory if unknown
+            letter = "D"
+
+    # ELSE: fallback to existing legacy logic already defined above
+    # (Nothing else changes.)
+    # === PATCH END ===============================================================
+
+
     # NOTE: place_parent_and_hedge currently returns (parent_bet_id, cref). If/when it returns a child id, call mark_child().
 # === PATCH START ===
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py

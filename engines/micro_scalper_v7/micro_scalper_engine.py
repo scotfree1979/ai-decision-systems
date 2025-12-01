@@ -131,6 +131,67 @@ def _apply_multiplier(plan: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, An
     return plan
 
 # === PATCH END ==============================================================
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/micro_scalper_engine.py  (module scope)
+# 🔎 SEARCH: class MicroScalperEngine:
+# 📆 PATCHED: 2025-12-02 — MSC LIVE matcher background thread
+# ======================================================================
+
+import threading, time
+
+def _msc_matcher_loop():
+    """
+    MSC background matcher loop.
+    Ensures MSC parents get MATCHED exactly like Legacy parents.
+    Calls the same LiveRouter functions:
+        - _sync_parent_matches
+        - _sync_all_matches
+        - _sync_hedge_matches
+    """
+    try:
+        from engines.live.live_router import (
+            _sync_parent_matches,
+            _sync_all_matches,
+            _sync_hedge_matches,
+        )
+    except Exception:
+        return  # live_router not available yet
+
+    while True:
+        try:
+            _sync_parent_matches(limit=50)
+        except Exception:
+            pass
+
+
+        try:
+            _sync_all_matches(limit=100)
+        except Exception:
+            pass
+
+        try:
+            _sync_hedge_matches(limit=50)
+        except Exception:
+            pass
+
+        time.sleep(1.0)
+
+def _start_msc_matcher_loop_once():
+    """Ensure the MSC matcher thread runs only once per process."""
+    if getattr(_start_msc_matcher_loop_once, "_started", False):
+        return
+    _start_msc_matcher_loop_once._started = True
+
+    t = threading.Thread(target=_msc_matcher_loop,
+                         name="MSCMatcherLoop",
+                         daemon=True)
+    t.start()
+
+
+# Hook into MSC engine startup
+# Insert this call at the beginning of MicroScalperEngine.__init__()
+# (see second patch block below)
+# ======================================================================
 
 
 class MicroScalperEngine:
@@ -150,6 +211,13 @@ class MicroScalperEngine:
     def __init__(self):
         # global PRE-OFF / IN-PLAY state
         self.state = MSCGlobalState.IDLE
+
+        # === PATCH START (MSC LIVE matcher loop) ===
+        try:
+            _start_msc_matcher_loop_once()
+        except Exception:
+            pass
+        # === PATCH END ===
 
         # sub-engine instances
         self.exploratory = ExploratoryEngine()

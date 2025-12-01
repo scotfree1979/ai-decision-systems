@@ -79,6 +79,15 @@ class ExploratoryEngine:
         ctx["msc_stop_ticks"]  = stop_ticks
         # === PATCH END ==============================================================
 
+        # === PATCH START ==========================================
+        # Add parent id to MSC parent plan so child engine can attach
+        if plan and plan.get("enter") and plan.get("role") == "CHILD":
+            parent_id = ctx.get("legacy_parent_id")
+            if parent_id:
+                plan["hedge_of"] = parent_id
+        # === PATCH END ============================================
+
+
 
     # -----------------------------------------------------------
     # INTERNAL LOGIC
@@ -107,7 +116,7 @@ class ExploratoryEngine:
 
         plan = {
             "enter": True,
-            "role": "CHILD",
+            "role": "PARENT",
             "family": "MSC",
             "subtype": self._classify_subtype(micro_state),
             "direction": order_side,

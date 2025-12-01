@@ -139,140 +139,205 @@ SPRINT = {
             ]
         },
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.4 — CLOUD DB REPAIR & ZERO-LOSS CLONE SYSTEM
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.4 – Cloud Database Repair & Clone System": {
-        "status": "✅",
-        "tasks": [
-            "✅ Built zero-loss SQLite clone engine (repairs WAL/SHM/corrupt pages safely)",
-            "✅ Repaired autoscalp_gui_cache.db, bets_cache.db, settlements_cache.db, mastery_cache.db",
-            "✅ Rebuilt all indexes, triggers, and views using canonical definitions",
-            "✅ Verified integrity_check on all cloud DBs (0 pages malformed)",
-            "📌 Added nightly or emergency repair utility for long-term resilience"
-        ]
-    },
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.4 — CLOUD DB REPAIR & ZERO-LOSS CLONE SYSTEM
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.4 – Cloud Database Repair & Clone System": {
+            "status": "✅",
+            "tasks": [
+                "✅ Built zero-loss SQLite clone engine (repairs WAL/SHM/corrupt pages safely)",
+                "✅ Repaired autoscalp_gui_cache.db, bets_cache.db, settlements_cache.db, mastery_cache.db",
+                "✅ Rebuilt all indexes, triggers, and views using canonical definitions",
+                "✅ Verified integrity_check on all cloud DBs (0 pages malformed)",
+                "📌 Added nightly or emergency repair utility for long-term resilience"
+            ]
+        },
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.5 — EXECUTION ARCHITECTURE REBUILD (LEGACY UNCOUPLED)
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.5 – Execution Architecture Rebuild (Legacy Uncoupled)": {
-        "status": "✔",
-        "tasks": [
-            "✔ Fully decouple Legacy execution — Legacy now only opens the parent; all management external",
-            "✔ Install unified execution flow: CTX → MicroScalper v7 → Overwatcher → LiveRouter → orders",
-            "✔ Replace entire stop-loss layer with dynamic Trailing Stop-Loss Engine (TSL)",
-            "✔ Install new MicroScalper v7 folder structure (exploratory, risk, inplay, intel, utils, state machine)",
-            "✔ Standardise mid/sid/ltp/anchor/phase/oc_phase model across all engines",
-            "✔ Remove old enforced stop-ticks and hard-coded stop-loss paths from all components",
-            "✔ Freeze new architecture as the foundation for remaining 7.9.x phases"
-        ]
-    },
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.5 — EXECUTION ARCHITECTURE REBUILD (LEGACY UNCOUPLED)
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.5 – Execution Architecture Rebuild (Legacy Uncoupled)": {
+            "status": "✅",
+            "tasks": [
+                "✅ Fully removed Legacy routing from all live paths — Legacy now ONLY opens the parent order",
+                "✅ Installed unified execution chain: CTX v7 → MicroScalper v7 → Overwatcher → LiveRouter → orders",
+                "✅ Rebuilt LiveRouter to be MSC-aware (parent-first, child-safe, SLEQ + TSL compatible)",
+                "✅ Removed all legacy stop-loss code paths — router now listens purely to TSL + RiskEngine signals",
+                "✅ Normalised execution inputs across engines (marketId, selectionId, oc_phase, current_price)",
+                "✅ Installed new MSC folder structure with complete isolation from legacy exec",
+                "✅ Ensured router, Overwatcher, MicroScalper and TSL all use the same modern ctx schema",
+                "✅ Established architecture foundation for remaining 7.9.x phases (router stability + ctx unification)"
+            ]
+        },
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.6 — CTX v7 REBUILD + LANES NORMALISATION
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.6 – CTX v7 Rebuild + Lanes Normalisation": {
-        "status": "✔",
-        "tasks": [
-            "✔ Rebuild CTX to use only real schema-backed fields (odds_current, inbound_oc_cache, mastery views)",
-            "✔ Add v7 intelligence signals into CTX: slope_ppm, drift_speed, WOM, anchor, oc bands, p_fill, timing",
-            "✔ Ensure ctx uses modern OC-phase (OC0–OC7 pre-off, OC7+ in-play) across engines",
-            "✔ Clean all lanes of deprecated fields and incorrect ctx lookups",
-            "✔ Normalise plan structure: letter, family, subtype, direction, px, size, target_ticks, hedge_ticks",
-            "✔ Ensure MasteryPolicy governs confidence, family-level logic, and stake rules",
-            "✔ Update PlanLedger to store complete plan rows, plan_json, plan_why, metadata",
-            "✔ Ensure placement.py uses unified ctx/plan and routes correctly into place_parent_and_hedge",
-            "✔ Add robust px resolvers (odds_current → inbound_oc_cache → oc_series → API fallback)"
-        ]
-    },
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.6 — CTX v7 REBUILD + LANES NORMALISATION
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.6 – CTX v7 Rebuild + Lanes Normalisation": {
+            "status": "✅",
+            "tasks": [
+                "✅ Rebuilt CTX layer to use authoritative schema-only data: odds_current, inbound_oc_cache, oc_series, band state",
+                "✅ Added v7 intelligence fields: slope_ppm, drift_speed, momentum_class, bias_conf, blueprint stats, form",
+                "✅ Implemented OC-phase model (OC0–OC7 pre-off, OC7+ in-play) with consistent interpretation across engines",
+                "✅ Completely cleaned Lanes: removed deprecated ctx fields, wrong lookups, stale market_data references",
+                "✅ Normalised plan schema: family, subtype, direction, px, size, target_ticks, stop_ticks, msc multipliers",
+                "✅ Integrated MasteryPolicy for confidence, sizing, behavioural constraints, and engine gating",
+                "✅ Rebuilt PlanLedger to store plan_json, plan_why, confidence vectors, and MSC metadata",
+                "✅ Installed strict price resolvers: odds_current → inbound_oc_cache → oc_series → bets",
+                "✅ Ensured Lanes no longer hit live API anywhere — pure database-driven decision flow",
+                "✅ Verified Lanes run-through with live OC timeline, monitor bands, and MSC ctx injection"
+            ]
+        },
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.7 — OVERWATCHER v7, EVENT SINK v7 & MICROSCALPER v7
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.7 – Overwatcher v7, EventSink v7 & MicroScalper v7": {
-        "status": "✔",
-        "tasks": [
-            "✔ Rewrite Overwatcher as full market intelligence layer (Guardian, MLM, probability risk, green-up, cooldown)",
-            "✔ EventSink v7 rewrite: WAL-safe queue writer, mastery_v7.db routing, unified event mirror + caching",
-            "✔ Install unified bridge: Overwatcher → LiveRouterBridge → _place functions",
-            "✔ Add v7 bridge subscription to event_sink (handle_mastery_event)",
-            "✔ Add TSL→RiskEngine bridge: stop-loss events now feed MicroScalper’s parent-specific cleanup",
-            "✔ Integrate MicroScalper v7: Exploratory pre-off engine, Risk engine (per-parent), In-Play intelligent layer",
-            "✔ Add micro-scalper ctx injection: stoploss_triggered_for_parent, legacy_entry_side, expected_direction",
-            "✔ Add correct MSC family/subtype codes: MSC_EXPLORE / MSC_RISK / MSC_IP",
-            "✔ Update Overwatcher to print and forward micro events without interfering with STOPLOSS",
-            "✔ Upgrade price_math to full Betfair tick ladder (353 ticks), walk_ticks(), snap_to_tick(), tick_distance()",
-            "✔ Ensure MicroScalper v7 feeds drift/steam, microstructure, band features, breakout, WOM, range tracking",
-            "✔ Add complete diagnostic engine (non-trading), fully CTX-compatible"
-        ]
-    },
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.7 — OVERWATCHER v7, EVENT SINK v7 & MICROSCALPER v7
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.7 – Overwatcher v7, EventSink v7 & MicroScalper v7": {
+            "status": "✅",
+            "tasks": [
+                "✅ Rebuilt Overwatcher as full guardian layer (microstructure, WOM, volatility, range tracking, cooling windows)",
+                "✅ Added Overwatcher → LiveRouterBridge → hedge/close/stoploss relays (drop-in replacements for legacy paths)",
+                "✅ EventSink v7 fully rewritten with WAL-safe async writer, queueing, mastery_v7.db routing, and caching",
+                "✅ Integrated BrainPulse system: Overwatcher → MicroScalper brain_coherence injection",
+                "✅ Installed Trailing Stop-Loss (TSL) bridge: TSL events trigger immediate RiskEngine cleanup",
+                "✅ Integrated MicroScalper v7: Exploratory Engine A, Risk Engine B per parent, In-Play Engine C",
+                "✅ MSC ctx injection: sleq, volatility_state, micro_opportunity, drift/steam direction, bias, win_prob",
+                "✅ Full MSC multiplier model + SLEQ multiplier + direction engine (AGG/MOD/CON, ticks/stop_ticks)",
+                "✅ Added In-Play MSC Engine (Engine C) with collapse detection, safe liability limits, canonical pnl use",
+                "✅ Upgraded price_math: full Betfair ladder (353 ticks), tick-diff, walk_ticks(), accurate snap_to_tick()",
+                "✅ Verified MSC outputs route cleanly into LiveRouter and Orders with correct family/subtype",
+                "✅ Installed complete diagnostic MSC engine for non-trading telemetry and router debugging"
+            ]
+        },
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.8 — DYNAMIC TRAILING STOP-LOSS ENGINE (TSL) v1.0
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.8 – Dynamic Trailing Stop-Loss (TSL) Engine v1.0": {
-        "status": "✔",
-        "tasks": [
-            "✔ Implement unified TSL Engine (BOUNDARY, TRAILING, SLEQ widening, TS-POS / TS-NEG classification)",
-            "✔ Add dynamic trailing logic: 10% of movement, BASE_MIN_TRAIL_TICKS, SLEQ wideners",
-            "✔ Add SLEQ reinforcement learning (positive stops increase SLEQ, negative stops decrease)",
-            "✔ Add classification for Mastery training: trailing_positive vs trailing_negative",
-            "✔ Integrate immediate STOPLOSS execution in Overwatcher → LiveRouter (_place_stoploss_child_now)",
-            "✔ Install global TSL bridge: stop-loss events become ctx inputs for RiskEngine cleanup",
-            "✔ Remove all legacy stop-ticks and hard-coded stop-loss logic from LiveRouter & Overwatcher",
-            "✔ Add TSL ingestion to EventSink v7: mastery_events, playbooks, intel_updater, v_mastery_intel_v7",
-            "✔ Validate full end-to-end path: TSL → Overwatcher → LiveRouter → orders (exit_kind='STOPLOSS')",
-            "✔ Completed trailing tests: boundary_low/high, favourable-move, pullback scenarios, SLEQ behaviour"
-        ]
-    },
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.7.1 — ROUTER, LANES, SETTLEMENTS & CANDIDATES REPAIR
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.7.1 – Router, Lanes, Settlements & Candidates Repair": {
+            "status": "✅",
+            "tasks": [
+                "✅ Fixed LiveRouter startup ordering so no thread starves or blocks Step-4 initialisation",
+                "✅ Corrected Lanes → Candidates integration (Candidates rebuilt entirely to be API-free)",
+                "✅ Removed all hidden live API fallbacks in Candidates and replaced with pure DB chain",
+                "✅ Rebuilt Candidates priority: in_play → near20 → near60 → next5 using scope buckets",
+                "✅ Added Candidates source tagging: [PRICE:odds_current], [PRICE:inbound], [PRICE:oc_series], [PRICE:bets]",
+                "✅ Eliminated rogue fallback paths in Candidates that triggered fetch_live_odds or old patches",
+                "✅ Repaired Settlements infinite-loop lock by isolating connections and decoupling DAL",
+                "✅ Reintegrated credential reload path using safe DB lookups (no stale env paths)",
+                "✅ Repaired Step-4 warm-up → LiveLoop ordering (monitor refresh, scope preload, OC-timeline prep)",
+                "✅ Removed all cloud-attach issues and direct sqlite3 misuse (dedicated connectors only)",
+                "✅ Verified absolutely no engine calls Betfair API except the explicit Feeder/Step-1",
+                "✅ Validated end-to-end: MSC → Lanes → Candidates → LiveRouter → Orders with no fallback noise"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.8 — DYNAMIC TRAILING STOP-LOSS ENGINE (TSL) v1.0
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.8 – Dynamic Trailing Stop-Loss (TSL) Engine v1.0": {
+            "status": "✅",
+            "tasks": [
+                "✅ Installed unified TSL Engine (trailing, boundary, recovery, SLEQ-widened stops)",
+                "✅ Added TSL classification for Mastery training (trailing_positive, trailing_negative)",
+                "✅ Implemented real SLEQ reinforcement learning (positive stops strengthen, negative stops weaken)",
+                "✅ Integrated TSL into Overwatcher: boundary, reversal & pullback exits detected in real-time",
+                "✅ Integrated TSL into RiskEngine: TSL hits cleanly detach parent-specific MSC engines",
+                "✅ Installed TSL → Overwatcher → LiveRouter → orders bridge (realized_pnl, exit_kind)",
+                "✅ Removed every legacy stop-loss path from router, Overwatcher, and Candidates",
+                "✅ Verified SLEQ flows through ctx → RiskEngine → multiplier → plan → execution",
+                "✅ Completed scenario suite: boundary-low, boundary-high, favourable-trend, pullback-reversal"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.8.1 — FOREST–RIVER LIVE SYNC & REINTEGRATION
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.8.1 – Forest–River Live Sync & Reintegration": {
+            "status": "🔜",
+            "tasks": [
+                "⬜ Ensure River (LIVE) events persist cleanly from Overwatcher and MSC (no dropped events)",
+                "⬜ Fix Forest→River merge path for next-day training consistency",
+                "⬜ Guarantee schema alignment across mastery_outcomes_raw, river_bucket_state, mastery_posteriors",
+                "⬜ Add live reinforcement (on_settlement_event) reliability checks",
+                "⬜ Ensure nightly Forest run combines River shifts with historical windows",
+                "⬜ Add checksum validation for mid/sid/betId to prevent partial sync failures"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.8.2 — LIVE MASTERY → CTX v7 INTEGRATION
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.8.2 – Live Mastery Integration Into CTX v7": {
+            "status": "🔜",
+            "tasks": [
+                "⬜ Inject mastery-smoothed win_prob into ctx (smoothing & bias correction)",
+                "⬜ Inject brain_global and macro bucket deltas into ctx",
+                "⬜ Derive cluster features from v_mastery_intel_v7 for MicroScalper direction and mode",
+                "⬜ Add mastery deltas into MSC multiplier (confidence & volatility balancing)",
+                "⬜ Ensure ctx captures mastery feedback for training loops"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.8.3 — FULL MICROSTRUCTURE → MSC INTEGRATION
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.8.3 – Full Microstructure Integration for MSC v7": {
+            "status": "🔜",
+            "tasks": [
+                "⬜ Add full MarketMonitor microstructure fields into ctx (breakout state, range behaviour, micro-variance)",
+                "⬜ Add volatility clusters, micro-zones, WOM-derived states, acceleration curves",
+                "⬜ Feed OC-timeline deltas into ctx",
+                "⬜ Integrate microstructure into direction_engine and multiplier logic",
+                "⬜ Build MSC telemetry and diagnostics for tracking microstructure performance"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.9 — DASHBOARD INTELLIGENCE & GUI SYNC
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.9 – Dashboard Intelligence & GUI Sync": {
+            "status": "🔜",
+            "tasks": [
+                "🖥️ Wire dashboard data-sources to live brain/goal metrics (v_mastery_brain_input, v_mastery_brain_global)",
+                "🧠 Add Brain Summary panel (Global / Macro / Micro coherence + delta)",
+                "🧩 Add Good/Bad Trade metrics tile (% hedged / % stop-loss / unmatched)",
+                "📈 Add goal alignment index trend visualisation",
+                "🧩 Display model snapshot metadata (version, epochs, alignment index)",
+                "🧠 Add Training Health tab (brain_history_v7 time series)",
+                "⚙️ Add GUI Control Center automation (Playbooks rebuild, nightly training)",
+                "🧾 Auto-log training completion summaries to mastery_state",
+                "🧩 Dashboard health tests (KPI refresh, zero blank cards)",
+                "🏁 Prepare final matrix for Phase 7.9.10"
+            ]
+        },
 
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.9 — DASHBOARD INTELLIGENCE & GUI SYNC (old 7.9.5)
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.9 – Dashboard Intelligence & GUI Sync": {
-        "status": "🔜",
-        "tasks": [
-            "🖥️ Wire dashboard data-sources to live brain/goal metrics (v_mastery_brain_input, v_mastery_brain_global)",
-            "🧠 Add Brain Summary panel (Global / Macro / Micro coherence + delta)",
-            "🧩 Add Good/Bad Trade metrics tile (% hedged / % stop-loss / unmatched)",
-            "📈 Add goal alignment index trend visualisation",
-            "🧩 Display model snapshot metadata (version, epochs, alignment index)",
-            "🧠 Add Training Health tab (brain_history_v7 time series)",
-            "⚙️ Add GUI Control Center automation (Playbooks rebuild, nightly training)",
-            "🧾 Auto-log training completion summaries to mastery_state",
-            "🧩 Dashboard health tests (KPI refresh, zero blank cards)",
-            "🏁 Prepare final matrix for Phase 7.9.10"
-        ]
-    },
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.10 — FINAL VALIDATION & RELEASE PREP (old 7.9.6)
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.10 – Final Validation & Release Prep": {
+            "status": "🔜",
+            "tasks": [
+                "📊 Full system regression (7.9.3 → 7.9.8 pipeline continuity)",
+                "📦 Freeze schemas (mastery_outcomes_raw / brain_state_v7 / cache_mastery_outcomes)",
+                "🧠 Coherence stability check vs brain_history_v7 (deltas < ±0.02)",
+                "🧾 Generate release report + dashboard screenshots",
+                "🏁 Tag v7.9.x ‘Stabilised Brain-Integrated AutoScalp’ and merge branch → main"
+            ]
+        },
 
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 7.9.10 — FINAL VALIDATION & RELEASE PREP (old 7.9.6)
-    # ───────────────────────────────────────────────────────────────
-    "Phase 7.9.10 – Final Validation & Release Prep": {
-        "status": "🔜",
-        "tasks": [
-            "📊 Full system regression (7.9.3 → 7.9.8 pipeline continuity)",
-            "📦 Freeze schemas (mastery_outcomes_raw / brain_state_v7 / cache_mastery_outcomes)",
-            "🧠 Coherence stability check vs brain_history_v7 (deltas < ±0.02)",
-            "🧾 Generate release report + dashboard screenshots",
-            "🏁 Tag v7.9.x ‘Stabilised Brain-Integrated AutoScalp’ and merge branch → main"
-        ]
-    },
-
-    # ───────────────────────────────────────────────────────────────
-    # PHASE 8 – PUBLIC RELEASE
-    # ───────────────────────────────────────────────────────────────
-    "Phase 8 – Validation & Public Release": {
-        "status": "🔜",
-        "tasks": [
-            "Final QA + regression tests",
-            "Public release notes & technical documentation",
-            "Freeze schema + tag v8.0.0"
-        ]
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 8 – PUBLIC RELEASE
+        # ───────────────────────────────────────────────────────────────
+        "Phase 8 – Validation & Public Release": {
+            "status": "🔜",
+            "tasks": [
+                "Final QA + regression tests",
+                "Public release notes & technical documentation",
+                "Freeze schema + tag v8.0.0"
+            ]
+        }
     }
-}
 
 def show_progress():
     print(f"\nAUTO-SCALP MASTERY DASHBOARD v{SPRINT['version']}")

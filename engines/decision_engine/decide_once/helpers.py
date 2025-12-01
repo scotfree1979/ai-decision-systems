@@ -25,6 +25,27 @@ except Exception:
 import sqlite3
 from engines.config_paths import auto_conn as __cp_auto_conn, q_retry as __cp_q_retry
 
+# ============================================================
+# LEARNING MODE — override minutes_to_off with replay clock
+# ============================================================
+try:
+    from engines.replay_clock import replay_now_utc
+except Exception:
+    replay_now_utc = None
+
+_LEARNING_TIME_ACTIVE = False
+_LEARNING_DAY = None
+
+def enable_learning_time(day_iso: str):
+    global _LEARNING_TIME_ACTIVE, _LEARNING_DAY
+    _LEARNING_TIME_ACTIVE = True
+    _LEARNING_DAY = day_iso
+
+def disable_learning_time():
+    global _LEARNING_TIME_ACTIVE
+    _LEARNING_TIME_ACTIVE = False
+
+
 # === PATCH START ===
 # 📍 TARGET: engines/decision_engine/decide_once/helpers.py:_adb_ro_fresh
 # 🔎 SEARCH: def _adb_ro_fresh(
@@ -416,6 +437,13 @@ def tto_minutes(off_at_utc_iso: str, *, now: Optional[datetime] = None) -> Optio
     """
     if not off_at_utc_iso:
         return None
+
+    # LEARNING override: replace “now” with replay clock
+    if _LEARNING_TIME_ACTIVE and replay_now_utc:
+        try:
+            now = replay_now_utc()
+        except Exception:
+            pass
     try:
         s = off_at_utc_iso.strip().replace("Z", "+00:00")
         off = datetime.fromisoformat(s)
@@ -1644,6 +1672,161 @@ def gate_bump(*_a, **_k):
 
 def gate_snapshot() -> dict:
     return {}
+
+def learning_update_cache_oc(
+    market_id: str,
+    selection_id: int,
+    oc_label: str,
+    odd: float | None,
+    band_json: "list[float] | str | None" = None,
+):
+    """
+    LearningEngine-safe OC updater.
+    Does NOT conflict with GUI _autoscalp_update_cache_oc.
+    """
+    import re, json
+    from engines.database_hijack_monitor import enqueue_write as _db_write
+
+    m = re.fullmatch(r"OC(\d{1,2})", str(oc_label).upper())
+    if not m:
+        return
+    n = int(m.group(1))
+    if not (1 <= n <= 20):
+        return
+
+    # ensure row exists
+    _db_write(
+        "INSERT INTO inbound_oc_cache (marketId, selectionId, last_sync_ts) "
+        "SELECT ?, ?, datetime('now','utc') "
+        "WHERE NOT EXISTS (SELECT 1 FROM inbound_oc_cache WHERE marketId=? AND selectionId=?)",
+        [market_id, selection_id, market_id, selection_id],
+    )
+
+    # band json
+    if band_json is None:
+        try:
+            low = odd * 0.98 if odd is not None else None
+            high = odd * 1.02 if odd is not None else None
+            bj = json.dumps([low, odd, high]) if odd is not None else None
+        except Exception:
+            bj = None
+    elif isinstance(band_json, str):
+        bj = band_json
+    else:
+        try:
+            bj = json.dumps(band_json)
+        except Exception:
+            bj = None
+
+    # update OCn
+    _db_write(
+        f"UPDATE inbound_oc_cache "
+        f"SET oc{n}=?, oc{n}_band_json=?, last_sync_ts=datetime('now','utc') "
+        f"WHERE marketId=? AND selectionId=?",
+        [odd, bj, market_id, selection_id],
+    )
+
+def learning_upsert_cache_anchor(
+    market_id: str,
+    selection_id: int,
+    anchor_odd: float | None,
+):
+    """
+    LearningEngine-safe anchor writer.
+    Does NOT overwrite GUI behaviour.
+    """
+    from engines.database_hijack_monitor import enqueue_write as _db_write
+
+    _db_write(
+        "INSERT INTO inbound_oc_cache (marketId, selectionId, anchor_odd, last_sync_ts) "
+        "SELECT ?,?,?, datetime('now','utc') "
+        "WHERE NOT EXISTS (SELECT 1 FROM inbound_oc_cache WHERE marketId=? AND selectionId=?)",
+        [market_id, selection_id, anchor_odd, market_id, selection_id],
+    )
+
+    _db_write(
+        "UPDATE inbound_oc_cache "
+        "SET anchor_odd=COALESCE(anchor_odd, ?), last_sync_ts=datetime('now','utc') "
+        "WHERE marketId=? AND selectionId=?",
+        [anchor_odd, market_id, selection_id],
+    )
+
+def learning_cache_has_oc(market_id: str, selection_id: int, oc_n: int) -> bool:
+    """
+    LearningEngine version of _autoscalp_cache_has_oc.
+    Pure RO, no GUI cross-talk.
+    """
+    try:
+        from engines.config_paths import auto_conn
+        con = auto_conn(rw=False)
+        con.row_factory = __import__("sqlite3").Row
+
+        row = con.execute(
+            f"SELECT oc{oc_n} FROM inbound_oc_cache "
+            f"WHERE marketId=? AND selectionId=? LIMIT 1",
+            (str(market_id), str(selection_id)),
+        ).fetchone()
+        con.close()
+        return bool(row and row[0] is not None)
+    except Exception:
+        return False
+
+def learning_record_oc_series(
+    market_id: str,
+    selection_id: int,
+    stage: str,
+    odd: float | None,
+    *,
+    source: str = "SIM",
+    meta: dict | None = None
+):
+    """
+    LearningEngine-safe snapshot writer.
+    Does not interfere with GUI version.
+    """
+    from engines.database_hijack_monitor import enqueue_write as _db_write
+    import json
+
+    low = odd * 0.98 if odd is not None else None
+    high = odd * 1.02 if odd is not None else None
+    bj = json.dumps([low, odd, high]) if odd is not None else None
+    meta_json = json.dumps(meta or {})
+
+    # ensure table exists
+    _db_write(
+        "CREATE TABLE IF NOT EXISTS oc_series("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " marketId TEXT NOT NULL,"
+        " selectionId TEXT NOT NULL,"
+        " stage TEXT NOT NULL,"
+        " snapshot_ts TEXT NOT NULL,"
+        " odd REAL,"
+        " band_low REAL,"
+        " band_high REAL,"
+        " band_json TEXT,"
+        " meta_json TEXT,"
+        " source TEXT"
+        ")"
+    )
+
+    # write snapshot
+    _db_write(
+        "INSERT INTO oc_series (marketId, selectionId, stage, snapshot_ts, odd, "
+        " band_low, band_high, band_json, meta_json, source)"
+        " VALUES (?, ?, ?, datetime('now','utc'), ?, ?, ?, ?, ?, ?)",
+        [
+            market_id,
+            selection_id,
+            stage,
+            odd,
+            low,
+            high,
+            bj,
+            meta_json,
+            source,
+        ],
+    )
+
 
 # legacy misc aliases
 log_event_once = status_once

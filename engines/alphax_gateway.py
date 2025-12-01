@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # ============================================================
-#  AlphaX Gateway — PURE Scheduler (FINAL)
+#  AlphaX Gateway — PURE Scheduler (FINAL, LiveCache edition)
 # ============================================================
 # Responsibilities:
 #   • Receive SQL from Hijack
 #   • Classify: family / priority / rw
 #   • Queue: HP (immediate) / LP (batched)
-#   • Return dummy cursor for writes
-#   • Never open DBs. Never attach. Never choose connections.
-#
-# DAL (config_paths) performs ALL routing + DB opening.
+#   • Never open DBs for normal SQL execution
+#   • Never attach; never inspect paths
+#   • DAL (config_paths) performs all routing
+#   • Mirror thread syncs LiveCache → Local
 # ============================================================
 
 import sqlite3, threading, queue, time, os
+from typing import Optional
 
 # ------------------------------------------------------------
-# Family classification dictionary (stable)
+# Stable SQL family classifier
 # ------------------------------------------------------------
 FAMILIES = {
     "auto": ["inbound_", "oc_", "odds_", "dashboard_", "runs", "events"],
@@ -24,108 +25,77 @@ FAMILIES = {
     "settlements": ["settlement", "cleared"],
 }
 
-# Global scheduler queues
-_HP = queue.Queue()                  # High priority → immediate
-_LP = queue.Queue(maxsize=5000)      # Low priority → microbatch
+# ------------------------------------------------------------
+# Queues + control flags
+# ------------------------------------------------------------
+_HP = queue.Queue()            # High-priority queue
+_LP = queue.Queue(maxsize=5000)
 _STOP = threading.Event()
 
-# === PATCH START ===
-# 📍 TARGET: engines/alphax_gateway.py
-# 📆 PATCHED: 2025-11-25Z — Add unified enqueue_write() API for Hijack
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import time
-
+# ============================================================
+#  PUBLIC API: enqueue_write()
+# ============================================================
 def enqueue_write(sql: str, params=None, priority: int = 5):
     """
-    Public AlphaX enqueue API.
-    Accepts SQL + params and pushes into the LP queue.
-    AlphaX will classify (family + priority) and DAL will open a RW cloud writer.
-    Fully backwards-compatible with Hijack.
+    Public enqueue function (Hijack-compatible).
+    Pushes (priority, timestamp, sql, params) into LP queue.
     """
     try:
         _LP.put((priority, time.time(), sql, params or ()))
     except Exception as e:
-        # Minimal risk logging; avoids circular import
         print(f"[AlphaX enqueue_write] warn: {e} | sql={sql[:80]}")
-# === PATCH END ===
 
-# ------------------------------------------------------------
-#  FAMILY DETECTOR — SQL-only (no path-based routing)
-# ------------------------------------------------------------
+
+# ============================================================
+#  FAMILY DETECTOR / PRIORITY
+# ============================================================
 def _detect_family(sql_l: str) -> str:
     for fam, keys in FAMILIES.items():
         if any(k in sql_l for k in keys):
             return fam
     return "auto"
 
-
-# ------------------------------------------------------------
-#  PRIORITY CLASSIFIER
-# ------------------------------------------------------------
 def _classify(sql_l: str):
-    # Write?
     is_write = sql_l.startswith((
         "insert", "update", "delete", "replace",
         "alter", "create", "drop"
     ))
 
-    # Betting logic → priority 1
     if any(k in sql_l for k in ("orders", "bets", "hedge", "ladder", "decisions")):
-        return 1, True
+        return 1, True   # HP write
 
-    # Mid-priority writes
     if any(k in sql_l for k in ("odds_current", "inbound_", "oc_series", "markets_schedule")):
         return 3, True
 
-    # Default read
-    return 5, False
+    return 5, False      # read
 
 
-# ------------------------------------------------------------
-# AlphaX Route API (Hijack consumes this)
-# ------------------------------------------------------------
 def alphax_route(sql: str, params=None):
     sql_l = (sql or "").lower().strip()
-
     fam = _detect_family(sql_l)
     prio, rw = _classify(sql_l)
 
-    # Setup mode forces everything RW + immediate
     if (os.environ.get("AUTOSCALP_MODE") or "learning").upper() == "SETUP":
         prio, rw = 1, True
 
-    return {
-        "family": fam,
-        "priority": prio,
-        "rw": rw
-    }
+    return {"family": fam, "priority": prio, "rw": rw}
 
 
-# ------------------------------------------------------------
-# Write dispatchers (LP batcher + HP immediate)
-# ------------------------------------------------------------
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 📍 TARGET: engines/alphax_gateway.py
-# 🔎 SEARCH: ^def _lp_loop\(
-# 📆 PATCHED: 2025-11-19T10:40Z — adapt LP queue to 4-tuple items (prio, ts, sql, params)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ============================================================
+#  LP DISPATCHER (main worker)
+# ============================================================
 def _lp_loop():
     """
-    Low-priority write dispatcher.
-
-    Accepts both legacy 3-tuples (prio, sql, fam) and new 4-tuples
-    (prio, ts, sql, params). When family is not present, we re-run
-    alphax_route(sql, params) to determine the DB family.
+    Low-priority batched write dispatcher.
     """
-    BATCH_WINDOW = 0.003  # 3–4 ms batching window
 
-    # DAL handles actual execution — via open_* helpers
     from engines.config_paths import (
         open_auto_db,
         open_bets_db,
         open_mastery_db,
         open_settlements_db,
     )
+
     WAL = {
         "auto": open_auto_db,
         "bets": open_bets_db,
@@ -134,35 +104,22 @@ def _lp_loop():
     }
 
     def _normalise(item):
-        """
-        Normalise queue items to a unified shape:
-            (prio, sql_s, fam, params)
-
-        Supports:
-          • (prio, sql, fam)
-          • (prio, ts, sql, params)
-        Returns None for unusable items.
-        """
         if not isinstance(item, tuple):
             return None
-
-        # Legacy: (prio, sql, fam)
         if len(item) == 3:
             prio, sql, fam = item
             params = ()
-        # New: (prio, ts, sql, params)
         elif len(item) == 4:
             prio, _ts, sql, params = item
-            meta = alphax_route(sql, params)
-            fam = meta["family"]
+            fam = alphax_route(sql, params)["family"]
         else:
             return None
-
         sql_s = (sql or "").strip()
         if not sql_s:
             return None
-
         return prio, sql_s, fam, tuple(params or ())
+
+    BATCH_WINDOW = 0.003
 
     while not _STOP.is_set():
         try:
@@ -178,63 +135,175 @@ def _lp_loop():
         batch = [first]
         t0 = time.time()
 
-        # Small batching window to amortise open/commit cost
         while (time.time() - t0) < BATCH_WINDOW:
             try:
-                raw_more = _LP.get_nowait()
+                raw2 = _LP.get_nowait()
             except queue.Empty:
                 break
-
-            norm = _normalise(raw_more)
-            if not norm:
+            n2 = _normalise(raw2)
+            if not n2:
                 _LP.task_done()
                 continue
-            batch.append(norm)
+            batch.append(n2)
 
-        # Execute batch
         for (_prio, sql_s, fam, params) in batch:
-            opener = WAL.get(fam)
-            if opener is None:
-                # Defensive: default to AUTO if classification ever returns unknown
-                opener = WAL["auto"]
-
-            con = opener(rw=True, ro=False)
+            opener = WAL.get(fam, WAL["auto"])
             try:
+                con = opener(rw=True)
                 con.execute(sql_s, params)
                 con.commit()
             except Exception:
-                # Best-effort; individual failures are non-fatal to the loop
                 pass
             finally:
-                try:
-                    con.close()
-                except Exception:
-                    pass
+                try: con.close()
+                except Exception: pass
 
-        # Mark all processed items as done
         for _ in batch:
             _LP.task_done()
 
 
-
-# Start LP dispatcher thread (idempotent)
+# ============================================================
+#  Start LP thread (idempotent)
+# ============================================================
 if not any(t.name == "AlphaX-LP" for t in threading.enumerate()):
-    threading.Thread(target=_lp_loop, name="AlphaX-LP", daemon=True).start()
+    threading.Thread(
+        target=_lp_loop, name="AlphaX-LP", daemon=True
+    ).start()
 
 
-# ------------------------------------------------------------
-# AlphaX entrypoint for Hijack sqlite3.connect()
-# ------------------------------------------------------------
+# ============================================================
+#  LiveCache → Local Mirror (orders + odds only)
+# ============================================================
+import sqlite3 as _ax_sqlite
+import hashlib as _ax_hash
+import time as _ax_time
+
+def _ax_row_md5(row: dict) -> str:
+    flat = "|".join(str(row[k]) for k in sorted(row.keys()))
+    return _ax_hash.md5(flat.encode("utf-8")).hexdigest()
+
+
+def _ax_fetch_cloud_rows(con, table: str, today_only: bool):
+    try:
+        if today_only:
+            sql = f"SELECT * FROM {table} WHERE date(opened_at)=date('now','utc')"
+        else:
+            sql = f"SELECT * FROM {table}"
+        cur = con.execute(sql)
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def _ax_mirror_table(table: str, *, today_only: bool):
+    """
+    RAW → RAW mirror:
+      CLOUD_AUTO → LOCAL_AUTO
+    """
+    from engines.config_paths import _raw_open, CLOUD_AUTO, LOCAL_AUTO
+    from engines.config_paths import open_auto_local_write
+
+    cloud = _raw_open(CLOUD_AUTO)
+    try:
+        cloud.execute("PRAGMA busy_timeout=8000")
+        cloud.execute("PRAGMA journal_mode=WAL")
+        cloud.row_factory = _ax_sqlite.Row
+    except Exception:
+        pass
+
+    local = _raw_open(LOCAL_AUTO)
+    try:
+        local.execute("PRAGMA busy_timeout=8000")
+        local.execute("PRAGMA journal_mode=WAL")
+        local.row_factory = _ax_sqlite.Row
+    except Exception:
+        pass
+
+    rows = _ax_fetch_cloud_rows(cloud, table, today_only)
+    try: cloud.close()
+    except Exception: pass
+
+    index = {}
+    try:
+        cur = local.execute(f"SELECT * FROM {table}")
+        cols = [c[0] for c in cur.description]
+        for r in cur.fetchall():
+            d = dict(zip(cols, r))
+            index[d.get("id")] = _ax_row_md5(d)
+    except Exception:
+        pass
+    finally:
+        try: local.close()
+        except Exception:
+            pass
+
+    writer = open_auto_local_write()
+
+    for row in rows:
+        rid = row.get("id")
+        md5 = _ax_row_md5(row)
+        if rid not in index or md5 != index[rid]:
+            cols = list(row.keys())
+            plist = ",".join("?" for _ in cols)
+            clist = ",".join(cols)
+            sql = f"INSERT OR REPLACE INTO {table} ({clist}) VALUES ({plist})"
+            params = tuple(row[k] for k in cols)
+            writer.execute(sql, params)
+
+
+def _ax_cloud_mirror_loop():
+    PRIORITY_TABLES = [
+        ("orders", True),
+        ("order_events", True),
+        ("odds_current", True),
+        ("inbound_oc_cache", False),
+        ("oc_series", True),
+    ]
+    while not _STOP.is_set():
+        for table, today_only in PRIORITY_TABLES:
+            try:
+                _ax_mirror_table(table, today_only=today_only)
+            except Exception as e:
+                print(f"[AlphaX Mirror] warn {table}: {e}")
+        _ax_time.sleep(0.35)
+
+
+# Start mirror thread (idempotent)
+if not any(t.name == "AlphaX-Mirror" for t in threading.enumerate()):
+    threading.Thread(
+        target=_ax_cloud_mirror_loop,
+        name="AlphaX-Mirror",
+        daemon=True
+    ).start()
+
+
+# ============================================================
+#  PUBLIC: explicit thread bootstrap for GUI Step 4
+# ============================================================
+def start_alphax_threads():
+    if not any(t.name == "AlphaX-LP" for t in threading.enumerate()):
+        threading.Thread(target=_lp_loop, name="AlphaX-LP", daemon=True).start()
+        print("[AlphaX] LP dispatcher started")
+
+    if not any(t.name == "AlphaX-Mirror" for t in threading.enumerate()):
+        threading.Thread(target=_ax_cloud_mirror_loop,
+                         name="AlphaX-Mirror",
+                         daemon=True).start()
+        print("[AlphaX] Cloud→Local mirror started")
+
+
+# ============================================================
+#  Hijack entrypoint
+# ============================================================
 def alphax_entrypoint(db_path: str, sql=None):
     """
-    Hijack-level call:
-        sqlite3.connect() → dummy object
-    No real DB is opened at this stage.
+    Hijack-level sqlite3.connect() → dummy non-DB object.
+    AlphaX never opens DBs directly except mirror.
     """
     class _Dummy:
         def execute(self, *a, **k): return self
         def cursor(self): return self
         def fetchall(self): return []
         def fetchone(self): return None
-
     return _Dummy()
