@@ -195,21 +195,57 @@ def start(interval_s: int = 60):
                         },
                     )
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/mastery/feedback_scheduler.py : _loop()
+# 🔎 SEARCH: "# ── Stage 4: assimilate feedback into mastery_posteriors"
+# 📆 PATCHED: 2025-12-03 — v7 aligned: only assimilate AFTER market completion
+# 🧠 SUMMARY:
+#    • Prevents mid-race reinforcement
+#    • Ensures assimilate_feedback() receives final outcomes
+#    • Uses settlements tables to detect finished markets
+# ==============================================================================
+
                 # ── Stage 4: assimilate feedback into mastery_posteriors ───
+
+                # NEW: only run assimilation for markets that have *finished*
                 try:
-                    from engines.mastery.feedback_assimilator import assimilate_feedback
-                    a = assimilate_feedback(10)
-                    if a:
-                        event_sink.emit(
-                            "feedback_assimilated_summary",
-                            {
-                                "ts": datetime.now(timezone.utc).isoformat(),
-                                "rows": a,
-                                "source": "LIVE",
-                            },
-                        )
-                except Exception as e2:
-                    print(f"[feedback_scheduler] assimilate warn: {e2}")
+                    from engines.config_paths import open_settlements_db
+                    scon = open_settlements_db(ro=True)
+                    finished = scon.execute("""
+                        SELECT DISTINCT marketId
+                          FROM bf_cleared_orders
+                         WHERE settledDate >= date('now','-1 day','utc')
+                    """).fetchall()
+                    scon.close()
+
+                    finished_markets = {str(r["marketId"]) for r in finished}
+                except Exception:
+                    finished_markets = set()
+
+                # If no finished markets, skip assimilation
+                if not finished_markets:
+                    # skip partial updates — v7 requirement
+                    pass
+                else:
+                    try:
+                        from engines.mastery.feedback_assimilator import assimilate_feedback
+
+                        # Call assimilator only if complete markets exist
+                        a = assimilate_feedback(10)
+                        if a:
+                            event_sink.emit(
+                                "feedback_assimilated_summary",
+                                {
+                                    "ts": datetime.now(timezone.utc).isoformat(),
+                                    "rows": a,
+                                    "source": "LIVE",
+                                },
+                            )
+                    except Exception as e2:
+                        print(f"[feedback_scheduler] assimilate warn: {e2}")
+
+# === PATCH END ================================================================
+
 
 # === PATCH START ===
 # 📍 TARGET: engines/mastery/feedback_scheduler.py:_loop (Stage 5 DB write)

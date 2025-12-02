@@ -195,78 +195,206 @@ def _ax_fetch_cloud_rows(con, table: str, today_only: bool):
     except Exception:
         return []
 
+# 📍 TARGET: engines/alphax_gateway.py
+# 🔎 SEARCH: def _ax_mirror_table(
+# 📆 PATCHED: 2025-12-02 — LiveCache → Local: incremental, DAL-safe mirror
 
-def _ax_mirror_table(table: str, *, today_only: bool):
+# ======================================================================
+# NEW MIRROR SUBSYSTEM (Replaces old cloud mirror logic)
+# ======================================================================
+
+import glob as _ax_glob
+import sqlite3 as _ax_sql
+import time as _ax_time
+import hashlib as _ax_hash
+from engines.config_paths import (
+    open_auto_db,
+    open_bets_db,
+    open_mastery_db,
+    open_settlements_db,
+)
+
+# Timestamp-bearing columns (from full schema dump)
+_TS_COLS = {
+    "ts", "updated_ts", "updated_at", "snapshot_ts", "created_at",
+    "opened_at", "placed_at", "closed_at", "settled_at", "finished_at",
+    "decided_at", "realized_at", "recorded_at", "ingested_at",
+    "last_update_ts", "last_refreshed_ts", "last_snapshot_ts",
+    "off_ts", "happened_at"
+}
+
+# LiveCache directory
+_LIVE_ROOT = "data/livecache"
+
+# Map LiveCache DB names → Local DAL opener
+_DB_MAP = {
+    "autoscalp_livecache.db": open_auto_db,
+    "bets_livecache.db": open_bets_db,
+    "mastery_livecache.db": open_mastery_db,
+    "settlements_livecache.db": open_settlements_db,
+}
+
+
+def _ax_md5_row(row: dict) -> str:
+    flat = "|".join(str(row[k]) for k in sorted(row.keys()))
+    return _ax_hash.md5(flat.encode("utf-8")).hexdigest()
+
+
+def _ax_livecache_get_rows(db_path: str, table: str) -> list[dict]:
     """
-    RAW → RAW mirror:
-      CLOUD_AUTO → LOCAL_AUTO
+    Read only timestamp-bearing rows from LiveCache table.
+    Uses WAL + busy_timeout for safety.
     """
-    from engines.config_paths import _raw_open, CLOUD_AUTO, LOCAL_AUTO
-    from engines.config_paths import open_auto_local_write
-
-    cloud = _raw_open(CLOUD_AUTO)
     try:
-        cloud.execute("PRAGMA busy_timeout=8000")
-        cloud.execute("PRAGMA journal_mode=WAL")
-        cloud.row_factory = _ax_sqlite.Row
+        con = _ax_sql.connect(db_path, timeout=8000)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.row_factory = _ax_sql.Row
+
+        # detect timestamp column
+        cur = con.execute(f"PRAGMA table_info('{table}')")
+        cols = cur.fetchall()
+        if not cols:
+            con.close()
+            return []
+
+        tscol = None
+        for cid, name, ctype, notnull, dflt, pk in cols:
+            if name in _TS_COLS:
+                tscol = name
+                break
+
+        if not tscol:
+            con.close()
+            return []
+
+        sql = (
+            f"SELECT * FROM {table} "
+            f"WHERE {tscol} >= date('now','-1 day')"
+        )
+
+        cur = con.execute(sql)
+        colnames = [c[0] for c in cur.description]
+        rows = [dict(zip(colnames, r)) for r in cur.fetchall()]
+        con.close()
+        return rows
+
     except Exception:
-        pass
+        return []
 
-    local = _raw_open(LOCAL_AUTO)
-    try:
-        local.execute("PRAGMA busy_timeout=8000")
-        local.execute("PRAGMA journal_mode=WAL")
-        local.row_factory = _ax_sqlite.Row
-    except Exception:
-        pass
 
-    rows = _ax_fetch_cloud_rows(cloud, table, today_only)
-    try: cloud.close()
-    except Exception: pass
-
+def _ax_local_index(opener, table: str) -> dict:
+    """
+    Build MD5 index of Local table rows so we can skip unchanged rows.
+    """
     index = {}
     try:
-        cur = local.execute(f"SELECT * FROM {table}")
+        con = opener(rw=True)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.row_factory = _ax_sql.Row
+        cur = con.execute(f"SELECT * FROM {table}")
         cols = [c[0] for c in cur.description]
         for r in cur.fetchall():
             d = dict(zip(cols, r))
-            index[d.get("id")] = _ax_row_md5(d)
+            rid = d.get("id")
+            if rid is not None:
+                index[rid] = _ax_md5_row(d)
+        try: con.close()
+        except: pass
     except Exception:
         pass
-    finally:
-        try: local.close()
-        except Exception:
-            pass
+    return index
 
-    writer = open_auto_local_write()
+
+def _ax_mirror_table_livecache(live_db: str, table: str, opener):
+    """
+    Incremental LiveCache → Local mirror for one table.
+    Mirrors only timestamp-bearing tables.
+    """
+    rows = _ax_livecache_get_rows(live_db, table)
+    if not rows:
+        return
+
+    idx = _ax_local_index(opener, table)
+    writer = opener(rw=True)
+
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA busy_timeout=8000")
+        writer.row_factory = _ax_sql.Row
+    except Exception:
+        pass
 
     for row in rows:
         rid = row.get("id")
-        md5 = _ax_row_md5(row)
-        if rid not in index or md5 != index[rid]:
-            cols = list(row.keys())
-            plist = ",".join("?" for _ in cols)
-            clist = ",".join(cols)
-            sql = f"INSERT OR REPLACE INTO {table} ({clist}) VALUES ({plist})"
-            params = tuple(row[k] for k in cols)
+        if rid is None:
+            continue
+
+        md5 = _ax_md5_row(row)
+        if rid in idx and idx[rid] == md5:
+            continue  # unchanged
+
+        cols = list(row.keys())
+        plist = ",".join("?" for _ in cols)
+        clist = ",".join(cols)
+        sql = f"INSERT OR REPLACE INTO {table} ({clist}) VALUES ({plist})"
+        params = tuple(row[k] for k in cols)
+
+        try:
             writer.execute(sql, params)
+        except Exception:
+            pass
+
+    try:
+        writer.commit()
+    except Exception:
+        pass
+
+    try:
+        writer.close()
+    except Exception:
+        pass
 
 
 def _ax_cloud_mirror_loop():
-    PRIORITY_TABLES = [
-        ("orders", True),
-        ("order_events", True),
-        ("odds_current", True),
-        ("inbound_oc_cache", False),
-        ("oc_series", True),
-    ]
+    """
+    FINAL MIRROR LOOP:
+       • Scans all LiveCache DBs
+       • Mirrors ONLY timestamp-bearing tables
+       • MD5 diff skip
+       • WAL + busy_timeout
+       • Single-thread incremental sync
+    """
     while not _STOP.is_set():
-        for table, today_only in PRIORITY_TABLES:
+        try:
+            dbs = _ax_glob.glob(f"{_LIVE_ROOT}/*.db")
+        except Exception:
+            _ax_time.sleep(0.5)
+            continue
+
+        for live_db_path in dbs:
+            live_name = os.path.basename(live_db_path)
+            opener = _DB_MAP.get(live_name)
+            if opener is None:
+                continue
+
             try:
-                _ax_mirror_table(table, today_only=today_only)
-            except Exception as e:
-                print(f"[AlphaX Mirror] warn {table}: {e}")
+                con = _ax_sql.connect(live_db_path)
+                cur = con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [t[0] for t in cur.fetchall()]
+                con.close()
+            except Exception:
+                continue
+
+            for table in tables:
+                try:
+                    _ax_mirror_table_livecache(live_db_path, table, opener)
+                except Exception:
+                    pass
+
         _ax_time.sleep(0.35)
+
+# === PATCH END ==========================================================
+
 
 
 # Start mirror thread (idempotent)

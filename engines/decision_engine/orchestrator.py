@@ -3251,6 +3251,85 @@ def _clean_shutdown_handler(signum, frame):
     print("[HOUSEKEEPER] Cleanup complete. Exiting safely.", flush=True)
     os._exit(0)
 
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: def start_live_loop(
+# 📆 PATCHED: 2025-12-02 — CloudKeeper (startup-only, 5-day retention)
+
+# ----------------------------------------------------------------------
+# NEW: One-time LiveCache retention (runs ONLY at startup, never again)
+# ----------------------------------------------------------------------
+def _cloud_retention_once():
+    """
+    LiveCache retention:
+      • Runs ONCE per app start (before LiveLoop).
+      • Deletes rows older than 5 days.
+      • Scans ALL livecache DBs.
+      • Applies only to tables with timestamp-like columns.
+      • Silent unless errors occur.
+    """
+    import os, sqlite3, glob
+
+    LIVE_DIR = "data/livecache"
+
+    # universal timestamp columns (based on full schema dump)
+    TS_COLS = [
+        "ts", "updated_ts", "updated_at", "snapshot_ts", "created_at",
+        "opened_at", "placed_at", "closed_at", "settled_at", "finished_at",
+        "decided_at", "realized_at", "recorded_at", "ingested_at",
+        "last_update_ts", "last_refreshed_ts", "last_snapshot_ts", "off_ts",
+        "happened_at"
+    ]
+
+    try:
+        dbs = glob.glob(os.path.join(LIVE_DIR, "*.db"))
+    except Exception:
+        return  # silent fail-safe
+
+    for db_path in dbs:
+        try:
+            con = sqlite3.connect(db_path, timeout=10)
+            cur = con.cursor()
+
+            # list tables
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+
+            for tbl in tables:
+                try:
+                    cur.execute(f"PRAGMA table_info('{tbl}')")
+                    cols = cur.fetchall()
+                    if not cols:
+                        continue
+
+                    # find timestamp column
+                    tscol = None
+                    for cid, name, ctype, notnull, dflt, pk in cols:
+                        if name in TS_COLS:
+                            tscol = name
+                            break
+
+                    if not tscol:
+                        continue  # table has no timestamp → skip
+
+                    # delete rows older than 5 days
+                    q = (
+                        f"DELETE FROM {tbl} "
+                        f"WHERE {tscol} < datetime('now','-5 day')"
+                    )
+                    try:
+                        cur.execute(q)
+                        con.commit()
+                    except Exception:
+                        pass  # silent; retention should never break startup
+
+                except Exception:
+                    pass  # table-level fail-safe
+
+            con.close()
+
+        except Exception:
+            pass  # db-level fail-safe
+
 # === PATCH START ===
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: def start_live_loop(
@@ -3345,27 +3424,17 @@ def start_live_loop(*args, **kwargs):
         print(f"[AlphaX] bootstrap warn: {e}")
     # === PATCH END…
 
-    # === PATCH START ===============================================
-    # 📍 TARGET: orchestrator.start_live_loop()
-    # 📆 PATCHED: 2025-12-03 — ensure CloudKeeper starts in LIVE
+    # --------------------------------------------------------------
+    # **CLOUDKEEPER STARTUP PURGE (ONCE-PER-DAY RETENTION)**
+    # --------------------------------------------------------------
     try:
-        from engines.alphax_gateway import _cloud_retention_loop
-        print("[CloudKeeper] active (5-day retention, WAL purge)")
+        _cloud_retention_once()
+        print("[CloudKeeper] LiveCache retention done (5-day window)")
     except Exception as e:
-        print(f"[CloudKeeper] startup warn: {e}")
-    # === PATCH END =================================================
+        print(f"[CloudKeeper] warn: {e}")
+# === END OF PATCH INSERT =========================================
 
-    # === PATCH START =====================================================
-    # 📍 TARGET: orchestrator.start_live_loop
-    # 📆 PATCHED: 2025-12-03 — ensure LiveCacheKeeper is running in LIVE mode
-    try:
-        import engines.config_paths as CP
-        # CP module starts keeper at import; calling ensures activation
-        CP.LIVE_ROOT  # reference triggers module load if not loaded
-        print("[Live] LiveCacheKeeper verified running")
-    except Exception as e:
-        print(f"[Live] LiveCacheKeeper warn: {e}")
-    # === PATCH END =======================================================
+ 
 
 
     # ------------------------------------------------------------------

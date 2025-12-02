@@ -428,11 +428,15 @@ def start_keepalive_thread(app_key_getter=None,
 import time as _oc_time
 import logging as _oc_log
 
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH: def _oc_timeline_log(mid: str,
+# 📆 PATCHED: 2025-12-02
+
 def _oc_timeline_log(mid: str,
                      sid: str,
                      msg: str,
-                     lvl: int = _oc_log.WARNING,
                      *,
+                     lvl: int = _oc_log.WARNING,
                      benign: tuple[str, ...] = (
                          "unable to open database file",
                          "database is locked",
@@ -445,7 +449,7 @@ def _oc_timeline_log(mid: str,
     """
     Unified OC timeline logger (GUI).
     This merges BOTH older implementations:
-      • supports orchestrator callers with lvl argument
+      • supports orchestrator callers with lvl argument (now keyword-only)
       • suppresses duplicates for (mid/sid) within period_s
       • demotes known-benign errors to DEBUG
       • forwards structured logs to orchestrator’s OC log sink
@@ -482,9 +486,7 @@ def _oc_timeline_log(mid: str,
     except Exception:
         # Always safe fall-back print
         _oc_log.log(lvl, f"[OC_TIMELINE] {mid}/{sid} {msg}")
-
 # === PATCH END ==============================================================
-
 
 import os, sys, json, threading, time, logging
 from datetime import datetime, timedelta

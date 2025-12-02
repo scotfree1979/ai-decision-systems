@@ -541,6 +541,27 @@ def handle_choice(choice: str):
             print("[system] DB Repair complete.")
         except Exception as e:
             print(f"[system] ERROR running DB repair: {e}")
+
+            # -----------------------------------------------
+            # Run LiveCache full-schema rebuilder
+            # -----------------------------------------------
+            print("\n[system] Rebuilding full LiveCache schema…")
+            proc2 = subprocess.Popen(
+                ["python3", str(rebuild_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            for line in proc2.stdout:
+                print(line, end="")
+                f.write(line)
+
+            print("\n[system] LiveCache Schema Rebuild complete.")
+
+            print("\n[system] FULL DB FIX COMPLETE ✔️\n")
+
+        except Exception as e:
+            print(f"[system] ERROR in repair or rebuild: {e}")
 # === PATCH END ============================================================
 
     else:

@@ -53,21 +53,106 @@ def assimilate_feedback(limit_minutes: int = 10) -> int:
         con.close()
         return 0
 
-    # 2️⃣ Aggregate by market
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/mastery/feedback_assimilator.py : assimilate_feedback()
+# 🔎 SEARCH: "# 2️⃣ Aggregate by market"
+# 📆 PATCHED: 2025-12-03 — v7-correct final-outcome runner-level assimilation
+# 🧠 SUMMARY:
+#   • Runs ONLY after market completion
+#   • Aggregates runner-level outcomes (not market-level)
+#   • Builds correct bin_key = marketId|selectionId
+#   • Updates mastery_posteriors per bin_key (v7-compatible)
+#   • Replaces mid-race “marketId==bin_key” bug
+# ==============================================================================
+
+    # 2️⃣ Aggregate by *completed market*
+    # Old behaviour aggregated mid-race → WRONG.
+    # New: only process markets whose outcome is FINAL.
     markets = {}
     for r in rows:
         try:
             data = json.loads(r["json_payload"])
         except Exception:
             continue
+
         mid = data.get("marketId")
         if not mid:
             continue
+
+        # Skip markets not yet settled (we require final runner outcomes)
+        settled = data.get("market_status") == "CLOSED" or data.get("is_complete") is True
+        if not settled:
+            continue
+
+        # Collect by market for final aggregation
         m = markets.setdefault(mid, {"cashout": [], "liability": []})
         if "cashout_total" in data:
             m["cashout"].append(float(data["cashout_total"]))
         if "liability_total" in data:
             m["liability"].append(float(data["liability_total"]))
+
+    if not markets:
+        con.close()
+        return 0
+
+    # 3️⃣ Runner-level bin_key update
+    cur = con.cursor()
+
+    # ensure column exists
+    cur.execute("PRAGMA table_info(mastery_posteriors)")
+    cols = [r[1] for r in cur.fetchall()]
+    if "live_pnl_ratio" not in cols:
+        cur.execute("ALTER TABLE mastery_posteriors ADD COLUMN live_pnl_ratio REAL DEFAULT 0.0;")
+        con.commit()
+
+    # canonical weighting
+    from engines.mastery.canonical_digest import weight_for_letter
+
+    for mid, vals in markets.items():
+
+        # Get all runners for this market
+        try:
+            runners = con.execute("""
+                SELECT selectionId
+                  FROM market_data
+                 WHERE marketId=?""", (mid,)
+            ).fetchall()
+        except Exception:
+            runners = []
+
+        if not runners:
+            continue
+
+        # Compute final market-level ratios
+        cash = sum(vals["cashout"]) / max(1, len(vals["cashout"]))
+        liab = sum(vals["liability"]) / max(1, len(vals["liability"]))
+        pnl_ratio = cash / liab if liab else 0.0
+
+        # canonical weight (letter derived from market code — stable)
+        letter = str(mid)[5:6].upper() if len(mid) > 5 else "?"
+        pnl_ratio *= weight_for_letter(letter)
+
+        # Now apply to EACH RUNNER (correct v7 logic)
+        for row in runners:
+            sid = str(row["selectionId"])
+            bin_key = f"{mid}|{sid}"
+
+            cur.execute("""
+                INSERT INTO mastery_posteriors (bin_key, live_pnl_ratio, updated_at)
+                     VALUES (?, ?, datetime('now','utc'))
+                ON CONFLICT(bin_key)
+                DO UPDATE SET
+                    live_pnl_ratio = excluded.live_pnl_ratio,
+                    updated_at     = datetime('now','utc');
+            """, (bin_key, float(pnl_ratio)))
+
+    con.commit()
+    count = sum(len(r["cashout"]) > 0 or len(r["liability"]) > 0 for r in markets.values())
+    con.close()
+
+    # emit event unchanged…
+# === PATCH END ================================================================
+
 
     # 3️⃣ Update mastery_posteriors (ensure column exists first)
     try:
