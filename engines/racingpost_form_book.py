@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+raise ImportError("Disabled: RacingPost modules are not used in LIVE mode.")
+
 """
 engines/racingpost_form_book.py
 ──────────────────────────────────────────────────────────

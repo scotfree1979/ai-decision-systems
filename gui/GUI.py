@@ -629,35 +629,23 @@ def _ensure_odds_current_columns():
         except Exception: pass
 
 
+# === PATCH START ============================================================
+# 📍 TARGET: gui/GUI.py::restart_feeder_with_creds
+# 🔎 SEARCH: def restart_feeder_with_creds
+# 📆 PATCHED: 2025-12-03 — feeder fully deprecated (replaced by DAL live)
+# ============================================================================
+
 def restart_feeder_with_creds(app_key: str, session: str) -> None:
     """
-    Start/restart the dashboard feeder as a background subprocess.
-    Works regardless of which widget (tkapp, frame, view) calls it.
+    Deprecated: dashboard_feeder is no longer used in v6 architecture.
+    Live P&L and liability come directly from cashout_calc() + Auto DB.
+    This call is now a no-op.
     """
-    try:
-        import subprocess, sys, os, json
-        from engines.config_paths import autoscalp_db
+    print("[FEEDER] deprecated — no feeder process will be launched")
+    return None
 
-        # Persist creds so feeder (and future sessions) can read them
-        base = os.path.dirname(autoscalp_db())
-        os.makedirs(base, exist_ok=True)
-        creds_file = os.path.join(base, "betfair_creds.json")
-        with open(creds_file, "w", encoding="utf-8") as f:
-            json.dump({"app_key": app_key or "", "session": session or ""}, f)
+# === PATCH END ==============================================================
 
-        # Spawn feeder in LIVE/MIRROR mode; it will resolve creds from DB/JSON
-        cmd = [
-            sys.executable, "-u", "-m", "engines.dashboard_feeder",
-            "--mode", "LIVE", "--source", "MIRROR", "--tick", "1.0",
-            "--app-key", app_key or "",
-            "--session", session or "",
-        ]
-        # inherit stdout/stderr so you see feeder prints live
-        subprocess.Popen(cmd)  # inherits stdout/stderr
-
-        print("[FEEDER] launched via module-level restart_feeder_with_creds")
-    except Exception as e:
-        print(f"[FEEDER] module-level launch error: {e}")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2600,11 +2588,65 @@ class PhaseGUI(tk.Tk):
         except Exception as e:
             print(f"[db-preflight] ensure_db_ready warn: {e}")
 
+        # === PATCH START ============================================================
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH:
+#     from engines.dashboard_schema import ensure_dashboard_schema
+#     ensure_dashboard_schema(verbose=True)
+# 📆 PATCHED: 2025-12-03 — Remove legacy dashboard schema usage entirely
+# PURPOSE:
+#   • Prevent creation of v_dashboard_cashout
+#   • Stop GUI Step-1 from loading unused dashboard feeder schema
+#   • Remove all callers of ensureDashboardViews()
+#   • Eliminates DAL-READER “no such column: day” errors
+# ============================================================================
+
+# --- REMOVE legacy dashboard schema import & call ---
+# (No-op replacement ensures import fails safely if referenced elsewhere)
         try:
-            from engines.dashboard_schema import ensure_dashboard_schema
-            ensure_dashboard_schema(verbose=True)
+            # legacy no longer needed: replaced by inbound_oc_cache + settlement flows
+            pass
+        except Exception:
+            pass
+
+# === PATCH END ==============================================================
+
+# === PATCH START ============================================================
+# 📍 TARGET: gui/GUI.py:_step1
+# 📆 PATCHED: 2025-12-04 — Write SESSION_TOKEN into both local + LiveCache
+# ============================================================================
+
+        # --- NEW: mirror session token into LiveCache autoscalp_gui_cache.db ---
+        try:
+            import sqlite3
+            from engines.config_paths import CLOUD_AUTO
+
+            conLC = sqlite3.connect(
+                CLOUD_AUTO,
+                timeout=10,
+                isolation_level=None,
+                check_same_thread=False
+            )
+            conLC.execute("PRAGMA busy_timeout=8000;")
+            conLC.execute("""
+                CREATE TABLE IF NOT EXISTS app_kv(
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TEXT
+                )
+            """)
+            conLC.execute("""
+                INSERT OR REPLACE INTO app_kv(key,value,updated_at)
+                VALUES('SESSION_TOKEN', ?, datetime('now','utc'))
+            """, (token,))
+            conLC.commit()
+            conLC.close()
+            print("[creds] SESSION_TOKEN mirrored to LiveCache ✔")
         except Exception as e:
-            print(f"[schema] GUI pre-flight warn: {e}")
+            print(f"[creds] warn: could not mirror token to LiveCache: {e}")
+
+# === PATCH END ==============================================================
+
 
 
         # --- DB readiness + tracer -----------------------------------------
@@ -2640,12 +2682,29 @@ class PhaseGUI(tk.Tk):
         _save_state({"mode": mode_now})
 
         # Ensure dashboard + cache schemas are ready for all writers
+# === PATCH START ============================================================
+# 📍 TARGET: gui/GUI.py
+# 🔎 SEARCH:
+#     from engines.dashboard_schema import ensure_dashboard_schema
+#     ensure_dashboard_schema(verbose=True)
+# 📆 PATCHED: 2025-12-03 — Remove legacy dashboard schema usage entirely
+# PURPOSE:
+#   • Prevent creation of v_dashboard_cashout
+#   • Stop GUI Step-1 from loading unused dashboard feeder schema
+#   • Remove all callers of ensureDashboardViews()
+#   • Eliminates DAL-READER “no such column: day” errors
+# ============================================================================
+
+# --- REMOVE legacy dashboard schema import & call ---
+# (No-op replacement ensures import fails safely if referenced elsewhere)
         try:
-            # Prefer the central schema module if present
-            from engines.dashboard_schema import ensure_dashboard_schema as _ensure_dash
-            _ensure_dash()
+            # legacy no longer needed: replaced by inbound_oc_cache + settlement flows
+            pass
         except Exception:
             pass
+
+# === PATCH END ==============================================================
+
         try:
             _ensure_inbound_cache_upsertable()
             _ensure_odds_current_columns()
@@ -2682,6 +2741,39 @@ class PhaseGUI(tk.Tk):
         try:
             from engines.session_secrets import save_betfair_creds
             save_betfair_creds(app_key, token)   # our patched version ignores app_key
+# === PATCH START ============================================================
+# 📍 TARGET: gui/GUI.py:_step1()
+# 📆 PATCHED: 2025-12-10 — write session token to both LOCAL + LIVECACHE
+# ============================================================================
+
+            try:
+                import sqlite3
+                # Local write
+                con = sqlite3.connect(LOCAL_AUTO, timeout=5)
+                con.execute(
+                    "INSERT OR REPLACE INTO app_kv(key,value,updated_at) "
+                    "VALUES ('SESSION_TOKEN', ?, datetime('now','utc'))",
+                    (token,)
+                )
+                con.commit()
+                con.close()
+
+                # LiveCache write
+                con = sqlite3.connect(os.path.join(DATA_DIR,'livecache','autoscalp_livecache.db'))
+                con.execute(
+                    "INSERT OR REPLACE INTO app_kv(key,value,updated_at) "
+                    "VALUES ('SESSION_TOKEN', ?, datetime('now','utc'))",
+                    (token,)
+                )
+                con.commit()
+                con.close()
+
+                print("[creds] session token duplicated → LOCAL + LIVECACHE")
+            except Exception as e:
+                print(f"[creds] dual-write token warn: {e}")
+
+    # === PATCH END ==============================================================
+
         except Exception as e:
             print(f"[step1] DB persist warn: {e}")
 
@@ -2829,7 +2921,8 @@ class PhaseGUI(tk.Tk):
         from engines.config_paths import connect_db, autoscalp_db
         import sqlite3, datetime as _dt
         from datetime import timezone
-
+        from engines.live.settlements import start_all_settlement_services
+        start_all_settlement_services()
 
         # fast short-circuit: if we already seeded enough runners today, skip
         try:
@@ -3355,7 +3448,21 @@ class PhaseGUI(tk.Tk):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # ── live matched-odds refresh (Betfair fills → GUI) ─────────────
         from engines.config_paths import enable_live_dal
-        enable_live_dal()
+        # 📍 TARGET: engines/config_paths.py
+        # 🔎 SEARCH: def enable_live_dal():
+        # === PATCH START: run full LiveCache schema repair on LIVE mode switch ===
+        def enable_live_dal():
+            global DAL_MODE
+            DAL_MODE = "LIVE"
+
+            # Ensure LiveCache schemas are fully synced to LOCAL schemas
+            try:
+                _bootstrap_livecache_core_schema()
+                print("[DAL-SCHEMA] LiveCache schema repaired after LIVE mode switch")
+            except Exception as e:
+                print(f"[DAL-SCHEMA] warn: LiveCache schema repair failed: {e}")
+        # === PATCH END ===
+
 
 
 # === PATCH START ===

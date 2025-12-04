@@ -97,6 +97,34 @@ MARKET_MONITOR = {
 }
 
 # ============================================================
+#  BANKSTATE / BUDGETMANAGER ALIASES (COMPATIBILITY LAYER)
+# ============================================================
+from engines.live import bank_state as _BS
+
+# Percentage allocation per engine (from BudgetManager)
+ENGINE_ALLOCATIONS   = _BS.get_allocations
+
+# Snapshot of static pots for the day
+ENGINE_POTS_SNAPSHOT = _BS.get_daily_pots
+
+# Total static bank (sum of all pots)
+GET_TOTAL_BANK       = _BS.get_balance
+
+# Legacy alias for router dynamic stake
+GET_LIVE_BANK        = _BS.get_live_balance
+
+# Per-engine available funds right now
+ENGINE_AVAILABLE     = _BS.get_engine_available
+
+# Per-engine pot (static)
+ENGINE_POT           = _BS.get_engine_pot
+
+# Can-place gate (router)
+CAN_PLACE            = _BS.can_place
+
+
+
+# ============================================================
 # 💰 Budget & Risk Controls (Global)
 # ============================================================
 BANK_PCT_PER_ENTRY    = 0.004   # 0.4% of bank per entry (main sizing knob)
@@ -221,38 +249,131 @@ except Exception:
 # -----------------------------
 # 💰 Budget Fetching (only when called)
 # -----------------------------
+# === PATCH START: redirect to BankState for unified balance ===============
 def fetch_available_budget() -> float:
     """
-    Fetch available balance from Betfair Account API using Step-1 credentials.
-    Falls back to 800.0 on error.
+    Backward-compatible alias.
+    Returns the TOTAL bank at start-of-day (static), from BankState.
+    This is ONLY used for legacy sizing paths.
     """
-    token = get_session_token()
-    if not token:
-        logging.warning("[⚠️ Warning] No session token available; using fallback budget 500.0")
-        return 500.0
     try:
-        headers = {
-            "X-Application": APP_KEY,
-            "X-Authentication": token,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        payload = json.dumps([{
-            "jsonrpc": "2.0",
-            "method": "AccountAPING/v1.0/getAccountFunds",
-            "params": {},
-            "id": 1
-        }])
-        resp = requests.post(
-            "https://api.betfair.com/exchange/account/json-rpc/v1",
-            headers=headers,
-            data=payload,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return float(data[0].get("result", {}).get("availableToBetBalance", 0.0))
-    except Exception as e:
+        return float(_BS.get_total_pot())
+    except Exception:
         logging.warning(f"[❌ Error] Budget fetch failed: {e} — using 1000.0 fallback")
-        return 1000.0
+        return 300.0
+
+
+# ========================================================================
+# 📌 PATCH: Dynamic Bank & Stake Delegation via BankState / BudgetManager
+# ========================================================================
+
+try:
+    from engines.live import bank_state
+    from engines.risk import budget_manager
+except Exception:
+    bank_state = None
+    budget_manager = None
+
+
+# --- Dynamic Delegation Layer -------------------------------------------
+
+def get_engine_pot(engine: str) -> float:
+    """
+    Return the static (start-of-day) pot for this engine.
+    DailyConfig stays the public API; BankState is the implementation.
+    """
+    try:
+        return bank_state.get_engine_pot(engine)
+    except Exception:
+        return 0.0
+
+
+def get_engine_available(engine: str) -> float:
+    """
+    Return pot - open liability for this engine.
+    """
+    try:
+        return bank_state.get_engine_available(engine)
+    except Exception:
+        return 0.0
+
+
+def get_global_bank() -> float:
+    """
+    For legacy callers expecting 'total bank' from DailyConfig.
+    We expose the unified bank via BankState.
+    """
+    try:
+        return bank_state.get_global_bank()
+    except Exception:
+        return 0.0
+
+
+def allowed_stake(engine: str, *, letter: str = None) -> float:
+    """
+    Unified stake limit for this engine.
+    Replaces old DailyConfig stake caps.
+    LiveRouter still computes dynamic stake per letter; 
+    this returns the engine-level ceiling.
+    """
+    try:
+        live_bank = bank_state.get_engine_pot(engine)
+        return budget_manager.allowed_stake_for_engine(engine, live_bank)
+    except Exception:
+        return 0.0
+
+
+# --- Alias old CONSTANT names to these new dynamic delegates --------------
+
+def get_bank_pct_per_entry() -> float:
+    """
+    Old logic: BANK_PCT_PER_ENTRY
+    New logic: derived from engine pot sizing.
+    Safe fallback preserves original behaviour.
+    """
+    try:
+        return BANK_PCT_PER_ENTRY
+    except Exception:
+        return 0.004
+
+
+def get_min_stake() -> float:
+    """
+    MIN_STAKE now authoritative from BankState for dynamic environments.
+    """
+    try:
+        return getattr(bank_state, "MIN_STAKE", MIN_STAKE)
+    except Exception:
+        return MIN_STAKE
+
+
+# Legacy-compatible ACCESSORS that now read from BankState:
+
+def fetch_available_budget() -> float:
+    """
+    Original function name preserved.
+    Now returns unified global bank, not Betfair API.
+    """
+    try:
+        return bank_state.get_global_bank()
+    except Exception:
+        return 500.0
+
+# === PATCH START: Back-compat stake aliases for Router & Sizers ============
+def get_engine_pot(engine: str) -> float:
+    return ENGINE_POT(engine)
+
+def get_engine_available(engine: str) -> float:
+    return ENGINE_AVAILABLE(engine)
+
+def can_place_for_engine(engine: str, stake: float) -> bool:
+    return ENGINE_CAN_PLACE(engine, stake)
+
+def engine_allocations() -> dict:
+    return ENGINE_ALLOCATIONS()
+
+def engine_pots_snapshot() -> dict:
+    return ENGINE_POTS_SNAPSHOT()
+# === PATCH END ==============================================================
+
 

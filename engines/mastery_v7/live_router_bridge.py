@@ -55,24 +55,34 @@ def _force_place(event: dict):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import importlib
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery_v7/live_router_bridge.py
+# 🔎 SEARCH: in handle_mastery_event(event)
+# 📆 PATCHED: 2025-12-02 — restrict events to Overwatcher-only decisions
+# ============================================================================
 def handle_mastery_event(event):
     t = (event.get("type") or "").lower()
+
+    # --- NEW FILTER: ONLY react to events produced by Overwatcher ---
     if t in (
-        "bridge_pulse",       # ← brain-triggered intent
-        "micro_lay",
-        "greenup",
-        "enter_trade",
-        "reentry",
-        "stoploss",
         "stop_loss_triggered",
         "stop_loss_breached",
-        "mlm_enforced",
-        "mlm_cap_hit",
-        "loss_cut_signal",       # 🔥 new mark-to-market risk exit
-        "high_risk",             # optional alias if emitted as level only
-        "scalp_entry",           # micro-scalp diagnostic trigger
+        "legacy_boundary_exit",
+        "msc_trailing_positive",
+        "msc_trailing_negative",
+        "market_end_exit",
+
+        "micro_lay",
+
+        "probability_risk_signal",
+        "liability_signal",
     ):
         _force_place(event)
+
+    # --- IGNORE ALL OTHER EVENTS (brain_plan, bridge_pulse, etc.) ---
+    # This prevents infinite loops and invalid placements.
+# === PATCH END ==============================================================
+
 
 # ensure event_sink live before subscribing
 try:

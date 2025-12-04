@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-AutoScalp — CONFIG PATHS (FINAL CLEAN REBUILD)
-------------------------------------------------
-This file provides:
-
-    1) LiveCache (5-day write layer)
-    2) Local DBs (long-term historical)
-    3) RW-only DAL (no RO anywhere)
-    4) Raw openers for AlphaX mirroring
-    5) SafeConn wrapper for cached RW connections
-    6) Full attach-all-four model for cross-db SELECTs
-    7) LiveCacheKeeper (5-day retention + WAL/SHM purge)
-    8) Legacy compatibility for all older modules
-
-LIVE MODE:
-    READ  = LOCAL
-    WRITE = LIVECACHE (CLOUD_* now maps to LiveCache)
+AutoScalp — CONFIG PATHS (FINAL CLEAN REBUILD v3)
+-------------------------------------------------
+DAL Architecture (Final Model):
 
 SETUP MODE:
     READ  = LOCAL
     WRITE = LOCAL
 
-AlphaX:
-    Reads from LiveCache → Writes into LOCAL via dedicated writer
+LIVE MODE:
+    READ  = LOCAL
+    WRITE = LIVECACHE
+
+LIVE ROUTER:
+    READ  = LIVECACHE
+    WRITE = LIVECACHE
+
+Mirror:
+    LiveCache → LOCAL (queue-based)
+
+All real sqlite3 connections ALWAYS ATTACH:
+    auto, bets, settlements, mastery
+With consistent attach names.
 """
 
 from __future__ import annotations
-import os, sqlite3, threading, time
-from typing import Tuple
+import os, sqlite3, threading, queue, time, glob, hashlib
 import _sqlite3 as _raw_sqlite3
+from typing import Tuple
 
-# ============================================================
-# 📂 RESOLVE PROJECT ROOT + DATA DIRECTORY
-# ============================================================
+# ===============================================================
+# 📁 RESOLVE PROJECT ROOT + DATA DIRECTORY
+# ===============================================================
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, os.pardir))
@@ -42,161 +41,1022 @@ def _resolve_data_dir() -> str:
     if env:
         os.makedirs(env, exist_ok=True)
         return env
-    data = os.path.join(_ROOT, "data")
-    os.makedirs(data, exist_ok=True)
-    return data
+    d = os.path.join(_ROOT, "data")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 DATA_DIR = _resolve_data_dir()
 
-# ============================================================
-# 📘 LOCAL AUTHORITATIVE DATABASES (long-term historical)
-# ============================================================
+# === PATCH START ============================================================
+# 📆 PATCHED: 2025-12-09 — Restore full set_db_paths() for GUI setup
+
+def set_db_paths(
+    mode: str | None = None,
+    *,
+    bets: str | None = None,
+    autoscalp: str | None = None,
+    data_dir_override: str | None = None,
+    quiet: bool = False,
+):
+    """
+    GUI Step 1 uses this heavily.
+    Updates LOCAL paths + legacy aliases.
+    """
+    global DATA_DIR, LOCAL_BETS, LOCAL_AUTO, LOCAL_SETTLE, LOCAL_MASTERY
+    global BETS_DB_PATH, AUTOSCALP_DB_PATH, DB_PATH, GUI_DB_PATH
+    global BETS_DB, AUTOSCALP_DB, AUTO_DB, _MODE
+
+    m = (mode or os.environ.get("AUTOSCALP_MODE") or "learning").lower()
+    _MODE = m
+
+    base = data_dir_override or DATA_DIR
+    os.makedirs(base, exist_ok=True)
+
+    bet_p = bets or os.path.join(base, "bets.db" if m != "test" else "bets.test.db")
+    auto_p = autoscalp or os.path.join(base, "autoscalp_gui.db" if m != "test" else "autoscalp_gui.test.db")
+
+    LOCAL_BETS     = os.path.abspath(bet_p)
+    LOCAL_AUTO     = os.path.abspath(auto_p)
+    LOCAL_SETTLE   = os.path.join(base, "settlements.db")
+    LOCAL_MASTERY  = os.path.join(base, "mastery_v7.db")
+
+    BETS_DB_PATH      = LOCAL_BETS
+    AUTOSCALP_DB_PATH = LOCAL_AUTO
+    GUI_DB_PATH       = AUTOSCALP_DB_PATH
+    DB_PATH           = BETS_DB_PATH
+
+    BETS_DB      = BETS_DB_PATH
+    AUTOSCALP_DB = AUTOSCALP_DB_PATH
+    AUTO_DB      = AUTOSCALP_DB_PATH
+
+    if not quiet:
+        print(f"[paths] DATA_DIR={base} BETS_DB={BETS_DB_PATH} AUTO_DB={AUTOSCALP_DB_PATH}")
+
+    return BETS_DB_PATH, AUTOSCALP_DB_PATH
+
+# === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py (mode helpers)
+# 🔎 SEARCH: def get_mode()
+# 📆 PATCHED: 2025-12-09 — synchronize DAL_MODE with _MODE
+# ============================================================================
+
+
+
+# === PATCH END ============================================================
+
+
+# ===============================================================
+# 📘 LOCAL DBs
+# ===============================================================
 
 LOCAL_BETS      = os.path.join(DATA_DIR, "bets.db")
 LOCAL_AUTO      = os.path.join(DATA_DIR, "autoscalp_gui.db")
 LOCAL_SETTLE    = os.path.join(DATA_DIR, "settlements.db")
 LOCAL_MASTERY   = os.path.join(DATA_DIR, "mastery_v7.db")
 
-# ensure they exist
-for _p in (LOCAL_BETS, LOCAL_AUTO, LOCAL_SETTLE, LOCAL_MASTERY):
-    os.makedirs(os.path.dirname(_p), exist_ok=True)
-    if not os.path.exists(_p):
-        open(_p, "a").close()
+for p in (LOCAL_BETS, LOCAL_AUTO, LOCAL_SETTLE, LOCAL_MASTERY):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    if not os.path.exists(p):
+        open(p, "a").close()
 
-# ============================================================
-# 📙 LIVECACHE DATABASES (5-day rolling write layer)
-# ============================================================
+# ===============================================================
+# 🌩️ LIVECACHE DBs
+# ===============================================================
 
 LIVE_ROOT = os.path.join(DATA_DIR, "livecache")
 os.makedirs(LIVE_ROOT, exist_ok=True)
 
-CLOUD_ROOT     = LIVE_ROOT  # alias for old CLOUD usage
 CLOUD_AUTO     = os.path.join(LIVE_ROOT, "autoscalp_livecache.db")
 CLOUD_BETS     = os.path.join(LIVE_ROOT, "bets_livecache.db")
 CLOUD_SETTLE   = os.path.join(LIVE_ROOT, "settlements_livecache.db")
 CLOUD_MASTERY  = os.path.join(LIVE_ROOT, "mastery_livecache.db")
 
-# ensure LiveCache DBs exist
-for _p in (CLOUD_AUTO, CLOUD_BETS, CLOUD_SETTLE, CLOUD_MASTERY):
-    if not os.path.exists(_p):
-        open(_p, "a").close()
+for p in (CLOUD_AUTO, CLOUD_BETS, CLOUD_SETTLE, CLOUD_MASTERY):
+    if not os.path.exists(p):
+        open(p, "a").close()
 
 print(f"[LiveCache DAL] active → {LIVE_ROOT}")
 
-# Back-compat: old getters return new LiveCache path
-_LOCAL_AUTO_PATH = LOCAL_AUTO
-_CLOUD_AUTO_PATH = CLOUD_AUTO
-
-def get_local_auto_path() -> str: return LOCAL_AUTO
-def get_cloud_auto_path() -> str: return CLOUD_AUTO
-
-# === RESTORED HELPER SECTION ===============================================
-# These helpers existed in the old DAL and are required by GUI/engines.
-# They do NOT interfere with the new LiveCache DAL.
-
-# ---------------------------------------------------------------------------
-# q_retry — transient lock retry wrapper
-# ---------------------------------------------------------------------------
-def q_retry(con: sqlite3.Connection, sql: str, params=(),
-            *, tries: int = 6, delay_s: float = 0.08):
+def _bootstrap_livecache_core_schema():
     """
-    Retry wrapper for transient SQLITE_BUSY / SQLITE_LOCKED states.
-    Used heavily by GUI, lanes, live_router, dashboard, and V7 engines.
+    Mirror all REAL tables (no views) from each LOCAL DB into its
+    corresponding LiveCache DB.
+
+    This guarantees that LiveCache has:
+        • identical tables
+        • identical columns
+        • identical PRIMARY KEY constraints
+        • identical UNIQUE constraints
+
+    Without any of the historical partial bootstrappers that caused
+    ON CONFLICT failures.
+
+    NOTE:
+    - Does NOT copy data.
+    - Does NOT create views.
+    - Does NOT touch triggers.
     """
-    last = None
-    for i in range(max(1, tries)):
+
+    import sqlite3
+
+    # Local → LiveCache mapping by family
+    families = {
+        "auto":       (LOCAL_AUTO,       CLOUD_AUTO),
+        "bets":       (LOCAL_BETS,       CLOUD_BETS),
+        "settlements":(LOCAL_SETTLE,     CLOUD_SETTLE),
+        "mastery":    (LOCAL_MASTERY,    CLOUD_MASTERY),
+    }
+
+    for fam, (local_path, live_path) in families.items():
         try:
-            return con.execute(sql, params)
-        except sqlite3.OperationalError as e:
-            last = e
-            m = str(e).lower()
-            if (("locked" in m) or ("busy" in m)) and i < tries - 1:
-                time.sleep(delay_s * (i + 1))
-                continue
-            raise
-    if last:
-        raise last
+            # --- open LOCAL for schema inspection ---
+            lcon = sqlite3.connect(local_path)
+            lcur = lcon.cursor()
 
-# legacy export pattern
-_q_retry = q_retry
+            # --- open LIVE target for schema creation ---
+            vcon = sqlite3.connect(live_path)
+            vcur = vcon.cursor()
 
+            # 1️⃣ get all LOCAL tables (exclude views)
+            tables = lcur.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+            """).fetchall()
 
-# ---------------------------------------------------------------------------
-# Legacy connect_* APIs (GUI + older engines rely on these)
-# ---------------------------------------------------------------------------
+            for (tbl,) in tables:
+                # 2️⃣ read PRAGMA for columns
+                cols = lcur.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                # cols: cid, name, type, notnull, dflt_value, pk
 
-def connect_db(path: str | None = None, ro: bool = False, timeout: float = 10.0):
-    """
-    Legacy access point: defaults to bets.db.
-    """
-    target = path or BETS_DB_PATH
-    fam = "bets" if target == BETS_DB_PATH else "auto"
-    return open_db(fam, rw=not ro)
+                # 3️⃣ read UNIQUE constraints (indexes)
+                idx_rows = lcur.execute(f"PRAGMA index_list('{tbl}')").fetchall()
+                unique_cols = []
+                for idx in idx_rows:
+                    idx_name = idx[1]
+                    if idx[2] == 1:  # UNIQUE index
+                        # get column list for this index
+                        icols = lcur.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
+                        unique_cols.append([c[2] for c in icols])
 
-def connect_autoscalp_db(timeout: float = 10.0, ro: bool = False):
-    return open_auto_db(rw=not ro)
+                # 4️⃣ build CREATE TABLE statement
+                col_defs = []
+                pk_cols = []
 
-def connect_bets_db(timeout: float = 10.0, ro: bool = False):
-    return open_bets_db(rw=not ro)
+                for cid, name, ctype, notnull, dflt, pk in cols:
+                    line = f"{name} {ctype or ''}".strip()
 
-def connect_settlements_db(timeout: float = 10.0, ro: bool = False):
-    return open_settlements_db(rw=not ro)
+                    if notnull:
+                        line += " NOT NULL"
+                    if dflt is not None:
+                        line += f" DEFAULT {dflt}"
+                    if pk:
+                        pk_cols.append(name)
 
-def connect_mastery_v7_db(timeout: float = 10.0, ro: bool = False):
-    return open_mastery_db(rw=not ro)
+                    col_defs.append(line)
 
-def connect_mastery_v7_cache(timeout: float = 10.0, ro: bool = False):
-    # Mastery V7 cloud copy uses CLOUD_MASTERY
-    con = sqlite3.connect(
-        CLOUD_MASTERY,
-        timeout=10,
-        isolation_level=None,
-        check_same_thread=False
-    )
-    con.row_factory = sqlite3.Row
-    return con
+                # PRIMARY KEY clause
+                pk_clause = ""
+                if pk_cols:
+                    pk_clause = f", PRIMARY KEY({','.join(pk_cols)})"
 
+                # FULL TABLE CREATE DDL
+                create_sql = f"""
+                    CREATE TABLE IF NOT EXISTS {tbl} (
+                        {', '.join(col_defs)}
+                        {pk_clause}
+                    );
+                """
 
-# ---------------------------------------------------------------------------
-# Legacy read-only helpers
-# ---------------------------------------------------------------------------
-def auto_ro(timeout: float = 10.0):
-    return _open_auto_local(timeout=timeout, ro=True)
+                vcur.execute(create_sql)
 
-def settle_ro(timeout: float = 10.0):
-    return _local_db(LOCAL_SETTLE)  # ro not needed, DAL never attaches here
+                # 5️⃣ recreate UNIQUE indexes
+                for ucols in unique_cols:
+                    idx_name = f"ux_{tbl}_{'_'.join(ucols)}"
+                    vcur.execute(
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} "
+                        f"ON {tbl} ({','.join(ucols)})"
+                    )
+
+            vcon.commit()
+            lcon.close()
+            vcon.close()
+
+            print(f"[DAL-SCHEMA] LiveCache updated for {fam}")
+
+        except Exception as e:
+            print(f"[DAL-SCHEMA] {fam} mirror failed: {e}")
 
 # === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py  (final auto_conn definition)
-# 🔎 SEARCH: def auto_conn(
-# 📆 PATCHED: 2025-12-01 — enforce READ=LOCAL / WRITE=LiveCache
+# 📍 TARGET: engines/config_paths.py  (right after LiveCache schema bootstrap)
+# 📆 PATCHED: 2025-12-03 — add missing created_at column to mastery_events
+
+def _ensure_mastery_events_schema():
+    try:
+        con = sqlite3.connect(CLOUD_AUTO, timeout=5, isolation_level=None)
+        con.execute("PRAGMA journal_mode=WAL")
+        cols = [r[1] for r in con.execute("PRAGMA table_info('mastery_events')").fetchall()]
+        if "created_at" not in cols:
+            con.execute(
+                "ALTER TABLE mastery_events "
+                "ADD COLUMN created_at TEXT NOT NULL "
+                "DEFAULT (datetime('now','utc'))"
+            )
+            print("[DAL-SCHEMA] mastery_events: added created_at")
+        con.close()
+    except Exception as e:
+        print(f"[DAL-SCHEMA] mastery_events warn: {e}")
+
+# call this immediately after _bootstrap_livecache_core_schema()
+# === PATCH END ============================================================
+
+
+# ===============================================================
+# 🧵 DAL GLOBAL READ QUEUE + READER POOL
+# ===============================================================
+
+_DAL_READ_QUEUE = queue.Queue(maxsize=200000)
+
+# persistent readers (one per DB fam)
+_PERSISTENT_READERS = {}
+_PERSISTENT_READ_LOCK = threading.Lock()
+
+def _get_reader(fam: str) -> sqlite3.Connection:
+    """
+    Persistent pooled reader for each DB family.
+    Avoids repeated sqlite3.connect() calls and prevents FD churn.
+    Readers are LOCAL dbs (mirrored) and are READ ONLY.
+    """
+    with _PERSISTENT_READ_LOCK:
+        if fam in _PERSISTENT_READERS:
+            return _PERSISTENT_READERS[fam]
+
+        path = {
+            "auto": LOCAL_AUTO,
+            "bets": LOCAL_BETS,
+            "settlements": LOCAL_SETTLE,
+            "mastery": LOCAL_MASTERY,
+        }[fam]
+
+        con = sqlite3.connect(
+            path,
+            timeout=10,
+            isolation_level=None,
+            check_same_thread=False
+        )
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=8000")
+        _attach_all_four_local(con)   # always attach LOCAL families
+
+        _PERSISTENT_READERS[fam] = con
+        return con
+
+
+# Data structure returned to callers:
+# A "future" for a read: caller waits on result_queue.get()
+class _ReadFuture:
+    __slots__ = ("result_q",)
+
+    def __init__(self):
+        self.result_q = queue.Queue(maxsize=1)
+
+    def fetchall(self):
+        rows = self.result_q.get()
+        return rows if rows is not None else []
+
+    def fetchone(self):
+        rows = self.result_q.get()
+        if not rows:
+            return None
+        return rows[0]
+
+class DALReadProxy:
+    """
+    Lightweight read-only connection proxy.
+    Absorbs row_factory/text_factory assignments, so legacy code keeps working.
+    """
+    __slots__ = ("_fam", "_shim")
+
+    def __init__(self, fam: str):
+        self._fam = fam
+        self._shim = _AttrShim()
+
+    # absorb row_factory, text_factory, etc.
+    def __setattr__(self, k, v):
+        if k in ("_fam", "_shim"):
+            object.__setattr__(self, k, v)
+        else:
+            setattr(self._shim, k, v)
+
+    def __getattr__(self, k):
+        return getattr(self._shim, k, None)
+
+    # core EXECUTE API
+    def execute(self, sql: str, params=()):
+        fut = _ReadFuture()
+        _DAL_READ_QUEUE.put((self._fam, sql, params or (), fut))
+        return fut
+
+    def cursor(self): return self
+    def fetchall(self): return []
+    def fetchone(self): return None
+    def close(self): return None
+
+# ===============================================================
+# 🔴 FINAL DALWriteProxy — Dual-Write (LOCAL + LIVE)
+# ===============================================================
+
+class DALWriteProxy:
+    """
+    sqlite3.Connection-like writer that:
+      • Queues all writes (no direct DB I/O here)
+      • Duplicates every write into LOCAL + LIVECACHE
+      • Behaves like sqlite3.Connection for legacy modules
+      • Supports context manager ("with ... as con:")
+      • Supports execute(), executemany(), cursor()
+      • NEVER executes scripts (executescript forbidden)
+    """
+
+    __slots__ = ("_fam", "_shim")
+
+    def __init__(self, fam: str):
+        # fam MUST be one of: "auto", "bets", "settlements", "mastery"
+        self._fam = fam
+        self._shim = _AttrShim()      # absorbs row_factory/text_factory
+
+    # -----------------------------------------------------------
+    # Context Manager Support
+    # -----------------------------------------------------------
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # DAL writer is async — nothing to commit/rollback here.
+        return False
+
+    # -----------------------------------------------------------
+    # Core Write
+    # -----------------------------------------------------------
+    def execute(self, sql, params=()):
+        """Queue single write → duplicated to LOCAL + LIVE."""
+        if isinstance(params, list):
+            params = tuple(params)
+
+        local_fam, live_fam = DUAL_WRITE_FAMILIES[self._fam]
+
+        _DAL_WRITE_QUEUE.put((local_fam, sql, params))
+        _DAL_WRITE_QUEUE.put((live_fam,  sql, params))
+
+        return self
+
+    def executemany(self, sql, seq):
+        """Queue batch writes → each duplicated to LOCAL + LIVE."""
+        local_fam, live_fam = DUAL_WRITE_FAMILIES[self._fam]
+
+        for row in seq:
+            params = tuple(row) if isinstance(row, list) else row
+            _DAL_WRITE_QUEUE.put((local_fam, sql, params))
+            _DAL_WRITE_QUEUE.put((live_fam,  sql, params))
+
+        return self
+
+    # -----------------------------------------------------------
+    # Compatibility Internals
+    # -----------------------------------------------------------
+    def executescript(self, script):
+        raise RuntimeError("DALWriteProxy does not support executescript()")
+
+    def cursor(self):      return self
+    def fetchall(self):    return []
+    def fetchone(self):    return None
+    def commit(self):      return None
+    def rollback(self):    return None
+    def close(self):       return None
+
+    # absorb row_factory & text_factory safely
+    def __setattr__(self, k, v):
+        if k in ("_fam", "_shim"):
+            object.__setattr__(self, k, v)
+        else:
+            setattr(self._shim, k, v)
+
+    def __getattr__(self, k):
+        return getattr(self._shim, k, None)
+
+
+
+def _dal_reader_loop():
+    """
+    Dedicated thread that executes ALL read queries for the entire system.
+    Ensures:
+      - deterministic attach maps
+      - minimal FD usage
+      - no per-read sqlite3.connect() calls
+      - safe threading around SQLite (reads serialized)
+    """
+    while True:
+        fam, sql, params, fut = _DAL_READ_QUEUE.get()
+        try:
+            con = _get_reader(fam)
+            cur = con.execute(sql, params)
+            rows = cur.fetchall()
+            fut.result_q.put(rows)
+        except Exception as e:
+            print(f"[DAL-READER] fail: {e} | sql={sql}")
+            fut.result_q.put([])
+        finally:
+            _DAL_READ_QUEUE.task_done()
+
+
+# Start DAL reader thread
+if not any(t.name == "DAL-Reader" for t in threading.enumerate()):
+    threading.Thread(target=_dal_reader_loop, name="DAL-Reader", daemon=True).start()
+    print("[DAL] Reader thread ACTIVE")
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: # Start DAL reader thread
+# ⛏️ ACTION: insert hardened DALReadProxy + DALWriteProxy AFTER this block
+# 📆 PATCHED: 2025-12-09 — Hardened sqlite-compatible DAL proxies
 # ============================================================================
-def auto_conn(*, rw=False, timeout: float = 10.0):
-    """
-    Correct DAL router:
-       SETUP: always LOCAL
-       LIVE:  READ → LOCAL
-              WRITE → LiveCache
-    """
-    if DAL_MODE.upper() == "SETUP":
-        return _local_db(LOCAL_AUTO)
 
-    if rw:
-        # WRITE → LiveCache writer DB
-        return _cloud_db(CLOUD_AUTO)
+# ---------------------------------------------------------------------------
+# HARDENED ATTR SHIM (absorbs row_factory/text_factory safely)
+# ---------------------------------------------------------------------------
 
-    # READ → Local autoscalp_gui.db only
-    return _local_db(LOCAL_AUTO)
+# === PATCH START ============================================================
+# 📆 PATCHED: 2025-12-10 — Restore missing _AttrShim used by DALWriteProxy
+# PURPOSE:
+#   • Absorb arbitrary attribute assignments (row_factory, text_factory, etc.)
+#   • Prevent AttributeError crashes
+#   • Behaves as a transparent sink for unknown attributes
+
+# ---------------------------------------------------------------------------
+# HARDENED ATTR SHIM (shared by readers and writers)
+# ---------------------------------------------------------------------------
+class _AttrShim:
+    """Absorbs any attribute (row_factory, text_factory, etc.) safely."""
+    __slots__ = ()
+    def __getattr__(self, k): return None
+    def __setattr__(self, k, v): pass
+
+
+class DALReadProxy:
+    """
+    Lightweight read-only connection proxy.
+    Absorbs row_factory/text_factory assignments, so legacy code keeps working.
+    """
+    __slots__ = ("_fam", "_shim")
+
+    def __init__(self, fam: str):
+        self._fam = fam
+        self._shim = _AttrShim()
+
+    # absorb row_factory, text_factory, etc.
+    def __setattr__(self, k, v):
+        if k in ("_fam", "_shim"):
+            object.__setattr__(self, k, v)
+        else:
+            setattr(self._shim, k, v)
+
+    def __getattr__(self, k):
+        return getattr(self._shim, k, None)
+
+    # core EXECUTE API
+    def execute(self, sql: str, params=()):
+        fut = _ReadFuture()
+        _DAL_READ_QUEUE.put((self._fam, sql, params or (), fut))
+        return fut
+
+    def cursor(self): return self
+    def fetchall(self): return []
+    def fetchone(self): return None
+    def close(self): return None
+
+
 # === PATCH END ==============================================================
 
 
 # ---------------------------------------------------------------------------
-# Orders DB locator (used by live_router + event sink)
+# FUTURE CURSOR FOR READ RESULTS
 # ---------------------------------------------------------------------------
+
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py  (DAL write architecture)
+# 📆 PATCHED: 2025-12-10 — Dual-write family mapping (LOCAL + LIVECACHE)
+# PURPOSE:
+#   • Every logical family write is duplicated into both targets
+#   • Makes session_token, orders, decisions always visible everywhere
+#   • Replaces need for mirror threads entirely
+# ============================================================================
+
+DUAL_WRITE_FAMILIES = {
+    "auto":        ("auto", "auto"),
+    "bets":        ("bets", "bets"),
+    "settlements": ("settlements", "settlements"),
+    "mastery":     ("mastery", "mastery"),
+}
+
+
+# === PATCH END ==============================================================
+
+
+
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py
+# 📆 PATCHED: 2025-12-10 — dual writers consistent with existing DAL
+
+_LOCAL_WRITE_CONNS = {}
+_LIVE_WRITE_CONNS  = {}
+
+def _get_writer_local(fam: str) -> sqlite3.Connection:
+    path = {
+        "auto":        LOCAL_AUTO,
+        "bets":        LOCAL_BETS,
+        "settlements": LOCAL_SETTLE,
+        "mastery":     LOCAL_MASTERY,
+    }[fam]
+
+    con = _LOCAL_WRITE_CONNS.get(fam)
+    if con is None:
+        con = sqlite3.connect(path, timeout=20, isolation_level=None, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA busy_timeout=8000")
+        con.execute("PRAGMA journal_mode=WAL")
+
+        # Attach *LOCAL* namespaces
+        con.execute(f"ATTACH DATABASE '{LOCAL_AUTO}'     AS local_auto")
+        con.execute(f"ATTACH DATABASE '{LOCAL_BETS}'     AS local_bets")
+        con.execute(f"ATTACH DATABASE '{LOCAL_SETTLE}'   AS local_settle")
+        con.execute(f"ATTACH DATABASE '{LOCAL_MASTERY}'  AS local_mastery")
+
+        _LOCAL_WRITE_CONNS[fam] = con
+    return con
+
+
+def _get_writer_live(fam: str) -> sqlite3.Connection:
+    path = {
+        "auto":        CLOUD_AUTO,
+        "bets":        CLOUD_BETS,
+        "settlements": CLOUD_SETTLE,
+        "mastery":     CLOUD_MASTERY,
+    }[fam]
+
+    con = _LIVE_WRITE_CONNS.get(fam)
+    if con is None:
+        con = sqlite3.connect(path, timeout=20, isolation_level=None, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA busy_timeout=8000")
+        con.execute("PRAGMA journal_mode=WAL")
+
+        # Attach *LIVECACHE* namespaces
+        con.execute(f"ATTACH DATABASE '{CLOUD_AUTO}'     AS live_auto")
+        con.execute(f"ATTACH DATABASE '{CLOUD_BETS}'     AS live_bets")
+        con.execute(f"ATTACH DATABASE '{CLOUD_SETTLE}'   AS live_settle")
+        con.execute(f"ATTACH DATABASE '{CLOUD_MASTERY}'  AS live_mastery")
+
+        _LIVE_WRITE_CONNS[fam] = con
+    return con
+# === PATCH END ============================================================
+
+
+# ===============================================================
+# 🧵 DAL GLOBAL WRITE QUEUE + WRITER POOL
+# ===============================================================
+
+_DAL_WRITE_QUEUE = queue.Queue(maxsize=200000)
+
+_PERSISTENT_WRITERS = {}
+_PERSISTENT_LOCK = threading.Lock()
+
+def _get_writer(fam: str) -> sqlite3.Connection:
+    """
+    Persistent writer per DB family.
+    Always writes into LiveCache.
+    """
+
+    if fam.endswith("_LOCAL"):
+        fam = fam.replace("_LOCAL","")
+        path = LOCAL_PATH_MAP[fam]
+
+    if fam.endswith("_LIVE"):
+        fam = fam.replace("_LIVE","")
+        path = LIVE_PATH_MAP[fam]
+
+    with _PERSISTENT_LOCK:
+        if fam in _PERSISTENT_WRITERS:
+            return _PERSISTENT_WRITERS[fam]
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py:_get_writer
+# 📆 PATCHED: 2025-12-10 — map new dual-write families to actual DB files
+# ============================================================================
+
+        path_map = {
+            # LOCAL families
+            "auto_local":        LOCAL_AUTO,
+            "bets_local":        LOCAL_BETS,
+            "settle_local":      LOCAL_SETTLE,
+            "mastery_local":     LOCAL_MASTERY,
+
+            # LIVECACHE families
+            "auto_live":         CLOUD_AUTO,
+            "bets_live":         CLOUD_BETS,
+            "settle_live":       CLOUD_SETTLE,
+            "mastery_live":      CLOUD_MASTERY,
+        }
+
+        path = path_map.get(fam)
+        if not path:
+            raise RuntimeError(f"Unknown writer family: {fam}")
+
+        con = sqlite3.connect(path, timeout=20, isolation_level=None, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=8000")
+
+        _PERSISTENT_WRITERS[fam] = con
+        return con
+
+# === PATCH END ==============================================================
+
+
+# ===============================================================
+# ⚡ BATCH WRITE WORKER
+# ===============================================================
+
+_BATCH_WINDOW = 0.003
+_BATCH_MAX = 5000
+
+def _dal_writer_loop():
+    """
+    High-throughput batch writer.
+    Queue items: (fam, sql, params)
+    """
+    pending = []
+
+    while True:
+        fam, sql, params = _DAL_WRITE_QUEUE.get()
+        pending.append((fam, sql, params))
+        t0 = time.time()
+
+        while len(pending) < _BATCH_MAX:
+            remaining = _BATCH_WINDOW - (time.time() - t0)
+            if remaining <= 0:
+                break
+            try:
+                fam2, sql2, params2 = _DAL_WRITE_QUEUE.get(timeout=remaining)
+                pending.append((fam2, sql2, params2))
+            except queue.Empty:
+                break
+
+        # === PATCH START =====================================================
+        # Dual write: LOCAL first, then LIVE
+        for fam, sql, params in pending:
+
+            # LOCAL
+            try:
+                wloc = _get_writer_local(fam)
+                wloc.execute(sql, params)
+            except Exception as e:
+                print(f"[DAL-WRITER] LOCAL fail fam={fam}: {e} | sql={sql}")
+
+            # LIVE
+            try:
+                wlive = _get_writer_live(fam)
+                wlive.execute(sql, params)
+            except Exception as e:
+                print(f"[DAL-WRITER] LIVE fail fam={fam}: {e} | sql={sql}")
+
+        # Commit both
+        try: wloc.commit()
+        except: pass
+        try: wlive.commit()
+        except: pass
+        # === PATCH END =======================================================
+
+
+        for _ in pending:
+            _DAL_WRITE_QUEUE.task_done()
+
+        pending.clear()
+
+# Start writer thread
+if not any(t.name == "DAL-Writer" for t in threading.enumerate()):
+    threading.Thread(target=_dal_writer_loop, name="DAL-Writer", daemon=True).start()
+    print("[DAL] Writer thread ACTIVE")
+
+# ===============================================================
+# 🔧 ATTACH-ALL-FOUR HELPER
+# ===============================================================
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py::_attach_all_four_local
+# 🔎 SEARCH: def _attach_all_four_local
+# 📆 PATCHED: 2025-12-09 — safe URI attach + skip self-attach
+# ============================================================================
+
+def _attach_all_four_local(con: sqlite3.Connection):
+    """Attach LOCAL → LOCAL with URI-safe paths and skip self re-attach."""
+    dbs = {
+        "auto": LOCAL_AUTO,
+        "bets": LOCAL_BETS,
+        "settlements": LOCAL_SETTLE,
+        "mastery": LOCAL_MASTERY,
+    }
+
+    for alias, path in dbs.items():
+        try:
+            con.execute("ATTACH DATABASE ? AS %s" % alias, (path,))
+        except Exception as e:
+            print(f"[DAL-ATTACH-LOCAL] warn attaching {alias}: {e}")
+
+# === PATCH END ============================================================
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py::_attach_all_four_cloud
+# 📆 PATCHED: 2025-12-09 — safe attach for cloud layer
+# ============================================================================
+
+def _attach_all_four_cloud(con: sqlite3.Connection):
+    """Attach LIVECACHE → LIVECACHE with robust attach."""
+    dbs = {
+        "auto": CLOUD_AUTO,
+        "bets": CLOUD_BETS,
+        "settlements": CLOUD_SETTLE,
+        "mastery": CLOUD_MASTERY,
+    }
+    for alias, path in dbs.items():
+        try:
+            con.execute("ATTACH DATABASE ? AS %s" % alias, (path,))
+        except Exception as e:
+            print(f"[DAL-ATTACH-CLOUD] warn attaching {alias}: {e}")
+
+# === PATCH END ============================================================
+
+
+# ===============================================================
+# 📘 REAL DB OPENERS
+# ===============================================================
+
+def _local_db(path: str):
+    """READ connection — ALWAYS LOCAL + attach all LOCAL DBs."""
+    con = sqlite3.connect(path, timeout=10, isolation_level=None, check_same_thread=False)
+    # real sqlite connections already use default tuple rows; DALReadProxy handles rows
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=8000")
+    _attach_all_four_local(con)
+    return con
+
+def _cloud_db(path: str):
+    """WRITE connection — ALWAYS LIVECACHE + attach all LIVECACHE DBs."""
+    con = sqlite3.connect(path, timeout=20, isolation_level=None, check_same_thread=False)
+    # real sqlite connections already use default tuple rows; DALReadProxy handles rows
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=8000")
+    _attach_all_four_cloud(con)
+    return con
+
+# ===============================================================
+# 🔀 DALWriteProxy (queue-based writer)
+# ===============================================================
+
+
+
+# ===============================================================
+# 🌐 DAL MODE
+# ===============================================================
+
+DAL_MODE = "SETUP"
+
+def enable_live_dal():
+    global DAL_MODE
+    DAL_MODE = "LIVE"
+
+def enable_setup_dal():
+    global DAL_MODE
+    DAL_MODE = "SETUP"
+
+# ===============================================================
+# PUBLIC ROUTERS
+# ===============================================================
+
+def open_auto_db(*, rw=False, **_):
+    if DAL_MODE == "SETUP":
+        return _local_db(LOCAL_AUTO)
+    if rw:
+        return DALWriteProxy("auto")
+    return DALReadProxy("auto")
+
+def open_bets_db(*, rw=False, **_):
+    if DAL_MODE == "SETUP":
+        return _local_db(LOCAL_BETS)
+    if rw:
+        return DALWriteProxy("bets")
+    return DALReadProxy("bets")
+
+def open_settlements_db(*, rw=False, **_):
+    if DAL_MODE == "SETUP":
+        return _local_db(LOCAL_SETTLE)
+    if rw:
+        return DALWriteProxy("settlements")
+    return DALReadProxy("settlements")
+
+def open_mastery_db(*, rw=False, **_):
+    if DAL_MODE == "SETUP":
+        return _local_db(LOCAL_MASTERY)
+    if rw:
+        return DALWriteProxy("mastery")
+    return DALReadProxy("mastery")
+
+
+def open_db(family: str, ro=False, rw=False, **_):
+    return {
+        "auto": open_auto_db,
+        "bets": open_bets_db,
+        "settlements": open_settlements_db,
+        "mastery": open_mastery_db,
+    }[family](rw=rw)
+
+# ===============================================================
+# AUTOCONN / LIVE-ROUTE AUTOCONN
+# ===============================================================
+
+def auto_conn(*, rw=False, **_):
+    if DAL_MODE == "SETUP":
+        return _local_db(LOCAL_AUTO)
+    if rw is True:
+        return DALWriteProxy("auto")
+    return DALReadProxy("auto")
+
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: import sqlite3  (place immediately after the top-level imports)
+# 📆 PATCHED: 2025-12-03 — LiveCache + Attach-All universal LIVE connector
+# ---------------------------------------------------------------------------
+
+# === PATCH START ======================================================
+# 📍 TARGET: engines/config_paths.py:auto_conn_live
+# 🔎 SEARCH: def auto_conn_live(
+# 📆 PATCHED: 2025-12-03 — attach full local + livecache families
+
+def auto_conn_live(rw=True):
+    """
+    LiveCache-first connector.
+    • PRIMARY = livecache AUTOSCALP
+    • Attaches all LOCAL DBs for views + historical reads
+    • Attaches all LIVECACHE DBs for today’s reads
+    • RW always allowed (single-writer architecture)
+    """
+
+    import sqlite3, os
+
+    LIVECACHE_AUTO = os.path.join(DATA_DIR, "livecache", "autoscalp_livecache.db")
+    LIVECACHE_BETS = os.path.join(DATA_DIR, "livecache", "bets_livecache.db")
+    LIVECACHE_SETTLE = os.path.join(DATA_DIR, "livecache", "settlements_livecache.db")
+    LIVECACHE_MASTERY = os.path.join(DATA_DIR, "livecache", "mastery_livecache.db")
+
+    LOCAL_AUTO = os.path.join(DATA_DIR, "autoscalp_gui.db")
+    LOCAL_BETS = os.path.join(DATA_DIR, "bets.db")
+    LOCAL_SETTLE = os.path.join(DATA_DIR, "settlements.db")
+    LOCAL_MASTERY = os.path.join(DATA_DIR, "mastery_v7.db")
+
+    con = sqlite3.connect(
+        LIVECACHE_AUTO,
+        timeout=12,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    con.row_factory = sqlite3.Row
+
+    con.execute("PRAGMA busy_timeout=8000;")
+    con.execute("PRAGMA journal_mode=WAL;")
+
+    # Attach LOCAL family
+    con.execute(f"ATTACH DATABASE '{LOCAL_AUTO}'     AS local_auto;")
+    con.execute(f"ATTACH DATABASE '{LOCAL_BETS}'     AS local_bets;")
+    con.execute(f"ATTACH DATABASE '{LOCAL_SETTLE}'   AS local_settle;")
+    con.execute(f"ATTACH DATABASE '{LOCAL_MASTERY}'  AS local_mastery;")
+
+    # Attach LIVECACHE family (for today-only tables)
+    con.execute(f"ATTACH DATABASE '{LIVECACHE_BETS}'     AS lc_bets;")
+    con.execute(f"ATTACH DATABASE '{LIVECACHE_SETTLE}'   AS lc_settle;")
+    con.execute(f"ATTACH DATABASE '{LIVECACHE_MASTERY}'  AS lc_mastery;")
+
+    # =====================================================
+    # Inject dual-write behaviour into auto_conn_live
+    # =====================================================
+    class _LiveDualWriteCursor:
+        def __init__(self, base_con):
+            self._base = base_con
+
+        def execute(self, sql, params=()):
+            if isinstance(params, list):
+                params = tuple(params)
+
+            # Duplicate into LOCAL and LIVE write queues
+            _DAL_WRITE_QUEUE.put(("auto_local", sql, params))
+            _DAL_WRITE_QUEUE.put(("auto_live",  sql, params))
+
+            return self
+
+        def executemany(self, sql, seq):
+            for row in seq:
+                params = tuple(row) if isinstance(row, list) else row
+                _DAL_WRITE_QUEUE.put(("auto_local", sql, params))
+                _DAL_WRITE_QUEUE.put(("auto_live",  sql, params))
+            return self
+
+        def fetchall(self): return []
+        def fetchone(self): return None
+        def close(self):    return None
+        def __iter__(self): return iter([])
+
+    class _LiveDualWriteProxy:
+        def __init__(self, base_con):
+            self._base = base_con
+
+        def cursor(self):
+            return _LiveDualWriteCursor(self._base)
+
+        # Legacy compatibility:
+        def execute(self, sql, params=()):
+            return self.cursor().execute(sql, params)
+
+        def executemany(self, sql, seq):
+            return self.cursor().executemany(sql, seq)
+
+        def commit(self):  pass
+        def rollback(self): pass
+        def close(self):    self._base.close()
+
+    # Use proxy for all RW operations inside live-router/overwatcher
+    if rw:
+        return _LiveDualWriteProxy(con)
+
+    return con
+
+
+    return con
+
+# === PATCH END ========================================================
+
+
+
+# === PATCH START ============================================================
+# 📆 PATCHED: 2025-12-09 — Restore get_mode(), is_replay_mode(), get_db_paths()
+
+# MODE STATE (GUI + session_secrets expect this)
+_MODE = "learning"
+
+# Correct placement:
+def sync_modes():
+    """Guarantee DAL_MODE follows legacy _MODE for LIVE/SETUP."""
+    global DAL_MODE
+    if _MODE in ("live", "LIVE"):
+        DAL_MODE = "LIVE"
+    else:
+        DAL_MODE = "SETUP"
+
+# Now call it safely AFTER _MODE exists:
+sync_modes()
+
+def get_mode() -> str:
+    """Return current global mode as expected by GUI and orchestrator."""
+    return _MODE
+
+def is_replay_mode() -> bool:
+    """Return True if tool is running in test or replay pipelines."""
+    return _MODE in ("test", "replay")
+
+def get_db_paths() -> tuple[str, str]:
+    """Return (bets.db, autoscalp_gui.db) — legacy dashboard import."""
+    return (LOCAL_BETS, LOCAL_AUTO)
+
+# === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📆 PATCHED: 2025-12-09 — Restore repo_root(), data_dir()
+
+def repo_root() -> str:
+    """Return project root directory. Needed by orchestrator + dashboard."""
+    return _ROOT
+
+def data_dir() -> str:
+    """Return the resolved DATA_DIR used by all DBs."""
+    return DATA_DIR
+
+# === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📆 PATCHED: 2025-12-09 — Restore connect_orders_db()
+
 def connect_orders_db(ro: bool = True, timeout: float = 10.0):
     """
-    Return the DB owning the 'orders' table.
-    Prefers autoscalp_gui.db, falls back to bets.db.
+    Return a connection to the DB containing the `orders` table.
+    Used by live_router + event_sink.
     """
     for path, fam in [(LOCAL_AUTO, "auto"), (LOCAL_BETS, "bets")]:
         try:
@@ -206,475 +1066,215 @@ def connect_orders_db(ro: bool = True, timeout: float = 10.0):
                 ).fetchone()
                 if r:
                     return open_db(fam, rw=not ro)
-        except Exception:
-            pass
+        except:
+            continue
+
     return open_bets_db(rw=not ro)
 
-# === END OF RESTORED HELPER SECTION =========================================
-
-
-# ============================================================
-# 🧰 RAW OPENERS (AlphaX direct)
-# ============================================================
-
-def _raw_open(path: str, *, timeout: int = 10):
-    con = _raw_sqlite3.connect(path, timeout=timeout, isolation_level=None)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=8000")
-    return con
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py
-# 🔎 SEARCH: def _get_local_conn(
-# 📆 PATCHED: 2025-12-01 — correct RAW connector paths
-# ============================================================================
-def _get_local_conn(fam: str):
-    if fam == "auto":        return _raw_open(LOCAL_AUTO)
-    if fam == "bets":        return _raw_open(LOCAL_BETS)
-    if fam == "mastery":     return _raw_open(LOCAL_MASTERY)
-    if fam == "settlements": return _raw_open(LOCAL_SETTLE)
-    raise ValueError(f"Unknown family {fam}")
-
-def _get_cloud_conn(fam: str):
-    if fam == "auto":        return _raw_open(CLOUD_AUTO)
-    if fam == "bets":        return _raw_open(CLOUD_BETS)
-    if fam == "mastery":     return _raw_open(CLOUD_MASTERY)
-    if fam == "settlements": return _raw_open(CLOUD_SETTLE)
-    raise ValueError(f"Unknown family {fam}")
 # === PATCH END ==============================================================
-
-
-# ============================================================
-# 🔒 RW-ONLY CONNECTORS (LOCAL + LIVECACHE)
-# ============================================================
-
-def _local_db(path: str):
-    con = sqlite3.connect(path, timeout=10, isolation_level=None, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=8000")
-    con.execute("PRAGMA journal_mode=WAL")
-    return con
-
-def _cloud_db(path: str):
-    con = sqlite3.connect(path, timeout=12, isolation_level=None, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=12000")
-    con.execute("PRAGMA journal_mode=WAL")
-    return con
-
-# ============================================================
-# 🧩 ATTACH MODEL — ALL FOUR DBS
-# ============================================================
-
-def _attach_all_four(con: sqlite3.Connection, rw_primary: str):
-    fam_to_cloud = {
-        "auto": CLOUD_AUTO,
-        "bets": CLOUD_BETS,
-        "mastery": CLOUD_MASTERY,
-        "settlements": CLOUD_SETTLE,
-    }
-    fam_to_local = {
-        "auto": LOCAL_AUTO,
-        "bets": LOCAL_BETS,
-        "mastery": LOCAL_MASTERY,
-        "settlements": LOCAL_SETTLE,
-    }
-
-    import time
-    for fam in ("auto", "bets", "mastery", "settlements"):
-        path = fam_to_cloud[fam] if fam == rw_primary else fam_to_local[fam]
-        for attempt in range(5):
-            try:
-                con.execute(f"ATTACH DATABASE ? AS {fam}", (path,))
-                break
-            except Exception as e:
-                if attempt == 4:
-                    raise
-                time.sleep(0.05 * (attempt + 1))
-
-# === RESTORED PUBLIC MODE HELPERS =========================================
-
-# Ensures dashboard, GUI, orchestrator can import `get_mode`
-def get_mode() -> str:
-    """
-    Return last selected mode ('test', 'learning', or 'live').
-    Guaranteed to exist for legacy GUI imports.
-    """
-    return _MODE
-
-def is_replay_mode() -> bool:
-    """
-    True if running in test/replay mode.
-    """
-    return _MODE in ("test", "replay")
-
-def get_db_paths() -> tuple[str, str]:
-    """
-    Return (bets_path, autoscalp_gui_path).
-    """
-    return BETS_DB_PATH, AUTOSCALP_DB_PATH
-
-# === END RESTORED PUBLIC MODE HELPERS ====================================
-# === RESTORED PATH HELPERS ==================================================
-
-def repo_root() -> str:
-    """
-    Return the absolute path to the project root directory.
-    Needed by the Orchestrator and dashboard.
-    """
-    return _ROOT
-
-def data_dir() -> str:
-    """
-    Return the resolved base data directory.
-    """
-    return DATA_DIR
-
-# === END RESTORED PATH HELPERS =============================================
-# === RESTORED LEGACY HELPERS ===============================================
-
-def set_db_paths(
-    mode: str | None = None,
-    *,
-    bets: str | None = None,
-    autoscalp: str | None = None,
-    data_dir_override: str | None = None,
-    quiet: bool = False,
-) -> tuple[str, str]:
-    """
-    Legacy DB selector used by GUI during setup.
-    Preserves original behaviour:
-      • mode: 'test' | 'learning' | 'live'
-      • can override bets/auto paths and/or base data dir
-      • updates BETS_DB_PATH / AUTOSCALP_DB_PATH + all aliases
-    """
-    global DATA_DIR, LOCAL_BETS, LOCAL_AUTO, LOCAL_SETTLE, LOCAL_MASTERY
-    global BETS_DB_PATH, AUTOSCALP_DB_PATH, DB_PATH
-    global BETS_DB, AUTOSCALP_DB, AUTO_DB, _MODE
-
-    m = (mode or os.environ.get("AUTOSCALP_MODE") or "learning").lower()
-    _MODE = m
-
-    base = data_dir() if data_dir_override is None else os.path.abspath(data_dir_override)
-    os.makedirs(base, exist_ok=True)
-
-    # choose filenames based on mode
-    bet_path = bets or os.path.join(base, "bets.test.db" if m == "test" else "bets.db")
-    auto_path = autoscalp or os.path.join(base, "autoscalp_gui.test.db" if m == "test" else "autoscalp_gui.db")
-
-    # update canonical paths
-    LOCAL_BETS = os.path.abspath(bet_path)
-    LOCAL_AUTO = os.path.abspath(auto_path)
-    LOCAL_SETTLE = os.path.join(base, "settlements.db")
-    LOCAL_MASTERY = os.path.join(base, "mastery_v7.db")
-
-    BETS_DB_PATH = LOCAL_BETS
-    AUTOSCALP_DB_PATH = LOCAL_AUTO
-    DB_PATH = BETS_DB_PATH
-    BETS_DB = BETS_DB_PATH
-    AUTOSCALP_DB = AUTOSCALP_DB_PATH
-    AUTO_DB = AUTOSCALP_DB_PATH
-
-    if not quiet:
-        print(f"[paths] DATA_DIR={base} BETS_DB={BETS_DB_PATH} AUTO_DB={AUTOSCALP_DB_PATH}")
-
-    return BETS_DB_PATH, AUTOSCALP_DB_PATH
-
-# === END RESTORED LEGACY HELPERS ===========================================
-
-
-# ============================================================
-# 🌐 DAL MODE
-# ============================================================
-
-DAL_MODE = "SETUP"
-
-def enable_live_dal():  # Step 4
-    global DAL_MODE
-    DAL_MODE = "LIVE"
-
-def enable_setup_dal():  # GUI startup
-    global DAL_MODE
-    DAL_MODE = "SETUP"
-
-# ============================================================
-# 🎛️ RW-ONLY DISPATCH LOGIC
-# ============================================================
-
-def _dispatch_open(family: str, *, rw: bool = False):
-    mode = "SETUP" if DAL_MODE.upper() == "SETUP" else "LIVE"
-
-    if mode == "SETUP":
-        if family == "auto":        return _local_db(LOCAL_AUTO)
-        if family == "bets":        return _local_db(LOCAL_BETS)
-        if family == "mastery":     return _local_db(LOCAL_MASTERY)
-        if family == "settlements": return _local_db(LOCAL_SETTLE)
-
-    # LIVE MODE
-    PRIMARY_LOCAL    = {
-        "auto": LOCAL_AUTO,
-        "bets": LOCAL_BETS,
-        "mastery": LOCAL_MASTERY,
-        "settlements": LOCAL_SETTLE,
-    }[family]
-    PRIMARY_LIVECACHE = {
-        "auto": CLOUD_AUTO,
-        "bets": CLOUD_BETS,
-        "mastery": CLOUD_MASTERY,
-        "settlements": CLOUD_SETTLE,
-    }[family]
-
-    if rw:
-        con = _cloud_db(PRIMARY_LIVECACHE)
-        _attach_all_four(con, rw_primary=family)
-        return con
-
-    return _local_db(PRIMARY_LOCAL)
-
-# ============================================================
-# 🎚 PUBLIC DAL API (LIVE-INTEGRATED)
-# ============================================================
-
 # === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py  (last open_auto_db definition)
-# 🔎 SEARCH: def open_auto_db(
-# 📆 PATCHED: 2025-12-01 — unify selector to match auto_conn
-# ============================================================================
-def open_auto_db(*, rw=None, **_):
-    """
-    Mirrors auto_conn routing exactly.
-    Prevents legacy overrides.
-    """
-    if DAL_MODE.upper() == "SETUP":
-        return _local_db(LOCAL_AUTO)
+# 📆 PATCHED: 2025-12-09 — Restore auto_ro(), settle_ro()
 
-    if rw:
-        return _cloud_db(CLOUD_AUTO)
-
+def auto_ro(timeout: float = 10.0):
+    """Pure local reader for autoscalp_gui.db with full attach-map."""
     return _local_db(LOCAL_AUTO)
-# === PATCH END ==============================================================
 
-
-def open_bets_db(*, rw=None, **_):
-    if DAL_MODE.upper() == "SETUP":
-        return _local_db(LOCAL_BETS)
-    if rw:
-        con = _cloud_db(CLOUD_BETS)
-        _attach_all_four(con, rw_primary="bets")
-        return con
-    return _local_db(LOCAL_BETS)
-
-def open_mastery_db(*, rw=None, **_):
-    if DAL_MODE.upper() == "SETUP":
-        return _local_db(LOCAL_MASTERY)
-    if rw:
-        con = _cloud_db(CLOUD_MASTERY)
-        _attach_all_four(con, rw_primary="mastery")
-        return con
-    return _local_db(LOCAL_MASTERY)
-
-def open_settlements_db(*, rw=None, **_):
-    if DAL_MODE.upper() == "SETUP":
-        return _local_db(LOCAL_SETTLE)
-    if rw:
-        con = _cloud_db(CLOUD_SETTLE)
-        _attach_all_four(con, rw_primary="settlements")
-        return con
+def settle_ro(timeout: float = 10.0):
+    """Pure local reader for settlements.db."""
     return _local_db(LOCAL_SETTLE)
 
-def open_db(family: str, ro=False, rw=False, **_):
-    if family == "auto":        return open_auto_db(rw=rw)
-    if family == "bets":        return open_bets_db(rw=rw)
-    if family == "mastery":     return open_mastery_db(rw=rw)
-    if family == "settlements": return open_settlements_db(rw=rw)
-    raise ValueError(f"Unknown DB family: {family}")
-
-# ============================================================
-# 🧵 CACHED CONNECTIONS (SafeConn)
-# ============================================================
-
-_LOCAL_CONN = {"auto":None,"bets":None,"mastery":None,"settlements":None}
-_CLOUD_CONN = {"auto":None,"bets":None,"mastery":None,"settlements":None}
-_CONN_LOCK  = {
-    "auto":threading.Lock(),"bets":threading.Lock(),
-    "mastery":threading.Lock(),"settlements":threading.Lock()
-}
-_LOCAL_PATHS = {
-    "auto":LOCAL_AUTO,"bets":LOCAL_BETS,"mastery":LOCAL_MASTERY,"settlements":LOCAL_SETTLE
-}
-_CLOUD_PATHS = {
-    "auto":CLOUD_AUTO,"bets":CLOUD_BETS,"mastery":CLOUD_MASTERY,"settlements":CLOUD_SETTLE
-}
-
-class _SafeConn:
-    __slots__=("_con",)
-    def __init__(self, real): self._con = real
-    def close(self): return None
-    def commit(self):
-        try: return self._con.commit()
-        except: return None
-    def rollback(self):
-        try: return self._con.rollback()
-        except: return None
-    def __getattr__(self, n): return getattr(self._con, n)
-    def __enter__(self): return self
-    def __exit__(self, *_):
-        try: self._con.commit()
-        except: pass
-        return False
-
+# === PATCH END ==============================================================
 # === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py::_wrap_local and _wrap_cloud
-# 🔎 SEARCH: def _wrap_local(
-# 📆 PATCHED: 2025-12-01 — ensure wrappers return correct DBs
-# ============================================================================
-def _wrap_local(fam: str):
-    """
-    LOCAL = real autoscalp_gui.db / bets.db / mastery / settlements.
-    SafeConn removed to ensure SELECT sees full schema.
-    """
-    return _local_db(_LOCAL_PATHS[fam])
+# 📆 PATCHED: 2025-12-09 — Final alias surface
 
-def _wrap_cloud(fam: str):
+bets_conn             = open_bets_db
+mastery_conn          = open_mastery_db
+settle_conn           = open_settlements_db
+
+connect_auto_db        = auto_conn
+connect_bets_db        = open_bets_db
+connect_mastery_db     = open_mastery_db
+connect_settlements_db = open_settlements_db
+
+def autoscalp_db(): return LOCAL_AUTO
+def bets_db():       return LOCAL_BETS
+def settlements_db():return LOCAL_SETTLE
+def mastery_v7_db(): return LOCAL_MASTERY
+
+AUTO_DB       = LOCAL_AUTO
+BETS_DB       = LOCAL_BETS
+CLOUD_BETS_DB = CLOUD_BETS
+CLOUD_AUTO_DB = CLOUD_AUTO
+
+AUTO_RO = lambda timeout=10: _local_db(LOCAL_AUTO)
+
+# === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py   (or wherever schema bootstrap lives)
+# 🔎 SEARCH: def autoscalp_db(    (just place below DB open helpers)
+# 📆 PATCHED: 2025-12-03 — add created_at column for mastery_events
+# ---------------------------------------------------------------------------
+
+def _ensure_mastery_events_schema_fix():
     """
-    LIVECACHE = Cloud paths now pointing to local livecache folder.
+    Ensure mastery_events contains created_at column.
+    Safe to run every startup (idempotent).
     """
-    return _cloud_db(_CLOUD_PATHS[fam])
+    try:
+        con = open_auto_db(rw=True)
+        cur = con.cursor()
+
+        # Does the column already exist?
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(mastery_events)")}
+
+        if "created_at" not in cols:
+            cur.execute(
+                "ALTER TABLE mastery_events "
+                "ADD COLUMN created_at TEXT DEFAULT (datetime('now','utc'))"
+            )
+            con.commit()
+            print("[SCHEMA] mastery_events upgraded → added created_at")
+        con.close()
+    except Exception as e:
+        print(f"[SCHEMA] mastery_events upgrade warn: {e}")
+
+# Call once during system startup
+try:
+    _ensure_mastery_events_schema_fix()
+except Exception:
+    pass
+
 # === PATCH END ==============================================================
 
 
-# ============================================================
-# ✍️ DEDICATED LOCAL WRITER FOR ALPHAX
-# ============================================================
-
-_LOCAL_WRITE_LOCK = threading.Lock()
-
-def open_auto_local_write(timeout: float =10.0):
-    from engines.config_paths import _get_local_conn
-    con = _get_local_conn("auto")
-    class _LocalWriter:
-        __slots__=("_con","_lock")
-        def __init__(self,c,l):self._con=c;self._lock=l
-        def execute(self,sql,params=()):
-            with self._lock:
-                try:
-                    cur=self._con.execute(sql,params); self._con.commit(); return cur
-                except: return None
-        def executemany(self,sql,seq):
-            with self._lock:
-                try:
-                    cur=self._con.executemany(sql,seq); self._con.commit();return cur
-                except: return None
-        def close(self): return None
-    return _LocalWriter(con,_LOCAL_WRITE_LOCK)
-
-# ============================================================
-# 🧼 LiveCacheKeeper — 5-day Retention + WAL Purge
-# ============================================================
-
-_LC_RETENTION_DAYS = 5
-_LIVE_TABLES_TS = {
-    "orders":"opened_at",
-    "order_events":"ts",
-    "odds_current":"updated_ts",
-    "inbound_oc_cache":"last_sync_ts",
-    "oc_series":"snapshot_ts",
-}
-
-def _lc_trim_table(con,table,ts):
-    try:
-        con.execute(
-            f"DELETE FROM {table} "
-            f"WHERE date({ts}) < date('now','utc','-{_LC_RETENTION_DAYS} days')"
-        ); con.commit()
-    except Exception as e:
-        print(f"[LiveCacheKeeper] trim warn {table}: {e}")
-
-def _lc_wal_cleanup(path):
-    try:
-        for ext in ("-wal","-shm"):
-            p = path+ext
-            if os.path.exists(p): os.remove(p)
-    except Exception as e:
-        print(f"[LiveCacheKeeper] WAL warn: {e}")
-
-def _lc_keeper_loop():
-    while True:
-        for db in (CLOUD_AUTO,CLOUD_BETS,CLOUD_SETTLE,CLOUD_MASTERY):
-            try:
-                con = sqlite3.connect(db,timeout=4,isolation_level=None)
-                con.row_factory = sqlite3.Row
-                for table,ts in _LIVE_TABLES_TS.items():
-                    try: con.execute(f"SELECT 1 FROM {table} LIMIT 1")
-                    except: continue
-                    _lc_trim_table(con,table,ts)
-                con.close()
-                _lc_wal_cleanup(db)
-            except Exception as e:
-                print(f"[LiveCacheKeeper] db warn {db}: {e}")
-        time.sleep(90)
-
-if not any(t.name=="LiveCacheKeeper" for t in threading.enumerate()):
-    threading.Thread(target=_lc_keeper_loop,name="LiveCacheKeeper",daemon=True).start()
-    print("[LiveCacheKeeper] active (5-day trim + WAL purge)")
-
-# ============================================================
-# LEGACY ALIASES (unchanged)
-# ============================================================
+# ===============================================================
+# LEGACY ALIASES + HELPERS
+# ===============================================================
 
 BETS_DB_PATH      = LOCAL_BETS
 AUTOSCALP_DB_PATH = LOCAL_AUTO
-GUI_DB_PATH       = AUTOSCALP_DB_PATH
 DB_PATH           = BETS_DB_PATH
-BETS_DB           = BETS_DB_PATH
-AUTOSCALP_DB      = AUTOSCALP_DB_PATH
-AUTO_DB           = AUTOSCALP_DB_PATH
-CLOUD_BETS_PATH   = CLOUD_BETS
-CLOUD_AUTOSCALP_DB= CLOUD_AUTO
-
-# === FIXED LEGACY ALIASES (preserve correct routing) ===
-
-# auto_conn MUST remain the correct dispatcher
-auto_conn = auto_conn  # keep original function
+GUI_DB_PATH       = AUTOSCALP_DB_PATH
 
 bets_conn            = open_bets_db
 mastery_conn         = open_mastery_db
 settle_conn          = open_settlements_db
-
 connect_auto_db       = auto_conn
 connect_bets_db       = open_bets_db
 connect_mastery_db    = open_mastery_db
 connect_settlements_db = open_settlements_db
-
-def connect_db(path: str|None=None, ro:bool=False, timeout:float=10.0):
-    # if a specific path was supplied → determine correct family
-    if path:
-        if os.path.abspath(path) == os.path.abspath(LOCAL_BETS):
-            return open_bets_db(rw=not ro)
-        if os.path.abspath(path) == os.path.abspath(LOCAL_AUTO):
-            return auto_conn(rw=not ro)
-    # fallback = AUTO_DB
-    return auto_conn(rw=not ro)
-
-
 
 def autoscalp_db(): return LOCAL_AUTO
 def bets_db(): return LOCAL_BETS
 def settlements_db(): return LOCAL_SETTLE
 def mastery_v7_db(): return LOCAL_MASTERY
 
-def connect_db(path: str|None=None, ro:bool=False, timeout:float=10.0):
+AUTO_RO = lambda timeout=10: _local_db(LOCAL_AUTO)
+
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py — restore q_retry()
+# 📆 PATCHED: 2025-12-09
+
+def q_retry(con: sqlite3.Connection, sql: str, params=(),
+            *, tries: int = 6, delay_s: float = 0.08):
+    """
+    Retry wrapper for transient SQLITE_BUSY / SQLITE_LOCKED states.
+    Used throughout GUI, dashboard, lanes, live_router, event sink, and v7 engines.
+    This must exist exactly with this signature for legacy imports.
+    """
+    last_err = None
+    for i in range(max(1, tries)):
+        try:
+            return con.execute(sql, params)
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            last_err = e
+            if (("locked" in msg) or ("busy" in msg)) and i < tries - 1:
+                time.sleep(delay_s * (i + 1))
+                continue
+            raise
+    if last_err:
+        raise last_err
+
+# legacy-compatible alias (must always exist)
+_q_retry = q_retry
+q        = q_retry
+_q       = q_retry
+
+# === PATCH END ==============================================================
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py (legacy connector section)
+# 🔎 SEARCH: bets_conn = open_bets_db
+# 📆 PATCHED: 2025-12-09 — restore missing connection helpers
+# ============================================================================
+
+def connect_autoscalp_db(timeout: float = 10.0, ro: bool = False):
+    """Legacy alias — used by SCOPE, lanes, dashboard."""
     return open_auto_db(rw=not ro)
 
-def connect_bets_db(timeout:float=10.0,ro:bool=False):
-    return open_bets_db(rw=not ro)
-
-def connect_settlements_db(timeout:float=10.0,ro:bool=False):
+def connect_settlements_db(timeout: float = 10.0, ro: bool = False):
+    """Legacy alias — settlement engine expects this to exist."""
     return open_settlements_db(rw=not ro)
 
-def connect_mastery_v7_db(ro:bool=False,timeout:float=10.0):
+def connect_mastery_v7_db(timeout: float = 10.0, ro: bool = False):
+    """Legacy alias — mastery v7 training and dashboards import this."""
     return open_mastery_db(rw=not ro)
 
-AUTO_RO = lambda timeout=10.0: _local_db(LOCAL_AUTO)
+# === PATCH END ============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py::ensure_db_ready
+# 🔎 SEARCH: def ensure_db_ready(
+# 📆 PATCHED: 2025-12-09 — allow zero-arg and one-arg usage
+# ============================================================================
 
-print("[paths] ✔ COMPLETE CONFIG_PATHS.PY REBUILD — OK")
+def ensure_db_ready(path: str | None = None):
+    """
+    Legacy-friendly DB preflight.
+
+    Accepts either:
+        ensure_db_ready(path)
+        ensure_db_ready()
+
+    New DAL guarantees DBs exist, so this remains a safe no-op when
+    called without arguments.
+
+    If a path is provided, ensure the directory exists and the file
+    is present.
+    """
+    if not path:
+        return None
+
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            open(path, "a").close()
+    except Exception as e:
+        print(f"[db-preflight] ensure_db_ready warn: {e}")
+
+    return path
+
+# === PATCH END ============================================================
+
+
+
+# === PATCH START: Restore legacy connect_db ================================
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: Legacy connect_* APIs (GUI + older engines rely on these)
+# 📆 PATCHED: 2025-12-08
+
+def connect_db(path: str | None = None, ro: bool = False, timeout: float = 10.0):
+    """
+    Legacy access point required by GUI/session_secrets/dashboard.
+    Defaults to bets.db unless a specific path is provided.
+
+    READ  → rw=False → return LOCAL reader
+    WRITE → rw=True  → return appropriate DALWriteProxy()
+    """
+    target = path or BETS_DB_PATH
+    fam = "bets" if target == BETS_DB_PATH else "auto"
+    return open_db(fam, rw=not ro)
+
+# === PATCH END =============================================================
+print("[paths] ✔ COMPLETE CONFIG_PATHS REBUILD — OK")

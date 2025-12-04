@@ -61,7 +61,7 @@ def train_brain():
         payload = {"ts": now, "coherence": coherence, "adjustment": adjustment,
                    "reason": "Brain–Overwatcher bridge pulse"}
         from engines.mastery import event_sink
-        event_sink.emit("bridge_pulse", payload)
+        event_sink.emit("brain_plan", payload)
         print(f"[brain_trainer] ⚡ emitted bridge_pulse (coh={coherence:.2f}, Δ={adjustment:+.3f})")
 
     con.execute("""

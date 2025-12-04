@@ -30,6 +30,13 @@ def _orders_has_status() -> bool:
         except Exception:
             pass
 
+def _engine_of(row):
+    eng = (row.get("engine") or "").upper()
+    if eng in ("MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY"):
+        return eng
+    return "LEGACY"
+
+
 # === DROP IN: engines/caps.py ================================================
 
 from typing import Tuple, Optional, Dict, Any
@@ -430,42 +437,86 @@ def cap_ok_v7(market_id: str, selection_id: str, letter: str, *, mode: str = "LI
 def cap_ok_v8(market_id: str, selection_id: str, letter: str,
               *, mode: str = "LIVE", cap_limit: int = 3) -> tuple[bool,str,dict]:
 
-    # normalise + accept MSC letters
+    """
+    CAP v10 — Diagnostic only.
+    Prints:
+      • fires today per engine+letter
+      • open active parents
+      • PnL per engine
+    No blocking — always returns ok=True.
+    """
+
     letter = str(letter).upper()
-    if letter not in ("A","B","C","D","E","F","G","H","I","J","K","L","P","R","S","T","V","X","Z"):
-        return True, "cap_skip_unknown_letter", {}
+    con = _auto_conn(rw=True)
+    con.row_factory = sqlite3.Row
 
-    con = _auto_conn(rw=True); con.row_factory = sqlite3.Row
     try:
-        q = f"""
-        SELECT COUNT(*) AS active
-          FROM orders p
-         WHERE role='PARENT'
-           AND UPPER(COALESCE(entry_status,'')) IN ('PLACED','MATCHED')
-           AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
-           AND NOT EXISTS (
-                 SELECT 1 FROM orders c
-                  WHERE c.hedge_of=p.id
-                    AND UPPER(COALESCE(c.exit_status,''))='MATCHED'
-             )
-           AND UPPER(COALESCE(source,'')) LIKE UPPER(?)
-           AND date(p.opened_at)=date('now','utc')
-           AND UPPER(COALESCE(p.mode,''))=UPPER(?)
-           AND p.marketId=? AND p.selectionId=?
-        """
+        # pull all orders for today in LIVE mode
+        rows = con.execute("""
+            SELECT
+              engine,
+              UPPER(COALESCE(source,'')) AS src,
+              role,
+              entry_status,
+              exit_status,
+              realized_pnl,
+              net_pl
+            FROM orders
+            WHERE date(opened_at)=date('now','utc')
+              AND mode='LIVE'
+        """).fetchall()
 
-        row = con.execute(q, (letter, mode, str(market_id), str(selection_id))).fetchone()
-        active = int(row["active"] or 0)
+        stats = {}   # engine → letter → counters
 
-        ok = active < cap_limit
-        reason = "cap_ok" if ok else f"cap_block {letter}: {active}/{cap_limit}"
-        return ok, reason, {"active": active, "cap_limit": cap_limit}
+        for r in rows:
+            eng = r["engine"] or "LEGACY"
+            L   = (r["src"] or "?")[:1].upper()
+
+            e = stats.setdefault(eng, {})
+            s = e.setdefault(L, {
+                "fires_today":    0,
+                "open_active":    0,
+                "realized_pnl":   0.0,
+                "net_pl":         0.0,
+            })
+
+            # every row counts as a "fire" (a trade attempt)
+            s["fires_today"] += 1
+
+            # parent is open if matched but not hedged out
+            if r["role"] == "PARENT" \
+               and r["entry_status"] == "MATCHED" \
+               and (not r["exit_status"] or r["exit_status"].upper() != "MATCHED"):
+                s["open_active"] += 1
+
+            # accumulate pnl
+            try:
+                if r["realized_pnl"] is not None:
+                    s["realized_pnl"] += float(r["realized_pnl"])
+                if r["net_pl"] is not None:
+                    s["net_pl"] += float(r["net_pl"])
+            except:
+                pass
+
+        # print summary
+        for eng, letters in stats.items():
+            for L, d in letters.items():
+                print(f"[CAPv10] ENGINE={eng:<18} "
+                      f"LETTER={L}  fires={d['fires_today']}  "
+                      f"open={d['open_active']}  "
+                      f"pnl={d['realized_pnl']:+.2f}")
+
+        # always OK — diagnostic only
+        return True, "cap_noop", stats
 
     except Exception as e:
-        return True, f"cap_v8_err:{type(e).__name__}", {}
+        return True, f"cap_v10_err:{e}", {}
 
     finally:
-        con.close()
+        try: con.close()
+        except:
+            pass
+
 
 # === PATCH END ==============================================================
 

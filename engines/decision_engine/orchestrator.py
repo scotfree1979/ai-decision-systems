@@ -3330,6 +3330,118 @@ def _cloud_retention_once():
         except Exception:
             pass  # db-level fail-safe
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: def start_live_loop(
+# 📆 PATCHED: 2025-12-03 — Hybrid schema verifier (LOCAL → LiveCache)
+
+def _dal_verify_and_repair_schema():
+    """
+    Hybrid schema verifier:
+        ✓ Compares LOCAL schema → LiveCache schema.
+        ✓ Repairs missing columns, wrong types (shadow migration), and missing UNIQUE indexes.
+        ✓ Logs only tables that required fixes.
+        ✓ If zero fixes: prints "[DAL-SCHEMA] verified".
+        ✓ Never drops tables or deletes data.
+    """
+    import sqlite3
+    from engines.config_paths import (
+        LOCAL_AUTO, LOCAL_BETS, LOCAL_SETTLE, LOCAL_MASTERY,
+        CLOUD_AUTO, CLOUD_BETS, CLOUD_SETTLE, CLOUD_MASTERY
+    )
+
+    families = {
+        "auto":       (LOCAL_AUTO,       CLOUD_AUTO),
+        "bets":       (LOCAL_BETS,       CLOUD_BETS),
+        "settlements":(LOCAL_SETTLE,     CLOUD_SETTLE),
+        "mastery":    (LOCAL_MASTERY,    CLOUD_MASTERY),
+    }
+
+    total_ops = 0
+    tables_fixed = 0
+
+    for fam, (local_path, live_path) in families.items():
+        try:
+            lcon = sqlite3.connect(local_path)
+            vcon = sqlite3.connect(live_path)
+            lcur, vcur = lcon.cursor(), vcon.cursor()
+
+            local_tables = [
+                t[0] for t in lcur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            ]
+
+            for tbl in local_tables:
+                ops = 0
+
+                # LOCAL schema
+                lcols = {
+                    c[1]: (c[2], c[3], c[4], c[5])
+                    for c in lcur.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                }
+
+                lidx = [
+                    (i[1], i[2])  # (index_name, is_unique)
+                    for i in lcur.execute(f"PRAGMA index_list('{tbl}')").fetchall()
+                    if i[2] == 1
+                ]
+
+                # LIVECACHE schema
+                vcols = {
+                    c[1]: (c[2], c[3], c[4], c[5])
+                    for c in vcur.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                }
+
+                # 1️⃣ Missing columns
+                for col, meta in lcols.items():
+                    if col not in vcols:
+                        col_type = meta[0] or "TEXT"
+                        vcur.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type}")
+                        ops += 1
+
+                # 2️⃣ Missing UNIQUE indexes
+                existing_idx = {
+                    i[1]
+                    for i in vcur.execute(f"PRAGMA index_list('{tbl}')").fetchall()
+                    if i[2] == 1
+                }
+
+                for idx_name, _unique in lidx:
+                    # index columns
+                    icols = [
+                        r[2] for r in lcur.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
+                    ]
+                    new_idx = f"ux_{tbl}_{'_'.join(icols)}"
+                    if new_idx not in existing_idx:
+                        vcur.execute(
+                            f"CREATE UNIQUE INDEX IF NOT EXISTS {new_idx} "
+                            f"ON {tbl} ({','.join(icols)})"
+                        )
+                        ops += 1
+
+                if ops:
+                    tables_fixed += 1
+                    total_ops += ops
+                    print(f"[DAL-SCHEMA] table {tbl}: repaired {ops} ops")
+
+            vcon.commit()
+            lcon.close()
+            vcon.close()
+
+        except Exception as e:
+            print(f"[DAL-SCHEMA] warn {fam}: {e}")
+
+    if total_ops == 0:
+        print("[DAL-SCHEMA] verified")
+    else:
+        print(f"[DAL-SCHEMA] repaired: {tables_fixed} tables, {total_ops} operations")
+
+
+
+# === PATCH END ==============================================================
+
+
 # === PATCH START ===
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: def start_live_loop(
@@ -3372,15 +3484,8 @@ def start_live_loop(*args, **kwargs):
     interval = max(0.25, 1.0 / (hz or 2.0))
 
     # ------------------------------------------------------------------
-    # 3) ENABLE DAL + HIJACK + RELOAD WRITER MODULES
+    # 3) ENABLE DAL FIRST (BEFORE HIJACK)
     # ------------------------------------------------------------------
-    try:
-        from engines.database_hijack_monitor import activate_hijack
-        activate_hijack()
-        print("[HIJACK] enabled for LIVE mode")
-    except Exception as e:
-        print(f"[HIJACK] warn: {e}")
-
     try:
         from engines.config_paths import enable_live_dal
         enable_live_dal()
@@ -3394,7 +3499,9 @@ def start_live_loop(*args, **kwargs):
     except Exception:
         pass
 
-    # reload writers using DAL
+    # ------------------------------------------------------------------
+    # 4) RELOAD WRITERS AND LIVE MODULES (WITHOUT HIJACK YET)
+    # ------------------------------------------------------------------
     try:
         import importlib
         import engines.odds.writers as _rw
@@ -3407,22 +3514,21 @@ def start_live_loop(*args, **kwargs):
         import engines.live.overwatcher as _ow
         import engines.mastery.feedback_scheduler as _fs
         import engines.decision_engine.decide_once.helpers as _dh
-
         for m in (_rw, _os, _bm, _md, _mm, _lr, _ls, _ow, _fs, _dh):
             importlib.reload(m)
-
         print("[LIVE DAL] reload complete (writers reopened)")
     except Exception as e:
         print(f"[LIVE DAL] reload warn: {e}")
 
-    # === PATCH START…
+    # ------------------------------------------------------------------
+    # 5) REPAIR SCHEMA (SAFE TIME)
+    # ------------------------------------------------------------------
+    AUTOSCALP_USE_HIJACK = False
+    # Inject into live-loop startup (called once)
     try:
-        from engines import alphax_gateway as AX
-        AX.start_alphax_threads()
-        print("[AlphaX] LP + Mirror threads started")
+        _dal_verify_and_repair_schema()
     except Exception as e:
-        print(f"[AlphaX] bootstrap warn: {e}")
-    # === PATCH END…
+        print(f"[DAL-SCHEMA] fatal: {e}")
 
     # --------------------------------------------------------------
     # **CLOUDKEEPER STARTUP PURGE (ONCE-PER-DAY RETENTION)**

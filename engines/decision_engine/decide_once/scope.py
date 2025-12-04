@@ -638,7 +638,7 @@ def build_and_maintain_scope(*, inplay_window_min: int = 15, show_dashboard: boo
     # --- Always include today's markets with open bets ----------------
     open_bets = []
     try:
-        from engines.config_paths import connect_autoscalp_db as _auto_db, q_retry as _q
+        from engines.config_paths import open_auto_db as _auto_db, q_retry as _q
         con = _auto_db(ro=True)
         con.row_factory = sqlite3.Row
         rows = _q(con, """

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import os, sys, subprocess
+import os, sys
+import subprocess
 
 MENU = {
     "1": {
@@ -512,19 +513,13 @@ def handle_choice(choice: str):
         import subprocess, datetime
         from pathlib import Path
 
-        # Correct project root
         root = Path(__file__).resolve().parent
         script = root / "scripts" / "db_repair_all.py"
 
-
-        # timestamped logfile in data/db_repair_logs
         ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         logdir = root / "data" / "db_repair_logs"
         logdir.mkdir(parents=True, exist_ok=True)
-
-        logdir.mkdir(exist_ok=True)
         logfile = logdir / f"repair-{ts}.log"
-
         print(f"[system] Log: {logfile}")
 
         try:
@@ -538,30 +533,23 @@ def handle_choice(choice: str):
                 for line in proc.stdout:
                     print(line, end="")
                     f.write(line)
+
             print("[system] DB Repair complete.")
+
         except Exception as e:
             print(f"[system] ERROR running DB repair: {e}")
 
-            # -----------------------------------------------
-            # Run LiveCache full-schema rebuilder
-            # -----------------------------------------------
-            print("\n[system] Rebuilding full LiveCache schema…")
-            proc2 = subprocess.Popen(
-                ["python3", str(rebuild_script)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
-            for line in proc2.stdout:
-                print(line, end="")
-                f.write(line)
 
-            print("\n[system] LiveCache Schema Rebuild complete.")
 
-            print("\n[system] FULL DB FIX COMPLETE ✔️\n")
-
-        except Exception as e:
-            print(f"[system] ERROR in repair or rebuild: {e}")
+        # ---- ALWAYS RUN THIS ----
+        cmd = f'cd {PROJECT_DIR} && echo "DB Repair log at: {logfile}" ; exec bash'
+        osa = f'''
+        tell application "Terminal"
+            activate
+            do script "{cmd}"
+        end tell
+        '''
+        subprocess.run(["osascript", "-e", osa])
 # === PATCH END ============================================================
 
     else:

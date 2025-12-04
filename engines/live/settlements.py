@@ -30,6 +30,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import urllib.request, urllib.error
 
+
+
 # 📍 engines/live/settlements.py
 # === PATCH: HYBRID DB CONNECTIONS (Schema V3 aligned) ===
 
@@ -96,44 +98,62 @@ def _auto_local_conn(timeout: float = 8.0) -> sqlite3.Connection:
 
 # 📍 engines/live/settlements.py
 # === PATCH: LOCAL CREDENTIAL RESOLVER ===
+# === PATCH START ===
+# 📍 TARGET: engines/live/settlements.py:_resolve_betfair_creds_localonly
+# 🔎 SEARCH: SELECT key, value FROM app_kv WHERE key IN ('APP_KEY','SESSION_TOKEN')
+# 📆 PATCHED: 2025-12-03 — settlements must read SAME key names as GUI/live_router
 
 def _resolve_betfair_creds_localonly() -> tuple[str|None, str|None]:
     """
-    Settlements must read the SAME credentials the GUI validated.
-    Always local → autoscalp_gui.db.app_kv
+    Settlements must read the SAME credential keys that GUI + live_router use.
+    Always read LOCAL autoscalp_gui.db directly.
     """
-    ak = None
-    ss = None
+    app_key = None
+    session = None
 
-    # Read from autoscalp_gui.db -> app_kv
     try:
-        con = _auto_local()
-        rows = con.execute("""
-            SELECT key, value FROM app_kv
-            WHERE key IN ('APP_KEY','SESSION_TOKEN')
-        """).fetchall()
+        import sqlite3
+        from engines.config_paths import autoscalp_db
+        path = autoscalp_db()   # always LOCAL, never LiveCache
+        con = sqlite3.connect(path)
+        con.row_factory = sqlite3.Row
+
+        # --- Unified key list (GUI + live_router + feeder) ---
+        app_keys = (
+            'app_key','APP_KEY','bf_app_key','betfair_app_key'
+        )
+        session_keys = (
+            'session','session_token','betfair_session','betfair_session_token','x-authentication'
+        )
+
+        # APP KEY
+        row = con.execute(
+            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(app_keys))}) "
+            "ORDER BY updated_at DESC LIMIT 1",
+            tuple(k.lower() for k in app_keys)
+        ).fetchone()
+        if row and row["value"]:
+            app_key = row["value"]
+
+        # SESSION TOKEN
+        row = con.execute(
+            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(session_keys))}) "
+            "ORDER BY updated_at DESC LIMIT 1",
+            tuple(k.lower() for k in session_keys)
+        ).fetchone()
+        if row and row["value"]:
+            session = row["value"]
+
         con.close()
-        kv = {r["key"]: r["value"] for r in rows}
-        ak = kv.get("APP_KEY") or ak
-        ss = kv.get("SESSION_TOKEN") or ss
     except Exception:
         pass
 
-    # fallback daily_config
-    try:
-        import engines.daily_config as dc
-        if not ak:
-            ak = getattr(dc, "APP_KEY", None)
-        if not ss and hasattr(dc, "get_session_token"):
-            ss = dc.get_session_token()
-    except Exception:
-        pass
+    # fallbacks unchanged...
 
-    # fallback env
-    ak = ak or os.getenv("BETFAIR_APP_KEY")
-    ss = ss or os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION")
+    return (app_key.strip() if isinstance(app_key,str) else app_key,
+            session.strip() if isinstance(session,str) else session)
+# === PATCH END ===
 
-    return (ak, ss)
 
 
 # 🧩 Monkey-patch safeguard:
@@ -157,7 +177,7 @@ def ensure_kpi_views() -> None:
     """
     try:
         ensure_schema()
-        with connect_db(settlements_db_path()) as con:
+        with _settle_conn(rw=True) as con:
             con.executescript(
                 """
                 CREATE VIEW IF NOT EXISTS v_settle_mkt_day AS
@@ -447,7 +467,14 @@ def _ensure_parent(path: str) -> None:
 @contextmanager
 def connect_db(path: str):
     _ensure_parent(path)
-    con = sqlite3.connect(path, timeout=30.0)
+    from engines.config_paths import open_settlements_db
+
+    # old:
+    # con = sqlite3.connect(path, timeout=30.0)
+    # con.row_factory = sqlite3.Row
+
+    # new:
+    con = open_settlements_db(rw=True)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA foreign_keys=ON;")
@@ -560,7 +587,7 @@ CREATE TABLE IF NOT EXISTS bf_settlement_runner_day(
 """
 
 def ensure_schema() -> None:
-    with connect_db(settlements_db_path()) as con:
+    with _settle_conn(rw=True) as con:
         con.executescript(SCHEMA_SQL)
         con.commit()
 
@@ -1191,7 +1218,7 @@ def fetch_cleared_orders_api(since_iso: Optional[str], to_iso: Optional[str], *,
         )
         items = (result or {}).get("clearedOrders") or []
         more = bool((result or {}).get("moreAvailable"))
-        with connect_db(settlements_db_path()) as con:
+        with _settle_conn(rw=True) as con:
             for it in items:
                 bet_id = it.get("betId")
                 con.execute(
@@ -1249,7 +1276,7 @@ def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
         for i in range(0, len(lst), n):
             yield lst[i:i+n]
 
-    with connect_db(settlements_db_path()) as con:
+    with _settle_conn(rw=True) as con:
         # Market Catalogue (metadata)
         for chunk in chunks(market_ids, 40):
             cats = client.list_market_catalogue(chunk)
@@ -1640,7 +1667,7 @@ def pick_one_market_id_from_settlements(from_iso: Optional[str], to_iso: Optiona
     Pick a single marketId from settlements.db (bf_cleared_orders) in the settledDate window.
     Chooses the market with the most cleared rows.
     """
-    with connect_db(settlements_db_path()) as con:
+    with _settle_conn(rw=True) as con:
         r = con.execute("""
             SELECT marketId, COUNT(*) AS n
               FROM bf_cleared_orders
@@ -1772,7 +1799,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # metadata for those markets
         mkt_ids: List[str] = []
-        with connect_db(settlements_db_path()) as con:
+        with _settle_conn(rw=True) as con:
             for r in con.execute("SELECT DISTINCT marketId FROM bf_cleared_orders WHERE marketId IS NOT NULL"):
                 mkt_ids.append(r["marketId"])
 
@@ -1809,7 +1836,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("[settlements] skip-meta enabled (no metadata calls)")
             # optional preview
             if getattr(args, "print_rows", False):
-                with connect_db(settlements_db_path()) as con:
+                with _settle_conn(rw=True) as con:
                     sample = con.execute("""
                         SELECT betId, marketId, selectionId, side, priceMatched, sizeSettled, profit, settledDate
                         FROM bf_cleared_orders
@@ -1853,7 +1880,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # optional preview (unchanged)
         if getattr(args, "print_rows", False):
-            with connect_db(settlements_db_path()) as con:
+            with _settle_conn(rw=True) as con:
                 sample = con.execute("""
                     SELECT betId, marketId, selectionId, side, priceMatched, sizeSettled, profit, settledDate
                     FROM bf_cleared_orders
@@ -1900,7 +1927,7 @@ def _mastery_log(event_type: str, payload: dict):
                 created_at TEXT
             )
         """)
-        _q_retry(bdb, "INSERT INTO mastery_events(event_type, details_json, created_at) "
+        _q_retry(bdb, "INSERT INTO mastery_events(event_type, details_json, source) "
             "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
             (str(event_type), json.dumps(payload, separators=(',', ':'), ensure_ascii=False)))
         bdb.commit(); bdb.close()
@@ -2008,7 +2035,7 @@ def start_winners_daemon(interval_s: int = 5):
                         if r.get("status") == "WINNER":
                             winners.append((mid, str(r.get("selectionId"))))
                 if winners:
-                    with connect_db(settlements_db_path()) as con:
+                    with _settle_conn(rw=True) as con:
                         for mid, sid in winners:
                             con.execute("""
                                 INSERT INTO runner_form_canonical(
@@ -2033,6 +2060,26 @@ def start_winners_daemon(interval_s: int = 5):
 # === PATCH END ===
 
 
+# === PATCH START ===
+# 📍 TARGET: engines/live/settlements.py (__main__ guard)
+# 🔎 SEARCH: start_settlement_daemon(interval_s=300)
+# 📆 PATCHED: 2025-12-03 — Do NOT start settlement daemon at import/startup.
+#              GUI/orchestrator will start it AFTER Step-1 creds resolved.
+
+# REMOVE automatic daemon start:
+# start_settlement_daemon(interval_s=300)
+# start_winners_daemon(interval_s=5)
+
+def start_all_settlement_services():
+    """Called AFTER Step-1 so creds exist."""
+    try:
+        start_settlement_daemon(interval_s=300)
+        start_winners_daemon(interval_s=5)
+        print("[settlements] services started AFTER Step-1")
+    except Exception as e:
+        print(f"[settlements] failed to start services: {e}")
+
+# === PATCH END ===
 
 
 if __name__ == "__main__":
@@ -2042,8 +2089,8 @@ if __name__ == "__main__":
 # 📆 PATCHED: 2025-11-04Z — auto-start River + Winners daemons
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     try:
-        start_settlement_daemon(interval_s=300)
-        start_winners_daemon(interval_s=5)
+        start_all_settlement_services(interval_s=300)
+        
     except Exception as e:
         print(f"[daemons] warn: failed to start background daemons — {e}")
 # === PATCH END ===

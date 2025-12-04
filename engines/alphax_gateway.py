@@ -35,15 +35,20 @@ _STOP = threading.Event()
 # ============================================================
 #  PUBLIC API: enqueue_write()
 # ============================================================
-def enqueue_write(sql: str, params=None, priority: int = 5):
+# === PATCH START ============================================================
+# Change enqueue_write signature to accept DAL connection objects
+
+def enqueue_write(real_con, sql: str, params=None, priority: int = 5):
     """
-    Public enqueue function (Hijack-compatible).
-    Pushes (priority, timestamp, sql, params) into LP queue.
+    Queue the SQL with its TRUE DAL connection.
+    AlphaX never opens DBs — it only executes what DAL already routed.
     """
     try:
-        _LP.put((priority, time.time(), sql, params or ()))
+        _LP.put((priority, time.time(), real_con, sql, params or ()))
     except Exception as e:
         print(f"[AlphaX enqueue_write] warn: {e} | sql={sql[:80]}")
+# === PATCH END ============================================================
+
 
 
 # ============================================================
@@ -56,18 +61,21 @@ def _detect_family(sql_l: str) -> str:
     return "auto"
 
 def _classify(sql_l: str):
-    is_write = sql_l.startswith((
+    # True writes = only actual write verbs
+    if sql_l.startswith((
         "insert", "update", "delete", "replace",
         "alter", "create", "drop"
-    ))
+    )):
+        return 1, True
 
-    if any(k in sql_l for k in ("orders", "bets", "hedge", "ladder", "decisions")):
-        return 1, True   # HP write
+    # OC & inbound-heavy writes (safe because they always do UPSERT)
+    if sql_l.startswith("insert") or sql_l.startswith("update"):
+        if any(k in sql_l for k in ("odds_current", "inbound_", "oc_series", "markets_schedule")):
+            return 3, True
 
-    if any(k in sql_l for k in ("odds_current", "inbound_", "oc_series", "markets_schedule")):
-        return 3, True
+    # Everything else = read
+    return 5, False
 
-    return 5, False      # read
 
 
 def alphax_route(sql: str, params=None):
@@ -81,43 +89,71 @@ def alphax_route(sql: str, params=None):
     return {"family": fam, "priority": prio, "rw": rw}
 
 
+# === PATCH START ============================================================
+
+class AlphaXWrapper:
+    """
+    Thin wrapper around the REAL DAL connection.
+    execute() does NOT execute immediately.
+    It queues (real_con, sql, params) for the LP worker.
+    """
+    __slots__ = ("_real_con",)
+
+    def __init__(self, real_con):
+        self._real_con = real_con
+
+    def execute(self, sql, params=()):
+        # tech-family classification preserved
+        AlphaX_enqueue = enqueue_write
+        AlphaX_enqueue(self._real_con, sql, params)
+        return self
+
+    def executemany(self, sql, seq):
+        for p in seq:
+            enqueue_write(self._real_con, sql, tuple(p), priority=5)
+
+        return self
+
+
+    # These allow callers to finalize transactions safely
+    def commit(self): return None
+    def close(self): return None
+# === PATCH END ============================================================
+# === PATCH START ============================================================
+
+def _normalise(item):
+    """
+    item structure becomes:
+        (prio, ts, real_con, sql, params)
+    """
+    # === PATCH START ===
+    if isinstance(raw, tuple) and len(raw) == 2:
+        sql_s, params = raw
+        sql_s = str(sql_s)
+        return sql_s, params
+    # === PATCH END ===
+
+    prio, ts, real_con, sql, params = item
+
+    sql_s = (sql or "").strip()
+    if not sql_s:
+        return None
+
+    fam = _detect_family(sql_s.lower())
+    return prio, real_con, sql_s, tuple(params or ())
+
+
+# === PATCH END ============================================================
+
+
 # ============================================================
 #  LP DISPATCHER (main worker)
 # ============================================================
 def _lp_loop():
     """
     Low-priority batched write dispatcher.
+    Executes SQL using REAL DAL connections (no opener, no new connections).
     """
-
-    from engines.config_paths import (
-        open_auto_db,
-        open_bets_db,
-        open_mastery_db,
-        open_settlements_db,
-    )
-
-    WAL = {
-        "auto": open_auto_db,
-        "bets": open_bets_db,
-        "mastery": open_mastery_db,
-        "settlements": open_settlements_db,
-    }
-
-    def _normalise(item):
-        if not isinstance(item, tuple):
-            return None
-        if len(item) == 3:
-            prio, sql, fam = item
-            params = ()
-        elif len(item) == 4:
-            prio, _ts, sql, params = item
-            fam = alphax_route(sql, params)["family"]
-        else:
-            return None
-        sql_s = (sql or "").strip()
-        if not sql_s:
-            return None
-        return prio, sql_s, fam, tuple(params or ())
 
     BATCH_WINDOW = 0.003
 
@@ -146,20 +182,18 @@ def _lp_loop():
                 continue
             batch.append(n2)
 
-        for (_prio, sql_s, fam, params) in batch:
-            opener = WAL.get(fam, WAL["auto"])
+        # === REAL DAL EXECUTION =====================================================
+        for (_prio, real_con, fam, sql_s, params) in batch:
             try:
-                con = opener(rw=True)
-                con.execute(sql_s, params)
-                con.commit()
-            except Exception:
-                pass
-            finally:
-                try: con.close()
-                except Exception: pass
+                real_con.execute(sql_s, params)
+                real_con.commit()
+            except Exception as e:
+                print(f"[AlphaX LP] write-fail: {e} | sql={sql_s}")
+        # =============================================================================
 
         for _ in batch:
             _LP.task_done()
+
 
 
 # ============================================================

@@ -2,7 +2,28 @@
 # engines/live/overwatcher.py
 import time, threading, sqlite3, json
 from datetime import datetime, timezone
-from engines.config_paths import auto_conn, q_retry as _q, autoscalp_db
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: from engines.config_paths import auto_conn, q_retry as _q, autoscalp_db
+# 📆 PATCHED: 2025-12-03 — Route Overwatcher through LiveCache (cloud) while keeping all aliases
+
+# OLD:
+# from engines.config_paths import auto_conn, q_retry as _q, autoscalp_db
+
+# NEW:
+from engines.config_paths import (
+    auto_conn_live as auto_conn,     # 🔥 Overwatcher now uses LiveCache everywhere
+    auto_conn_live as _auto_conn,    # 🔥 ensure all internal alias calls also use LiveCache
+    q_retry as _q,
+    autoscalp_db,                    # unchanged — still returns path only
+)
+
+# Backwards compatibility for anything else that imported auto_conn FOR THIS MODULE:
+auto_conn_local = auto_conn          # legacy alias if needed
+# === PATCH END ==============================================================
+# === PATCH START ===
+_q_retry = _q   # back-compat alias
+# === PATCH END ===
 
 
 try:
@@ -46,22 +67,6 @@ from engines.price_math import calculate_tick_distance as _tick_distance  # ✅ 
 from engines.mastery import event_sink
 
 
-
-# === PATCH START ===
-# 📍 TARGET: engines/live/overwatcher.py (bridge import)
-# 📆 PATCHED: 2025-11-10Z — point bridge import to mastery_v7.live_router_bridge
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-try:
-    # Use the v7 bridge, not live_router
-    from engines.mastery_v7.live_router_bridge import send_plan_through_bridge
-    print("[OVERWATCHER] ✅ bridge relay connected (v7)")
-except ImportError as e:
-    # fallback shim so runtime never blocks
-    def send_plan_through_bridge(plan: dict | None = None) -> bool:
-        print(f"[OVERWATCHER] ⚠️ bridge relay unavailable: {e}")
-        return False
-# === PATCH END ===
-
 def check_overwatcher_state():
     import threading
     live_threads = [t.name for t in threading.enumerate() if 'OVERWATCHER' in t.name or 'feedback' in t.name]
@@ -76,44 +81,33 @@ import time
 _last_brain_note = [0]       # module-level mutable container (existing)
 _last_brain_pulse = [None]   # NEW: stores last full valid pulse (same style)
 
-def _on_bridge_pulse(payload):
+def _on_brain_pulse(payload):
     try:
-        coh = float(payload.get("coherence", 0))
-        adj = float(payload.get("adjustment", 0))
-        reason = payload.get("reason", "Brain pulse")
-        ts = payload.get("ts")
-
         mid = str(payload.get("marketId") or "")
         sid = str(payload.get("selectionId") or "")
         if not mid or not sid:
-            now = time.time()
-            if now - _last_brain_note[0] > 300:   # every 5 minutes
-                print("[OVERWATCHER][BRAIN] ⏳ waiting for market context …")
-                _last_brain_note[0] = now
             return
 
         plan = {
-            "type": "BRAIN_BRIDGE",
-            "reason": reason,
-            "confidence": coh,
-            "adjustment": adj,
+            "type": "brain_plan",
             "marketId": mid,
             "selectionId": sid,
-            "side": "LAY" if adj >= 0 else "BACK",
-            "odds": payload.get("odds", 0),
-            "stake": payload.get("stake", 2.0),
-            "target_ticks": 1,
-            "ts": ts,
+            "side": "LAY" if payload.get("adjustment", 0) >= 0 else "BACK",
+            "odds": float(payload.get("odds") or 0),
+            "stake": float(payload.get("stake") or 2.0),
+            "target_ticks": int(payload.get("target_ticks") or 1),
+            "confidence": float(payload.get("coherence") or 0),
+            "adjustment": float(payload.get("adjustment") or 0),
+            "ts": payload.get("ts"),
         }
 
-        # NEW: store the last full valid pulse for MSC consumption
-        _last_brain_pulse[0] = dict(plan)
+        print(f"[OVERWATCHER][BRAIN] → router mid={mid} sid={sid}")
 
-        print(f"[OVERWATCHER][BRAIN] 🧠 bridge pulse mid={mid} sid={sid} coh={coh:.2f} adj={adj:+.2f}")
-        send_plan_through_bridge(plan)
+        event_sink.on_decision(plan)
+
     except Exception as e:
         print(f"[OVERWATCHER][BRAIN] warn: {e}")
-# === PATCH END ===
+
 
 # =====================================================================
 # 📍 TARGET: engines/live/overwatcher.py
@@ -158,12 +152,8 @@ def get_tsl_parent():
 
 
 # subscribe into Overwatcher event sink
+event_sink.subscribe(_on_brain_pulse)
 event_sink.subscribe(_on_tsl_event)
-# =====================================================================
-
-
-# attach listener to event bus
-event_sink.subscribe(_on_bridge_pulse)
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/overwatcher.py (after other event_sink.subscribe calls)
@@ -678,7 +668,14 @@ def risk_weight(market_id: str, selection_id: str) -> float:
     """Return historical win% probability for current shape pattern."""
     import sqlite3
     from engines.config_paths import autoscalp_db, q_retry as _q
-    con = sqlite3.connect(autoscalp_db()); con.row_factory = sqlite3.Row
+    from engines.config_paths import open_auto_db
+
+    # old:
+    # con = sqlite3.connect(autoscalp_db()); con.row_factory = sqlite3.Row
+
+    # new:
+    con = open_auto_db(rw=True)
+    con.row_factory = sqlite3.Row
     row = _q(con, """
         SELECT win_pct
           FROM v7_liability_risk

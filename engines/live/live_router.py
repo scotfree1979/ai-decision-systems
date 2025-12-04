@@ -6,7 +6,10 @@ import json, time, threading, random, sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 from engines import price_math as pm
-from engines.config_paths import auto_conn as _auto_conn
+# === PATCH START: use LiveCache-only DB connector for router ===
+from engines.config_paths import auto_conn_live as _auto_conn
+# === PATCH END ===
+
 import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
@@ -217,17 +220,33 @@ import sqlite3
 from engines.config_paths import autoscalp_db
 
 # unified GUI DB connector (no name collision)
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _db(
+# 📆 PATCHED: 2025-12-03 — Router must operate on LiveCache
+# ============================================================================
+
 def _db() -> sqlite3.Connection:
-    con = _cp_auto_conn()
+    """
+    Router must always use the LiveCache DB.
+    This ensures:
+        • parents and children are in the same DB
+        • match sync sees correct parent rows
+        • stoploss and hedge updates are consistent
+        • AlphaX mirrors LiveCache to Local without blocking
+    """
+    con = _cp_auto_conn(rw=True)  # ← ENFORCE LiveCache (CLOUD_AUTO alias)
     try:
         con.row_factory = sqlite3.Row
         _cp_q_retry(con, "PRAGMA journal_mode=WAL;")
         _cp_q_retry(con, "PRAGMA busy_timeout=8000;")
-        _cp_q_retry(con, "PRAGMA synchronous=NORMAL;")
-        _cp_q_retry(con, "PRAGMA read_uncommitted=1;")
     except Exception:
         pass
     return con
+
+# === PATCH END ==============================================================
+
+
 
 def _q(con: sqlite3.Connection, sql: str, params: tuple = ()):
     return _cp_q_retry(con, sql, params)
@@ -257,20 +276,26 @@ LETTER_MAP = {
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: LETTER_MAP = {
-# 📆 PATCHED: 2025-12-02 — expand letter recognition for MSC engines
-# ---------------------------------------------------------------------------
+# 🔎 INSERT BELOW EXISTING LETTER_MAP
+# 📆 PATCHED: 2025-12-03 — engine classifier for all order writes
 
-# Add MSC mappings (Exploratory = D, Risk = J, InPlay = V)
-LETTER_MAP.update({
-    "MSC_EXPLORATORY": "D",
-    "MSC_RISK":        "J",
-    "MSC_INPLAY":      "V",
-})
+ENGINE_MAP = {
+    "D": "MSC_EXPLORATORY",
+    "J": "MSC_RISK",
+    "V": "MSC_INPLAY",
+}
 
-# Also ensure raw letters D/J/V are accepted
-# (router already accepts single-letter fallback via s[:1])
-# === PATCH END ==============================================================
+def _engine_from_source(source: str) -> str:
+    """
+    Convert a source/letter into an engine bucket.
+    Defaults to LEGACY for all non-MSC letters.
+    """
+    if not source:
+        return "LEGACY"
+    L = str(source).upper()[:1]      # take the first letter only
+    return ENGINE_MAP.get(L, "LEGACY")
+# === PATCH END ============================================================
+
 
 
 def _letter_from_source(src: str) -> str:
@@ -338,7 +363,7 @@ def _mastery_log(event_type: str, payload: dict):
                 created_at TEXT
             )
         """)
-        _q_retry(bdb, "INSERT INTO mastery_events(event_type, details_json, created_at) "
+        _q_retry(bdb, "INSERT INTO mastery_events(event_type, details_json, source) "
             "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
             (str(event_type), json.dumps(payload, separators=(',', ':'), ensure_ascii=False))
         )
@@ -982,8 +1007,12 @@ def _orders_insert_parent_queued(run_id, market_id, selection_id, side, entry_od
             INSERT INTO orders (
                 customerOrderRef, run_id, mode, marketId, selectionId,
                 side, entry_odds, entry_stake, entry_status, opened_at,
-                role, source
-            ) VALUES (?, ?, 'LIVE', ?, ?, ?, ?, ?, 'queued', ?, 'PARENT', ?)
+                role, source, engine
+            )
+            VALUES (
+                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'queued', ?, 
+                'PARENT', ?, ?
+            )
             ON CONFLICT(customerOrderRef) DO UPDATE SET
                 run_id=COALESCE(orders.run_id, excluded.run_id),
                 mode='LIVE',
@@ -995,10 +1024,22 @@ def _orders_insert_parent_queued(run_id, market_id, selection_id, side, entry_od
                 entry_status=COALESCE(orders.entry_status, 'queued'),
                 opened_at=COALESCE(orders.opened_at, excluded.opened_at),
                 role='PARENT',
-                source=COALESCE(orders.source, excluded.source)
-        """, (str(cor), int(fk), str(market_id), str(selection_id),
-              side.upper(), float(entry_odds), float(entry_stake),
-              _utcnow_str(), str(source)))
+                source=COALESCE(orders.source, excluded.source),
+                engine=COALESCE(orders.engine, excluded.engine)
+        """,
+        (
+            str(cor),                 # customerOrderRef
+            int(fk),                  # run_id
+            str(market_id),           # marketId
+            str(selection_id),        # selectionId
+            side.upper(),             # side
+            float(entry_odds),        # entry_odds
+            float(entry_stake),       # entry_stake
+            _utcnow_str(),            # opened_at
+            str(source),              # source
+            _engine_from_source(source)  # engine
+        ))
+
         con.commit()
         _orders_probe(cor, note="queued")
     except Exception as e:
@@ -1584,34 +1625,30 @@ def _open_parents_count_live(market_id: str, selection_id: str) -> int:
         try: con.close()
         except Exception: pass
 
-# === PATCH START ===
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _active_parents_count_per_letter(
+# 📆 PATCHED: 2025-12-03 — remove embedded patch text & fix SQL
+# ---------------------------------------------------------------------------
+
 def _active_parents_count_per_letter(market_id: str, selection_id: str, letter: str) -> int:
     """
     Count active parents for this (market, selection, letter).
     Active = entry_status in ('PLACED','MATCHED')
              AND no matched hedge/stoploss child yet.
+    MSC extensions: letters D, J, V.
     """
     try:
+        L = str(letter or "").upper()
+        # Accept raw letters or MSC tags
+        VALID = {"A","B","C","D","E","F","G","H","I","J","K",
+                 "L","P","R","S","T","V","X","Z"}
+        if L not in VALID:
+            L = L[:1]  # fallback safe
+
         con = _orders_conn(); con.row_factory = sqlite3.Row
-        row = _q_retry(con, f"""
-        # === PATCH START ============================================================
-        # 📍 TARGET: engines/live/live_router.py
-        # 🔎 SEARCH: def _active_parents_count_per_letter(
-        # 📆 PATCHED: 2025-12-02 — support MSC letters D/J/V in CAP accounting
-        # ---------------------------------------------------------------------------
 
-        # No code replacement needed — but we must ensure that D/J/V letters 
-        # are not filtered out by LIKE patterns. Insert right before SELECT:
-
-        letter = str(letter).upper()
-        if letter not in ("A","B","C","D","E","F","G","H","I","J","K","L","P","R","S","T","V","X","Z"):
-            # MSC extensions added: D, J, V
-            # Allow raw letters without mapping
-            pass
-
-        # (query below remains unchanged)
-        # === PATCH END ==============================================================
-
+        row = _q_retry(con, """
             SELECT COUNT(*) AS n
               FROM orders p
              WHERE mode='LIVE'
@@ -1621,19 +1658,21 @@ def _active_parents_count_per_letter(market_id: str, selection_id: str, letter: 
                AND UPPER(COALESCE(entry_status,'')) IN ('PLACED','MATCHED')
                AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
                AND NOT EXISTS (
-                   SELECT 1 FROM orders c
-                    WHERE c.hedge_of=p.id
-                      AND UPPER(COALESCE(c.exit_status,''))='MATCHED'
+                     SELECT 1 FROM orders c
+                      WHERE c.hedge_of=p.id
+                        AND UPPER(COALESCE(c.exit_status,''))='MATCHED'
                )
-        """, (str(market_id), str(selection_id), f"{letter}%")).fetchone()
+        """, (str(market_id), str(selection_id), f"{L}%")).fetchone()
+
         return int(row["n"] or 0)
     except Exception:
         return 0
     finally:
         try: con.close()
-        except Exception: pass
-# === PATCH END ===
+        except Exception:
+            pass
 
+# === PATCH END ============================================================
 
 def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> None:
     _ensure_orders_schema()
@@ -1685,7 +1724,7 @@ def _orders_insert_child_live(parent_cor: str, *, market_id: str, selection_id: 
             INSERT INTO orders(
               customerOrderRef, run_id, mode, marketId, selectionId,
               side, entry_odds, entry_stake, entry_status, opened_at,
-              entry_bet_id, role, hedge_of, source, exit_kind
+              entry_bet_id, role, hedge_of, source, exit_kind, engine
             ) VALUES (?, ?, 'LIVE', ?, ?, ?, ?, ?, 'live', datetime('now','utc'),
                       ?, 'CHILD', ?, ?, ?)
         """, (_ref("CHILD"), int(fk), str(market_id), str(selection_id),
@@ -1790,7 +1829,7 @@ def _place_stoploss_child_now(
                     ?, ?, ?,
                     'matched', datetime('now','utc'),
                     ?,
-                    'CHILD', ?, 'S', 'STOPLOSS')
+                    'CHILD', ?, 'S', 'STOPLOSS',)
         """, (
             cref, fk_run,
             str(market_id), str(selection_id),
@@ -2133,6 +2172,33 @@ def place_parent_and_hedge(
     if (letter == "A" and USE_ROUTER_DYNAMIC_STAKE_A) or (stake <= 0.0):
         stake = dyn_stake
 
+        # === BANKSTATE GATING ============================================
+        try:
+            from engines.live import bank_state
+
+            # resolve engine bucket
+            eng = _engine_from_source(source)
+
+            # static pot (used for dynamic stake sizing)
+            live_bank = bank_state.get_engine_pot(eng)
+
+            # required stake for this order (dyn or plan)
+            stake_required = float(stake)
+
+            # is there enough AVAILABLE pot right now?
+            if not bank_state.can_place(eng, stake_required):
+                msg = (f"[BUDGET] block: engine={eng} "
+                       f"need={stake_required:.2f} "
+                       f"avail={bank_state.get_engine_available(eng):.2f}")
+                _log_event("WARN", "live_router", msg)
+                return None, msg
+
+        except Exception as e:
+            _log_event("ERROR", "live_router",
+                       f"budget_gate_error src={source} err={e}")
+        # ==================================================================
+
+
     try:
         _log_event("INFO","live_router",
                    f"stake_resolve letter={letter} phase={phase} stake={stake:.2f} "
@@ -2154,6 +2220,7 @@ def place_parent_and_hedge(
         "letter": letter, "phase": phase, "market": str(market_id), "runner": str(selection_id),
         "entry_odds": float(entry_odds), "stake": float(stake), "why": dyn_why, "source": str(source),
     })
+
 
     # --- CAP gate --------------------------------------------------------------
     try:
