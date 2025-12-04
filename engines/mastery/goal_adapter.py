@@ -9,6 +9,117 @@ from datetime import datetime, timezone
 import math
 import os
 
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py
+# 📆 PATCHED: 2025-12-04 — introduce DAL-safe read helpers
+# =======================================================================
+
+from engines.config_paths import auto_conn
+
+def _safe_read(sql: str, params=()):
+    """
+    Execute SQL safely using DALReadProxy.
+    Always returns list-of-tuples (never raises, never returns None).
+    """
+    try:
+        con = auto_conn(rw=False)
+        fut = con.execute(sql, params or ())
+        rows = fut.fetchall()
+        return rows or []
+    except Exception:
+        return []
+
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py
+# 📆 PATCHED: 2025-12-04 — New multi-window trade stats engine
+# =======================================================================
+
+def _trade_stats(period_days=None):
+    """
+    Returns dict with:
+      total, good, bad, win_rate, matched_ratio
+    period_days:
+       None → ALL TIME
+       0    → TODAY
+       7    → last 7 days
+       30   → last 30 days
+    """
+    where = ""
+    params = ()
+
+    if period_days is not None:
+        if period_days == 0:
+            where = "AND date(opened_at)=date('now','utc')"
+        else:
+            where = "AND opened_at >= datetime('now','utc', ?)"
+            params = (f'-{period_days} day',)
+
+    # parents
+    row = _safe_read_one(f"""
+        SELECT COUNT(*)
+          FROM orders
+         WHERE role='PARENT'
+         {where}
+    """, params)
+    total = row[0] if row else 0
+
+    # hedged
+    row = _safe_read_one(f"""
+        SELECT COUNT(DISTINCT p.id)
+          FROM orders p
+          JOIN orders c ON c.hedge_of=p.id
+         WHERE p.role='PARENT'
+           AND c.role='CHILD'
+           AND c.source='H'
+           AND c.entry_status='MATCHED'
+           {where.replace("opened_at", "p.opened_at")}
+    """, params)
+    good = row[0] if row else 0
+
+    bad = total - good
+
+    # win-rate
+    rowset = _safe_read(f"""
+        SELECT marketId,
+               SUM(COALESCE(net,0)) AS total
+          FROM v_dashboard_cashout
+         WHERE date(day) >= CASE
+                 WHEN ? IS NULL THEN date(day)
+                 WHEN ?='0' THEN date('now','utc')
+                 ELSE date('now','utc', ?)
+             END
+         GROUP BY marketId
+    """, (None if period_days is None else str(period_days),
+          '0' if period_days == 0 else None,
+          f'-{period_days} day' if period_days not in (None,0) else None))
+
+    if rowset:
+        wins = sum(1 for r in rowset if float(r[1] or 0) > 0)
+        total_mkts = len(rowset)
+        win_rate = wins / total_mkts
+    else:
+        win_rate = 0.0
+
+    matched_ratio = (good / total) if total > 0 else 0.0
+
+    return dict(
+        total=total,
+        good=good,
+        bad=bad,
+        win_rate=win_rate,
+        matched_ratio=matched_ratio,
+    )
+
+# === PATCH END =========================================================
+
+
+def _safe_read_one(sql: str, params=()):
+    rows = _safe_read(sql, params)
+    return rows[0] if rows else None
+
+# === PATCH END =========================================================
+
+
 def current_goals():
     """Return canonical live goal values."""
     return dict(
@@ -42,120 +153,104 @@ def _pnl_score(pnl: float, *, profit_target: float, max_loss: float) -> float:
         return max(0.0, 0.3 * math.exp(pnl / abs(max_loss)))
     return 0.0
 
-# === PATCH START ===
-# 📍 TARGET: engines/mastery/goal_adapter.py
-# 📆 PATCHED: 2025-11-06Z — add print-only trade outcome summary (H/S/M logic)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import sqlite3
-from engines.config_paths import autoscalp_db
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py:print_trade_outcome_summary
+# =======================================================================
 
+# === PATCH START =======================================================
 def print_trade_outcome_summary():
     """
-    Console-only summary showing number of good (H) and bad (S/M/no child) trades.
-    Does not affect goal alignment calculations — purely informational.
+    Print ALL TIME, TODAY, 7-DAY, 30-DAY stats.
     """
-    con = sqlite3.connect(autoscalp_db())
-    con.row_factory = sqlite3.Row
+    stats_all  = _trade_stats(None)
+    stats_day  = _trade_stats(0)
+    stats_7    = _trade_stats(7)
+    stats_30   = _trade_stats(30)
 
-    total = con.execute("""
-        SELECT COUNT(*) FROM orders WHERE role='PARENT';
-    """).fetchone()[0] or 0
+    def fmt(name, s):
+        print(f"\n[{name}]")
+        print(f"  Total parents : {s['total']}")
+        print(f"  Good (hedged) : {s['good']}")
+        print(f"  Bad           : {s['bad']}")
+        print(f"  Win rate      : {s['win_rate']:.3f}")
+        print(f"  Matched ratio : {s['matched_ratio']:.3f}")
 
-    good = con.execute("""
-        SELECT COUNT(DISTINCT p.id)
-          FROM orders p
-          JOIN orders c ON c.hedge_of = p.id
-         WHERE p.role='PARENT'
-           AND c.role='CHILD'
-           AND c.source='H';
-    """).fetchone()[0] or 0
+    print_trade_outcome_summary.__wrapped__ = True  # marker
 
-    bad = con.execute("""
-        SELECT COUNT(DISTINCT p.id)
-          FROM orders p
-          LEFT JOIN orders c ON c.hedge_of = p.id
-         WHERE p.role='PARENT'
-           AND (c.id IS NULL OR c.source IN ('S','M'));
-    """).fetchone()[0] or 0
+    print("\n=== TRADE OUTCOME SUMMARY ===")
+    fmt("ALL TIME", stats_all)
+    fmt("TODAY", stats_day)
+    fmt("LAST 7 DAYS", stats_7)
+    fmt("LAST 30 DAYS", stats_30)
+    print("================================\n")
+# === PATCH END =========================================================
 
-    con.close()
-
-    pct_good = (good / total * 100) if total else 0
-    pct_bad  = (bad / total * 100) if total else 0
-
-    print("\n[goal_adapter] Trade Outcome Snapshot")
-    print(f"  • Good trades  : {good:6d} ({pct_good:5.1f}%)  (hedged)")
-    print(f"  • Bad trades   : {bad:6d} ({pct_bad:5.1f}%)  (S/M/no child)")
-    print(f"  • Total trades : {total:6d}")
-    print(f"  • Goal alignment proxy (good/total): {good/total if total else 0:5.3f}")
-# === PATCH END ===
-
-
-
-def evaluate_progress(live_pnl: float, win_rate: float, matched_ratio: float) -> float:
+# === PATCH START =======================================================
+def evaluate_progress(live_pnl, win_rate, matched_ratio):
     """
-    Compute a 0–1 progress score vs core goals.
-
-    Open-ended upward reward:
-      • profits above target continue to score 1.0
-      • losses graded by size, tolerating small losses
-    Weighted equally with win-rate and matched-ratio.
+    New correct goal-alignment:
+      • Profit alignment (vs profit target)
+      • Loss control (vs max loss)
+      • Win rate alignment
+      • Matched ratio alignment
+    Each component 0–1, then averaged.
     """
     g = current_goals()
 
-    pnl_component   = _pnl_score(live_pnl,
-                                 profit_target=g["target_profit"],
-                                 max_loss=g["max_loss"])
-    win_component   = min(1.0, max(0.0, win_rate / g["win_rate"]))
-    match_component = min(1.0, max(0.0, matched_ratio / g["matched_ratio"]))
+    # Profit score (open-ended)
+    if live_pnl >= g["target_profit"]:
+        profit_score = 1.0
+    else:
+        profit_score = max(0.0, live_pnl / g["target_profit"])
 
-    return round((pnl_component + win_component + match_component) / 3.0, 3)
-# === PATCH END ===
+    # Loss control score
+    if live_pnl >= 0:
+        loss_score = 1.0
+    else:
+        loss_score = max(0.0, 1 - abs(live_pnl) / abs(g["max_loss"]))
+
+    # Win rate score
+    win_score = min(1.0, win_rate / g["win_rate"])
+
+    # Matched ratio score
+    match_score = min(1.0, matched_ratio / g["matched_ratio"])
+
+    return round((profit_score + loss_score + win_score + match_score) / 4.0, 3)
+# === PATCH END =========================================================
 
 
-# === PATCH START ===
-# 📍 TARGET: engines/mastery/goal_adapter.py
-# 📆 PATCHED: 2025-11-17Z — correct PnL, win_rate, matched_ratio using existing dashboard + trade logic
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-import sqlite3
-from engines.config_paths import autoscalp_db
-from gui.dashboard_data import _live_realized_today     # settlement-verified PnL
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py:_trade_good_bad_counts
+# =======================================================================
 
 def _trade_good_bad_counts():
-    """
-    EXACT SAME LOGIC as print_trade_outcome_summary(), but scoped to TODAY.
-    good  = parent with child.source='H'
-    bad   = S/M/no child
-    total = parents today
-    """
-    con = sqlite3.connect(autoscalp_db())
-    con.row_factory = sqlite3.Row
-
-    # all parents today
-    total = con.execute("""
-        SELECT COUNT(*) FROM orders
+    """DAL-safe version."""
+    row = _safe_read_one("""
+        SELECT COUNT(*)
+          FROM orders
          WHERE role='PARENT'
            AND date(opened_at)=date('now','utc')
-    """).fetchone()[0] or 0
+    """)
+    total = row[0] if row else 0
 
-    # hedged (good)
-    good = con.execute("""
+    row = _safe_read_one("""
         SELECT COUNT(DISTINCT p.id)
           FROM orders p
-          JOIN orders c ON c.hedge_of=p.id
+          JOIN orders c ON c.hedge_of = p.id
          WHERE p.role='PARENT'
            AND date(p.opened_at)=date('now','utc')
            AND c.role='CHILD'
            AND c.source='H'
            AND c.entry_status='MATCHED'
-    """).fetchone()[0] or 0
+    """)
+    good = row[0] if row else 0
 
-    # everything else is bad
     bad = total - good
-
-    con.close()
     return good, bad, total
+
+# === PATCH END =========================================================
+
 
 def _win_rate_today():
     """
@@ -201,30 +296,20 @@ def _win_rate_today():
     return 0.0
 
 
-
-
-# === PATCH START ===
+# === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:_matched_ratio_today
-# 📆 PATCHED: 2025-11-20 — fix correct CHILD-HEDGE detection + fallback
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _matched_ratio_today():
-    """
-    matched_ratio = hedged_parents / total_parents_today
-    Correct handling:
-      • hedge = CHILD role with entry_status='MATCHED' AND source='H'
-      • fallback: if system still warming up, allow partial progress
-    """
-    con = sqlite3.connect(autoscalp_db())
-    con.row_factory = sqlite3.Row
+# =======================================================================
 
-    total = con.execute("""
-        SELECT COUNT(*) FROM orders
+def _matched_ratio_today():
+    row = _safe_read_one("""
+        SELECT COUNT(*)
+          FROM orders
          WHERE role='PARENT'
            AND date(opened_at)=date('now','utc')
-    """).fetchone()[0] or 0
+    """)
+    total = row[0] if row else 0
 
-    # hedged
-    good = con.execute("""
+    row = _safe_read_one("""
         SELECT COUNT(DISTINCT p.id)
           FROM orders p
           JOIN orders c ON c.hedge_of=p.id
@@ -233,18 +318,16 @@ def _matched_ratio_today():
            AND c.role='CHILD'
            AND c.entry_status='MATCHED'
            AND c.source='H'
-    """).fetchone()[0] or 0
-
-    con.close()
+    """)
+    good = row[0] if row else 0
 
     if total == 0:
         return 0.0
 
-    # Warm-up handling: if many parents but exchange still syncing, cap at 0.05 baseline
     ratio = good / total
     return ratio if ratio > 0 else 0.05
-# === PATCH END ===
 
+# === PATCH END =========================================================
 
 
 # === PATCH START ===

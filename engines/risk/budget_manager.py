@@ -271,6 +271,33 @@ def report_exposure():
         print(f"{eng:20s} exposure={v:.2f}")
     print("================================\n")
 
+# Add near bottom of budget_manager.py
+
+def start_watcher(interval_s: int = 60):
+    """
+    Legacy compatibility.
+    Old GUI expects this function.
+    New system does not require a watcher, but we provide:
+      • one-time init
+      • periodic allocation report (non-critical)
+    """
+    init_budget_manager()
+
+    def _loop():
+        while True:
+            try:
+                report_allocations()
+                report_exposure()
+            except Exception:
+                pass
+            time.sleep(max(10, interval_s))
+
+    t = threading.Thread(target=_loop, name="BudgetWatcher", daemon=True)
+    t.start()
+
+    print("[BUDGET] Legacy start_watcher() shim active (V10-compatible)")
+
+
 
 # ============================================================
 #  CLEAN STARTUP ENTRYPOINT

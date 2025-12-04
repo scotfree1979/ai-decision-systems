@@ -35,6 +35,62 @@ except Exception:
 from engines.mastery import mastery_policy as mp
 from engines.mastery.context_builder_next import build_context_from_scope as build_context
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 📆 PATCHED: 2025-12-04 — Universal plan safety wrapper
+# ============================================================================
+
+def _safe_plan(fam: str, raw: Any, ctx: dict) -> dict:
+    """
+    Guarantee that every policy returns a valid plan dict
+    with all required fields populated.
+
+    This permanently eliminates:
+        'NoneType' object is not subscriptable
+        missing keys
+        malformed plan objects
+    """
+    # If family returned None → convert to safe no-entry plan
+    if raw is None:
+        return {
+            "enter": False,
+            "letter": fam[:1].upper(),
+            "direction": None,
+            "size": 0.0,
+            "target_ticks": 1,
+            "why": f"{fam}:none"
+        }
+
+    # If returned tuple or other non-dict, wrap it
+    if not isinstance(raw, dict):
+        return {
+            "enter": False,
+            "letter": fam[:1].upper(),
+            "direction": None,
+            "size": 0.0,
+            "target_ticks": 1,
+            "why": f"{fam}:invalid_type"
+        }
+
+    # Ensure required fields
+    raw.setdefault("enter", False)
+    raw.setdefault("letter", fam[:1].upper())
+    raw.setdefault("direction", None)
+    raw.setdefault("size", 0.0)
+    raw.setdefault("target_ticks", 1)
+    raw.setdefault("why", f"{fam}:ok")
+
+    # Best-effort numeric coercion
+    try: raw["size"] = float(raw.get("size") or 0.0)
+    except: raw["size"] = 0.0
+
+    try: raw["target_ticks"] = int(raw.get("target_ticks") or 1)
+    except: raw["target_ticks"] = 1
+
+    return raw
+# === PATCH END ==============================================================
+
+
 
 # Optional market monitor
 try:
@@ -667,7 +723,8 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
                 # If this runner is a candidate, run ALL family policies
                 for fam_name, fn in ORDER:
                     try:
-                        fam_plan = fn(ctx)
+                        raw_plan = fn(ctx)
+                        fam_plan = _safe_plan(fam_name, raw_plan, ctx)
                     except Exception as e:
                         print(f"[DECIDE] fam {fam_name} failed mid={mids} sid={sid}: {e}")
                         continue

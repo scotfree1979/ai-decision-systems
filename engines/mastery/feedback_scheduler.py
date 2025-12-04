@@ -103,6 +103,13 @@ def run_goal_alignment_once() -> None:
     from engines.mastery.goal_adapter import as_feedback_dict
     from engines.mastery.canonical_digest import total_pnl
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery/feedback_scheduler.py:run_goal_alignment_once
+# 🔎 SEARCH: with sqlite3.connect(SETTLE_DB) as scon:
+#            with open_auto_db(ro=True) as acon:
+# 📆 PATCHED: 2025-12-04 — DAL-safe connection usage (no context managers)
+# ============================================================================
+
     try:
         # --- 1) core PnL from canonical digest ---
         pnl = float(total_pnl() or 0.0)
@@ -110,7 +117,8 @@ def run_goal_alignment_once() -> None:
         # --- 2) win rate from settlements.db ---
         SETTLE_DB = "data/settlements.db"
         win_rate = 0.0
-        with sqlite3.connect(SETTLE_DB) as scon:
+        scon = sqlite3.connect(SETTLE_DB)
+        try:
             scon.row_factory = sqlite3.Row
             row = scon.execute("""
                 WITH pnl_by_market AS (
@@ -127,25 +135,45 @@ def run_goal_alignment_once() -> None:
             """).fetchone()
             if row and row["win_rate"] is not None:
                 win_rate = float(row["win_rate"])
+        finally:
+            try:
+                scon.close()
+            except:
+                pass
 
         # --- 3) matched ratio from autoscalp_gui.db (DAL-safe) ---
         matched_ratio = 0.0
-        with open_auto_db(ro=True) as acon:   # ✅ DAL-safe
+        acon = open_auto_db(rw=False)
+        try:
             acon.row_factory = sqlite3.Row
+            # === PATCH START ============================================================
+            # 📍 TARGET: engines/mastery/goal_adapter.py
+            # 🔎 SEARCH: SUM(COALESCE(net,0)) AS total
+            # 📆 PATCHED: 2025-12-04 — replace nonexistent column "net" with "profit"
+
             row = acon.execute("""
-                SELECT
-                  100.0 *
-                  SUM(CASE WHEN entry_status='MATCHED' THEN 1 ELSE 0 END)
-                      / COUNT(*) AS matched_ratio
-                  FROM orders
-                 WHERE date(opened_at)=date('now','utc')
-                   AND role IN ('PARENT','CHILD');
-            """).fetchone()
+                SELECT marketId,
+                       SUM(COALESCE(profit,0)) AS total     -- FIXED: 'net' → 'profit'
+                  FROM v_dashboard_cashout
+                 WHERE date(day) >= CASE
+                         WHEN ? IS NULL THEN date(day)
+                         WHEN ?='0' THEN date('now','utc')
+                         ELSE date('now','utc', ?)
+                     END
+                 GROUP BY marketId
+            """, (window, window, window)).fetchone()
+            # === PATCH END ==============================================================
+
             if row and row["matched_ratio"] is not None:
                 matched_ratio = float(row["matched_ratio"])
+        finally:
+            try:
+                acon.close()
+            except:
+                pass
 
         # --- 4) assemble & emit payload ---
-        payload = as_feedback_dict()   # canonical generator
+        payload = as_feedback_dict()
         event_sink.emit("goal_alignment_tick", payload)
 
         print(
@@ -164,7 +192,9 @@ def run_goal_alignment_once() -> None:
 
     except Exception as e:
         print(f"[mastery] goal_adapter warn: {e}")
-# === PATCH END ===
+
+# === PATCH END ==============================================================
+
 
 
 

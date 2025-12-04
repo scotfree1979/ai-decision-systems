@@ -342,6 +342,13 @@ class DALReadProxy:
         self._fam = fam
         self._shim = _AttrShim()
 
+    # NEW — context manager support
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False   # do not suppress exceptions
+
     # absorb row_factory, text_factory, etc.
     def __setattr__(self, k, v):
         if k in ("_fam", "_shim"):
@@ -379,6 +386,14 @@ class DALWriteProxy:
     """
 
     __slots__ = ("_fam", "_shim")
+
+    # NEW — context manager support
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # queue-based writer handles persistence; nothing to commit/rollback
+        return False
 
     def __init__(self, fam: str):
         # fam MUST be one of: "auto", "bets", "settlements", "mastery"
@@ -632,46 +647,35 @@ _DAL_WRITE_QUEUE = queue.Queue(maxsize=200000)
 _PERSISTENT_WRITERS = {}
 _PERSISTENT_LOCK = threading.Lock()
 
+# === PATCH START: Replace broken _get_writer with correct resolver ==========
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: def _get_writer(
+# 📆 PATCHED: 2025-12-04 — remove path_map block, unify writer resolver
+# ============================================================================
+
 def _get_writer(fam: str) -> sqlite3.Connection:
     """
-    Persistent writer per DB family.
-    Always writes into LiveCache.
+    Resolve a persistent writer for a *base family* only.
+    fam must be one of:
+        auto, bets, settlements, mastery
+    Dual-write variants (auto_local, auto_live) are normalized BEFORE calling this.
     """
-
-    if fam.endswith("_LOCAL"):
-        fam = fam.replace("_LOCAL","")
-        path = LOCAL_PATH_MAP[fam]
-
-    if fam.endswith("_LIVE"):
-        fam = fam.replace("_LIVE","")
-        path = LIVE_PATH_MAP[fam]
+    fam = fam.lower()
 
     with _PERSISTENT_LOCK:
         if fam in _PERSISTENT_WRITERS:
             return _PERSISTENT_WRITERS[fam]
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py:_get_writer
-# 📆 PATCHED: 2025-12-10 — map new dual-write families to actual DB files
-# ============================================================================
+        # Base-family → file mapping
+        path = {
+            "auto":        CLOUD_AUTO,
+            "bets":        CLOUD_BETS,
+            "settlements": CLOUD_SETTLE,
+            "mastery":     CLOUD_MASTERY,
+        }.get(fam)
 
-        path_map = {
-            # LOCAL families
-            "auto_local":        LOCAL_AUTO,
-            "bets_local":        LOCAL_BETS,
-            "settle_local":      LOCAL_SETTLE,
-            "mastery_local":     LOCAL_MASTERY,
-
-            # LIVECACHE families
-            "auto_live":         CLOUD_AUTO,
-            "bets_live":         CLOUD_BETS,
-            "settle_live":       CLOUD_SETTLE,
-            "mastery_live":      CLOUD_MASTERY,
-        }
-
-        path = path_map.get(fam)
         if not path:
-            raise RuntimeError(f"Unknown writer family: {fam}")
+            raise RuntimeError(f"[DAL] Unknown writer family: {fam}")
 
         con = sqlite3.connect(path, timeout=20, isolation_level=None, check_same_thread=False)
         con.row_factory = sqlite3.Row
@@ -680,6 +684,56 @@ def _get_writer(fam: str) -> sqlite3.Connection:
 
         _PERSISTENT_WRITERS[fam] = con
         return con
+
+# === PATCH END ===============================================================
+
+
+# === PATCH START: Normalize dual-writer family names =======================
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: def _get_writer(
+# 📆 PATCHED: 2025-12-04
+
+def _normalize_writer_family(fam: str) -> tuple[str, str]:
+    """
+    Normalise dual-write family names.
+
+    Input families:
+        auto_local, auto_live
+        bets_local, bets_live
+        settle_local, settle_live
+        mastery_local, mastery_live
+
+    Output family:
+        ('local'/'live', base_family)
+    """
+    fam = fam.lower()
+
+    if fam.endswith("_local"):
+        return "local", fam.replace("_local", "")
+
+    if fam.endswith("_live"):
+        return "live", fam.replace("_live", "")
+
+    # Already base family
+    return "local", fam
+
+
+# Patch point inside the writer loop:
+# Replace:
+#     wloc = _get_writer_local(fam)
+#     wlive = _get_writer_live(fam)
+# With:
+#     kind, base = _normalize_writer_family(fam)
+#     if kind == "local":
+#         wloc = _get_writer_local(base)
+#         wloc.execute(sql, params)
+#     else:
+#         wlive = _get_writer_live(base)
+#         wlive.execute(sql, params)
+# === PATCH END ==============================================================
+
+
+
 
 # === PATCH END ==============================================================
 
@@ -714,29 +768,41 @@ def _dal_writer_loop():
                 break
 
         # === PATCH START =====================================================
-        # Dual write: LOCAL first, then LIVE
+# === PATCH START: Normalize writer family handling ==========================
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: "Dual write: LOCAL first, then LIVE"
+# 📆 PATCHED: 2025-12-04 — Correct mapping of fam → (local/live, base_family)
+# ============================================================================
+
+        # Dual write using normalized families
         for fam, sql, params in pending:
 
-            # LOCAL
-            try:
-                wloc = _get_writer_local(fam)
-                wloc.execute(sql, params)
-            except Exception as e:
-                print(f"[DAL-WRITER] LOCAL fail fam={fam}: {e} | sql={sql}")
+            # Normalize: fam may be "auto_local", "auto_live", or "auto"
+            kind, base = _normalize_writer_family(fam)
 
-            # LIVE
-            try:
-                wlive = _get_writer_live(fam)
-                wlive.execute(sql, params)
-            except Exception as e:
-                print(f"[DAL-WRITER] LIVE fail fam={fam}: {e} | sql={sql}")
+            if kind == "local":
+                # LOCAL write path
+                try:
+                    wloc = _get_writer_local(base)
+                    wloc.execute(sql, params)
+                except Exception as e:
+                    print(f"[DAL-WRITER] LOCAL fail fam={fam}: {e} | sql={sql}")
+            else:
+                # LIVE write path
+                try:
+                    wlive = _get_writer_live(base)
+                    wlive.execute(sql, params)
+                except Exception as e:
+                    print(f"[DAL-WRITER] LIVE fail fam={fam}: {e} | sql={sql}")
 
-        # Commit both
+        # Commit whichever writers were touched
         try: wloc.commit()
         except: pass
         try: wlive.commit()
         except: pass
-        # === PATCH END =======================================================
+
+# === PATCH END ==============================================================
+
 
 
         for _ in pending:
@@ -844,12 +910,38 @@ def enable_setup_dal():
 # PUBLIC ROUTERS
 # ===============================================================
 
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: def open_auto_db(
+# 📆 PATCHED: 2025-12-04 — trading engines require real writer
+
 def open_auto_db(*, rw=False, **_):
+    """
+    RETURNS:
+      • SETUP mode → local DB (read/write real sqlite connection)
+      • LIVE mode, rw=False → DALReadProxy (safe async reader)
+      • LIVE mode, rw=True  → REAL sqlite3 write connection
+        (Overwatcher / LiveRouter must use real cursor objects)
+    """
     if DAL_MODE == "SETUP":
         return _local_db(LOCAL_AUTO)
-    if rw:
-        return DALWriteProxy("auto")
+
+    if rw is True:
+        # REAL writer — not DALWriteProxy
+        con = sqlite3.connect(
+            LOCAL_AUTO,
+            timeout=10,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=8000")
+        _attach_all_four_local(con)
+        return con
+
+    # SAFE async reader for dashboards, mastery, scope
     return DALReadProxy("auto")
+
 
 def open_bets_db(*, rw=False, **_):
     if DAL_MODE == "SETUP":
@@ -979,6 +1071,17 @@ def auto_conn_live(rw=True):
     class _LiveDualWriteProxy:
         def __init__(self, base_con):
             self._base = base_con
+
+        # NEW — context manager support
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                self._base.close()
+            except:
+                pass
+            return False
 
         def cursor(self):
             return _LiveDualWriteCursor(self._base)
