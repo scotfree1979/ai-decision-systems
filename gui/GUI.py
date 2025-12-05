@@ -2836,25 +2836,6 @@ class PhaseGUI(tk.Tk):
             print(f"[strategies] probe failed: {e}")
 
         print("✅ Step 1 OK — token/app key set.")
-# === PATCH START ===
-# 📍 TARGET: gui/GUI.py
-# 🔎 SEARCH: print("✅ Step 1 OK — token/app key set.")
-# ⛏️ ACTION: insert bank_state init just before the print
-
-        # --- Initialise internal bank (persisted in autoscalp_gui.db) ---
-        try:
-            from engines.live import bank_state
-            bank_state.reset_for_live()          # seeds + ensures internal_bank
-            bal = bank_state.get_balance()
-            if bal == 0.0:
-                # Fallback: refresh from in-memory live balance
-                bal = bank_state.get_live_balance()
-            print(f"[GUI] LiveBalance display: {bal:.2f}")
-        except Exception as e:
-            print(f"[bank_state] init warn: {e}")
-
-        print("✅ Step 1 OK — token/app key set.")
-
 
         print("READY: next step")
         self.status.config(text="• Step 1 complete → Run Step 2", foreground="#2c7")

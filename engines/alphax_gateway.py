@@ -119,31 +119,32 @@ class AlphaXWrapper:
     def commit(self): return None
     def close(self): return None
 # === PATCH END ============================================================
-# === PATCH START ============================================================
+# === PATCH START ================================================
+# FIX: _normalise must ALWAYS return a 5-tuple for LP worker
+#      to prevent "not enough values to unpack"
 
 def _normalise(item):
     """
-    item structure becomes:
-        (prio, ts, real_con, sql, params)
+    Normalise queue items so LP worker always receives:
+        (prio, real_con, fam, sql_s, params)
     """
-    # === PATCH START ===
-    if isinstance(raw, tuple) and len(raw) == 2:
-        sql_s, params = raw
-        sql_s = str(sql_s)
-        return sql_s, params
-    # === PATCH END ===
 
-    prio, ts, real_con, sql, params = item
+    # item structure: (prio, ts, real_con, sql, params)
+    try:
+        prio, ts, real_con, sql, params = item
+    except ValueError:
+        # fallback for malformed or old 2-tuple entries
+        # treat as no-op entry so it cannot break the worker
+        return (5, None, "noop", None, ())
 
     sql_s = (sql or "").strip()
     if not sql_s:
-        return None
+        return (5, real_con, "noop", None, ())
 
     fam = _detect_family(sql_s.lower())
-    return prio, real_con, sql_s, tuple(params or ())
+    return (prio, real_con, fam, sql_s, tuple(params or ()))
+# === PATCH END ==================================================
 
-
-# === PATCH END ============================================================
 
 
 # ============================================================

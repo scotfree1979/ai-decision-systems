@@ -240,26 +240,105 @@ def get_stop_ticks(entry_odds: float, default_ticks: int = 1) -> int:
     return default_ticks
 
 # engines/daily_config.py
-try:
-    from engines.upgrade_import_patch import get_session_token  # ✅ shim Step-1 creates
-except Exception:
-    def get_session_token():
+# === PATCH START ============================================
+# 📍 TARGET: engines/daily_config.py
+# 🔎 SEARCH: def get_session_token
+# 🛠 ACTION: replace with KV-backed reader (GUI-compatible)
+# ============================================================
+
+import sqlite3
+from engines.config_paths import autoscalp_db as _adb_path
+
+def get_session_token() -> str | None:
+    """
+    Canonical getter for Betfair session token.
+
+    Priority:
+      1) app_kv['betfair_session_token']
+      2) environment variable SESSION_TOKEN
+      3) in-memory SESSION_TOKEN (legacy)
+    """
+    import os, sqlite3
+    from engines.config_paths import autoscalp_db
+
+    # 1) App KV always wins — GUI writes token HERE in Step-1
+    try:
+        con = sqlite3.connect(autoscalp_db())
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT value FROM app_kv WHERE key='betfair_session_token'"
+        ).fetchone()
+        con.close()
+        if row and row["value"]:
+            return row["value"]
+    except Exception:
+        pass
+
+    # 2) Environment fallback
+    env_tok = os.environ.get("SESSION_TOKEN")
+    if env_tok:
+        return env_tok
+
+    # 3) In-memory fallback (legacy)
+    try:
+        return SESSION_TOKEN
+    except Exception:
         return None
+
+
 
 # -----------------------------
 # 💰 Budget Fetching (only when called)
 # -----------------------------
-# === PATCH START: redirect to BankState for unified balance ===============
+# =====================================================================
+# 📍 FINAL: fetch_available_budget()
+# Fetches real Betfair balance using APP_KEY + SESSION_TOKEN
+# Falls back ONLY if the API fails.
+# =====================================================================
+
 def fetch_available_budget() -> float:
-    """
-    Backward-compatible alias.
-    Returns the TOTAL bank at start-of-day (static), from BankState.
-    This is ONLY used for legacy sizing paths.
-    """
+    import json, logging, requests
+    from engines.daily_config import APP_KEY, get_session_token
+
+    token = get_session_token()
+
+    # 1) If no token → fallback immediately
+    if not token:
+        logging.warning("[daily_config] No session token — using fallback 350.0")
+        return 350.0
+
+    # 2) Build correct Betfair headers
+    headers = {
+        "X-Application": APP_KEY,          # The key already in DailyConfig
+        "X-Authentication": token,         # Pulled from AppKV/environment
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = json.dumps([{
+        "jsonrpc": "2.0",
+        "method": "AccountAPING/v1.0/getAccountFunds",
+        "params": {},
+        "id": 1
+    }])
+
+    # 3) Try Betfair API
     try:
-        return float(_BS.get_total_pot())
-    except Exception:
-        logging.warning(f"[❌ Error] Budget fetch failed: {e} — using 1000.0 fallback")
+        resp = requests.post(
+            "https://api.betfair.com/exchange/account/json-rpc/v1",
+            headers=headers,
+            data=payload,
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Extract real balance
+        bal = float(data[0]["result"]["availableToBetBalance"])
+        return bal
+
+    except Exception as e:
+        logging.warning(f"[daily_config] Balance API failed: {e} — using 300.0 fallback")
         return 300.0
 
 
@@ -349,15 +428,6 @@ def get_min_stake() -> float:
 
 # Legacy-compatible ACCESSORS that now read from BankState:
 
-def fetch_available_budget() -> float:
-    """
-    Original function name preserved.
-    Now returns unified global bank, not Betfair API.
-    """
-    try:
-        return bank_state.get_global_bank()
-    except Exception:
-        return 500.0
 
 # === PATCH START: Back-compat stake aliases for Router & Sizers ============
 def get_engine_pot(engine: str) -> float:

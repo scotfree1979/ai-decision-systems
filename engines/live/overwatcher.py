@@ -1278,38 +1278,36 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
         while True:
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py:start_overwatcher loop
-# 🔎 SEARCH: with auto_conn() as conn:
-# 📆 PATCHED: 2025-12-04 — DAL-safe connection usage
+# 📆 PATCHED: 2025-12-04 — Correct try/finally and DAL-safe connection
 # ============================================================================
 
-            # === PATCH START ============================================================
-            # 📍 TARGET: engines/live/overwatcher.py:start_overwatcher loop
-            # 🔎 SEARCH: with auto_conn() as conn:
-            # 📆 PATCHED: 2025-12-04 — DALReadProxy does not support context manager
-
             try:
+                # DALReadProxy does NOT support `with`, so use explicit open/close
                 conn = auto_conn(rw=False)
+
+                # Core guardian / liability / micro-scalper diagnostics
                 _evaluate_market_guardian(conn)
                 _evaluate_liability_cap(conn)
                 _evaluate_liability_alerts(conn)
                 _evaluate_probability_risk(conn)
                 _evaluate_micro_scalper_balance(conn)
-            finally:
-                try: conn.close()
-                except: pass
-            # === PATCH END ==============================================================
 
-
-                # MSC — trailing stop-loss only
+                # MSC-only trailing stop-loss
                 enforce_stop_losses_trailing()
 
-                # Legacy — boundary exits only
+                # Legacy boundary exits
                 enforce_legacy_boundaries_and_trailing()
 
             except Exception as e:
                 print("[OVERWATCHER] loop error", e)
 
-# === PATCH END ==============================================================
+            finally:
+                try:
+                    conn.close()
+                except:
+                    pass
+# === PATCH END ============================================================
+
 
 
             time.sleep(max(1.0 / hz, 0.5))

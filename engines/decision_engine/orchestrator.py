@@ -3499,6 +3499,36 @@ def start_live_loop(*args, **kwargs):
     except Exception:
         pass
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: "print(\"[LIVE DAL] switched → LIVE\")"
+# 📆 PATCHED: 2025-12-04 — Initialise BankState before any placement/tick logic
+# ============================================================================
+
+    # ------------------------------------------------------------------
+    # 3A) INITIALISE BANKSTATE (STATIC ENGINE POTS)
+    # ------------------------------------------------------------------
+    try:
+        # Import BankState without triggering circular import
+        from engines.live import bank_state
+
+        # Ensure today's engine_pots table and pot values exist
+        bank_state.init_bank_state()
+
+        # Optional: diagnostic print
+        try:
+            pots = bank_state.get_daily_pots()
+            total = bank_state.get_balance()
+            print(f"[BankState] initialised pots={pots} total={total:.2f}")
+        except Exception:
+            print("[BankState] initialised (diagnostic unavailable)")
+
+    except Exception as e:
+        print(f"[BankState] init warn: {e}")
+
+# === PATCH END ==============================================================
+
+
     # ------------------------------------------------------------------
     # 4) RELOAD WRITERS AND LIVE MODULES (WITHOUT HIJACK YET)
     # ------------------------------------------------------------------

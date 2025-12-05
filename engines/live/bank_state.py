@@ -24,6 +24,30 @@ from __future__ import annotations
 import sqlite3, datetime, json, os
 from typing import Dict
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: top-level _auto_conn usage
+# 📆 PATCHED: 2025-12-10 — BankState reads correct DB per DAL mode
+# ============================================================================
+
+from engines.config_paths import auto_conn as _auto_conn
+from engines.config_paths import auto_conn_live as _auto_conn_live
+from engines.config_paths import DAL_MODE
+
+def _bank_conn(rw=False):
+    """
+    BankState must read the SAME orders table that LiveRouter writes:
+        • SETUP mode → Local autoscalp_gui.db
+        • LIVE mode  → LiveCache autoscalp_livecache.db
+    This ensures open_liability and can_place() match LiveRouter behaviour.
+    """
+    if DAL_MODE == "LIVE":
+        return _auto_conn_live(rw=rw)
+    return _auto_conn(rw=rw)
+
+# === PATCH END ==============================================================
+
+
 # DAL connector
 from engines.config_paths import auto_conn as _auto_conn
 
@@ -38,6 +62,11 @@ ENGINES = ["LEGACY", "MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY"]
 # ============================================================
 #  DB SCHEMA FOR ENGINE POTS
 # ============================================================
+# === PATCH START ======================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: CREATE TABLE IF NOT EXISTS engine_pots(
+# ⛏️ ACTION: remove PRIMARY KEY, keep columns simple
+# ======================================================================
 
 def _ensure_pot_table(con):
     con.execute("""
@@ -45,12 +74,13 @@ def _ensure_pot_table(con):
             day TEXT NOT NULL,
             engine TEXT NOT NULL,
             pot REAL NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(day, engine)
+            updated_at TEXT NOT NULL
+            -- No PRIMARY KEY → DAL-safe, LiveCache-safe
         )
     """)
     con.commit()
 
+# === PATCH END ========================================================
 # ============================================================
 #  UTILS
 # ============================================================
@@ -78,41 +108,87 @@ def _fetch_starting_balance() -> float:
     except Exception:
         return 0.0
 
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: from engines.risk.budget_manager import (
+# ⛏️ ACTION: Remove top-level import + fix init_pots_if_needed()
+# 📆 PATCHED: 2025-12-04
+# ======================================================================
+
+### PATCH START
+# REMOVE this at top of file if still present:
+# from engines.risk.budget_manager import ( get_allocations, )
+
+# REPLACE the current init_pots_if_needed() with this:
+
+# === PATCH START ======================================================
+# 📍 TARGET: engines/live/bank_state.py:init_pots_if_needed
+# 🔎 SEARCH: def init_pots_if_needed():
+# ======================================================================
 
 def init_pots_if_needed():
     """
-    Called at startup.  
-    Creates pots for the day if they do not exist yet.
+    Create today's engine pots once per day.
+    Logic-based guard: If ANY row exists for today → skip insert.
+    This avoids PK constraints and is fully DAL-safe.
     """
+
+    from engines.risk import budget_manager
+    allocs = budget_manager.get_allocations()
+
     today = _today()
-    con = _auto_conn(rw=True)
+    con = _bank_conn(rw=True)
     con.row_factory = sqlite3.Row
 
     _ensure_pot_table(con)
 
-    rows = con.execute("SELECT COUNT(*) AS n FROM engine_pots WHERE day=?", (today,)).fetchone()
-    if rows["n"] > 0:
-        con.close()
-        return  # already initialised
+    # 🌞 1️⃣ DAY CHECK — If today's pots already exist, skip
+    exists = con.execute(
+        "SELECT 1 FROM engine_pots WHERE day=? LIMIT 1",
+        (today,)
+    ).fetchone()
 
-    # get starting balance
+    if exists:
+        con.close()
+        return  # today already initialised
+
+    # 🌞 2️⃣ FIRST INITIALISATION FOR TODAY
     start_bal = _fetch_starting_balance()
 
-    # get allocation percentages from BudgetManager v10
-    allocs = get_allocations()
-
-    # write pots
     for eng in ENGINES:
         pct = allocs.get(eng, 0.0)
         pot_value = start_bal * pct
-        con.execute("""
-            INSERT INTO engine_pots(day, engine, pot, updated_at)
-            VALUES(?,?,?,?)
-        """, (today, eng, pot_value, _now()))
+
+        con.execute(
+            "INSERT INTO engine_pots(day, engine, pot, updated_at) VALUES (?,?,?,?)",
+            (today, eng, pot_value, _now())
+        )
 
     con.commit()
     con.close()
-    print("[BankState] Pots initialised:", json.dumps(allocs))
+    print(f"[BankState] Pots initialised for {today}: {json.dumps(allocs)}")
+
+# === PATCH END ========================================================
+
+
+
+# === PATCH START =======================================================
+# 📍 TARGET: engines/live/bank_state.py:_fetch_starting_balance
+# ⛏️ ACTION: Replace the import inside the function
+# =======================================================================
+
+def _fetch_starting_balance() -> float:
+    """
+    Pull the FIRST Betfair balance of the day.
+    """
+    try:
+        # 🔥 Lazy import to avoid circular with daily_config → orchestrator
+        from engines.daily_config import fetch_available_budget
+        bal = float(fetch_available_budget())
+        return bal if bal > 0 else 0.0
+    except Exception:
+        return 0.0
+# === PATCH END ===========================================================
 
 
 # ============================================================
@@ -125,7 +201,7 @@ def _get_pot(engine: str) -> float:
     """
     engine = engine.upper()
     today = _today()
-    con = _auto_conn(rw=False)
+    con = _bank_conn(rw=False)
     con.row_factory = sqlite3.Row
     row = con.execute("""
         SELECT pot FROM engine_pots 
@@ -142,7 +218,7 @@ def _set_pot(engine: str, value: float):
     """
     engine = engine.upper()
     today = _today()
-    con = _auto_conn(rw=True)
+    con = _bank_conn(rw=True)
     con.execute("""
         UPDATE engine_pots
            SET pot=?, updated_at=?
@@ -177,7 +253,7 @@ def _calculate_open_liability(engine: str) -> float:
     Sum liability of all *unhedged PARENT* orders belonging to this engine.
     """
     engine = engine.upper()
-    con = _auto_conn(rw=False)
+    con = _bank_conn(rw=False)
     con.row_factory = sqlite3.Row
 
     rows = con.execute("""

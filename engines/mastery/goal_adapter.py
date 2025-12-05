@@ -8,6 +8,7 @@ from engines.config_core_values import CORE_VALUES
 from datetime import datetime, timezone
 import math
 import os
+import sqlite3
 
 # === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py
@@ -30,19 +31,14 @@ def _safe_read(sql: str, params=()):
         return []
 
 # === PATCH START =======================================================
-# 📍 TARGET: engines/mastery/goal_adapter.py
-# 📆 PATCHED: 2025-12-04 — New multi-window trade stats engine
+# 📍 TARGET: engines/mastery/goal_adapter.py:_trade_stats
+# 📆 PATCHED: 2025-12-12 — DAL-safe + MATCHED + correct dashboard column
 # =======================================================================
 
 def _trade_stats(period_days=None):
     """
-    Returns dict with:
-      total, good, bad, win_rate, matched_ratio
-    period_days:
-       None → ALL TIME
-       0    → TODAY
-       7    → last 7 days
-       30   → last 30 days
+    Returns dict(total, good, bad, win_rate, matched_ratio)
+    Reads exclusively through DAL read proxies.
     """
     where = ""
     params = ()
@@ -52,36 +48,35 @@ def _trade_stats(period_days=None):
             where = "AND date(opened_at)=date('now','utc')"
         else:
             where = "AND opened_at >= datetime('now','utc', ?)"
-            params = (f'-{period_days} day',)
+            params = (f"-{period_days} day",)
 
-    # parents
+    # total parents
     row = _safe_read_one(f"""
         SELECT COUNT(*)
           FROM orders
          WHERE role='PARENT'
-         {where}
+           {where}
     """, params)
     total = row[0] if row else 0
 
-    # hedged
+    # GOOD: matched hedge children (H)
     row = _safe_read_one(f"""
         SELECT COUNT(DISTINCT p.id)
           FROM orders p
-          JOIN orders c ON c.hedge_of=p.id
+          JOIN orders c ON c.hedge_of = p.id
          WHERE p.role='PARENT'
            AND c.role='CHILD'
            AND c.source='H'
-           AND c.entry_status='MATCHED'
-           {where.replace("opened_at", "p.opened_at")}
+           AND UPPER(c.entry_status)='MATCHED'
+           {where.replace('opened_at','p.opened_at')}
     """, params)
     good = row[0] if row else 0
-
     bad = total - good
 
-    # win-rate
+    # --- Win rate via v_dashboard_cashout (DAL-safe) ---------------------
     rowset = _safe_read(f"""
         SELECT marketId,
-               SUM(COALESCE(net,0)) AS total
+               SUM(COALESCE(total,0)) AS t
           FROM v_dashboard_cashout
          WHERE date(day) >= CASE
                  WHEN ? IS NULL THEN date(day)
@@ -89,18 +84,20 @@ def _trade_stats(period_days=None):
                  ELSE date('now','utc', ?)
              END
          GROUP BY marketId
-    """, (None if period_days is None else str(period_days),
-          '0' if period_days == 0 else None,
-          f'-{period_days} day' if period_days not in (None,0) else None))
+    """, (
+        None if period_days is None else str(period_days),
+        "0" if period_days == 0 else None,
+        f"-{period_days} day" if period_days not in (None,0) else None
+    ))
 
     if rowset:
-        wins = sum(1 for r in rowset if float(r[1] or 0) > 0)
+        wins = sum(1 for _, t in rowset if float(t or 0.0) > 0.0)
         total_mkts = len(rowset)
-        win_rate = wins / total_mkts
+        win_rate = wins / total_mkts if total_mkts else 0.0
     else:
         win_rate = 0.0
 
-    matched_ratio = (good / total) if total > 0 else 0.0
+    matched_ratio = good / total if total > 0 else 0.0
 
     return dict(
         total=total,
@@ -111,7 +108,6 @@ def _trade_stats(period_days=None):
     )
 
 # === PATCH END =========================================================
-
 
 def _safe_read_one(sql: str, params=()):
     rows = _safe_read(sql, params)
@@ -217,15 +213,13 @@ def evaluate_progress(live_pnl, win_rate, matched_ratio):
 
     return round((profit_score + loss_score + win_score + match_score) / 4.0, 3)
 # === PATCH END =========================================================
-
-
-
 # === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:_trade_good_bad_counts
+# 📆 PATCHED: 2025-12-12 — DAL-safe + MATCHED logic
 # =======================================================================
 
 def _trade_good_bad_counts():
-    """DAL-safe version."""
+    """Return (good, bad, total) for today."""
     row = _safe_read_one("""
         SELECT COUNT(*)
           FROM orders
@@ -234,6 +228,7 @@ def _trade_good_bad_counts():
     """)
     total = row[0] if row else 0
 
+    # good = matched hedge children
     row = _safe_read_one("""
         SELECT COUNT(DISTINCT p.id)
           FROM orders p
@@ -242,62 +237,56 @@ def _trade_good_bad_counts():
            AND date(p.opened_at)=date('now','utc')
            AND c.role='CHILD'
            AND c.source='H'
-           AND c.entry_status='MATCHED'
+           AND UPPER(c.entry_status)='MATCHED'
     """)
     good = row[0] if row else 0
 
     bad = total - good
     return good, bad, total
 
-# === PATCH END =========================================================
-
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py:_win_rate_today
+# 📆 PATCHED: 2025-12-12 — DAL-only, dashboard-only (correct schema)
+# =======================================================================
 
 def _win_rate_today():
     """
     Win rate today = % of markets with positive PnL.
-    EXACTLY as per your definition.
+    Uses ONLY v_dashboard_cashout, which we verified by live test.
+    This avoids relying on unknown settlement schema.
     """
-    from engines.config_paths import settlements_db, auto_conn, q_retry as _q
+    from engines.config_paths import open_auto_db, q_retry as _q
 
-    # 1) Try settlement source first (canonical)
     try:
-        con = sqlite3.connect(settlements_db())
+        con = open_auto_db(rw=False)
         con.row_factory = sqlite3.Row
-        rows = con.execute("""
-            SELECT marketId, SUM(net) AS s
-              FROM v_settle_mkt_day
-             WHERE day=date('now','utc')
-             GROUP BY marketId
-        """).fetchall()
-        con.close()
-        if rows:
-            wins = sum(1 for r in rows if float(r["s"] or 0.0) > 0)
-            total = len(rows)
-            return wins / total if total else 0.0
-    except:
-        pass
 
-    # 2) Fallback: dashboard view
-    try:
-        con = auto_conn(); con.row_factory = sqlite3.Row
         rows = _q(con, """
-            SELECT marketId, total
+            SELECT marketId, SUM(COALESCE(total,0)) AS t
               FROM v_dashboard_cashout
              WHERE date(day)=date('now','utc')
+             GROUP BY marketId
         """).fetchall()
-        con.close()
-        if rows:
-            wins = sum(1 for r in rows if float(r["total"] or 0.0) > 0)
-            total = len(rows)
-            return wins / total if total else 0.0
-    except:
-        pass
 
-    return 0.0
+        if not rows:
+            return 0.0
+
+        wins = sum(1 for r in rows if float(r["t"] or 0.0) > 0.0)
+        total = len(rows)
+        return wins / total if total else 0.0
+
+    except Exception as e:
+        print(f"[mastery] goal_adapter pnl warn: {e}")
+        return 0.0
+
+# === PATCH END =========================================================
+
+
 
 
 # === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:_matched_ratio_today
+# 📆 PATCHED: 2025-12-12 — DAL-safe + MATCHED logic
 # =======================================================================
 
 def _matched_ratio_today():
@@ -316,8 +305,8 @@ def _matched_ratio_today():
          WHERE p.role='PARENT'
            AND date(p.opened_at)=date('now','utc')
            AND c.role='CHILD'
-           AND c.entry_status='MATCHED'
            AND c.source='H'
+           AND UPPER(c.entry_status)='MATCHED'
     """)
     good = row[0] if row else 0
 

@@ -1771,6 +1771,14 @@ def learning_cache_has_oc(market_id: str, selection_id: int, oc_n: int) -> bool:
     except Exception:
         return False
 
+# =====================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/helpers.py
+# 🔎 SEARCH: def learning_record_oc_series(
+# ⛏️ ACTION: Ensure oc_series table is created with the correct schema
+# 📆 PATCHED: 2025-12-05
+# =====================================================================
+
+### PATCH START
 def learning_record_oc_series(
     market_id: str,
     selection_id: int,
@@ -1778,13 +1786,14 @@ def learning_record_oc_series(
     odd: float | None,
     *,
     source: str = "SIM",
-    meta: dict | None = None
+    meta: dict | None = None,
 ):
     """
     LearningEngine-safe snapshot writer.
-    Does not interfere with GUI version.
+    Writes into LOCAL → DAL duplicates to LIVE, ensuring both stay in-sync.
     """
-    from engines.database_hijack_monitor import enqueue_write as _db_write
+
+    from engines.config_paths import auto_conn  # LOCAL writer only
     import json
 
     low = odd * 0.98 if odd is not None else None
@@ -1792,41 +1801,49 @@ def learning_record_oc_series(
     bj = json.dumps([low, odd, high]) if odd is not None else None
     meta_json = json.dumps(meta or {})
 
-    # ensure table exists
-    _db_write(
-        "CREATE TABLE IF NOT EXISTS oc_series("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " marketId TEXT NOT NULL,"
-        " selectionId TEXT NOT NULL,"
-        " stage TEXT NOT NULL,"
-        " snapshot_ts TEXT NOT NULL,"
-        " odd REAL,"
-        " band_low REAL,"
-        " band_high REAL,"
-        " band_json TEXT,"
-        " meta_json TEXT,"
-        " source TEXT"
-        ")"
-    )
+    con = auto_conn(rw=True)
+    cur = con.cursor()
 
-    # write snapshot
-    _db_write(
-        "INSERT INTO oc_series (marketId, selectionId, stage, snapshot_ts, odd, "
-        " band_low, band_high, band_json, meta_json, source)"
-        " VALUES (?, ?, ?, datetime('now','utc'), ?, ?, ?, ?, ?, ?)",
-        [
-            market_id,
-            selection_id,
-            stage,
-            odd,
-            low,
-            high,
-            bj,
-            meta_json,
-            source,
-        ],
-    )
+    # 1️⃣ Ensure correct table exists
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS oc_series(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            marketId TEXT NOT NULL,
+            selectionId TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            snapshot_ts TEXT NOT NULL,
+            odd REAL,
+            band_low REAL,
+            band_high REAL,
+            band_json TEXT,
+            meta_json TEXT,
+            source TEXT
+        )
+    """)
 
+    # 2️⃣ Insert today snapshot
+    cur.execute("""
+        INSERT INTO oc_series (
+            marketId, selectionId, stage, snapshot_ts,
+            odd, band_low, band_high, band_json, meta_json, source
+        )
+        VALUES (?, ?, ?, datetime('now','utc'),
+                ?, ?, ?, ?, ?, ?)
+    """, (
+        market_id,
+        selection_id,
+        stage,
+        odd,
+        low,
+        high,
+        bj,
+        meta_json,
+        source,
+    ))
+
+    con.commit()
+    con.close()
+### PATCH END
 
 # legacy misc aliases
 log_event_once = status_once

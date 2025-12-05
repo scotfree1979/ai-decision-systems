@@ -548,15 +548,43 @@ def subscribe(fn):
     with _lock:
         _listeners.append(fn)
 
-# === AUTOLOAD UNIFIED BRIDGE ======================================
-try:
-    import importlib
-    bridge = importlib.import_module("engines.mastery_v7.live_router_bridge")
-    subscribe(bridge.handle_mastery_event)
-    print("[event_sink] 🔗 unified v7 bridge subscribed successfully")
-except Exception as e:
-    print(f"[event_sink] bridge auto-subscribe warn: {e}")
-# ================================================================
+# === PATCH START ======================================================
+# 📍 TARGET: engines/mastery/event_sink.py
+# 🔎 SEARCH: "# === AUTOLOAD UNIFIED BRIDGE"
+# 📆 PATCHED: 2025-12-04 — remove circular import by lazy-loading bridge
+# =====================================================================
+
+def _lazy_load_bridge():
+    """
+    Delayed loader for mastery_v7.live_router_bridge to avoid
+    triggering circular imports during BankState initialisation.
+    Runs only once, on first event emission.
+    """
+    global _BRIDGE_LOADED
+    if _BRIDGE_LOADED:
+        return
+    _BRIDGE_LOADED = True
+
+    try:
+        import importlib
+        bridge = importlib.import_module("engines.mastery_v7.live_router_bridge")
+        subscribe(bridge.handle_mastery_event)
+        print("[event_sink] 🔗 unified v7 bridge subscribed (lazy)")
+    except Exception as e:
+        print(f"[event_sink] bridge lazy-load warn: {e}")
+
+_BRIDGE_LOADED = False
+
+# Wrap emit() so the bridge auto-loads only after BankState + Budget are ready
+_original_emit = emit
+def emit(event_type: str, payload: dict):
+    _lazy_load_bridge()      # <-- FIX for circular import
+    return _original_emit(event_type, payload)
+
+# === PATCH END ========================================================
+
+
+
 
 # ───────────────────────────────────────────────────────────────────────
 # ✅ END OF FILE
