@@ -373,58 +373,121 @@ def _active_sids(mid: str) -> list[str]:
         print(f"[active_sids] fallback warn: {e}")
         return []
 
-# === PATCH START ===
+# =======================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/scope.py
 # 🔎 SEARCH: def read_scope_window
-# 📆 PATCHED: 2025-10-09T12:30Z — restore legacy structure (list[str] + map[mid→sids])
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📆 PATCHED: 2025-12-05 — hybrid wrapper: modern scope → legacy format
+# =======================================================================
+
 def read_scope_window(ahead_min: int = 90) -> dict:
     """
-    Rebuild today's live scope snapshot for DecideOnce + Mastery.
-    Returns legacy structure:
-      { "markets": ["1.2487...", "1.2488..."], "active_sids": {"1.2487...": ["123","124"], ...} }
+    HYBRID WRAPPER (V10 → V5 compatibility)
+
+    Modern scope engine (scope_snapshot) produces:
+        {
+            "pre_near": [(mid, tto, name, off), ...],
+            "pre_far":  [(mid, tto, name, off), ...],
+            "in_play":  [(mid, elapsed), ...]
+        }
+
+    Legacy Lanes + Candidates + Placement expect:
+        {
+            "markets": [...],
+            "active_sids": { mid: [sid1, sid2, ...] }
+        }
+
+    This adapter:
+        • Calls the modern scope engine
+        • Extracts all marketIds from pre_far + pre_near + in_play
+        • Looks up SIDs from bets DB (legacy behaviour)
+        • Returns the exact V5 structure expected downstream
     """
-    import sqlite3, datetime
-    from .helpers import open_bets_db
-    from engines.config_paths import open_auto_db, q_retry as _q
 
+    import sqlite3
+    from engines.decision_engine.decide_once.scope import scope_snapshot
+    from engines.config_paths import open_bets_db, q_retry as _q
 
-    scope = {"markets": [], "active_sids": {}}
-    # === PATCH START ===
-    # 📍 TARGET: engines/decision_engine/decide_once/scope.py:read_scope_window
-    # 🔎 SEARCH: bdb = connect_db(path=bets_db(), ro=True)
-    # 📆 PATCHED: 2025-11-22 — replace unsafe connect_db() with DAL-safe open_bets_db()
+    # -------------------------------------------------------------------
+    # 1️⃣ Build authoritative modern scope
+    # -------------------------------------------------------------------
+    sc = scope_snapshot(inplay_window_min=15)
+    # sc contains: pre_far, pre_near, in_play
+
+    # Pull ALL modern markets
+    modern_mids = set()
+
+    for row in sc.get("pre_far", []):
+        try: modern_mids.add(str(row[0]))
+        except Exception: pass
+
+    for row in sc.get("pre_near", []):
+        try: modern_mids.add(str(row[0]))
+        except Exception: pass
+
+    for row in sc.get("in_play", []):
+        try: modern_mids.add(str(row[0]))
+        except Exception: pass
+
+    # -------------------------------------------------------------------
+    # 2️⃣ Build legacy SID map (bets DB is authoritative for selections)
+    # -------------------------------------------------------------------
+    legacy_scope = {"markets": [], "active_sids": {}}
 
     try:
-        # use DAL-safe bets connector
         bdb = open_bets_db(ro=True)
         bdb.row_factory = sqlite3.Row
-        rows = _q(bdb, """
+
+        sid_rows = _q(
+            bdb,
+            """
             SELECT marketId, selectionId
               FROM bets
-             WHERE datetime(marketStartTime) BETWEEN datetime('now','-1 hour','utc')
-                                               AND datetime('now','+12 hour','utc')
-             ORDER BY datetime(marketStartTime)
-        """).fetchall()
+             WHERE datetime(marketStartTime)
+                   BETWEEN datetime('now','-4 hour','utc')
+                       AND datetime('now','+12 hour','utc')
+            """
+        ).fetchall()
+
+        for r in sid_rows:
+            mid = str(r["marketId"])
+            sid = str(r["selectionId"])
+            if mid in modern_mids:
+                legacy_scope["active_sids"].setdefault(mid, []).append(sid)
+
         bdb.close()
-# === PATCH END ===
 
     except Exception:
-        rows = []
+        # fail-safe: empty SID list
+        for mid in modern_mids:
+            legacy_scope["active_sids"].setdefault(mid, [])
 
-    for r in rows:
-        mid, sid = str(r["marketId"]), str(r["selectionId"])
-        scope["active_sids"].setdefault(mid, set()).add(sid)
-    scope["markets"] = list(scope["active_sids"].keys())
-    # convert sets to sorted lists
-    scope["active_sids"] = {m: sorted(list(s)) for m, s in scope["active_sids"].items()}
+    # -------------------------------------------------------------------
+    # 3️⃣ Final V5 structure
+    # -------------------------------------------------------------------
+    # ensure deterministic sort
+    final_mids = sorted(list(modern_mids))
+    legacy_scope["markets"] = final_mids
 
-    _SCOPE_STATE.clear()
-    _SCOPE_STATE.update(scope)
-    return scope
-# === PATCH END ===
+    # sort SIDs
+    legacy_scope["active_sids"] = {
+        mid: sorted(sids)
+        for mid, sids in legacy_scope["active_sids"].items()
+    }
 
+    # -------------------------------------------------------------------
+    # 4️⃣ Cache globally for legacy readers
+    # -------------------------------------------------------------------
+    try:
+        _SCOPE_STATE.clear()
+        _SCOPE_STATE.update(legacy_scope)
+    except Exception:
+        pass
 
+    return legacy_scope
+
+# =======================================================================
+# END PATCH
+# =======================================================================
 
 # ============================================================
 # 📍 TARGET: engines/decision_engine/decide_once/scope.py
@@ -745,6 +808,56 @@ def start_scope_refresher(interval_s: int = 30) -> None:
     print("[SCOPE] refresher disabled (use build_and_maintain_scope() manually)")
     return
 # === PATCH END ===
+
+# === BACKWARD COMPATIBILITY SHIM ================================
+# LiveRouter still expects read_scope_window(lookback_min=X)
+
+def read_scope_window(ahead_min: int = 90, lookback_min: int = 10) -> dict:
+    """
+    Legacy API expected by LiveRouter.
+    Converts new scope_snapshot() into the old structure:
+        { "markets": [...], "active_sids": { mid: [sid1, sid2] } }
+    """
+
+    snap = scope_snapshot(inplay_window_min=lookback_min)
+
+    # old structure → flatten all the lists
+    mids = set()
+
+    for m, _tto, _name, _off in snap.get("pre_near", []):
+        mids.add(m)
+    for m, _tto, _name, _off in snap.get("pre_far", []):
+        mids.add(m)
+    for m, _elapsed in snap.get("in_play", []):
+        mids.add(m)
+
+    # build output structure
+    out = {
+        "markets": list(sorted(mids)),
+        "active_sids": {}
+    }
+
+    # attach runners (LiveRouter expects them)
+    try:
+        import sqlite3
+        from .helpers import open_bets_db
+        con = open_bets_db(ro=True)
+        con.row_factory = sqlite3.Row
+
+        for mid in out["markets"]:
+            rows = con.execute(
+                "SELECT selectionId FROM bets WHERE marketId=?",
+                (mid,)
+            ).fetchall()
+            out["active_sids"][mid] = [str(r["selectionId"]) for r in rows]
+
+        con.close()
+    except Exception:
+        pass
+
+    return out
+# ================================================================
+
 
 
 

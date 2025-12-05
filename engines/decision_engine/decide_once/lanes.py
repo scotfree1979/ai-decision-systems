@@ -35,6 +35,27 @@ except Exception:
 from engines.mastery import mastery_policy as mp
 from engines.mastery.context_builder_next import build_context_from_scope as build_context
 
+# === COMPAT PATCH: restore read_scope_window for LiveRouter ===
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: def read_scope_window(
+# 📆 PATCHED: 2025-12-05 — force lanes to use the unified scope reader
+# ============================================================================
+
+from .scope import read_scope_window as _unified_scope_reader
+
+def read_scope_window(*args, **kwargs):
+    """
+    Lanes MUST use the exact same scope window as DecideOnce.
+    This wrapper preserves backwards compatibility while ensuring
+    mid/sid lists are identical across all consumers.
+    """
+    return _unified_scope_reader(*args, **kwargs)
+
+# === PATCH END ==============================================================
+
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/decide_once/lanes.py
 # 📆 PATCHED: 2025-12-04 — Universal plan safety wrapper
@@ -648,12 +669,122 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
         # ----------------------------------------------------------------------
         # 4) LEGACY DECIDEONCE PROCESSING
         # ----------------------------------------------------------------------
-        for sid, px in pairs:
-            ctx = dict(base_ctx)
-            ctx["marketId"] = mids
-            ctx["selectionId"] = sid
-            ctx["current_price"] = px
-            ctx["is_passive"] = sid in passive
+        # =====================================================================
+        # DECIDEONCE CTX BUILDER (FINAL VERSION)
+        # =====================================================================
+        def build_decideonce_ctx(
+                *,
+                mid: str,
+                sid: str,
+                px: float | None,
+                rank: int | None,
+                epic_size: int | None,
+                epic_fav: str | None,
+                epic_second: str | None,
+                epic_field: list | None,
+                minutes_to_off: float | None,
+                phase: str | None,
+                run_id: str,
+                mode: str,
+                is_passive: bool,
+                is_active: bool,
+                is_ignored: bool,
+        ) -> dict:
+            """
+            DecideOnce CTX Builder (canonical lanes version)
+            ------------------------------------------------
+            • Builds CTX *only* from data available inside lanes
+            • Safe for Legacy, Mastery, MSC
+            • No missing fields → no NoneType errors
+            • Normalised using harden_ctx()
+            """
+
+            ctx = {}
+
+            # ---------------------------------------------------
+            # Identity
+            # ---------------------------------------------------
+            ctx["marketId"] = str(mid)
+            ctx["selectionId"] = str(sid)
+
+            # ---------------------------------------------------
+            # Price fields (sourced from lanes px)
+            # ---------------------------------------------------
+            try:
+                price = float(px) if px is not None else None
+            except Exception:
+                price = None
+
+            ctx["odds"] = price
+            ctx["px"] = price
+            ctx["ltp"] = price
+            ctx["current_price"] = price
+            ctx["price_now"] = price
+            ctx["tape_px"] = price
+
+            # ---------------------------------------------------
+            # Timing (from Mastery scope timing)
+            # ---------------------------------------------------
+            try:
+                mto = float(minutes_to_off) if minutes_to_off is not None else None
+            except Exception:
+                mto = None
+
+            ctx["minutes_to_off"] = mto
+            ctx["tto_minutes"] = mto
+
+            if phase is not None:
+                ctx["phase"] = str(phase)
+            else:
+                ctx["phase"] = "IN_PLAY" if (mto is not None and mto <= 0) else "PRE"
+
+            # ---------------------------------------------------
+            # Lanes category flags
+            # ---------------------------------------------------
+            ctx["is_passive"] = bool(is_passive)
+            ctx["is_active"] = bool(is_active)
+            ctx["is_ignored"] = bool(is_ignored)
+
+            # ---------------------------------------------------
+            # EPIC metadata (from pairs enumeration)
+            # ---------------------------------------------------
+            ctx["fav_rank"] = rank
+            ctx["epic_size"] = epic_size
+            ctx["epic_fav"] = epic_fav
+            ctx["epic_second"] = epic_second
+            ctx["epic_field"] = epic_field or []
+
+            # ---------------------------------------------------
+            # Engine context
+            # ---------------------------------------------------
+            ctx["run_id"] = run_id
+            ctx["mode"] = mode
+
+            # ---------------------------------------------------
+            # Required baseline numerics (so nothing is None)
+            # ---------------------------------------------------
+            ctx.setdefault("slope_ppm", 0.0)
+            ctx.setdefault("recent_net_ticks", 0)
+            ctx.setdefault("oc_momentum_ticks", 0)
+            ctx.setdefault("bank", 0.0)
+            ctx.setdefault("used_exposure", 0.0)
+
+            # downstream families populate these:
+            ctx.setdefault("strategy_name", None)
+            ctx.setdefault("letter", None)
+
+            # ---------------------------------------------------
+            # Normalisation using existing DecideOnce hardener
+            # ---------------------------------------------------
+            try:
+                from engines.decision_engine.decide_once.helpers import harden_ctx
+                harden_ctx(ctx)
+            except Exception:
+                pass
+
+            return ctx
+
+
 
             # --- MicroScalper v7 tick (correct location: full ctx available) ---
             try:

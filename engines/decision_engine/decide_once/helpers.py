@@ -77,6 +77,90 @@ def q_retry(obj, sql, params=(), *_a, **_k):
     return __cp_q_retry(con, sql, params)
 # --- END DB SHIM ---
 
+# =====================================================================
+# DECIDEONCE CTX BUILDER (SAFE, MINIMAL, MASTER-COMPATIBLE)
+# =====================================================================
+
+def build_decideonce_ctx(
+    *,
+    mid: str,
+    sid: str,
+    px: float | None,
+    rank: int | None = None,
+    epic_size: int | None = None,
+    epic_fav: str | None = None,
+    epic_second: str | None = None,
+    epic_field: list | None = None,
+    minutes_to_off: float | None = None,
+    phase: str | None = None,
+    run_id: str | None = None,
+    mode: str = "LIVE",
+) -> dict:
+    """
+    Unified CTX builder for DecideOnce → Mastery → Placement.
+    Ensures all downstream consumers get a complete, safe dictionary.
+    """
+
+    ctx = {}
+
+    # --- core identity ---
+    ctx["marketId"] = str(mid)
+    ctx["selectionId"] = str(sid)
+
+    # --- odds / px ---
+    try:
+        ctx["odds"] = float(px) if px is not None else None
+    except Exception:
+        ctx["odds"] = None
+
+    ctx["px"] = ctx["odds"]
+    ctx["ltp"] = ctx["odds"]
+    ctx["current_price"] = ctx["odds"]
+
+    # --- timing / windows ---
+    try:
+        if minutes_to_off is not None:
+            ctx["minutes_to_off"] = float(minutes_to_off)
+            ctx["tto_minutes"] = float(minutes_to_off)
+        else:
+            ctx["minutes_to_off"] = None
+            ctx["tto_minutes"] = None
+    except Exception:
+        ctx["minutes_to_off"] = None
+        ctx["tto_minutes"] = None
+
+    ctx["phase"] = str(phase or ("IN_PLAY" if (minutes_to_off is not None and minutes_to_off <= 0) else "PRE"))
+
+    # --- epic metadata (story size, fav tree, runner rank etc.) ---
+    ctx["fav_rank"] = int(rank) if rank is not None else None
+    ctx["epic_size"] = int(epic_size) if epic_size is not None else None
+    ctx["epic_fav"] = epic_fav
+    ctx["epic_second"] = epic_second
+    ctx["epic_field"] = epic_field or []
+
+    # --- orchestration / traceability ---
+    ctx["run_id"] = run_id
+    ctx["mode"] = mode
+
+    # --- minimal defaults required by Mastery & Lanes ---
+    ctx.setdefault("letter", None)
+    ctx.setdefault("strategy_name", None)
+    ctx.setdefault("slope_ppm", 0.0)
+    ctx.setdefault("recent_net_ticks", 0)
+    ctx.setdefault("oc_momentum_ticks", 0)
+    ctx.setdefault("bank", 0.0)
+    ctx.setdefault("used_exposure", 0.0)
+
+    # --- ensure harmonized context (same as Mastery hardener) ---
+    try:
+        from engines.decision_engine.decide_once.helpers import harden_ctx
+        harden_ctx(ctx)
+    except Exception:
+        pass
+
+    return ctx
+
+
 
 _q_retry = q_retry
 # === PATCH END ===
@@ -265,6 +349,120 @@ def harden_ctx(ctx: dict) -> dict:
         ctx["hedge_ticks"] = 1
 
     return ctx
+
+# === CTX BUILDER (drop-in at top-level in helpers.py, directly under harden_ctx) ===
+
+def build_ctx(base: dict, overrides: dict | None = None) -> dict:
+    """
+    Unified CTX builder for Legacy + MSC + Mastery.
+    - Guarantees every referenced CTX field exists.
+    - Applies safe defaults so NoneType explosions cannot happen.
+    - Merges base + overrides.
+    """
+
+    ctx = dict(base or {})
+    if overrides:
+        ctx.update(overrides)
+
+    # ---- Define ALL known CTX fields with safe defaults ----
+    DEFAULTS = {
+        # price stack
+        "odds": 0.0, "px": 0.0, "ltp": 0.0, "price": 0.0, "price_now": 0.0,
+        "current_price": 0.0, "tape_px": 0.0,
+
+        # time stack
+        "minutes_to_off": 9999.0, "tto_minutes": 9999.0,
+        "phase": "PRE", "tto_min": 9999.0,
+
+        # runner meta / ranks
+        "fav_rank": 99, "fav_rank_now": 99, "fav_rank_est": 99,
+        "fav_tag": "", "movement": "", "rank_now": 0, "rank_was": 0,
+
+        # epic meta
+        "epic_size": 0, "epic_fav": None, "epic_second": None, "epic_field": [],
+
+        # bands + oc signals
+        "band": "", "band_hint": "", "oc_phase": "",
+        "oc_momentum_ticks": 0, "band_stability": 0.0,
+
+        # MSC signals
+        "msc_mode": "", "msc_direction": "", "msc_entry_ticks": 0,
+        "msc_stop_ticks": 0, "msc_multiplier": 1.0,
+
+        # liquidity fields
+        "l1_available": 0.0, "l1_available_back": 0.0, "l1_available_lay": 0.0,
+        "liquidity_flag": "NORMAL", "liq_best_back": 0.0, "liq_best_lay": 0.0,
+
+        # WOM
+        "wom_ratio": 0.0, "wom_back_sum": 0.0, "wom_lay_sum": 0.0,
+
+        # trend
+        "slope_ppm": 0.0, "slope_per_min": 0.0, "slope_5m": 0.0,
+        "tick_volatility": 0.0, "tick_vel_3s_up": 0,
+        "up_ticks_10s": 0, "down_ticks_10s": 0, "trend": "",
+
+        # blueprint + playbook
+        "blueprint_conf": 0.0, "blueprint_key": "",
+        "blueprint_match": "", "playbook_win_rate": 0.0,
+
+        # bias
+        "bias": 0.0, "bias_conf": 0.0, "bias_dir": "FLAT", "bias_why": "",
+
+        # stoploss / risk
+        "stoploss_triggered_for_parent": None,
+        "open_liability": 0.0, "used_exposure": 0.0, "exposure": 0.0,
+
+        # strategy / family
+        "strategy_name": "", "family_code": "", "letter": "",
+        "pass_tag": "", "source": "", "mode": "",
+
+        # MSC + Legacy carry-throughs
+        "parent_info": None, "legacy_entry_odds": 0.0,
+        "legacy_entry_side": None, "legacy_parent_id": None,
+
+        # market meta
+        "marketId": "", "selectionId": "",
+        "is_passive": False, "is_active": True, "is_ignored": False,
+        "in_play": False, "inplay_progress": 0.0,
+
+        # misc / rare
+        "sleq": 0.0, "form_class": "", "form_win_rate": 0.0,
+        "range_breakout": "", "range_breakout_confirmed": False,
+        "distance_band": "", "tto_window": "",
+
+        # liquidity / ladder snapshots
+        "levels": [], "liquidity_ok": True,
+        "k": None, "key": None, "default": None,
+    }
+
+    # Fill missing fields
+    for k, v in DEFAULTS.items():
+        if k not in ctx or ctx[k] is None:
+            ctx[k] = v
+
+    # ensure price fields agree
+    try:
+        main_px = float(ctx.get("odds") or ctx.get("px") or ctx.get("current_price") or 0.0)
+    except:
+        main_px = 0.0
+
+    for p in ("px", "price", "price_now", "ltp", "current_price", "tape_px"):
+        try:
+            ctx[p] = float(ctx.get(p) or main_px)
+        except:
+            ctx[p] = main_px
+
+    # ensure MTO consistency
+    try:
+        mto = float(ctx.get("minutes_to_off") or ctx.get("tto_minutes") or 9999.0)
+    except:
+        mto = 9999.0
+    ctx["minutes_to_off"] = ctx["tto_minutes"] = mto
+    ctx["phase"] = "IN_PLAY" if mto <= 0 else "PRE"
+
+    return ctx
+# === END CTX BUILDER ===
+
 
 def harden_plan(plan: dict) -> dict:
     """
