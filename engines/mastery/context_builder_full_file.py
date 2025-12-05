@@ -4,7 +4,7 @@ from __future__ import annotations
 import os, json, time, sqlite3, random
 from typing import Tuple, Dict, Any, Optional, List
 from datetime import datetime, timedelta, timezone
-from engines.decision_engine.strategies.common import CTXV7   # <-- add import at top of file
+
 # Canonical DB paths
 from engines.config_paths import connect_db, autoscalp_db
 
@@ -712,111 +712,58 @@ def build_context(source: str | None = None) -> tuple[dict, dict]:
         # prefer lowest price
         sid = min(runners.keys(), key=lambda k: runners[k].get("px", 9999)) or sid
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/mastery/context_builder.py
-# 🔎 SEARCH: ctx = {
-# 🛠 ACTION: Replace legacy CTX dict with CTXV7 copy and populate fields
-# ===========================================================================
+    ctx = {
+        "source": src,
+        "marketId": mid,
+        "selectionId": sid,
+        "minutes_to_off": 10.0,
+        "phase": "PRE",
+        "depth_total": 900.0,
+        "matched_per_min": 280.0,
+        "direction": "LAY->BACK",
+    }
 
+    if sid in runners:
+        info = runners[sid]
+        ctx["odds"] = info.get("px")
+        ctx["band"] = info.get("band")
+        ctx["is_fav"] = info.get("is_fav", False)
 
+    try:
+        bias = compute_bias(ctx)
+        ctx.update(bias.as_plan_fields())
+        ctx["bias_why"] = bias.why
+    except Exception as e:
+        ctx["bias"] = 0.0
+        ctx["bias_dir"] = "FLAT"
+        ctx["bias_conf"] = 0.0
+        ctx["bias_why"] = f"bias_fail:{e}"
 
-# Inside build_context(), replace the legacy ctx = {...} block with:
+    try:
+        slope_ppm, net_ticks = _slope_ppm_from_inbound(mid, sid, horizon_rows=3)
+        ctx["slope_ppm"] = slope_ppm
+        ctx["recent_net_ticks"] = net_ticks
+    except Exception:
+        ctx["slope_ppm"] = 0.0
+        ctx["recent_net_ticks"] = 0
 
-        # --------------------------------------------
-        # NEW CTXv7 (identity-only initialisation)
-        # --------------------------------------------
-        ctx = CTXV7.copy()
-        ctx["source"] = src
-        ctx["marketId"] = mid
-        ctx["selectionId"] = sid
+    try:
+        bank, used = _get_account_funds()
+        ctx["bank"] = bank
+        ctx["used_exposure"] = used
+    except Exception:
+        pass
 
-        # --------------------------------------------
-        # Price: from MarketMonitor (primary) or inbound series
-        # --------------------------------------------
-        if sid in runners:
-            px = runners[sid].get("px")
-            if px is not None:
-                ctx["odds"] = float(px)
-                ctx["px"] = float(px)
-                ctx["ltp"] = float(px)
+    meta = {
+        "marketId": mid,
+        "selectionId": sid,
+        "scope_count": len(mids),
+        "runner_count": len(sids),
+        "updated_at": now.isoformat(),
+    }
 
-        # Tape snapshot (optional override if fresher)
-        try:
-            tape_px, tape_age = _tape_snapshot(mid, sid)
-            if tape_px is not None:
-                ctx["tape_px"] = float(tape_px)
-            if tape_age is not None:
-                ctx["tape_age"] = int(tape_age)
-        except Exception:
-            pass
-
-        # --------------------------------------------
-        # Movement Intel (existing slope/momentum logic)
-        # --------------------------------------------
-        try:
-            slope_ppm, net_ticks = _slope_ppm_from_inbound(mid, sid, horizon_rows=3)
-            ctx["slope_ppm"] = float(slope_ppm)
-            ctx["recent_net_ticks"] = int(net_ticks)
-            ctx["oc_momentum_ticks"] = int(net_ticks)
-        except Exception:
-            ctx["slope_ppm"] = 0.0
-            ctx["recent_net_ticks"] = 0
-            ctx["oc_momentum_ticks"] = 0
-
-        # --------------------------------------------
-        # Bias (keep old logic but populate CTXv7 fields)
-        # --------------------------------------------
-        try:
-            bias = compute_bias(ctx)
-            ctx["bias"] = float(bias.value)
-            ctx["bias_dir"] = str(bias.dir)
-            ctx["bias_conf"] = float(bias.conf)
-            ctx["bias_why"] = bias.why
-        except Exception:
-            ctx["bias"] = 0.0
-            ctx["bias_dir"] = "FLAT"
-            ctx["bias_conf"] = 0.0
-            ctx["bias_why"] = "bias_fail"
-
-        # --------------------------------------------
-        # Runner State from Scope
-        # --------------------------------------------
-        ctx["is_active"] = sid in sids
-        ctx["is_passive"] = False         # legacy - MSC never uses it here
-        ctx["is_ignored"] = False         # legacy - MSC never uses it here
-        ctx["is_fav"] = runners.get(sid, {}).get("is_fav", False)
-        ctx["fav_rank"] = runners.get(sid, {}).get("fav_rank")
-
-        # --------------------------------------------
-        # Bank / Exposure from BankState ONLY
-        # --------------------------------------------
-        try:
-            from engines.live import bank_state
-            ctx["bank"] = float(bank_state.get_balance() or 0.0)
-            ctx["used_exposure"] = float(bank_state.get_total_exposure() or 0.0)
-        except Exception:
-            ctx["bank"] = 0.0
-            ctx["used_exposure"] = 0.0
-
-        # --------------------------------------------
-        # Decision fields (left empty for MSC to populate)
-        # --------------------------------------------
-        ctx["direction"] = None
-        ctx["side"] = None
-        ctx["letter"] = None
-        ctx["target_ticks"] = None
-        ctx["size"] = None
-        ctx["entry_odds"] = None
-        ctx["why"] = None
-
-        # Timestamp
-        ctx["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-        # Return ctx + meta
-        return ctx, meta
-
-# === PATCH END ==============================================================
-
+    return ctx, meta
+# === PATCH 3 END (unified Scope ContextBuilder) ===
 
 
 # ─────────────────────────────────────────────────────────────────────────────

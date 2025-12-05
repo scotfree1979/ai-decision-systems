@@ -733,35 +733,36 @@ def ordered_markets_for_tick(scope_obj=None, *, ahead_min: int = 30, lookback_mi
 
 
 # ---- minimal Always_On policy -------------------------------------------------
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py
+# 🔎 SEARCH: def plan_for_always_on(
+# 🎯 ACTION: Hard-disable ALWAYS_ON by delegating to OG_STRATEGY (letter S)
+# 📆 PATCHED: 2025-12-05Z
+# ============================================================================
+
 def plan_for_always_on(ctx: dict) -> dict:
     """
-    Fallback plan that only needs a price.
-    Enters pre-off for px in [1.50, 12.0); direction by px band; 1 tick; base stake.
+    ALWAYS_ON (A) is deprecated.
+    Replace all A plans with OG_STRATEGY (S) logic.
     """
     try:
-        px = float(ctx.get("odds") or ctx.get("px") or 0.0)
+        # Force strategy family to OG_STRATEGY
+        ctx2 = dict(ctx)
+        ctx2["letter"] = "S"
+        return plan_for_strategy("OG_STRATEGY", ctx2)
     except Exception:
-        px = 0.0
+        # If OG_STRATEGY fails, return no-trade
+        return {
+            "enter": False,
+            "letter": "A",
+            "why": "A_disabled_redirect_to_S_failed",
+            "px": float(ctx.get("px") or ctx.get("odds") or 0.0),
+            "size": 0.0,
+            "target_ticks": 0,
+        }
 
-    if px <= 0.0:
-        return {"enter": False, "why": "missing_px", "letter": "A"}
-    if px < 1.50 or px >= 12.0:
-        return {"enter": False, "why": f"px_out_of_band({px:.2f})", "letter": "A"}
+# === PATCH END ================================================================
 
-    direction = "LAY->BACK" if px >= 4.0 else "BACK->LAY"
-    target_ticks = 1
-    size = float(getattr(daily_config, "BASE_STAKE_A",
-                         getattr(daily_config, "BASE_STAKE", 2.0)))
-
-    return {
-        "enter": True,
-        "letter": "A",
-        "direction": direction,
-        "target_ticks": target_ticks,
-        "size": size,
-        "px": px,
-        "plan_why": f"A-fallback px={px:.2f} dir={direction} ticks={target_ticks}"
-    }
 
 # -----------------------------------------------------------------------------
 # Source helper
@@ -1856,23 +1857,28 @@ def _stoploss_exit_plan(ctx: dict) -> dict | None:
     return None
 # === PATCH END ===
 
-# === PATCH: expose alias for decide_once / lanes ===
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py:plan_for_strategy
+# 🔎 SEARCH: def plan_for_strategy(fam: str, ctx: dict) -> dict:
+# 🎯 ACTION: Disable ALWAYS_ON (A) strategy completely
+# 📆 PATCHED: 2025-12-05Z
+# ============================================================================
+
 def plan_for_strategy(fam: str, ctx: dict) -> dict:
-    # === PATCH START ===
-    # 📍 TARGET: mastery_policy.plan_for_strategy
-    if ENABLE_LEGACY_ONLY:
-        # Master letter extracted same way orchestrator does
-        letter = _FAM_LETTER.get(fam, fam[:1]).upper()
-        if letter not in LEGACY_FAMILIES:
-            return {
-                "enter": False,
-                "letter": letter,
-                "why": "legacy_only_disabled",
-                "px": float(ctx.get("odds") or ctx.get("px") or 0.0),
-                "target_ticks": 0,
-                "size": 0.0,
-            }
-    # === PATCH END ===
+    # --- HARD DISABLE ALWAYS_ON (A) STRATEGY ------------------------------
+    if str(fam).upper() == "ALWAYS_ON":
+        return {
+            "enter": False,
+            "letter": "A",
+            "why": "disabled_A_msc_replacement",
+            "px": float(ctx.get("odds") or ctx.get("px") or 0.0),
+            "target_ticks": 0,
+            "size": 0.0,
+        }
+    # === PATCH END ========================================================
+
+
 
     mid = str(ctx.get("marketId") or "")
     sid = str(ctx.get("selectionId") or "")

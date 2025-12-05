@@ -145,6 +145,76 @@ def _on_tsl_event(payload):
 # Safe early export of TSL bridge context before any imports use it
 _TSL_LAST_PARENT = None
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🛠 ACTION: When stop-loss fires → place S child + cancel H child
+# 📆 PATCHED: 2025-12-06
+
+from engines.live.live_router import (
+    _place_stoploss_child_now,
+    _orders_conn,
+    _orders_update_parent_cancelled,
+)
+
+def _process_stoploss_now(ev):
+    """
+    New-world STOPLOSS executor:
+        • Place STOPLOSS child (S)
+        • Cancel any H child for this parent
+    """
+    try:
+        pid  = ev.get("parent_id")
+        mid  = str(ev.get("marketId"))
+        sid  = str(ev.get("selectionId"))
+        side = str(ev.get("entry_side")).upper()
+        entry_odds  = float(ev.get("entry_odds") or 0.0)
+        entry_stake = float(ev.get("entry_stake") or 0.0)
+
+        # -----------------------------
+        # 1) Determine STOPLOSS exit side
+        # -----------------------------
+        exit_side = "BACK" if side == "LAY" else "LAY"
+
+        # -----------------------------
+        # 2) Place STOPLOSS child NOW
+        # -----------------------------
+        child_id = _place_stoploss_child_now(
+            parent_cor=None,      # resolved below
+            market_id=mid,
+            selection_id=sid,
+            exit_side=exit_side,
+            exit_odds=ev.get("current_odds"),
+            parent_stake=entry_stake,
+            run_id=None
+        )
+
+        # -----------------------------
+        # 3) Cancel existing hedge child
+        # -----------------------------
+        con = _orders_conn(); con.row_factory = sqlite3.Row
+        rows = con.execute("""
+            SELECT id FROM orders
+             WHERE hedge_of=? AND role='CHILD'
+               AND exit_kind='HEDGE'
+               AND (exit_status IS NULL OR exit_status<>'matched')
+        """, (pid,)).fetchall()
+
+        for r in rows:
+            _orders_update_parent_cancelled(str(pid), reason="SL_Cancel_H")
+        con.close()
+
+        print(f"[STOPLOSS] S child placed for parent={pid}, cancelled {len(rows)} H children")
+
+    except Exception as e:
+        print(f"[STOPLOSS][ERR] failed to process stoploss now: {e}")
+
+# Hook it into event pipeline
+event_sink.subscribe(lambda ev: _process_stoploss_now(ev) 
+                     if ev.get("type") == "stop_loss_triggered" else None)
+
+# === PATCH END ================================================================
+
+
 def get_tsl_parent():
     """Safe accessor used by MicroScalper ctx injection."""
     return _TSL_LAST_PARENT

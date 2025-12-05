@@ -14,7 +14,7 @@ from engines.decision_engine.decide_once.helpers import (
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
 # 📆 PATCHED: 2025-10-18Z — fix undefined budget_manager reference
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-from engines.risk import budget_manager
+
 def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
     """
     Direct writable connection to AUTOSCALP_GUI (autoscalp_gui.db),
@@ -379,87 +379,215 @@ def _cancel_stale_parents(mid: str, sid: str, *, older_than_sec: int = 70) -> No
 
 
 # ---------- main entry
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 SEARCH (regex): ^def place_from_plan\(name: str, plan: dict, ctx: dict\) -> Optional\[int\]:
-# ⛏️ ACTION: replace the entire function with the block below
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔎 SEARCH: ^def place_from_plan\(name: str, plan: dict, ctx: dict\)
+# 🛠 ACTION: Replace entire function with MSC-pass-through + legacy-safe placement
+# 📆 PATCHED: 2025-12-11Z — CTXv7 alignment, MSC pass-through, legacy preservation
+# ============================================================================
+
 def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     """
-    Minimal placement path:
-      - trust plan (ids, price, size, direction)
-      - enforce per-letter CAP
-      - rotation: block same (mid,sid,letter) if an open parent exists
-      - preclaim PENDING -> call live router -> PLACED/FAILED
-      - always write decisions
+    Unified placement handler (MSC-aware)
+    -------------------------------------
+
+    • MSC engines (MSC_EXPLORATORY / MSC_RISK / MSC_INPLAY)
+        → DO NOT apply legacy placement logic
+        → DO NOT enrich px / size / direction
+        → DO NOT run caps or budget checks
+        → DO NOT stale-cancel
+        → They already contain full v7 intelligence and must pass straight
+          to LiveRouter untouched.
+
+    • Legacy engines
+        → Keep full legacy flow (caps, px enrichment, budget, stale cleanup)
+        → Direction already upgraded in lanes (MSC-direction-bridge)
     """
+
     from engines.live.live_router import place_parent_and_hedge
     from engines.decision_engine.decide_once import caps
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 SEARCH: def place_from_plan(
-# ⛏️ ACTION: insert early guards
+    from engines.config_paths import auto_conn
+ 
 
-    # scope sanity: do not place without odds or outside of scope
-    px = plan.get("px")
-    if px is None or float(px) <= 0:
-        # last-ditch: try odds_current
-        try:
-            from engines.config_paths import auto_conn
-            con = auto_conn(rw=True)
-            row = _q(con, """
-                SELECT ltp
-                  FROM odds_current
-                 WHERE marketId=? AND selectionId=?
-              ORDER BY updated_ts DESC LIMIT 1
-                 """, (str(plan.get("marketId")), str(plan.get("selectionId")))).fetchone()
-            con.close()
-            if row and row["ltp"]:
-                plan["px"] = float(row["ltp"])
-        except Exception:
-            pass
-    if float(plan.get("px") or 0) <= 0:
-        _write_decision and _write_decision(run_id=ctx.get("run_id"), marketId=str(plan.get("marketId")),
-            selectionId=str(plan.get("selectionId")), outcome="not_placed", why="blocked: missing px",
-            letter=str(plan.get("letter") or "?")[:1], proposed_odds=None, proposed_stake=plan.get("size"), order_id=None)
-        return None
-# === PATCH END ===
+    # Normalise objects
+    plan = dict(plan or {})
+    ctx  = dict(ctx or {})
 
+    engine = (ctx.get("engine") or "").upper()
+    is_msc = engine.startswith("MSC_")
 
-    plan = dict(plan or {}); ctx = dict(ctx or {})
-    plan_id = plan.get("plan_id")  # <- comes from mastery ledger
-
-    # --- IDs / letter / side
+    # ------------------------------------------------------------
+    # 1) Canonical MID/SID resolution
+    # ------------------------------------------------------------
     def _canon_ids(d):
         if not isinstance(d, dict): return None, None
         mid = d.get("marketId") or d.get("market_id") or d.get("mid")
         sid = d.get("selectionId") or d.get("selection_id") or d.get("sid")
-        return (str(mid) if mid is not None else None, str(sid) if sid is not None else None)
+        return (str(mid) if mid is not None else None,
+                str(sid) if sid is not None else None)
 
     mid, sid = _canon_ids(plan)
-    if mid is None or sid is None:
+    if not mid or not sid:
         cm, cs = _canon_ids(ctx)
         mid = mid or cm; sid = sid or cs
 
-    # clear stale parents from previous passes (optional safety)
+    if not mid or not sid:
+        _write_decision(
+            run_id=ctx.get("run_id"), mid=mid, sid=sid,
+            outcome="not_placed", why="blocked: missing marketId/selectionId",
+            letter=str(plan.get("letter") or "?")[:1]
+        )
+        return None
+
+    # MSC always supplies correct px / size / direction
+    # Legacy may not — determine early
+    direction = str(plan.get("direction") or "LAY->BACK").upper()
+    side = "LAY" if direction.startswith("LAY") else "BACK"
+
+    # ------------------------------------------------------------
+    # 2) MSC ENGINE FAST-PATH (NO LEGACY LOGIC)
+    # ------------------------------------------------------------
+    if is_msc:
+
+        # --- MSC LETTER SELECTION -----------------------------------------
+        msc_mode = plan.get("msc_mode") or ctx.get("msc_mode")
+        if   msc_mode == "EXPLORATORY": letter = "D"
+        elif msc_mode == "RISK":        letter = "J"
+        elif msc_mode == "INPLAY":      letter = "V"
+        else:                           letter = "D"
+
+        plan["letter"] = letter
+        plan["customerOrderRef"] = f"{letter}-{uuid.uuid4().hex[:10]}"
+
+        # Preclaim a parent row so Router can upgrade it
+        from engines.live.live_router import _orders_insert_parent_queued
+
+        pending_id = _orders_insert_parent_queued(
+            run_id=ctx.get("run_id"),
+            market_id=mid,
+            selection_id=sid,
+            side=side,
+            entry_odds=plan.get("px"),
+            entry_stake=plan.get("size"),
+            cor=plan["customerOrderRef"],
+            source=letter,
+        )
+        if pending_id is None:
+            _write_decision(
+                run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                outcome="not_placed", why="msc_preclaim_fail",
+                letter=letter
+            )
+            return None
+
+        # Route directly through LiveRouter exactly as MSC intended
+        result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
+        bet_id, cref, child_id = None, None, None
+
+        try:
+            if isinstance(result, (list, tuple)):
+                if len(result) >= 2: bet_id, cref = result[0], result[1]
+                if len(result) >= 3: child_id = result[2]
+            else:
+                bet_id = result
+        except Exception:
+            pass
+
+        cref = cref or plan["customerOrderRef"]
+
+        # Ledger: child
+        try:
+            if child_id:
+                mark_child(plan.get("plan_id"), child_id)
+        except Exception:
+            pass
+
+        # --- Upgrade order row --------------------------------------------
+        con = _auto_db_writer()
+        try:
+            if bet_id:
+                if _orders_has_status():
+                    con.execute("""
+                        UPDATE orders
+                           SET entry_bet_id=?,
+                               entry_status='PLACED', status='PLACED',
+                               customer_ref=COALESCE(?, customer_ref)
+                         WHERE customerOrderRef=?""",
+                        (str(bet_id), str(cref), str(plan["customerOrderRef"])))
+                else:
+                    con.execute("""
+                        UPDATE orders
+                           SET entry_bet_id=?,
+                               entry_status='PLACED',
+                               customer_ref=COALESCE(?, customer_ref)
+                         WHERE customerOrderRef=?""",
+                        (str(bet_id), str(cref), str(plan["customerOrderRef"])))
+                con.commit()
+
+                _write_decision(
+                    run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                    outcome="placed", why="ok(msc)", letter=letter,
+                    proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
+                    order_id=pending_id, meta={"cref": cref, "bet_id": bet_id}
+                )
+                return bet_id
+
+            # Router failed
+            if _orders_has_status():
+                con.execute("""
+                    UPDATE orders
+                       SET entry_status='FAILED', status='FAILED',
+                           closed_at=datetime('now','utc'),
+                           notes = TRIM(COALESCE(notes,'') || ' router_fail')
+                     WHERE customerOrderRef=?""",
+                    (str(plan["customerOrderRef"]),))
+            else:
+                con.execute("""
+                    UPDATE orders
+                       SET entry_status='FAILED',
+                           closed_at=datetime('now','utc'),
+                           notes = TRIM(COALESCE(notes,'') || ' router_fail')
+                     WHERE customerOrderRef=?""",
+                    (str(plan["customerOrderRef"]),))
+            con.commit()
+
+            _write_decision(
+                run_id=ctx.get("run_id"), mid=mid, sid=sid,
+                outcome="not_placed", why="router_fail", letter=letter,
+                proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
+                order_id=pending_id, meta={"cref": cref}
+            )
+            return None
+
+        except Exception as e:
+            con.rollback()
+            print(f"[MSC][ERR] finalize failed mid={mid} sid={sid}: {e}")
+            return None
+        finally:
+            con.close()
+
+    # =====================================================================
+    # 3) LEGACY ENGINE PLACEMENT (FULL PIPELINE)
+    # =====================================================================
+
+    # --- Legacy letter resolution (required before any CAP or PX logic) ---
+    letter = (str(
+        plan.get("letter") or
+        ctx.get("letter") or
+        name or "A"
+    )[:1]).upper()
+
+    plan["letter"] = letter
+
+
+
+    # --- stale cleanup
     try:
         _cancel_stale_parents(mid, sid, older_than_sec=70)
     except Exception:
         pass
 
-    letter = (str(plan.get("letter") or ctx.get("letter") or name or "A")[:1]).upper()
-    direction = str(plan.get("direction") or "LAY->BACK").upper()
-    side = "LAY" if direction.startswith("LAY") else "BACK"
-
-    # --- fundamentals
-    if not mid or not sid:
-        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                        outcome="not_placed", why="blocked: missing marketId/selectionId",
-                        letter=letter)
-        return None
-
-    # 🔁 ENRICH PX FROM DB IF MISSING ----------------------------------------
-    # plan["px"] may be absent/0 if upstream ctx didn't carry odds; resolve from DB.
+    # --- enrich px from DB if missing
     try:
         px0 = plan.get("px") or plan.get("entry_odds")
         px = float(px0) if px0 is not None else 0.0
@@ -467,39 +595,16 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         px = 0.0
 
     if px <= 0.0:
-        # 1) odds_current (today)
         px_oc = _fetch_px_from_odds_current(mid, sid)
-        if isinstance(px_oc, float) and px_oc > 0.0:
-            plan["px"] = px = float(px_oc)
+        if px_oc: px = float(px_oc)
         else:
-            # 2) inbound_oc_cache fallback
             px_ib = _fetch_px_from_inbound(mid, sid)
-            if isinstance(px_ib, float) and px_ib > 0.0:
-                plan["px"] = px = float(px_ib)
+            if px_ib: px = float(px_ib)
 
-    plan["size"] = _f(plan.get("size"), 2.0)
-    plan["px"]   = _f(plan.get("px"), _f(plan.get("entry_odds"), 0.0))
+    plan["px"]   = float(px)
+    plan["size"] = float(plan.get("size") or 2.0)
 
-    if plan["px"] <= 0.0:
-        # 📋 Detailed debug so we know *why* we still have no px
-        debug_meta = {
-            "why": "blocked: missing px",
-            "mid": str(mid), "sid": str(sid), "letter": letter,
-            "ctx_odds": ctx.get("odds"), "ctx_ltp": ctx.get("ltp"),
-            "plan_px": plan.get("px"), "entry_odds": plan.get("entry_odds"),
-            "oc_probe": bool(_fetch_px_from_odds_current(mid, sid) is not None),
-            "inbound_probe": bool(_fetch_px_from_inbound(mid, sid) is not None),
-        }
-        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                        outcome="not_placed", why="blocked: missing px",
-                        letter=letter, proposed_odds=None, proposed_stake=plan.get("size"),
-                        meta=debug_meta)
-        return None
-    # ------------------------------------------------------------------------
-
-    plan["size"] = _f(plan.get("size"), 2.0)
-    plan["px"]   = _f(plan.get("px"), _f(plan.get("entry_odds"), 0.0))
-    if plan["px"] <= 0.0:
+    if plan["px"] <= 0:
         _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
                         outcome="not_placed", why="blocked: missing px",
                         letter=letter)
@@ -514,9 +619,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                         meta={"cap": cap_metrics})
         return None
 
-    # --- Rotation (handled earlier in lanes; no hard block here)
-
-    # --- Preclaim PENDING parent (now passes plan_id so helper can mark ledger)
+    # --- Preclaim
     cor = f"{letter}-{uuid.uuid4().hex[:10]}"
     plan["customerOrderRef"] = cor
     pending_id = _insert_pending_parent(
@@ -529,130 +632,53 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                         letter=letter)
         return None
 
-    # Optional pass stamp
-    try:
-        plan["pass_no"] = int(caps.pass_no_for(mid, sid, letter))
-    except Exception:
-        pass
-
-    # ensure hedge distance is present (router will place child at parent ± ticks)
-    if "hedge_ticks" not in plan or not plan["hedge_ticks"]:
-        plan["hedge_ticks"] = int(plan.get("target_ticks") or 1)
-
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 📆 PATCHED: 2025-10-18T12:05Z — fix stray return indentation inside place_from_plan()
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Budget enforcement check
-        try:
-            if not budget_manager.authorise(plan):
-                _write_decision(
-                    run_id=ctx.get("run_id"),
-                    mid=mid,
-                    sid=sid,
-                    outcome="not_placed",
-                    why="blocked: over liability limit",
-                    letter=letter,
-                    proposed_odds=plan["px"],
-                    proposed_stake=plan["size"],
-                    meta={"budget": "liability > limit"},
-                )
-                print(f"[BUDGET] Blocked mid={mid} sid={sid} – liability over limit")
-                return None
-        except Exception as e:
-            print(f"[BUDGET] warn: enforcement check failed mid={mid} sid={sid}: {e}")
-
-
-    # --- Route to live placement
-    # === PATCH START (MSC letter routing fix) ===================================
-    # Insert this RIGHT BEFORE calling place_parent_and_hedge
-
-    # MSC engines must use their proper family letters:
-    #  - Exploratory: D
-    #  - Risk:        J
-    #  - InPlay:      V
-    if plan.get("family") == "MSC":
-        msc_mode = plan.get("msc_mode") or ctx.get("msc_mode")
-
-        if msc_mode == "EXPLORATORY":
-            letter = "D"
-        elif msc_mode == "RISK":
-            letter = "J"
-        elif msc_mode == "INPLAY":
-            letter = "V"
-        else:
-            # default to Exploratory if unknown
-            letter = "D"
-
-    # ELSE: fallback to existing legacy logic already defined above
-    # (Nothing else changes.)
-    # === PATCH END ===============================================================
-
-
-    # NOTE: place_parent_and_hedge currently returns (parent_bet_id, cref). If/when it returns a child id, call mark_child().
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 SEARCH: bet_id, cref = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
-# ⛏️ ACTION: replace that single line with this block
-
+    # --- Router (legacy)
     result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
     bet_id, cref, child_id = None, None, None
-
-    # Backward-compat: router may return (parent_id, cref) OR (parent_id, cref, child_id)
     try:
         if isinstance(result, (list, tuple)):
-            if len(result) >= 2:
-                bet_id, cref = result[0], result[1]
-            if len(result) >= 3:
-                child_id = result[2]
+            if len(result) >= 2: bet_id, cref = result[:2]
+            if len(result) >= 3: child_id = result[2]
         else:
             bet_id = result
     except Exception:
         pass
 
     cref = cref or cor
+    if child_id:
+        try: mark_child(plan_id, child_id)
+        except Exception: pass
 
-    # If router gave us a child ID, mark it in the plan ledger
-    try:
-        if child_id:
-            mark_child(plan_id, child_id)
-    except Exception as e:
-        print(f"[PLACE][WARN] mark_child failed mid={mid} sid={sid}: {e}")
-# === PATCH END ===
-
-    cref = cref or cor
-
-    # --- Upgrade order row based on exchange result
+    # --- Finalise legacy
     con = None
     try:
-        # 🔁 Use direct writer to AUTOSCALP_GUI to avoid readonly DAL issues
         con = _auto_db_writer()
         if bet_id:
-            # ✅ we have an exchange order – upgrade to PLACED and attach bet id
+            # placed
             if _orders_has_status():
                 con.execute("""
                   UPDATE orders
-                     SET entry_bet_id=?,
-                         entry_status='PLACED', status='PLACED',
+                     SET entry_bet_id=?, entry_status='PLACED', status='PLACED',
                          customer_ref=COALESCE(?, customer_ref)
                    WHERE customerOrderRef=?""",
-                   (str(bet_id), str(cref or cor), str(cor)))
+                   (str(bet_id), str(cref), str(cor)))
             else:
                 con.execute("""
                   UPDATE orders
-                     SET entry_bet_id=?,
-                         entry_status='PLACED',
+                     SET entry_bet_id=?, entry_status='PLACED',
                          customer_ref=COALESCE(?, customer_ref)
                    WHERE customerOrderRef=?""",
-                   (str(bet_id), str(cref or cor), str(cor)))
+                   (str(bet_id), str(cref), str(cor)))
             con.commit()
+
             _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
                             outcome="placed", why="ok", letter=letter,
                             proposed_odds=plan["px"], proposed_stake=plan["size"],
-                            order_id=pending_id, meta={"cref": cref or cor, "bet_id": bet_id})
-            return bet_id  # success
+                            order_id=pending_id)
+            return bet_id
+
         else:
-            # ❌ no bet id returned – mark FAILED (do NOT call this 'PLACED')
+            # failed
             if _orders_has_status():
                 con.execute("""
                   UPDATE orders
@@ -668,17 +694,20 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                          notes = TRIM(COALESCE(notes,'') || ' router_fail')
                    WHERE customerOrderRef=?""", (str(cor),))
             con.commit()
+
             _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
                             outcome="not_placed", why="router_fail", letter=letter,
                             proposed_odds=plan["px"], proposed_stake=plan["size"],
-                            order_id=pending_id, meta={"cref": cref or cor})
+                            order_id=pending_id)
             return None
+
     except Exception as e:
         try:
             if con: con.rollback()
         finally:
-            print(f"[PLACE][ERR] finalize failed: {e}")
+            print(f"[PLACE][ERR] finalize failed mid={mid} sid={sid}: {e}")
         return None
+
     finally:
         try:
             if con: con.close()

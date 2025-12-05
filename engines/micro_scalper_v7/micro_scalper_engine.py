@@ -305,6 +305,27 @@ class MicroScalperEngine:
             }
         # === PATCH END ===
 
+            # === PATCH START ============================================================
+            # 📍 TARGET: micro_scalper_engine._tick_preoff
+            # 🛠 ACTION: Inject SLEQ from StopLoss engine into MSC ctx
+            # 📆 PATCHED: 2025-12-06
+            from engines.live.stoploss_engine import StopLossEngine
+
+            try:
+                # Singleton TSL engine used by Overwatcher
+                sleq_engine = StopLossEngine()
+                key = (str(ctx["marketId"]), str(ctx["selectionId"]))
+                sleq_state = sleq_engine.sleq_map.get(key)
+
+                if sleq_state:
+                    ctx["sleq"] = float(sleq_state.sleq)
+                else:
+                    ctx["sleq"] = 1.0  # default multiplier
+            except Exception:
+                ctx["sleq"] = 1.0
+            # === PATCH END ============================================================
+
+
 
         # ---------------------------------------------------------
         # ATTACH RISK ENGINE (per Legacy parent)

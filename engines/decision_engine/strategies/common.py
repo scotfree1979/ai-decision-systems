@@ -5,6 +5,78 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from engines.config_paths import autoscalp_db
 
+# ============================================
+# CTXv7 — Canonical Context Template (FINAL)
+# ============================================
+
+CTXV7 = {
+    # Identity / Engine
+    "version": "CTXv7",
+    "source": None,         # LIVE | TEST | LEARNING
+    "engine": None,         # MSC_EXPLORATORY | MSC_RISK | MSC_INPLAY | LEGACY
+    "marketId": None,
+    "selectionId": None,
+
+    # Prices / Tape
+    "odds": None,
+    "px": None,
+    "ltp": None,
+    "tape_px": None,
+    "tape_age": None,
+
+    # Movement / v7 Intelligence
+    "slope_ppm": None,
+    "recent_net_ticks": None,
+    "oc_momentum_ticks": None,
+    "drift_speed": None,
+    "momentum_class": None,
+    "band_stability": None,
+    "inplay_progress": None,
+
+    # Indicators / Microstructure
+    "wom": None,
+    "micro_opportunity": None,
+
+    # Bias (suggestions only)
+    "bias": None,
+    "bias_dir": None,
+    "bias_conf": None,
+    "bias_why": None,
+
+    # Scope State
+    "is_active": None,
+    "is_passive": None,
+    "is_ignored": None,
+    "is_fav": None,
+    "fav_rank": None,
+
+    # Exposure / Bank — from BankState ONLY
+    "bank": None,
+    "used_exposure": None,
+
+    # MSC Integration
+    "oc_phase": None,
+    "stoploss_triggered": None,
+    "risk_class": None,
+
+    # Final Decision Output (always assigned by MSC)
+    "direction": None,       # L2B | B2L
+    "side": None,            # LAY | BACK
+    "letter": None,          # Strategy letter (MSC or Legacy)
+    "target_ticks": None,
+    "size": None,
+    "entry_odds": None,
+    "why": None,
+
+    # Optional Narrative
+    "story": None,
+    "story_key": None,
+
+    # Timestamp
+    "ts": None,
+}
+
+
 def _adb() -> sqlite3.Connection:
     con = sqlite3.connect(autoscalp_db(), timeout=12, isolation_level=None, check_same_thread=False)
     con.row_factory = sqlite3.Row

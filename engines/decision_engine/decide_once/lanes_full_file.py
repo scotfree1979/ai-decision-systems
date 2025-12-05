@@ -6,8 +6,6 @@ import os, json, sqlite3
 # ── Local engine utilities ───────────────────────────────────────────────────
 from .scope import advance_scope_cursor
 from .placement import place_from_plan
-from engines.live.live_router import place_parent_and_hedge
-
 try:
     # decisions-table writer used by placement; keep schema consistent
     from .placement import _write_decision as _lane_write_decision
@@ -19,29 +17,6 @@ from .helpers import (
     q_retry as _q,
     status_once,
 )
-# === PATCH START ============================================================
-# 📍 TARGET: lanes.py (top of file, near other helper imports)
-# Insert NEW import:
-
-from engines.decision_engine.decide_once.helpers import harden_ctx, harden_plan
-
-# === PATCH END ==============================================================
-# === PATCH START ============================================================
-# 📍 TARGET: lanes.py (file-level imports)
-try:
-    from engines.utils.api_tools import fetch_live_odds
-except:
-    fetch_live_odds = None
-# === PATCH END ==============================================================
-# === PATCH START ============================================================
-# 📍 TARGET: lanes.py (top imports)
-from engines.decision_engine.microscalper.context_adapter import build_msc_context
-from engines.decision_engine.microscalper.plan_builder import build_plan_from_msc
-# === PATCH END ==============================================================
-# === PATCH START ===
-from engines.mastery.mastery_policy import plan_for_strategy
-# === PATCH END ===
-
 # ── Plan ledger (guarded) ─────────────────────────────────────────────────────
 try:
     from engines.mastery.plan_ledger import record_plan, concurrency_ok
@@ -49,7 +24,12 @@ except Exception:
     record_plan = None
     def concurrency_ok(*_a, **_k): return True
 
-
+# Optional helper imports (we provide fallbacks if not available)
+try:
+    from .helpers import harden_ctx as _harden_ctx, harden_plan as _harden_plan
+except Exception:
+    _harden_ctx = None
+    _harden_plan = None
 
 # Mastery policy (new unified API)
 from engines.mastery import mastery_policy as mp
@@ -173,7 +153,7 @@ def dryrun():
     Works with both old and new scope shapes.
     """
     from engines.mastery.context_builder_next import build_context_from_scope
-   
+    from engines.mastery.mastery_policy import plan_for_strategy
     from engines.decision_engine.decide_once.scope import read_scope_window
 
     print("[DRYRUN] testing DecideOnce→Mastery linkage")
@@ -608,237 +588,542 @@ def _market_alive(mid: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Public entrypoint: called by the orchestration wrapper per tick
 # ─────────────────────────────────────────────────────────────────────────────
+
+# === PATCH START ===
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: def run_all(
+# 🛠 ACTION: replace entire run_all() implementation
+# 📆 PATCHED: 2025-11-29 — Unified DecideOnce + MSC tick engine
+# ============================================================================
+
 def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
     """
-    FINAL CLEAN DecideOnce + MSC unified tick engine.
-    Architecture:
-        1. Build CTXv7 for each runner
-        2. MSC tick FIRST (Exploratory + Risk + InPlay internally)
-        3. If MSC emits a plan → place
-        4. Legacy Mastery family plans → place
-        5. Done
-    No ORDER loop, no duplicated MSC calls, no old pipelines.
+    Unified DecideOnce + MSC Tick Engine
+    ------------------------------------
+    This version guarantees:
+        • ACTIVE + PASSIVE runner processing
+        • correct v7-intel context for all families
+        • correct MSC + Legacy plan routing
+        • clear tick output for debugging
     """
+    import sys
+    from engines.decision_engine.decide_once import scope
+    from engines.decision_engine.decide_once.scope import build_and_maintain_scope
+
+    from engines.decision_engine.decide_once.candidates import active_candidates_for_market, cands_for_market
+    from engines.decision_engine.decide_once.placement import place_from_plan
+    from engines.decision_engine.microscalper.context_adapter import build_msc_context
+    from engines.decision_engine.microscalper.plan_builder import build_plan_from_msc
+    from engines.live.live_router import place_parent_and_hedge
+
 
     # ------------------------------------------------------------------
-    # 1) REFRESH SCOPE (canonical)
+    # 1) SCOPE REFRESH  (canonical: build_and_maintain_scope)
     # ------------------------------------------------------------------
     try:
         from engines.decision_engine.decide_once.scope import (
-            build_and_maintain_scope, ordered_markets_for_tick
+            build_and_maintain_scope,
+            ordered_markets_for_tick,
         )
+
+        # full scope snapshot (PRE + INPLAY + ACTIVE/PASSIVE maps)
         live_scope = build_and_maintain_scope(show_dashboard=False) or {}
+
+        # canonical ordered MID list for this tick
         markets = ordered_markets_for_tick(live_scope) or []
-        print(f"[LANES] scope refreshed ({len(markets)} markets)")
+
+        print(f"[LANES] scope refreshed ({len(markets)} markets in state)")
+
     except Exception as e:
-        print(f"[LANES] scope refresh error: {e}")
+        print(f"[LANES] scope refresh warn: {e}")
         return None
 
+    # early abort: nothing in scope
     if not markets:
+        print("[LANES] warn: no markets in scope")
         return None
+
 
     # ------------------------------------------------------------------
-    # 2) BUILD BASE CTX (CTXv7)
+    # 2) BASE CONTEXT (canonical shared DecideOnce + Mastery + MSC)
     # ------------------------------------------------------------------
     try:
         base_ctx, _ = build_context(source=source)
     except Exception as e:
-        print(f"[DECIDE] base_ctx build error: {e}")
+        print(f"[DECIDE] base_ctx error: {e}")
         return None
 
-    # Prepare MSC engine singleton
-    from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
-    msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+    if not isinstance(base_ctx, dict):
+        print("[DECIDE] invalid base_ctx (not a dict)")
+        return None
+
 
     # ------------------------------------------------------------------
-    # 3) PER-MARKET / PER-RUNNER LOOP
+    # 3) PER-MARKET LOOP
     # ------------------------------------------------------------------
     for mid in markets:
         mids = str(mid)
-        active  = live_scope.get("active_sids",  {}).get(mids, [])
+        active = live_scope.get("active_sids", {}).get(mids, [])
         passive = live_scope.get("passive_sids", {}).get(mids, [])
+
+        # ACTIVE + PASSIVE combined routing
         sids = list(active) + list(passive)
 
         if not sids:
+            print(f"[LANES] no runners for {mids}")
             continue
 
-        # Build ordered price list
+        # --------------------------------------------------------------
+        # BUILD ORDERED PAIRS (sid → price)
+        # --------------------------------------------------------------
         pairs = []
         for sid in sids:
             try:
                 from engines.decision_engine.decide_once.placement import (
                     _fetch_px_from_odds_current as _px_oc,
-                    _fetch_px_from_inbound      as _px_ib
+                    _fetch_px_from_inbound      as _px_ib,
                 )
-                px = _px_oc(mids, sid) or _px_ib(mids, sid)
+                px = _px_oc(mids, sid)
+                if px is None:
+                    px = _px_ib(mids, sid)
+
                 if px is None:
                     from engines.utils.api_tools import fetch_live_odds
                     odds = fetch_live_odds(None, mids, sid)
-                    px = float(odds.get("lay") or odds.get("back") or 0.0) if odds else 0.0
-            except:
-                px = 0.0
-            pairs.append((sid, float(px)))
+                    if isinstance(odds, dict):
+                        px = float(odds.get("lay") or odds.get("back") or 0.0)
 
-        pairs.sort(key=lambda p: (p[1], p[0]))
+                pairs.append((sid, float(px or 0.0)))
+            except Exception:
+                pairs.append((sid, 0.0))
 
-        print(f"[TICK] {mids} runners={len(pairs)} → " +
-              ", ".join(f"{sid}:{px}" for sid, px in pairs[:8]))
+        pairs.sort(key=lambda t: (t[1], t[0]))
+
+        # ------------------------------------------------------------------
+        # PRINT TICK HEADER (UPGRADED)
+        # ------------------------------------------------------------------
+        px_str = ", ".join(f"{sid}:{px}" for sid, px in pairs[:8])
+        print(f"[TICK] {mids}  runners={len(pairs)}  {px_str}")
 
         # ----------------------------------------------------------------------
-        # 4) PER-RUNNER PIPELINE
+        # 4) LEGACY DECIDEONCE PROCESSING
         # ----------------------------------------------------------------------
+
         for sid, px in pairs:
 
-            # --------------------------------------------------------------
-            # 4A) BUILD CTX FOR THIS RUNNER (CTXv7)
-            # --------------------------------------------------------------
+            # Start with the global base context from build_context()
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: ctx = dict(base_ctx)
+# 🛠 ACTION: Replace entire CTX construction block with CTXv7 fields
+# ============================================================================
+
+            # ------------------------------------------------------
+            # NEW CTXv7: start with the base context (already CTXv7)
+            # ------------------------------------------------------
             ctx = base_ctx.copy()
-            ctx["marketId"]    = mids
+
+            # Identity override for this SID
+            ctx["marketId"] = mids
             ctx["selectionId"] = sid
-            ctx["px"] = ctx["odds"] = ctx["ltp"] = px
-            ctx["tape_px"] = px
+
+            # ------------------------------------------------------
+            # Price (canonical CTXv7 price fields)
+            # ------------------------------------------------------
+            try:
+                price = float(px)
+            except Exception:
+                price = None
+
+            ctx["odds"] = price
+            ctx["px"] = price
+            ctx["ltp"] = price
+            ctx["tape_px"] = price
+
+            # ------------------------------------------------------
+            # Runner classification (via Scope)
+            # ------------------------------------------------------
             ctx["is_active"]  = sid in active
             ctx["is_passive"] = sid in passive
             ctx["is_ignored"] = not (sid in active or sid in passive)
-            ctx["direction"] = ctx["side"] = None
-            ctx["entry_odds"] = ctx["target_ticks"] = None
-            ctx["letter"] = None
-            ctx["why"] = None
+
+            # ------------------------------------------------------
+            # Remove ALL legacy DecideOnce-only fields
+            # (epic_*, fav_rank_now, price_now, range_pos, etc.)
+            # ------------------------------------------------------
+            for k in list(ctx.keys()):
+                if k.startswith("epic_"):
+                    ctx.pop(k, None)
+                if k in ("current_price", "price_now", "phase", "minutes_to_off",
+                         "tto_window", "depth_total", "matched_per_min"):
+                    ctx.pop(k, None)
+
+            # ------------------------------------------------------
+            # Movement intel defaults (kept until MSC updates direction)
+            # ------------------------------------------------------
+            ctx.setdefault("slope_ppm", 0.0)
+            ctx.setdefault("recent_net_ticks", 0)
+            ctx.setdefault("oc_momentum_ticks", 0)
+
+            # ------------------------------------------------------
+            # Bank / Exposure now comes from BankState
+            # ------------------------------------------------------
+            try:
+                from engines.live import bank_state
+                ctx["bank"] = float(bank_state.get_balance() or 0.0)
+                ctx["used_exposure"] = float(bank_state.get_total_exposure() or 0.0)
+            except Exception:
+                ctx["bank"] = 0.0
+                ctx["used_exposure"] = 0.0
+
+            # ------------------------------------------------------
+            # Decision fields (MSC will populate these later)
+            # ------------------------------------------------------
+            ctx["direction"]     = None
+            ctx["side"]          = None
+            ctx["letter"]        = None
+            ctx["target_ticks"]  = None
+            ctx["size"]          = None
+            ctx["entry_odds"]    = None
+            ctx["why"]           = None
+
+# === PATCH START ============================================================
+# 📍 TARGET: CTX build block
+# ============================================================================
+
             ctx["run_id"] = run_id
             ctx["mode"]   = source
 
-            # --------------------------------------------------------------
-            # GUARANTEE PX IS NEVER NONE
-            # --------------------------------------------------------------
+# === PATCH END ================================================================
+
+
+
+            # Final normalisation ----------------------------------------------
             try:
-                if ctx.get("px") is None or ctx["px"] != ctx["px"]:  # None or NaN
-                    ctx["px"] = ctx["odds"] = ctx["ltp"] = 0.0
-            except Exception:
-                ctx["px"] = ctx["odds"] = ctx["ltp"] = 0.0
-
-            # --------------------------------------------------------------
-            # MINIMAL LEGACY-PARENT → RISK TRIGGER FOR MSC
-            # --------------------------------------------------------------
-            try:
-                from engines.live.live_router import _open_parents_count_live
-                parent_count = _open_parents_count_live(mids, sid)
-
-                if parent_count and parent_count > 0:
-                    # This flag activates MSC RiskEngine for this runner
-                    ctx["legacy_parent_id"] = 1
-                    ctx["legacy_entry_side"] = ctx.get("side") or None
-            except Exception:
-                # silently ignore; MSC risk simply won’t fire
-                pass
-
-
-            try:
+                from engines.decision_engine.decide_once.helpers import harden_ctx
                 harden_ctx(ctx)
-            except:
+            except Exception:
                 pass
 
+
+
+
+            # --- MicroScalper v7 tick (correct location: full ctx available) ---
+            try:
+                from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+                msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+
+                # MSC tick uses the SAME ctx we pass into legacy lanes
 # === PATCH START ============================================================
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py : inside run_all()
-# 🔎 SEARCH: if msc_plan and msc_plan.get("size") and msc_plan.get("direction"):
-# ⛏ REPLACE the entire block until the next Legacy family loop
-# 📆 PATCHED: 2025-12-06 — MSC routed through DecideOnce placement
+# 📍 TARGET: MSC tick block inside run_all
 # ============================================================================
 
-            # --------------------------------------------------------------
-            # 4B) **MSC FIRST** (Exploratory + Risk + In-Play)
-            # --------------------------------------------------------------
-            try:
-                msc_plan = msc.tick(ctx)
+                engine = (ctx.get("engine") or base_ctx.get("engine") or "").upper()
+
+                if engine.startswith("MSC_"):
+                    msc_plan = msc.tick(ctx)
+                else:
+                    msc_plan = None
+
+# === PATCH END ================================================================
+
+
+                if msc_plan:
+                    # store last MSC plan for unified tick report (epic output block)
+                    run_all.__dict__["_LAST_MSC_PLAN"] = msc_plan
+
+                    # ROUTE THROUGH LIVE ROUTER (correct — replaces queue_order)
+                    from engines.live.live_router import place_parent_and_hedge
+
+                    try:
+                        place_parent_and_hedge(
+                            market_id    = msc_plan.get("marketId")    or mid,
+                            selection_id = msc_plan.get("selectionId") or sid,
+                            side         = "LAY" if str(msc_plan.get("direction","")).upper().startswith("LAY") else "BACK",
+                            entry_odds   = float(msc_plan.get("px")   or
+                                                 msc_plan.get("odds") or
+                                                 ctx.get("current_price") or 0.0),
+                            stake        = float(msc_plan.get("size") or 0.0),
+                            hedge_ticks  = int(msc_plan.get("target_ticks") or 1),
+                            run_id       = run_id,
+                            source       = str(msc_plan.get("letter") or "A")
+                        )
+
+                        print(
+                            f"[MSC][EXEC] {mid}:{sid} "
+                            f"dir={msc_plan.get('direction')} "
+                            f"px={msc_plan.get('px')} "
+                            f"size={msc_plan.get('size')} "
+                            f"why={msc_plan.get('why','')}"
+                        )
+
+                    except Exception as e:
+                        print(f"[MSC][EXEC] router fail mid={mid} sid={sid}: {e}")
             except Exception as e:
-                print(f"[MSC] tick failed mid={mids} sid={sid}: {e}")
-                msc_plan = None
+                print(f"[MSC] warn mid={mid} sid={sid}: {e}")
 
-            if msc_plan and msc_plan.get("size") and msc_plan.get("direction"):
+            # --- LEGACY DECIDEONCE: Correct candidate-driven execution -------
+            try:
+                # Load real candidate engines (no invented names)
+                from engines.decision_engine.decide_once.candidates import (
+                    active_candidates_for_market,
+                    cands_for_market,
+                )
+
+                # Pull price map…
                 try:
-                    # Normalize MSC plan for DecideOnce placement
-                    msc_plan["engine"]       = "MSC"
-                    msc_plan["letter"]       = msc_plan.get("source") or msc_plan.get("letter") or "D"
-                    msc_plan["marketId"]     = ctx["marketId"]
-                    msc_plan["selectionId"]  = ctx["selectionId"]
-                    msc_plan["enter"]        = True
-
-                    # MSC → DecideOnce unified placement
-                    from engines.decision_engine.decide_once.placement import place_from_plan
-                    place_from_plan("MSC", msc_plan, ctx)
-
-                    print(f"[MSC][EXEC] {mids}:{sid} → {msc_plan}")
-
-                except Exception as e:
-                    print(f"[MSC][EXEC] placement error mid={mids} sid={sid}: {e}")
-
-            # --------------------------------------------------------------
-            # 4C) **LEGACY MASTERY FAMILIES**
-            # --------------------------------------------------------------
-# === PATCH END ==============================================================
-
-            from engines.mastery.mastery_policy import plan_for_strategy
-
-            legacy_families = [
-                "BLUEPRINTS",
-                "OG_STRATEGY",
-                "LADDER_STRATEGY",
-                "S4_CROSSOVER",
-                "S5_BREAKOUT",
-                "S6_STEAM_FADE",
-                "BTL_SCOUT",
-                "BTL_AGGR",
-                "IP1_SHOCK_DRIFT",
-                "IP2_TIRED_LEADER",
-                "IP3_CLOSE_FINISH",
-                "IP4_FENCE_ERROR",
-                "IP5_COLLAPSE_FADE",
-            ]
-
-            for fam in legacy_families:
-                try:
-                    plan = plan_for_strategy(fam, ctx)
-                except Exception as e:
-                    print(f"[LEGACY] {fam} error mid={mids} sid={sid}: {e}")
-                    continue
-
-                # Skip invalid or non-entry plans
-                if not plan or not plan.get("enter"):
-                    continue
-
-                # -------------------------------
-                # NEW: Tag plan + ctx with ENGINE=LEGACY
-                # -------------------------------
-                try:
-                    plan["engine"] = "LEGACY"
-                    ctx["engine"]  = "LEGACY"
+                    cand_px = dict(cands_for_market(mids, max_runners=20))
                 except Exception:
-                    pass
+                    cand_px = {}
 
-                # Ensure identity is present
-                plan.setdefault("marketId", mids)
-                plan.setdefault("selectionId", sid)
+                # If this runner is NOT in candidate set → skip
+                px_cand = cand_px.get(str(sid))
+                if px_cand is None:
+                    continue
 
-                # -------------------------------
-                # LiveRouter placement
-                # -------------------------------
+                # ======================================================================
+                # UNIFIED ENGINE TRIGGER PIPELINE  — MSC FIRST → LEGACY SECOND
+                # ======================================================================
+
+                # -------------------------------------------------------------
+                # 1) MSC INTELLIGENCE (Exploratory + Risk + InPlay)
+                #    Always called FIRST; MSC decides internally which engine fires.
+                # -------------------------------------------------------------
+                try:
+                    from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+                    msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+
+                    # MSC tick uses ctx and internal state (risk engines, in-play engine, etc.)
+                    msc_plan = msc.tick(ctx)
+                except Exception as e:
+                    print(f"[MSC] tick error mid={mids} sid={sid}: {e}")
+                    msc_plan = None
+
+                # --- If MSC produced a plan → route through LiveRouter --------------------
+                if msc_plan and msc_plan.get("size") and msc_plan.get("direction"):
+                    try:
+                        place_parent_and_hedge(
+                            market_id    = msc_plan.get("marketId") or mids,
+                            selection_id = msc_plan.get("selectionId") or sid,
+                            side         = "LAY" if str(msc_plan["direction"]).upper().startswith("LAY") else "BACK",
+                            entry_odds   = float(msc_plan.get("px") or px or 0.0),
+                            stake        = float(msc_plan["size"]),
+                            hedge_ticks  = int(msc_plan.get("target_ticks") or 1),
+                            run_id       = run_id,
+                            source       = msc_plan.get("source") or msc_plan.get("letter") or "D",
+                        )
+                        print(f"[MSC][EXEC] mid={mids} sid={sid} → {msc_plan}")
+                    except Exception as e:
+                        print(f"[MSC][EXEC] router fail mid={mids} sid={sid}: {e}")
+
+                # ======================================================================
+                # 2) LEGACY MASTERY STRATEGIES  (families, not letters)
+                # ======================================================================
+                try:
+                    from engines.mastery.mastery_policy import plan_for_strategy
+                except Exception:
+                    plan_for_strategy = None
+
+                # Master list of families in execution order
+                legacy_families = [
+                    "BLUEPRINTS",
+                    "OG_STRATEGY",
+                    "LADDER_STRATEGY",
+                    "S4_CROSSOVER",
+                    "S5_BREAKOUT",
+                    "S6_STEAM_FADE",
+                    "BTL_SCOUT",
+                    "BTL_AGGR",
+                    "IP1_SHOCK_DRIFT",
+                    "IP2_TIRED_LEADER",
+                    "IP3_CLOSE_FINISH",
+                    "IP4_FENCE_ERROR",
+                    "IP5_COLLAPSE_FADE",
+                ]
+
+                for fam in legacy_families:
+                    try:
+                        plan = plan_for_strategy(fam, ctx)
+                    except Exception as e:
+                        print(f"[LEGACY] error fam={fam} mid={mids} sid={sid}: {e}")
+                        continue
+
+                    # Must be a real entry plan
+                    if not plan or not plan.get("enter"):
+                        continue
+
+                    # -----------------------------------------------------------------
+                    # PLACE LEGACY ORDER (family-based)
+                    # -----------------------------------------------------------------
+                    try:
+                        place_parent_and_hedge(
+                            market_id    = plan.get("marketId") or mids,
+                            selection_id = plan.get("selectionId") or sid,
+                            side         = "LAY" if str(plan.get("direction","")).upper().startswith("LAY") else "BACK",
+                            entry_odds   = float(plan.get("px") or plan.get("odds") or px or 0.0),
+                            stake        = float(plan.get("size") or 0.0),
+                            hedge_ticks  = int(plan.get("target_ticks") or 1),
+                            run_id       = run_id,
+                            source       = plan.get("letter") or fam[:1],
+                        )
+                        print(f"[LEGACY][EXEC] mid={mids} sid={sid} fam={fam} → {plan}")
+                    except Exception as e:
+                        print(f"[LEGACY][ERR] router fail fam={fam} mid={mids} sid={sid}: {e}")
+
+                # ======================================================================
+                # END OF TRIGGER PIPELINE — MSC + LEGACY DONE
+                # ======================================================================
+
+
+
+                # === PATCH END ================================================================
+
+
+                # If this runner is a candidate, run ALL family policies
+                for fam_name, fn in ORDER:
+
+                    # --- SAFE STRATEGY CALL (critical fix) ------------------------------
+                    try:
+                        raw_plan = fn(ctx)
+                    except Exception as e:
+                        print(f"[DECIDE] fam {fam_name} threw mid={mids} sid={sid}: {e}")
+                        raw_plan = None
+
+                    # --- ALWAYS normalise result ----------------------------------------
+                    fam_plan = _safe_plan(fam_name, raw_plan, ctx)
+
+                    # Skip non-entry plans
+                    if not fam_plan.get("enter"):
+                        continue
+
+                    # Family → letter code
+                    letter = _FAM_LETTER.get(fam_name, fam_name[:1].upper())
+
+                    # Attach bias + veto
+                    plan = _attach_bias(dict(fam_plan), ctx)
+                    veto, reason = _bias_veto(plan)
+                    if veto:
+                        continue
+
+                    # Ensure essentials
+                    plan.setdefault("marketId", mids)
+                    plan.setdefault("selectionId", sid)
+                    plan.setdefault("letter", letter)
+
+                    harden_plan(plan)
+
+# === PATCH START ============================================================
+# 📍 TARGET: run_all() after harden_plan(plan)
+# 🛠 ACTION: Overwrite legacy direction using MSC intelligence
+# ============================================================================
+
+                    # ------------------------------------------------------
+                    # MSC DIRECTION UPGRADE (V7 Intelligence)
+                    # ------------------------------------------------------
+                    try:
+                        from engines.decision_engine.microscalper.context_adapter import build_msc_context
+                        from engines.decision_engine.microscalper.plan_builder import build_plan_from_msc
+
+                        # Build MSC context from current CTXv7
+                        msc_ctx = build_msc_context(ctx)
+
+                        # Ask MSC for directional intelligence
+                        msc_dir_plan = build_plan_from_msc(msc_ctx) or {}
+                        msc_dir  = msc_dir_plan.get("direction")
+                        msc_edge = msc_dir_plan.get("edge")
+
+                        if msc_dir:
+                            legacy_dir = plan.get("direction")
+                            if not legacy_dir or str(msc_dir).upper() != str(legacy_dir).upper():
+                                plan["direction"] = msc_dir
+                                plan["why"] = (plan.get("why") or "") + f" | MSC-dir={msc_dir}"
+
+                        if msc_edge:
+                            plan["edge"] = msc_edge
+
+                    except Exception as e:
+                        print(f"[LANES] MSC-direction-bridge failed mid={mids} sid={sid}: {e}")
+
+# === PATCH END ================================================================
+
+
+
+                    # ----------------------------------------------------------------
+
+                    # Final placement through legacy placement engine
+                    try:
+                        from engines.decision_engine.decide_once.placement import place_from_plan
+                        place_from_plan(fam_name, plan, ctx)
+
+                        if logger:
+                            logger(f"[PLACE] {fam_name} mid={mids} sid={sid} plan={plan}")
+
+                    except Exception as e:
+                        print(f"[LANE-ERR] place {fam_name} mid={mids} sid={sid} err={e}")
+
+            except Exception as e:
+                print(f"[DECIDE] legacy warn mid={mids} sid={sid} {e}")
+
+
+
+        # ----------------------------------------------------------------------
+        # 5) MICROSCALPER PROCESSING  (FINAL – LIVE ROUTER INTEGRATION)
+        # ----------------------------------------------------------------------
+        try:
+            from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
+            msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
+        except Exception as e:
+            print(f"[MSC] init warn: {e}")
+            continue
+
+        for sid, px in pairs:
+            try:
+                # --- Build MSC context using available DecideOnce base_ctx ---
+                ctx_legacy = {
+                    "marketId": mids,
+                    "selectionId": sid,
+                    "current_price": px,
+                    "oc_phase": (live_scope.get("minutes_to_off", {}) or {}).get(mids, 10),
+                    "legacy_parent_id": base_ctx.get("legacy_parent_id"),
+                    "legacy_entry_side": base_ctx.get("legacy_entry_side"),
+                    "dynamic_stake_fn": base_ctx.get("dynamic_stake_fn"),
+                    "stoploss_triggered_for_parent": None,
+                    **{k: v for k, v in base_ctx.items() if k.startswith("v7_")}
+                }
+
+                # --- MSC tick ---------------------------------------------------
+                msc_ctx = build_msc_context(ctx_legacy)
+                msc_plan = msc.tick(msc_ctx)
+
+                if not msc_plan:
+                    continue
+
+                # ===============================================================
+                # LIVE ROUTER EXECUTION (REPLACES queue_live_order)
+                # ===============================================================
+                from engines.live.live_router import place_parent_and_hedge
+
                 try:
                     place_parent_and_hedge(
-                        market_id    = plan.get("marketId") or mids,
-                        selection_id = plan.get("selectionId") or sid,
-                        side         = "LAY" if str(plan.get("direction","")).upper().startswith("LAY") else "BACK",
-                        entry_odds   = float(plan.get("px") or px or 0.0),
-                        stake        = float(plan.get("size") or 0.0),
-                        hedge_ticks  = int(plan.get("target_ticks") or 1),
-                        run_id       = run_id,
-                        source       = plan.get("letter") or fam[:1]
+                        market_id   = msc_plan.get("marketId")    or mids,
+                        selection_id= msc_plan.get("selectionId") or sid,
+                        side        = "LAY" if str(msc_plan.get("direction","")).upper().startswith("LAY") else "BACK",
+                        entry_odds  = float(msc_plan.get("px") or msc_plan.get("odds") or px or 0.0),
+                        stake       = float(msc_plan.get("size") or 0.0),
+                        hedge_ticks = int(msc_plan.get("target_ticks") or 1),
+                        run_id      = run_id,
+                        source      = msc_plan.get("letter") or "A"
                     )
-                    print(f"[LEGACY][EXEC] {mids}:{sid} fam={fam} → {plan}")
-                except Exception as e:
-                    print(f"[LEGACY][ERR] mid={mids} sid={sid} fam={fam}: {e}")
 
+                    print(f"[MSC] {mids}:{sid} EXEC → dir={msc_plan.get('direction')} "
+                          f"px={msc_plan.get('px')} size={msc_plan.get('size')} why={msc_plan.get('why','')}")
+                except Exception as e:
+                    print(f"[MSC][EXEC] router fail mid={mids} sid={sid}: {e}")
+
+            except Exception as e:
+                print(f"[MSC] warn mid={mids} sid={sid}: {e}")
 
     return 1
-
 
 # === PATCH START (legacy DecideOnce block removed) ============================
     # The legacy DecideOnce tick/placement engine has been fully removed.
