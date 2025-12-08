@@ -14,6 +14,90 @@ import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py (top of file)
+# 🆕 ADD: Router → EventSync unified emit wrappers
+# 📆 PATCHED: 2026-01-22
+# ============================================================================
+
+from engines.mastery.event_sink import emit as emit_event
+
+def _emit_router_event(event_type: str, payload: dict):
+    """
+    Unified router → EventSync emitter.
+    Includes timestamp, runner identity, and engine/letter metadata.
+    """
+    try:
+        payload = dict(payload)
+        payload["ts"] = datetime.now(timezone.utc).isoformat()
+        emit_event(event_type, payload)
+    except Exception as e:
+        print(f"[Router→EventSync] WARN {event_type}: {e}")
+
+# === EXPOSURE HELPERS (B3 MODEL) ============================================
+def _compute_exposure(mid: str, sid: str):
+    """
+    Compute exposure_before / exposure_after for runner + letter.
+    Returns:
+        { runner_open_liability, runner_net_pl }
+    """
+    try:
+        con = _orders_conn(); con.row_factory = sqlite3.Row
+        row = _q_retry(con, """
+            SELECT 
+              SUM(CASE WHEN role='PARENT' AND entry_status='matched' 
+                       AND (exit_status IS NULL OR exit_status<>'matched')
+                       THEN 
+                           CASE WHEN side='LAY'
+                                THEN entry_stake*(entry_odds-1)
+                                ELSE entry_stake
+                           END
+                  END) AS liab,
+              SUM(COALESCE(net_pl, 0)) AS pnl
+            FROM orders
+            WHERE mode='LIVE'
+              AND marketId=? AND selectionId=?
+        """, (str(mid), str(sid))).fetchone()
+        con.close()
+        return {
+            "runner_open_liability": float(row["liab"] or 0),
+            "runner_net_pl": float(row["pnl"] or 0)
+        }
+    except Exception:
+        return {
+            "runner_open_liability": 0.0,
+            "runner_net_pl": 0.0
+        }
+
+def _compute_letter_exposure(mid: str, sid: str, letter: str):
+    """
+    Compute per-letter exposure for MSC/Legacy engines.
+    """
+    try:
+        con = _orders_conn(); con.row_factory = sqlite3.Row
+        row = _q_retry(con, """
+            SELECT 
+              SUM(CASE WHEN role='PARENT' AND entry_status='matched'
+                       AND (exit_status IS NULL OR exit_status<>'matched')
+                       AND UPPER(SUBSTR(source,1,1))=UPPER(?)
+                       THEN 
+                           CASE WHEN side='LAY'
+                                THEN entry_stake*(entry_odds-1)
+                                ELSE entry_stake
+                           END
+                  END) AS liab
+            FROM orders
+            WHERE mode='LIVE'
+              AND marketId=? AND selectionId=?
+        """, (letter, str(mid), str(sid))).fetchone()
+        con.close()
+        return float(row["liab"] or 0)
+    except Exception:
+        return 0.0
+
+# === PATCH END ===============================================================
+
+
 # DB connection for AUTOSCALP orders table (GUI DB)
 # === PATCH START ============================================
 # 📍 TARGET: engines/live/live_router.py : _orders_conn()
@@ -1011,8 +1095,6 @@ def _start_reconcile_loop(period_s: int = 30):
     return stop_evt
 # === PATCH END ===
 
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: ^def _orders_insert_parent_queued\(
 # --- PATCH START: replace function ------------------------------------
@@ -1020,9 +1102,31 @@ def _orders_insert_parent_queued(
     run_id, market_id, selection_id, side, entry_odds, entry_stake, cor,
     *, source="LEGACY_STRATEGY", stop_loss_px=None):
     """
-    Upsert LIVE parent row as 'queued' with strategy source.
-    Now stores stop_loss_px (raw price) for Overwatcher stop-loss engine.
+    Upsert LIVE parent row as 'queued'.
+    Stores stop_loss_px for Overwatcher STOPLOSS engine.
     """
+
+    # === PATCH 3.2 START — EventSync: parent_queued =======================
+    mid = str(market_id)
+    sid = str(selection_id)
+    letter = str(source)[:1].upper()
+
+    before_exposure = _compute_exposure(mid, sid)
+    before_letter = _compute_letter_exposure(mid, sid, letter)
+
+    _emit_router_event("parent_queued", {
+        "marketId": mid,
+        "selectionId": sid,
+        "cor": cor,
+        "source": source,
+        "letter": letter,
+        "entry_odds": entry_odds,
+        "entry_stake": entry_stake,
+        **before_exposure,
+        "letter_exposure_before": before_letter,
+    })
+    # === PATCH 3.2 END =====================================================
+
     _ensure_orders_schema()
 
     # --- ensure column exists ------------------------------------------------
@@ -1081,12 +1185,17 @@ def _orders_insert_parent_queued(
 
         con.commit()
         _orders_probe(cor, note="queued")
+
     except Exception as e:
         _log_event("ERROR", "live_router",
                    f"orders upsert queued failed ref={cor}: {e}")
     finally:
-        try: con.close()
-        except Exception: pass
+        try:
+            con.close()
+        except Exception:
+            pass
+# --- PATCH END ----------------------------------------------------------
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
@@ -1498,6 +1607,7 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str, exit_odds: float, 
                            SET exit_odds=?, exit_stake=?
                          WHERE customerOrderRef=? AND exit_odds IS NULL
                     """, (avg_odds, matched_size, str(cor)))
+
                     con.commit()
         except Exception as e:
             _log_event("WARN","live_router",f"hedge_matched: could not stamp avg match ref={cor} err={e}")
@@ -1514,6 +1624,19 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str, exit_odds: float, 
             })
         except Exception:
             pass
+
+        # === PATCH 4A: Settlement EventSync for hedge exits ================
+        try:
+            _emit_settlement_router_event(
+                cor,
+                outcome="HEDGE_EXIT",
+                market_id=p["marketId"],
+                selection_id=p["selectionId"],
+            )
+        except Exception:
+            pass
+        # ====================================================================
+
 
         try:
             _ = autoscalp_db()
@@ -1897,6 +2020,19 @@ def _place_stoploss_child_now(
 
         return int(child_id)
 
+        # === PATCH 4B: Settlement EventSync for STOPLOSS exit ==============
+        try:
+            _emit_settlement_router_event(
+                parent_cor,
+                outcome="STOPLOSS_EXIT",
+                market_id=market_id,
+                selection_id=selection_id,
+            )
+        except Exception:
+            pass
+        # ====================================================================
+
+
     except Exception as e:
         try:
             con.close()
@@ -1907,6 +2043,26 @@ def _place_stoploss_child_now(
         return None
 
 # === PATCH END ============================================================
+# === PATCH WALL 4 START — Settlement EventSync ============================
+from engines.mastery.live_event_api import emit_settlement_event
+
+def _emit_settlement_router_event(cor: str, *, outcome: str, market_id: str, selection_id: str):
+    """
+    Push settlement lifecycle updates into EventSync.
+    Called whenever router marks an order as SETTLED or CLOSED.
+    """
+    try:
+        payload = {
+            "marketId": str(market_id),
+            "selectionId": str(selection_id),
+            "cor": str(cor),
+            "outcome": outcome,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        emit_settlement_event(payload)
+    except Exception as e:
+        print(f"[EventSync][SETTLEMENT] warn: {e}")
+# === PATCH WALL 4 END =======================================================
 
 
 def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
@@ -1917,15 +2073,17 @@ def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
     Returns (n_cancelled, n_settled).
     """
     try:
-        # 1) which markets are 'finished' (bets.db schedule, UTC)
+        # 1) Which markets are 'finished' (bets.db schedule, UTC)
         bdb = connect_db(ro=True)
         bdb.row_factory = sqlite3.Row
-        rows = _q_retry(bdb, "SELECT marketId FROM markets_schedule "
+        rows = _q_retry(bdb,
+            "SELECT marketId FROM markets_schedule "
             "WHERE datetime(off_at_utc) <= datetime('now','utc', ?) "
             "AND date(off_at_utc)=date('now','utc')",
             (f"+{int(grace_min)} minutes",)
         ).fetchall()
         bdb.close()
+
         mids = [str(r["marketId"]) for r in rows] if rows else []
         if not mids:
             return (0, 0)
@@ -1934,34 +2092,79 @@ def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
         con = _orders_conn(); con.row_factory = sqlite3.Row
         qph = ",".join("?" * len(mids))
 
-        # 2) cancel QUEUED/PLACED (unmatched liability)
-        n_cancel = _q_retry(con, f"UPDATE orders SET entry_status='cancelled', "
-            f"    closed_at=COALESCE(closed_at, datetime('now','utc')), "
-            f"    mode='LIVE' "
-            f"WHERE mode='LIVE' AND marketId IN ({qph}) "
-            f"  AND UPPER(COALESCE(entry_status,'')) IN ('QUEUED','PLACED')",
-            tuple(mids)
-        ).rowcount
+        # 2) CANCEL QUEUED/PLACED
+        n_cancel = _q_retry(con, f"""
+            UPDATE orders SET
+                entry_status='cancelled',
+                closed_at=COALESCE(closed_at, datetime('now','utc')),
+                mode='LIVE'
+            WHERE mode='LIVE'
+              AND marketId IN ({qph})
+              AND UPPER(COALESCE(entry_status,'')) IN ('QUEUED','PLACED')
+        """, tuple(mids)).rowcount
 
-        # 3) mark unmatched-hedge parents as SETTLED (to drop from 'open risk')
-        n_settle = _q_retry(con, f"UPDATE orders SET exit_status='settled', "
-            f"    closed_at=COALESCE(closed_at, datetime('now','utc')), "
-            f"    mode='LIVE' "
-            f"WHERE mode='LIVE' AND marketId IN ({qph}) "
-            f"  AND COALESCE(role, CASE WHEN hedge_of IS NULL OR hedge_of='' THEN 'PARENT' ELSE 'CHILD' END)='PARENT' "
-            f"  AND UPPER(COALESCE(entry_status,''))='MATCHED' "
-            f"  AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')",
-            tuple(mids)
-        ).rowcount
+        # 3) SETTLE OPEN PARENTS
+        n_settle = _q_retry(con, f"""
+            UPDATE orders SET
+                exit_status='settled',
+                closed_at=COALESCE(closed_at, datetime('now','utc')),
+                mode='LIVE'
+            WHERE mode='LIVE'
+              AND marketId IN ({qph})
+              AND COALESCE(role, CASE WHEN hedge_of IS NULL OR hedge_of='' THEN 'PARENT' ELSE 'CHILD' END)='PARENT'
+              AND UPPER(COALESCE(entry_status,''))='MATCHED'
+              AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
+        """, tuple(mids)).rowcount
 
         con.commit(); con.close()
+
+        # ---------------------------------------------------------------------
+        # 4C — EventSync emission for AUTO settlement (correct indentation)
+        # ---------------------------------------------------------------------
         if n_cancel or n_settle:
-            _log_event("INFO", "live_router",
-                       f"_sweep_close_finished_markets: cancelled={n_cancel} settled={n_settle} mids={len(mids)}")
+            if n_settle:
+                try:
+                    # Re-open DB to fetch the set of newly-settled parents
+                    con2 = _orders_conn(); con2.row_factory = sqlite3.Row
+                    cur2 = con2.cursor()
+                    settled_rows = _q_retry(cur2, f"""
+                        SELECT customerOrderRef AS cor,
+                               marketId,
+                               selectionId
+                          FROM orders
+                         WHERE mode='LIVE'
+                           AND marketId IN ({qph})
+                           AND UPPER(COALESCE(exit_status,''))='SETTLED'
+                    """, tuple(mids)).fetchall()
+
+                    for row in settled_rows:
+                        try:
+                            _emit_settlement_router_event(
+                                row["cor"],
+                                outcome="AUTO_SETTLED",
+                                market_id=row["marketId"],
+                                selection_id=row["selectionId"],
+                            )
+                        except Exception:
+                            pass
+
+                    con2.close()
+                except Exception as e:
+                    _log_event("WARN", "live_router",
+                               f"EventSync settle emit failed: {e}")
+
+            _log_event(
+                "INFO", "live_router",
+                f"_sweep_close_finished_markets: cancelled={n_cancel} "
+                f"settled={n_settle} mids={len(mids)}"
+            )
+
         return (int(n_cancel or 0), int(n_settle or 0))
+
     except Exception as e:
         _log_event("ERROR", "live_router", f"sweep_close_finished_markets error: {e}")
         return (0, 0)
+
 
 
 

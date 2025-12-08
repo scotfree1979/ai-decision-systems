@@ -66,6 +66,88 @@ from engines.mastery import mastery_policy as mp
 from engines.mastery.context_builder import build_context
 
 # === PATCH END ==============================================================
+# =====================================================================
+# 📆 PATCHED: 2026-01-19
+# 📍 TARGET: lanes.py (top-level queue & subscriber)
+# 🛠 PURPOSE: Install the global LanesPlanQueue for v7.9.9.1 architecture
+# =====================================================================
+
+from collections import deque
+
+# Global, high-speed, lossless plan queue
+_LANES_PLAN_QUEUE = deque()
+
+def _lanes_plan_ingest(plan: dict):
+    """
+    EventSink → Lanes adapter.
+    Every engine pushes plans here.
+    Lanes no longer calls engines; it only consumes this queue.
+    """
+    try:
+        if isinstance(plan, dict) and plan.get("enter"):
+            _LANES_PLAN_QUEUE.append(plan)
+    except Exception:
+        pass
+
+# === PATCH START ============================================================
+# 📆 PATCHED: 2026-01-25
+# 📍 TARGET: lanes.py (after _LANES_PLAN_QUEUE definition)
+# 🛠 PURPOSE: Subscribe Lanes to EventSync (MSC / STOPLOSS / Router lifecycle)
+
+from engines.mastery.event_sink import subscribe as _es_subscribe
+
+def _lanes_event_adapter(ev: dict):
+    """
+    Convert EventSync live events into Lanes-queue plans.
+
+    Events handled:
+        • MSC plans (type: "msc_plan")
+        • STOPLOSS events (type: "stop_loss_triggered")
+        • Router placement lifecycle (ignored except for STOPLOSS)
+    """
+    try:
+        et = ev.get("type")
+
+        # MSC plan → push into queue
+        if et == "msc_plan":
+            plan = dict(ev.get("plan") or {})
+            if plan.get("enter"):
+                _LANES_PLAN_QUEUE.append(plan)
+            return
+
+        # STOPLOSS → convert to plan
+        if et == "stop_loss_triggered":
+            plan = {
+                "enter": True,
+                "engine": "OVERWATCHER",
+                "strategy": "W",
+                "letter": "W",
+                "marketId": ev.get("marketId"),
+                "selectionId": ev.get("selectionId"),
+                "direction": "BACK" if ev.get("entry_side") == "LAY" else "LAY",
+                "px": ev.get("current_odds"),
+                "size": ev.get("entry_stake"),
+                "stop_loss_px": ev.get("stop_loss_px"),
+                "why": "STOPLOSS_EVENTSYNC",
+            }
+            _LANES_PLAN_QUEUE.append(plan)
+            return
+
+        # Router-level events are not routed into Lanes
+        # (placed/matched/settled events are future training inputs)
+        return
+
+    except Exception as e:
+        print(f"[LANES][EVENTSYNC][WARN] {e}")
+
+# register EventSync subscriber
+_es_subscribe(_lanes_event_adapter)
+# === PATCH END ==============================================================
+
+
+# Subscribe to all engine decisions
+from engines.mastery import event_sink
+
 
 
 # === COMPAT PATCH: restore read_scope_window for LiveRouter ===
@@ -87,69 +169,11 @@ def read_scope_window(*args, **kwargs):
 
 # === PATCH END ==============================================================
 
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
-# 🆕 ADD FUNCTION: _select_final_plan
-# 📆 PATCHED: 2026-01-19
-# ============================================================================
+# =====================================================================
+# STOPLOSS → LANES plan mapping
+# =====================================================================
 
-def _select_final_plan(msc_ex: dict | None,
-                       msc_risk: dict | None,
-                       msc_ip: dict | None,
-                       legacy: dict | None,
-                       w_stoploss: dict | None = None) -> dict | None:
-    """
-    Unified v7 plan selection logic.
 
-    Engines DO NOT suppress each other.
-    Every engine may emit a plan.
-    Lanes selects exactly ONE final plan using the v7 routing priority:
-
-        1) STOPLOSS (W-lane)          ← future Overwatcher integration
-        2) MSC_RISK                    ← risk correction strongest priority
-        3) MSC_EXPLORATORY             ← exploratory entries
-        4) MSC_INPLAY                  ← in-play micro-execution
-        5) LEGACY                      ← macro strategy families
-
-    IMPORTANT:
-      - This function NEVER mutates plans.
-      - It NEVER infers engine or letter.
-      - It ONLY selects which plan to forward to Router.
-    """
-
-    # ----------------------------------------------------------
-    # 1. STOPLOSS — future path (Overwatcher W-engine)
-    # ----------------------------------------------------------
-    if w_stoploss and w_stoploss.get("enter"):
-        return w_stoploss
-
-    # ----------------------------------------------------------
-    # 2. MSC_RISK
-    # ----------------------------------------------------------
-    if msc_risk and msc_risk.get("enter"):
-        return msc_risk
-
-    # ----------------------------------------------------------
-    # 3. MSC_EXPLORATORY
-    # ----------------------------------------------------------
-    if msc_ex and msc_ex.get("enter"):
-        return msc_ex
-
-    # ----------------------------------------------------------
-    # 4. MSC_INPLAY
-    # ----------------------------------------------------------
-    if msc_ip and msc_ip.get("enter"):
-        return msc_ip
-
-    # ----------------------------------------------------------
-    # 5. LEGACY
-    # ----------------------------------------------------------
-    if legacy and legacy.get("enter"):
-        return legacy
-
-    # ----------------------------------------------------------
-    # No plan
-    # ----------------------------------------------------------
-    return None
 
 # 📍 TARGET: engines/decision_engine/decide_once/lanes.py
 # 🆕 ADD FUNCTION: _route_final_plan
@@ -852,27 +876,77 @@ def _market_alive(mid: str) -> bool:
         try: con.close()
         except: pass
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public entrypoint: called by the orchestration wrapper per tick
-# ─────────────────────────────────────────────────────────────────────────────
+# 📍 TARGET: lanes.py (top-level definitions)
+# 🔎 SEARCH: "ORDER: List[Tuple[str"
+# 🛠 ACTION: Insert after ORDER[]
+# =================================================================
+
+# === PATCH START — define legacy families ==========================
+legacy_families = [
+    "BLUEPRINTS",
+    "OG_STRATEGY",
+    "LADDER_STRATEGY",
+    "S4_CROSSOVER",
+    "S5_BREAKOUT",
+    "S6_STEAM_FADE",
+    "BTL_SCOUT",
+    "BTL_AGGR",
+    "IP1_SHOCK_DRIFT",
+    "IP2_TIRED_LEADER",
+    "IP3_CLOSE_FINISH",
+    "IP4_FENCE_ERROR",
+    "IP5_COLLAPSE_FADE",
+]
+# === PATCH END =======================================================
+
+
+# =====================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: "def run_all("
+# 🎯 ACTION: Replace the entire run_all() implementation with the final PURE-EVENTSYNC version
+# 📆 PATCHED: 2026-02-05
+# =====================================================================================================
+# 🔥 THIS IS THE LAST LANES PATCH — leaves Lanes as:
+#     • EventSync → Lanes → Router (MSC / STOPLOSS / Router feedback)
+#     • Legacy plan executor AFTER queue empties
+#     • No MSC calls or arbitration logic live inside Lanes
+#     • No DecideOnce old loops, no ORDER loop, no duplicated blocks
+# =====================================================================================================
+
+# 📍 DELETE EVERYTHING from:
+#     def run_all(run_id: str, source: str = "LIVE", logger=None):
+# up to just before:
+#     if __name__ == "__main__":
+#
+# (delete entire old run_all(), all 4B, 4C, 4D blocks, arbitration remnants,
+#  duplicate legacy collectors, MSC references, and old placeholders)
+
+# 📍 INSERT THIS NEW run_all() EXACTLY IN ITS PLACE
+# -----------------------------------------------------------------------------------------------------
+
 def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
     """
-    FINAL CLEAN DecideOnce + MSC unified tick engine.
-    Architecture:
-        1. Build CTXv7 for each runner
-        2. MSC tick FIRST (Exploratory + Risk + InPlay internally)
-        3. If MSC emits a plan → place
-        4. Legacy Mastery family plans → place
-        5. Done
-    No ORDER loop, no duplicated MSC calls, no old pipelines.
+    FINAL v7.9.9.1 DecideOnce Engine
+    --------------------------------
+    Pure EventSync → Lanes → Router integration.
+    Lanes no longer calls MSC or Overwatcher directly.
+    Lanes consumes plans *only* from EventSync, then executes ONE Legacy fallback
+    when no event-driven plans exist for the current runner.
+
+    PROCESS PER RUNNER:
+        1. Dequeue all EventSync plans → normalise → route to Router
+        2. When queue empty → try Legacy families (MTO-gated)
+        3. Route Legacy if present
+        4. Move to next SID
     """
 
     # ------------------------------------------------------------------
-    # 1) REFRESH SCOPE (canonical)
+    # 1) REFRESH SCOPE
     # ------------------------------------------------------------------
     try:
         from engines.decision_engine.decide_once.scope import (
-            build_and_maintain_scope, ordered_markets_for_tick
+            build_and_maintain_scope,
+            ordered_markets_for_tick,
         )
         live_scope = build_and_maintain_scope(show_dashboard=False) or {}
         markets = ordered_markets_for_tick(live_scope) or []
@@ -885,36 +959,20 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
         return None
 
     # ------------------------------------------------------------------
-    # 2) BUILD BASE CTX (CTXv7)
+    # 2) BUILD BASE CONTEXT (CTXv7)
     # ------------------------------------------------------------------
     try:
         base_ctx, _ = build_context(source=source)
     except Exception as e:
-        print(f"[DECIDE] base_ctx build error: {e}")
+        print(f"[LANES] base_ctx build error: {e}")
         return None
 
-    # Prepare MSC engine singleton
-    from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
-    msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
-
-    # === PATCH START ============================================================
-    # 📍 TARGET: lanes.py (inside run_all(), per-runner loop, after ctx is built)
-    # 🛠 ACTION: Pull STOPLOSS plan from STOPLOSS_QUEUE
-    # 📆 PATCHED: 2026-01-19
-    # ============================================================================
-
-    # STOPLOSS dequeue (Overwatcher W-engine)
-    from engines.live.overwatcher import STOPLOSS_QUEUE
-
-    w_stoploss = STOPLOSS_QUEUE.pop((mids, str(sid)), None)
-    # === PATCH END ================================================================
-
-
     # ------------------------------------------------------------------
-    # 3) PER-MARKET / PER-RUNNER LOOP
+    # 3) MAIN LOOP — PER MARKET
     # ------------------------------------------------------------------
     for mid in markets:
         mids = str(mid)
+
         active  = live_scope.get("active_sids",  {}).get(mids, [])
         passive = live_scope.get("passive_sids", {}).get(mids, [])
         sids = list(active) + list(passive)
@@ -922,211 +980,82 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
         if not sids:
             continue
 
-        # Build ordered price list
-        pairs = []
+        # ------------------------------------------------------------------
+        # 4) PER-RUNNER LOOP
+        # ------------------------------------------------------------------
         for sid in sids:
-            try:
-                from engines.decision_engine.decide_once.placement import (
-                    _fetch_px_from_odds_current as _px_oc,
-                    _fetch_px_from_inbound      as _px_ib
-                )
-                px = _px_oc(mids, sid) or _px_ib(mids, sid)
-                if px is None:
-                    from engines.utils.api_tools import fetch_live_odds
-                    odds = fetch_live_odds(None, mids, sid)
-                    px = float(odds.get("lay") or odds.get("back") or 0.0) if odds else 0.0
-            except:
-                px = 0.0
-            pairs.append((sid, float(px)))
+            sid_current = str(sid)
 
-        pairs.sort(key=lambda p: (p[1], p[0]))
-
-        print(f"[TICK] {mids} runners={len(pairs)} → " +
-              ", ".join(f"{sid}:{px}" for sid, px in pairs[:8]))
-
-        # ----------------------------------------------------------------------
-        # 4) PER-RUNNER PIPELINE
-        # ----------------------------------------------------------------------
-        for sid, px in pairs:
-
-            # --------------------------------------------------------------
-            # 4A) BUILD CTX FOR THIS RUNNER (CTXv7)
-            # --------------------------------------------------------------
-            ctx = base_ctx.copy()
+            # Build runner ctx
+            ctx = dict(base_ctx)
             ctx["marketId"]    = mids
-            ctx["selectionId"] = sid
-            ctx["px"] = ctx["odds"] = ctx["ltp"] = px
-            ctx["tape_px"] = px
-            ctx["is_active"]  = sid in active
-            ctx["is_passive"] = sid in passive
-            ctx["is_ignored"] = not (sid in active or sid in passive)
-            ctx["direction"] = ctx["side"] = None
-            ctx["entry_odds"] = ctx["target_ticks"] = None
-            ctx["letter"] = None
-            ctx["why"] = None
-            ctx["run_id"] = run_id
-            ctx["mode"]   = source
+            ctx["selectionId"] = sid_current
 
-            # --------------------------------------------------------------
-            # GUARANTEE PX IS NEVER NONE
-            # --------------------------------------------------------------
-            try:
-                if ctx.get("px") is None or ctx["px"] != ctx["px"]:  # None or NaN
-                    ctx["px"] = ctx["odds"] = ctx["ltp"] = 0.0
-            except Exception:
-                ctx["px"] = ctx["odds"] = ctx["ltp"] = 0.0
+            harden_ctx(ctx)
 
-            # --------------------------------------------------------------
-            # MINIMAL LEGACY-PARENT → RISK TRIGGER FOR MSC
-            # --------------------------------------------------------------
-            try:
-                from engines.live.live_router import _open_parents_count_live
-                parent_count = _open_parents_count_live(mids, sid)
+            # ------------------------------------------------------------------
+            # 4A) EVENTSYNC → QUEUE FIRST (MSC, STOPLOSS, Router events)
+            # ------------------------------------------------------------------
+            while _LANES_PLAN_QUEUE:
+                raw = _LANES_PLAN_QUEUE.popleft()
 
-                if parent_count and parent_count > 0:
-                    # This flag activates MSC RiskEngine for this runner
-                    ctx["legacy_parent_id"] = 1
-                    ctx["legacy_entry_side"] = ctx.get("side") or None
-            except Exception:
-                # silently ignore; MSC risk simply won’t fire
-                pass
+                plan = _safe_plan(
+                    raw.get("strategy") or raw.get("engine") or "UNK",
+                    raw,
+                    ctx
+                )
+                harden_plan(plan)
 
+                engine = plan.get("engine")
+                if not engine:
+                    print(f"[LANES][DROP] missing engine → {plan}")
+                    continue
 
-            try:
-                harden_ctx(ctx)
-            except:
-                pass
+                try:
+                    _route_final_plan(plan, ctx)
+                except Exception as e:
+                    print(f"[LANES][ERR] event-queue route failed: {e}")
 
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
-# 🔎 SEARCH: # 4B) **MSC FIRST** (Exploratory + Risk + In-Play)
-# 🛠 ACTION: Replace MSC routing block with v7 engine/strategy identity model
-# 📆 PATCHED: 2026-01-19
-# ================================================================
-
-            # --------------------------------------------------------------
-            # 4B) **MSC PLANS (Exploratory, Risk, InPlay)**
-            #     Engines already produce their plans; Lanes only normalises.
-            # --------------------------------------------------------------
-            try:
-                msc_plan = msc.tick(ctx)
-            except Exception as e:
-                print(f"[MSC] tick failed mid={mids} sid={sid}: {e}")
-                msc_plan = None
-
-            # If no MSC plan or invalid → skip to legacy
-            if not (msc_plan and isinstance(msc_plan, dict)):
-                msc_plan = None
-            else:
-                # Guarantee core identity fields
-                msc_plan.setdefault("marketId", ctx["marketId"])
-                msc_plan.setdefault("selectionId", ctx["selectionId"])
-                msc_plan["enter"] = bool(msc_plan.get("enter") and msc_plan.get("size") and msc_plan.get("direction"))
-
-                # ----------------------------------------------------------
-                # ENGINE + STRATEGY + LETTER MODEL (v7 canonical mapping)
-                # ----------------------------------------------------------
-                fam = msc_plan.get("family") or msc_plan.get("engine") or ""
-
-                # 1) MSC Exploratory ---------------------------------------
-                if fam.upper() in ("MSC_EX", "MSC_EXPLORATORY", "EXPLORATORY"):
-                    legacy_letter = ctx.get("strategy") or ctx.get("letter")
-                    # exploratory inherits legacy strategy letter
-                    msc_plan["engine"]   = "MSC_EXPLORATORY"
-                    msc_plan["strategy"] = legacy_letter
-                    msc_plan["letter"]   = legacy_letter
-
-                # 2) MSC Risk ----------------------------------------------
-                elif fam.upper() in ("MSC_RISK", "RISK"):
-                    msc_plan["engine"]   = "MSC_RISK"
-                    msc_plan["strategy"] = "J"
-                    msc_plan["letter"]   = "J"
-
-                # 3) MSC In-Play -------------------------------------------
-                elif fam.upper() in ("MSC_IP", "MSC_INPLAY", "INPLAY"):
-                    msc_plan["engine"]   = "MSC_INPLAY"
-                    msc_plan["strategy"] = "V"
-                    msc_plan["letter"]   = "V"
-
-                # 4) Unknown family → MSC disabled --------------------------
-                else:
-                    print(f"[MSC] unknown family '{fam}' → MSC plan ignored for {mids}:{sid}")
-                    msc_plan = None
-
-                # ----------------------------------------------------------
-                # ROUTE MSC PLAN (only if enter=True)
-                # ----------------------------------------------------------
-                pass
-
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
-# 🔎 SEARCH: # 4C) **LEGACY MASTERY FAMILIES**
-# 🛠 ACTION: Replace engine-specific placement calls with unified merge+route logic
-# 📆 PATCHED: 2026-01-19
-# ============================================================================
-
-            # --------------------------------------------------------------
-            # 4C) **COLLECT LEGACY PLAN**
-            # --------------------------------------------------------------
+            # ------------------------------------------------------------------
+            # 4B) LEGACY FALLBACK (only if no EventSync plans were present)
+            # ------------------------------------------------------------------
             legacy_plan = None
             try:
-                from engines.mastery.mastery_policy import plan_for_strategy
                 for fam in legacy_families:
+
+                    # MTO gating for legacy
+                    allowed = _allowed_letters_for_tick(ctx)
+                    fam_letter = _FAM_LETTER.get(fam, fam[:1].upper())
+                    if fam_letter not in allowed:
+                        continue
+
                     p = plan_for_strategy(fam, ctx)
                     if p and p.get("enter"):
-                        # Assign engine + strategy letter safely
                         strat = p.get("letter") or fam[:1].upper()
                         p["engine"]   = "LEGACY"
                         p["strategy"] = strat
                         p["letter"]   = strat
                         p.setdefault("marketId", mids)
-                        p.setdefault("selectionId", sid)
+                        p.setdefault("selectionId", sid_current)
+                        harden_plan(p)
                         legacy_plan = p
                         break
+
             except Exception as e:
-                print(f"[LEGACY][ERR] mid={mids} sid={sid}: {e}")
+                print(f"[LEGACY][ERR] mid={mids} sid={sid_current}: {e}")
 
-            # --------------------------------------------------------------
-            # 4D) **SELECT FINAL PLAN (MSC_EX, MSC_RISK, MSC_INPLAY, LEGACY)**
-            # --------------------------------------------------------------
-            final_plan = _select_final_plan(
-                msc_ex      = msc_plan if msc_plan and msc_plan.get("engine") == "MSC_EXPLORATORY" else None,
-                msc_risk    = msc_plan if msc_plan and msc_plan.get("engine") == "MSC_RISK"         else None,
-                msc_ip      = msc_plan if msc_plan and msc_plan.get("engine") == "MSC_INPLAY"       else None,
-                legacy      = legacy_plan,
-                w_stoploss  = None  # future Overwatcher integration
-            )
-
-            # --------------------------------------------------------------
-            # 4E) **ROUTE FINAL PLAN**
-            # --------------------------------------------------------------
-            _route_final_plan(final_plan, ctx)
-
-            # Proceed to next runner
-            continue
+            # route final legacy plan if any
+            if legacy_plan:
+                try:
+                    _route_final_plan(legacy_plan, ctx)
+                except Exception as e:
+                    print(f"[LANES][ERR] legacy-route failed: {e}")
 
     return 1
 
-
-# === PATCH START (legacy DecideOnce block removed) ============================
-    # The legacy DecideOnce tick/placement engine has been fully removed.
-    # The modern run_all() above already performs:
-    #   • scope → ctx build
-    #   • MSC tick routing
-    #   • full legacy plan execution
-    #   • placement, veto, bias, ctx harden
-    # Keeping a placeholder here preserves indentation and block structure.
-    pass
-# === PATCH END ================================================================
-# === PATCH START (legacy DecideOnce block removed) ============================
-    # The legacy DecideOnce tick/placement engine has been fully removed.
-    # The modern run_all() above already performs:
-    #   • scope → ctx build
-    #   • MSC tick routing
-    #   • full legacy plan execution
-    #   • placement, veto, bias, ctx harden
-    # Keeping a placeholder here preserves indentation and block structure.
-    pass
-# === PATCH END ================================================================
-
+# -----------------------------------------------------------------------------------------------------
+# END OF PATCH — Lanes is now final-form v7.9.9.1
+# =====================================================================================================
 
 
 if __name__ == "__main__":

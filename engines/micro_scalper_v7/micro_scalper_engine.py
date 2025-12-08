@@ -7,6 +7,10 @@ from .inplay_engine import InPlayEngine
 from .intel_adapter import build_micro_state
 from .state_machine import MSCGlobalState
 from .utils import classify_direction_from_legacy
+# === PATCH START (EventSync MSC import) ======================================
+from engines.mastery.live_event_api import emit_msc_plan
+# === PATCH END ===============================================================
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalaper_v7/micro_scalper_engine.py (module scope)
@@ -244,6 +248,11 @@ class MicroScalperEngine:
     # PUBLIC API — Called every tick by orchestrator (full market context)
     # ======================================================================
     def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # === PATCH START (MSC error → EventSync) =====================================
+        from engines.mastery.event_sink import emit as _ev_emit_error
+        # === PATCH END ===============================================================
+
+
         """
         Main entry point called from orchestrator.
 
@@ -260,7 +269,11 @@ class MicroScalperEngine:
             - stoploss_triggered_for_parent (optional)
             - v7-intel enriched fields
         """
-        oc_phase = ctx.get("oc_phase", 0)
+        # === PATCH START (wrap tick in error catcher) ================================
+        try:
+            oc_phase = ctx.get("oc_phase", 0)
+        # === PATCH END ===============================================================
+
 
         # === PATCH START (BrainPulse → MSC injection) =========================
         try:
@@ -276,15 +289,54 @@ class MicroScalperEngine:
         else:
             self.state = MSCGlobalState.IN_PLAY
 
+        # === PATCH START (EventSync MSC emission wrapper) =============================
+
         # 2) PRE-OFF MODE → run exploratory + risk engines
         if self.state == MSCGlobalState.PRE_OFF:
-            return self._tick_preoff(ctx)
+            plan = self._tick_preoff(ctx)
+            if plan and isinstance(plan, dict) and plan.get("enter"):
+                try:
+                    # MSC must always emit event BEFORE Lanes sees the plan
+                    payload = dict(plan)
+                    payload["marketId"] = ctx.get("marketId")
+                    payload["selectionId"] = ctx.get("selectionId")
+                    emit_msc_plan(payload)
+                except Exception as _ev_err:
+                    print(f"[MSC][EVENTSYNC] warn (preoff): {_ev_err}")
+            return plan
 
         # 3) IN-PLAY MODE → run in-play laying engine
         if self.state == MSCGlobalState.IN_PLAY:
-            return self._tick_inplay(ctx)
+            plan = self._tick_inplay(ctx)
+            if plan and isinstance(plan, dict) and plan.get("enter"):
+                try:
+                    payload = dict(plan)
+                    payload["marketId"] = ctx.get("marketId")
+                    payload["selectionId"] = ctx.get("selectionId")
+                    emit_msc_plan(payload)
+                except Exception as _ev_err:
+                    print(f"[MSC][EVENTSYNC] warn (inplay): {_ev_err}")
+            return plan
+
+        # === PATCH START (close error catcher) =======================================
+        except Exception as e:
+            try:
+                _ev_emit_error("msc_plan_error", {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "marketId": ctx.get("marketId"),
+                    "selectionId": ctx.get("selectionId"),
+                    "error": str(e),
+                })
+            except Exception:
+                pass
+            print(f"[MSC] tick error: {e}")
+            return None
+# === PATCH END ===============================================================
+
 
         return None
+
+        # === PATCH END ===============================================================
 
 
 

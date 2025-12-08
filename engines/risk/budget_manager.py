@@ -21,6 +21,8 @@ from engines.config_paths import auto_conn as _auto_conn
 from engines.config_paths import open_bets_db as _bets
 from engines.mastery import event_sink
 
+_last_rebalance_day = None
+_alloc_lock = threading.Lock()
 
 # ============================================================
 #  GLOBAL CONSTANTS AND STATE
