@@ -1532,6 +1532,37 @@ def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
       • Record in plan_ledger (plan_id attached on success)
     """
     _ensure_row_factory_monkeypatch()
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py
+# 🔎 SEARCH: def propose_trade(context:
+# 📆 PATCHED: 2026-02-12 — direction-first legacy via Bus override
+# ============================================================================
+
+    # --- DIRECTION-FIRST (BUS OVERRIDE) ------------------------------------
+    dir_override = context.get("direction_override")
+    if dir_override:
+        ctx["direction"] = dir_override
+# === PATCH END ================================================================
+# === PATCH START ============================================================
+# 📍 TARGET: mastery_policy.propose_trade
+# 📆 PATCHED: 2026-02-13 — MSC direction-first mode
+# ============================================================================
+
+    # MSC Direction-first injection
+    if ctx.get("direction") is None:
+        try:
+            from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
+            _msc = ExploratoryEngine()
+            d = _msc.direction_only(ctx)
+            if d:
+                ctx["direction"] = d
+        except Exception:
+            pass
+
+# Continue existing plan logic
+# === PATCH END ================================================================
+
+
     ctx = _enrich_ctx(context)
     # --- Scope filter -----------------------------------------------------
     try:

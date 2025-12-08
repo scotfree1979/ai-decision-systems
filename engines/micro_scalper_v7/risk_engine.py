@@ -36,6 +36,34 @@ class RiskEngine:
         self.mode = "MODERATE"
 
 # === PATCH START ============================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: class RiskEngine(
+# 🆕 ADD: enable toggle + legacy guard
+# 📆 PATCHED: 2026-02-12
+# ============================================================================
+
+    # Bus-level toggles
+    ENABLE_FOR_LEGACY = True
+    ENABLE_FOR_EXPLORATORY = False  # phase 1 constraint
+
+    def tick(self, ctx: dict):
+        """
+        Legacy parent rescue engine.
+        Only runs when parent is LEGACY unless exploratory mode toggled ON.
+        """
+        # Guard by engine type
+        if ctx.get("parent_engine") == "LEGACY" and self.ENABLE_FOR_LEGACY:
+            return self._tick_impl(ctx)
+
+        if ctx.get("parent_engine") == "MSC_EXPLORATORY" and self.ENABLE_FOR_EXPLORATORY:
+            return self._tick_impl(ctx)
+
+        return None
+
+# === PATCH END ================================================================
+
+
+# === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py (inside class RiskEngine)
 # 📆 PATCHED: 2025-12-06 — OC6 flatten/exit logic
 # ============================================================================

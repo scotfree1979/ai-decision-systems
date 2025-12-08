@@ -3648,48 +3648,24 @@ def start_live_loop(*args, **kwargs):
     # ------------------------------------------------------------------
     # 5) MAIN LIVE LOOP — CLEAN VERSION
     # ------------------------------------------------------------------
-    from engines.decision_engine.decide_once.lanes import run_all
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: def start_live_loop(
+# 📆 PATCHED: 2026-02-12 — replace Lanes with BUS
+# ============================================================================
 
+    # OLD:
+    # from engines.decision_engine.decide_once.lanes import run_all
+
+    # NEW:
+    from engines.bus.bus import BUS
 
     while True:
-        try:
-            # ----------------------------------------------------------
-            # A) RUNALL — FULL DECISION ENGINE (legacy + MSC + v7)
-            # ----------------------------------------------------------
-            try:
-                run_all(run_id, source="LIVE", logger=logger)
-            except Exception as e:
-                if logger:
-                    logger(f"[DECIDE] run_all warn: {e}")
+        BUS.tick()
+        time.sleep(max(0.5, 1.0 / hz))
 
-            # ----------------------------------------------------------
-            # B) OVERWATCHER (stop-loss, guardian, brain pulse etc.)
-            # ----------------------------------------------------------
+# === PATCH END ================================================================
 
-
-
-
-            # ----------------------------------------------------------
-            # C) MATCH / HEDGE SYNC
-            # ----------------------------------------------------------
-            try:
-                now_mono = time.monotonic()
-                last = getattr(start_live_loop, "_last_sync", 0.0)
-                if now_mono - last >= 5.0:
-                    _sync_live_matches(logger=logger)
-                    _sync_hedge_matches(logger=logger)
-                    start_live_loop._last_sync = now_mono
-            except Exception as e:
-                if logger:
-                    logger(f"[sync] warn: {e}")
-
-        except Exception as e:
-            if logger:
-                logger(f"[live] loop warn: {e}")
-
-        time.sleep(interval)
-
-# === PATCH END ===
 
 
 def run_test_day(run_id: str, seconds: int = 600, hz: int = 4, logger=None) -> None:

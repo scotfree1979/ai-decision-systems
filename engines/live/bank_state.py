@@ -62,6 +62,36 @@ ENGINES = ["LEGACY", "MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY"]
 # ============================================================
 #  DB SCHEMA FOR ENGINE POTS
 # ============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: class BankState(
+# 🆕 ADD: ENGINE → POT mapping
+# 📆 PATCHED: 2026-02-12
+# ============================================================================
+
+ENGINE_TO_POT = {
+    "LEGACY":          "LEGACY",
+    "MSC_EXPLORATORY": "MSC_EXPLORATORY",
+    "MSC_RISK":        "MSC_RISK",
+    "MSC_INPLAY":      "MSC_INPLAY",
+    "OVERWATCHER":     "OVERWATCHER",
+}
+
+def get_engine_budget(engine: str) -> float:
+    """
+    Returns the allocated balance for the given engine.
+    Fully Bus-compatible.
+    """
+    pot = ENGINE_TO_POT.get(engine.upper())
+    if not pot:
+        return 0.0
+    try:
+        return float(BankState.pots.get(pot, 0.0))
+    except Exception:
+        return 0.0
+
+# === PATCH END ================================================================
+
 # === PATCH START ======================================================
 # 📍 TARGET: engines/live/bank_state.py
 # 🔎 SEARCH: CREATE TABLE IF NOT EXISTS engine_pots(

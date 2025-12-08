@@ -730,6 +730,11 @@ def build_context(source: str | None = None) -> tuple[dict, dict]:
         ctx["marketId"] = mid
         ctx["selectionId"] = sid
 
+        # Legacy bridge prep
+        ctx["legacy_parent_id"] = None
+        ctx["legacy_entry_side"] = None
+        ctx["legacy_expected_direction"] = ctx.get("direction")
+
         # --------------------------------------------
         # Price: from MarketMonitor (primary) or inbound series
         # --------------------------------------------

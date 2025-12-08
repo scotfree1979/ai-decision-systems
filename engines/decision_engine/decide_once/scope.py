@@ -772,6 +772,21 @@ def build_and_maintain_scope(*, inplay_window_min: int = 15, show_dashboard: boo
 
     # --- Normalize dual-access structure for DecideOnce.run_all() -----
     snap["active_sids"] = {m["marketId"]: m["active_sids"] for m in snap["markets"]}
+# === PATCH START ============================================================
+# 📍 TARGET: engines/decision_engine/decide_once/scope.py
+# 🔎 SEARCH: snap["active_sids"]
+# 📆 PATCHED: 2026-02-12 — scope returns ALL SIDs needed by Bus
+# ============================================================================
+
+    # Ensure full SID visibility (Bus removes Candidates)
+    for m in snap["markets"]:
+        mid = m["marketId"]
+        all_sids = set(m.get("active_sids") or [])
+        if "passive_sids" in snap:
+            all_sids.update(snap["passive_sids"].get(mid, []))
+        snap.setdefault("all_sids", {})[mid] = sorted(all_sids)
+# === PATCH END ================================================================
+
     snap["passive_sids"] = {m["marketId"]: m["passive_sids"] for m in snap["markets"]}
     snap["fav_sids"] = {m["marketId"]: m["fav_sid"] for m in snap["markets"] if m.get("fav_sid")}
 

@@ -63,6 +63,8 @@ FLOOR_PCT = {
     "SAFETY_NET":      0.05,
 }
 
+
+
 # Dynamic pool (total = 35% of daily allocation)
 DYNAMIC_POOL = 0.35
 

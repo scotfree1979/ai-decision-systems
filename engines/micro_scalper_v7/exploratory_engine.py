@@ -26,6 +26,30 @@ class ExploratoryEngine:
         # No internal state in v7
         pass
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
+# 🔎 SEARCH: class ExploratoryEngine(
+# 🆕 ADD: direction_only(ctx)
+# 📆 PATCHED: 2026-02-12
+# ============================================================================
+
+    def direction_only(self, ctx: dict):
+        """
+        Lightweight direction probe for Legacy (Bus usage).
+        Does NOT emit a plan, does NOT place trades.
+        Returns "LAY->BACK" | "BACK->LAY" | None.
+        """
+        try:
+            # Reuse MSC microstructure direction inference
+            from .direction_engine import compute_msc_decision
+            dec = compute_msc_decision(ctx)
+            return dec.get("direction")
+        except Exception:
+            return None
+
+# === PATCH END ================================================================
+
+
     # -----------------------------------------------------------
     # PUBLIC API
     # -----------------------------------------------------------

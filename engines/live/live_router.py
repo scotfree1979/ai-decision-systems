@@ -484,6 +484,69 @@ def _safe_int(x, default=1):
     except Exception:
         return default
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🆕 ADD: place_from_bus()
+# 📆 PATCHED: 2026-02-13
+# ============================================================================
+
+def place_from_bus(plan: dict, ctx: dict):
+    """
+    Direct BUS→Router placement.
+    All engines pass through here.
+    No Lanes, no Placement stage.
+    `plan` contains engine, px, size, direction.
+    """
+# === PATCH START ============================================================
+# 📍 TARGET: live_router.place_from_bus
+# 📆 PATCHED: 2026-02-14 — Shadow Mode Switch
+# ============================================================================
+
+    import os
+    SHADOW = os.environ.get("AUTOSCALP_SHADOW", "0") == "1"
+
+    if SHADOW:
+        print(f"[ROUTER][SHADOW] {direction} {size}@{odds} mid={mid} sid={sid}")
+        return None
+
+# === PATCH END ================================================================
+
+    mid = str(plan.get("marketId"))
+    sid = str(plan.get("selectionId"))
+    odds = float(plan.get("px") or 0)
+    size = float(plan.get("size") or 0)
+    direction = plan.get("direction")
+
+    # create order reference
+    cref = f"{plan.get('engine','?')}-{uuid.uuid4().hex[:10]}"
+
+    # insert via existing helper
+    from engines.live.live_router import _orders_insert_parent_queued
+    parent_id = _orders_insert_parent_queued(
+        run_id=ctx.get("run_id"),
+        market_id=mid,
+        selection_id=sid,
+        side="LAY" if direction.startswith("LAY") else "BACK",
+        entry_odds=odds,
+        entry_stake=size,
+        cor=cref,
+        source=plan.get("engine"),
+    )
+
+    # push into main router path
+    _place(_name=plan.get("engine"), _plan={
+        "px": odds,
+        "size": size,
+        "direction": direction,
+        "customerOrderRef": cref,
+        "marketId": mid,
+        "selectionId": sid
+    }, _ctx=ctx)
+
+# === PATCH END ================================================================
+export AUTOSCALP_SHADOW=1
+
+
 # ── DB bootstrap (orders + events) ───────────────────────────────────────────
 _ORDERS_SCHEMA_OK = False
 def _ensure_orders_schema() -> None:
@@ -2357,6 +2420,21 @@ def place_parent_and_hedge(
     _plan: dict | None = None,
     _ctx: dict | None = None,
 ) -> tuple[Optional[str], str]:
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def place_parent_and_hedge(
+# 📆 PATCHED: 2026-02-12 — allow Bus direct placement
+# ============================================================================
+
+# Bus direct placement is already compatible with place_parent_and_hedge.
+# Add a safety guard so that legacy placement module is not required.
+
+    if _name.startswith("MSC_") or _name == "OVERWATCHER" or _name == "LEGACY":
+        # fast-path accepted
+        pass
+# === PATCH END ================================================================
+
 
     # --- COMPAT GLUE: accept (_name, _plan, _ctx) from placement.py -----------
     if _plan is not None:

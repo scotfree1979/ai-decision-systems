@@ -52,6 +52,14 @@ import engines.mastery_v7.live_router_bridge  # noqa: F401
 from engines.live.live_router import analyze_market_pnl
 from engines.live.live_router import _keys
 
+# overwatcher.py (patched)
+
+from engines.bus.bus_engine import BUS
+
+def _process_stoploss_now(ev):
+    BUS.push_stoploss(ev)
+
+
 # === PATCH START ===
 # 📍 TARGET: engines/live/overwatcher.py
 # 🔎 SEARCH: from engines.stoploss_engine import StopLossInputs, evaluate_stoploss
@@ -311,6 +319,24 @@ def _process_stoploss_now(ev):
 
     except Exception as e:
         print(f"[W-SL][ERR] STOPLOSS emit fail: {e}")
+
+# === PATCH END ================================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: STOPLOSS_QUEUE =
+# 🆕 ADD: safe accessor
+# 📆 PATCHED: 2026-02-12
+# ============================================================================
+
+def pull_stoploss_for(mid: str, sid: str):
+    """
+    Bus-safe STOPLOSS fetch.
+    Returns STOPLOSS plan if present; removes it from queue.
+    """
+    key = (mid, sid)
+    if key in STOPLOSS_QUEUE:
+        return STOPLOSS_QUEUE.pop(key)
+    return None
 
 # === PATCH END ================================================================
 
