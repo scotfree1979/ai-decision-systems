@@ -3543,32 +3543,41 @@ def start_live_loop(*args, **kwargs):
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: "print(\"[LIVE DAL] switched → LIVE\")"
-# 📆 PATCHED: 2025-12-04 — Initialise BankState before any placement/tick logic
+# 🔎 SEARCH: "# 3B) INITIALISE BANKSTATE (STATIC ENGINE POTS)"
+# 📆 PATCHED: 2026-02-12 — BudgetManager first, THEN BankState
 # ============================================================================
 
     # ------------------------------------------------------------------
-    # 3B) INITIALISE BANKSTATE (STATIC ENGINE POTS)
+    # 3B) INITIALISE BUDGET MANAGER → THEN BANKSTATE
     # ------------------------------------------------------------------
     try:
-        # Import BankState without triggering circular import
-        from engines.live import bank_state
+        # 1️⃣ BudgetManager must run FIRST so allocations are correct
+        import engines.risk.budget_manager as _bm
+        _bm.init_budget_manager()         # performs midnight rebalance
+        try:
+            allocs = _bm.get_allocations()
+            print(f"[BudgetManager] allocations initialised → {allocs}")
+        except Exception:
+            print("[BudgetManager] allocations initialised (no diagnostics)")
 
-        # Ensure today's engine_pots table and pot values exist
+        # 2️⃣ Now BankState can safely initialise STATIC pots using correct allocations
+        from engines.live import bank_state
         bank_state.init_bank_state()
 
-        # Optional: diagnostic print
         try:
             pots = bank_state.get_daily_pots()
             total = bank_state.get_balance()
-            print(f"[BankState] initialised pots={pots} total={total:.2f}")
+            print(f"[BankState] initialised pots → {pots} total={total:.2f}")
         except Exception:
-            print("[BankState] initialised (diagnostic unavailable)")
+            print("[BankState] initialised (no diagnostics)")
 
     except Exception as e:
-        print(f"[BankState] init warn: {e}")
+        print(f"[INIT] BudgetManager/BankState setup warn: {e}")
 
 # === PATCH END ==============================================================
+
+
+
 
 
     # ------------------------------------------------------------------
