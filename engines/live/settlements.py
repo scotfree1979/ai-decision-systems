@@ -1373,8 +1373,6 @@ def map_cleared_api(it: Dict[str, Any]) -> Dict[str, Any]:
         "json_raw": json.dumps(it, ensure_ascii=False),
     }
 
-# 📍 TARGET: engines/live/settlements.py
-# 🔎 SEARCH: def fetch_market_metadata_api
 # === PATCH START 2026-02-11 ===============================================
 
 def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
@@ -1387,40 +1385,41 @@ def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
         for i in range(0, len(lst), n):
             yield lst[i:i+n]
 
-    # ✔ USE REAL SQLITE CONNECTION — NOT DALWRITEPROXY
-    from engines.live.settlements import connect_db, settlements_db_path
-
+    # ✔ USE REAL SQLITE3 — NOT DALWriteProxy
     with connect_db(settlements_db_path()) as con:
-        # (rest of the function identical)
 
-# === PATCH END ============================================================
-
-        # Market Catalogue (metadata)
+        # -------------------------------------------------
+        # MARKET CATALOGUE INSERTS
+        # -------------------------------------------------
         for chunk in chunks(market_ids, 40):
             cats = client.list_market_catalogue(chunk)
             total_cats += len(cats or [])
-            for c in cats:
+
+            for c in cats or []:
                 md = c or {}
-                runners = [{"selectionId": r.get("selectionId"),
-                            "runnerName": r.get("runnerName")}
-                           for r in (md.get("runners") or [])]
+                runners = [
+                    {"selectionId": r.get("selectionId"),
+                     "runnerName": r.get("runnerName")}
+                    for r in (md.get("runners") or [])
+                ]
                 venue = ((md.get("event") or {}).get("venue")) or md.get("eventName")
+
                 con.execute("""
-                INSERT INTO bf_market_catalogue(
-                  marketId, marketName, eventName, competition, countryCode, venue,
-                  marketStartTime, totalMatched, raceType, distanceMeters, going, class,
-                  runnersJson, raw_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(marketId) DO UPDATE SET
-                  marketName=excluded.marketName,
-                  eventName=excluded.eventName,
-                  competition=excluded.competition,
-                  countryCode=excluded.countryCode,
-                  venue=excluded.venue,
-                  marketStartTime=excluded.marketStartTime,
-                  totalMatched=excluded.totalMatched,
-                  runnersJson=excluded.runnersJson,
-                  raw_json=excluded.raw_json
+                    INSERT INTO bf_market_catalogue(
+                      marketId, marketName, eventName, competition, countryCode, venue,
+                      marketStartTime, totalMatched, raceType, distanceMeters, going, class,
+                      runnersJson, raw_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(marketId) DO UPDATE SET
+                      marketName=excluded.marketName,
+                      eventName=excluded.eventName,
+                      competition=excluded.competition,
+                      countryCode=excluded.countryCode,
+                      venue=excluded.venue,
+                      marketStartTime=excluded.marketStartTime,
+                      totalMatched=excluded.totalMatched,
+                      runnersJson=excluded.runnersJson,
+                      raw_json=excluded.raw_json
                 """, (
                     md.get("marketId"),
                     md.get("marketName"),
@@ -1434,14 +1433,16 @@ def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
                     json.dumps(runners, ensure_ascii=False),
                     json.dumps(md, ensure_ascii=False),
                 ))
+
                 for r in (md.get("runners") or []):
                     con.execute("""
-                    INSERT INTO bf_runner_info(marketId, selectionId, runnerName, stallDraw, raw_json)
-                    VALUES (?,?,?,?,?)
-                    ON CONFLICT(marketId, selectionId) DO UPDATE SET
-                      runnerName=excluded.runnerName,
-                      stallDraw=excluded.stallDraw,
-                      raw_json=excluded.raw_json
+                        INSERT INTO bf_runner_info(marketId, selectionId, runnerName, stallDraw, raw_json)
+                        VALUES (?,?,?,?,?)
+                        ON CONFLICT(marketId, selectionId)
+                        DO UPDATE SET
+                          runnerName=excluded.runnerName,
+                          stallDraw=excluded.stallDraw,
+                          raw_json=excluded.raw_json
                     """, (
                         md.get("marketId"),
                         str(r.get("selectionId")),
@@ -1450,33 +1451,40 @@ def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
                         json.dumps(r, ensure_ascii=False),
                     ))
 
-        # Market Book (status/results)
+        # -------------------------------------------------
+        # MARKET BOOK INSERTS
+        # -------------------------------------------------
         for chunk in chunks(market_ids, 40):
             books = client.list_market_book(chunk)
             total_books += len(books or [])
-            for b in books:
+
+            for b in books or []:
                 md = b or {}
-                res = []
-                for r in (md.get("runners") or []):
-                    res.append({
+                res = [
+                    {
                         "selectionId": r.get("selectionId"),
                         "status": r.get("status"),
                         "ltp": r.get("lastPriceTraded"),
                         "totalMatched": r.get("totalMatched"),
-                        "sp": ((r.get("sp") or {}).get("actualSP"))
-                    })
+                        "sp": ((r.get("sp") or {}).get("actualSP")),
+                    }
+                    for r in (md.get("runners") or [])
+                ]
+
                 con.execute("""
-                INSERT INTO bf_market_book(marketId, isInplay, status, betDelay, totalMatched,
-                                           lastMatchTime, resultJson, raw_json)
-                VALUES (?,?,?,?,?,?,?,?)
-                ON CONFLICT(marketId) DO UPDATE SET
-                  isInplay=excluded.isInplay,
-                  status=excluded.status,
-                  betDelay=excluded.betDelay,
-                  totalMatched=excluded.totalMatched,
-                  lastMatchTime=excluded.lastMatchTime,
-                  resultJson=excluded.resultJson,
-                  raw_json=excluded.raw_json
+                    INSERT INTO bf_market_book(
+                      marketId, isInplay, status, betDelay, totalMatched,
+                      lastMatchTime, resultJson, raw_json
+                    )
+                    VALUES (?,?,?,?,?,?,?,?)
+                    ON CONFLICT(marketId) DO UPDATE SET
+                      isInplay=excluded.isInplay,
+                      status=excluded.status,
+                      betDelay=excluded.betDelay,
+                      totalMatched=excluded.totalMatched,
+                      lastMatchTime=excluded.lastMatchTime,
+                      resultJson=excluded.resultJson,
+                      raw_json=excluded.raw_json
                 """, (
                     md.get("marketId"),
                     1 if md.get("isInplay") else 0,
@@ -1487,9 +1495,13 @@ def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
                     json.dumps(res, ensure_ascii=False),
                     json.dumps(md, ensure_ascii=False),
                 ))
+
         con.commit()
 
     return (total_cats, total_books)
+
+# === PATCH END ============================================================
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────

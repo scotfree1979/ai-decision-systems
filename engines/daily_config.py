@@ -96,32 +96,6 @@ MARKET_MONITOR = {
     # and only re-enter if they drift into ACTIVE >= 1.5.
 }
 
-# ============================================================
-#  BANKSTATE / BUDGETMANAGER ALIASES (COMPATIBILITY LAYER)
-# ============================================================
-from engines.live import bank_state as _BS
-
-# Percentage allocation per engine (from BudgetManager)
-ENGINE_ALLOCATIONS   = _BS.get_allocations
-
-# Snapshot of static pots for the day
-ENGINE_POTS_SNAPSHOT = _BS.get_daily_pots
-
-# Total static bank (sum of all pots)
-GET_TOTAL_BANK       = _BS.get_balance
-
-# Legacy alias for router dynamic stake
-GET_LIVE_BANK        = _BS.get_live_balance
-
-# Per-engine available funds right now
-ENGINE_AVAILABLE     = _BS.get_engine_available
-
-# Per-engine pot (static)
-ENGINE_POT           = _BS.get_engine_pot
-
-# Can-place gate (router)
-CAN_PLACE            = _BS.can_place
-
 
 
 # ============================================================
@@ -342,50 +316,6 @@ def fetch_available_budget() -> float:
         return 300.0
 
 
-# ========================================================================
-# 📌 PATCH: Dynamic Bank & Stake Delegation via BankState / BudgetManager
-# ========================================================================
-
-try:
-    from engines.live import bank_state
-    from engines.risk import budget_manager
-except Exception:
-    bank_state = None
-    budget_manager = None
-
-
-# --- Dynamic Delegation Layer -------------------------------------------
-
-def get_engine_pot(engine: str) -> float:
-    """
-    Return the static (start-of-day) pot for this engine.
-    DailyConfig stays the public API; BankState is the implementation.
-    """
-    try:
-        return bank_state.get_engine_pot(engine)
-    except Exception:
-        return 0.0
-
-
-def get_engine_available(engine: str) -> float:
-    """
-    Return pot - open liability for this engine.
-    """
-    try:
-        return bank_state.get_engine_available(engine)
-    except Exception:
-        return 0.0
-
-
-def get_global_bank() -> float:
-    """
-    For legacy callers expecting 'total bank' from DailyConfig.
-    We expose the unified bank via BankState.
-    """
-    try:
-        return bank_state.get_global_bank()
-    except Exception:
-        return 0.0
 
 
 def allowed_stake(engine: str, *, letter: str = None) -> float:
