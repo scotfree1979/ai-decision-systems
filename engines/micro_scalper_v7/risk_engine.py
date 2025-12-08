@@ -35,6 +35,84 @@ class RiskEngine:
         self.active_plan = None       # the current child
         self.mode = "MODERATE"
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py (inside class RiskEngine)
+# 📆 PATCHED: 2025-12-06 — OC6 flatten/exit logic
+# ============================================================================
+
+    def _terminate_oc6(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OC6 termination:
+          • Immediately flatten legacy parent at market px
+          • exit_kind = H (right side) or S (wrong side)
+          • stake = exposure-neutralising
+          • direction = opposite legacy entry
+        """
+        px = float(ctx.get("current_price") or ctx.get("px") or 0.0)
+        if px <= 0:
+            return None
+
+        # -----------------------------
+        # 1) Parent metadata
+        # -----------------------------
+        parent_side = (ctx.get("legacy_entry_side") or "").upper()  # LAY/BACK
+        anchor      = float(ctx.get("legacy_entry_odds") or px)
+        parent_stk  = float(ctx.get("legacy_entry_stake") or 0.0)
+
+        if parent_stk <= 0:
+            return None
+
+        # -----------------------------
+        # 2) Determine flatten direction
+        # -----------------------------
+        if parent_side == "LAY":
+            # Legacy opened with LAY → flatten with BACK
+            flatten_side  = "BACK"
+            flatten_stake = parent_stk   # exposure-neutralising
+            # Anchor logic:
+            # px > anchor → right side → H
+            exit_kind = "H" if px > anchor else "S"
+
+        else:
+            # Legacy opened with BACK → flatten with LAY
+            flatten_side  = "LAY"
+            flatten_stake = parent_stk
+            # Anchor logic:
+            # px < anchor → right side → H
+            exit_kind = "H" if px < anchor else "S"
+
+        # -----------------------------
+        # 3) Build flatten child plan
+        # -----------------------------
+        plan = {
+            "enter": True,
+            "close": True,               # explicit terminal close
+            "role": "CHILD",
+            "family": "MSC_RISK",
+            "parent_id": self.parent_id,
+            "direction": flatten_side,
+            "size": float(flatten_stake),
+            "px": float(px),             # EXACT px – option A
+            "exit_kind": exit_kind,
+            "why": f"oc6_flatten_{exit_kind}",
+        }
+
+        # -----------------------------
+        # 4) Detach and end micro-cycle
+        # -----------------------------
+        self.active_plan = None
+        self.attached    = False
+        self.last_px     = None
+
+        print(f"[MSC-RISK][OC6] pid={self.parent_id} side={parent_side} "
+              f"px={px} anchor={anchor} → flatten={flatten_side} "
+              f"stk={flatten_stake} kind={exit_kind}")
+
+        return plan
+
+# === PATCH END ==============================================================
+
+
     # ----------------------------------------------------------------------
     # ENTRYPOINT: called each tick by MSC engine
     # ----------------------------------------------------------------------
@@ -61,6 +139,13 @@ class RiskEngine:
         # SLEQ multiplier
         stake_mult = float(ctx.get("msc_multiplier") or 1.0)
 
+        # ---------------------------------------------------------
+        # OC6 TERMINATION (PRE-OFF → IN-PLAY boundary)
+        # ---------------------------------------------------------
+        oc_phase = ctx.get("oc_phase")
+        if oc_phase is not None and int(oc_phase) >= 6:
+            return self._terminate_oc6(ctx)
+
         # FIRST ATTACH → open micro scalp immediately
         if not self.attached:
             self.attached = True
@@ -75,9 +160,16 @@ class RiskEngine:
         # CONTINUOUS SCALPING
         return self._scalp_tick(px, entry_ticks, stop_ticks, stake_mult, ctx)
 
+
     # ----------------------------------------------------------------------
     # INITIAL SHADOW-TRADE
     # ----------------------------------------------------------------------
+    # ============================================================
+    # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
+    # 🔎 SEARCH: def _initial_shadow(
+    # 🛠 ACTION: Replace entire function with parent-plan version
+    # 📆 PATCHED: 2025-12-06
+    # ============================================================
     def _initial_shadow(self, px, entry_ticks, stop_ticks, stake_mult, ctx):
         tick = ctx.get("tick_size_fn")(px)
 
@@ -91,32 +183,49 @@ class RiskEngine:
 
         size = self._stake(ctx, stake_mult, entry_ticks)
 
+        # 🔥 Emit MSC_RISK PARENT plan (router will hedge it)
+        # === PATCH START: baseline 3-tick stop-loss ==========================
+        from engines.price_math import walk_ticks
+
+        baseline_sl_ticks = 3
+        sl_dir = "up" if direction == "LAY" else "down"
+        stop_loss_px = walk_ticks(float(entry_px), baseline_sl_ticks, sl_dir)
+
         plan = {
             "enter": True,
-            "role": "CHILD",
+            "role": "PARENT",
             "family": "MSC_RISK",
-            "direction": direction,
             "parent_id": self.parent_id,
+            "direction": direction,
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
             "size": size,
             "px": entry_px,
-            "why": "risk_initial_shadow"
+            "why": "risk_initial_shadow",
+
+            # NEW STOP-LOSS FIELDS
+            "stop_loss_ticks": baseline_sl_ticks,
+            "stop_loss_px": float(stop_loss_px),
         }
+        # === PATCH END ========================================================
 
         self.last_px = px
         self.active_plan = plan
         return plan
 
+    # ============================================================
+
+
     # ----------------------------------------------------------------------
     # TICK-BASED CONTINUOUS SCALPING
     # ----------------------------------------------------------------------
+    # ============================================================
+    # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
+    # 🔎 SEARCH: def _scalp_tick(
+    # 🛠 ACTION: Replace entire function
+    # 📆 PATCHED: 2025-12-06
+    # ============================================================
     def _scalp_tick(self, px, entry_ticks, stop_ticks, stake_mult, ctx):
-        """
-        When price moves:
-            • in favour of parent → stack_tick
-            • against parent     → hedge_tick
-        """
         tick = ctx.get("tick_size_fn")(px)
 
         moving_favour = (
@@ -127,74 +236,90 @@ class RiskEngine:
 
         moving_against = not moving_favour
 
-        # If crossing → flip direction
+        # FLIP direction if crossing anchor
         if self._crossed_parent(px):
             direction = "LAY" if px > self.entry_px else "BACK"
             size = self._stake(ctx, stake_mult, entry_ticks)
-            return self._open_new(direction, px, entry_ticks, stop_ticks, size,
-                                  reason="risk_cross")
+            return self._open_new(
+                direction, px, entry_ticks, stop_ticks, size, reason="risk_cross"
+            )
 
+        # STACK (move with trend)
         if moving_favour:
             direction = "LAY" if self.entry_side == "LAY" else "BACK"
             size = self._stake(ctx, stake_mult, entry_ticks)
-            return self._open_new(direction, px, entry_ticks, stop_ticks, size,
-                                  reason="risk_stack")
-        else:
-            # hedging tick
-            direction = "BACK" if self.entry_side == "LAY" else "LAY"
-            size = self._stake(ctx, stake_mult, entry_ticks)
-            return self._open_new(direction, px, entry_ticks, stop_ticks, size,
-                                  reason="risk_hedge")
+            return self._open_new(
+                direction, px, entry_ticks, stop_ticks, size, reason="risk_stack"
+            )
+
+        # HEDGE (move against legacy)
+        direction = "BACK" if self.entry_side == "LAY" else "LAY"
+        size = self._stake(ctx, stake_mult, entry_ticks)
+        return self._open_new(
+            direction, px, entry_ticks, stop_ticks, size, reason="risk_hedge"
+        )
+    # ============================================================
+
 
     # ----------------------------------------------------------------------
     # MONITOR ACTIVE MICRO CHILD
     # ----------------------------------------------------------------------
+    # ============================================================
+    # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
+    # 🔎 SEARCH: def _monitor(
+    # 🛠 ACTION: Replace entire function
+    # 📆 PATCHED: 2025-12-06
+    # ============================================================
     def _monitor(self, px, entry_ticks, stop_ticks):
-        entry_px = self.active_plan["px"]
-        direction = self.active_plan["direction"]
-
-        tick = abs(px - entry_px)
-        if tick <= 0:
-            return None
-
-        # PROFIT target
-        if (direction == "LAY" and px >= entry_px + tick * entry_ticks) or \
-           (direction == "BACK" and px <= entry_px - tick * entry_ticks):
-            return self._exit("risk_profit", H=True)
-
-        # STOP LOSS
-        if (direction == "LAY" and px <= entry_px - tick * stop_ticks) or \
-           (direction == "BACK" and px >= entry_px + tick * stop_ticks):
-            return self._exit("risk_stop", H=False)
-
-        # BOUNDARIES 1.5 / 12.0
-        if px >= 12.0 or px <= 1.5:
-            parent = self.entry_side
-            H = True if (px >= 12 and parent == "LAY") or \
-                       (px <= 1.5 and parent == "BACK") else False
-            return self._exit("risk_boundary", H=H)
-
+        # No internal exits. Router handles hedging and closure.
+        self.last_px = px
         return None
+    # ============================================================
+
 
     # ----------------------------------------------------------------------
     # OPEN A NEW MICRO SCALP
     # ----------------------------------------------------------------------
+    # ============================================================
+    # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
+    # 🔎 SEARCH: def _open_new(
+    # 🛠 ACTION: Replace with parent-version
+    # 📆 PATCHED: 2025-12-06
+    # ============================================================
     def _open_new(self, direction, px, entry_ticks, stop_ticks, size, reason):
+        # === PATCH START: baseline 3-tick stop-loss ==========================
+        from engines.price_math import walk_ticks
+
+        baseline_sl_ticks = 3
+        sl_dir = "up" if direction == "LAY" else "down"
+        stop_loss_px = walk_ticks(float(px), baseline_sl_ticks, sl_dir)
+
         plan = {
             "enter": True,
-            "role": "CHILD",
+            "role": "PARENT",
             "family": "MSC_RISK",
+            "source": "J",                     # ← HARD-CODED FOR MSC-RISK
+            "engine": "MSC_RISK",              # ← DB bucket
             "parent_id": self.parent_id,
             "direction": direction,
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
             "size": size,
-            "px": px,
+            "px": float(px),
             "why": reason,
+
+            # NEW STOP-LOSS FIELDS
+            "stop_loss_ticks": baseline_sl_ticks,
+            "stop_loss_px": float(stop_loss_px),
         }
+        # === PATCH END ========================================================
+
         self.active_plan = plan
         self.last_px = px
         return plan
+
+    # ============================================================
+
 
     # ----------------------------------------------------------------------
     # EXIT PLAN

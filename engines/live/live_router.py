@@ -15,9 +15,23 @@ from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_re
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
 
 # DB connection for AUTOSCALP orders table (GUI DB)
+# === PATCH START ============================================
+# 📍 TARGET: engines/live/live_router.py : _orders_conn()
+# 📆 PATCHED: 2025-12-10 — route all LIVE writes to dual-writer
+# =============================================================
+
+from engines.config_paths import auto_conn_live
+
 def _orders_conn():
-    # Uses the canonical path from engines.config_paths.autoscalp_db()
-    return _db()
+    """
+    LiveRouter MUST write to dual-writer:
+        LOCAL + LiveCache simultanously.
+    auto_conn_live(rw=True) provides this.
+    """
+    return auto_conn_live(rw=True)
+
+# === PATCH END ==============================================
+
 
 # 📍 TARGET: engines/live/live_router.py
 # 📆 PATCHED: 2025-11-14T23:00Z — fetch bank from BankState instead of dashboard_tiles
@@ -222,26 +236,28 @@ from engines.config_paths import autoscalp_db
 # unified GUI DB connector (no name collision)
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: def _db(
-# 📆 PATCHED: 2025-12-03 — Router must operate on LiveCache
+# 🔎 SEARCH: def _db()
+# 📆 PATCHED: 2025-12-10 — FORCE router writes to LiveCache DB only
 # ============================================================================
 
 def _db() -> sqlite3.Connection:
     """
-    Router must always use the LiveCache DB.
-    This ensures:
-        • parents and children are in the same DB
-        • match sync sees correct parent rows
-        • stoploss and hedge updates are consistent
-        • AlphaX mirrors LiveCache to Local without blocking
+    LiveRouter MUST write to the LiveCache DB (autoscalp_livecache.db).
+    This connector (_auto_conn) is imported as:
+        from engines.config_paths import auto_conn_live as _auto_conn
+    The previous implementation incorrectly routed through auto_conn(),
+    causing all writes to go to LOCAL or nowhere.
     """
-    con = _cp_auto_conn(rw=True)  # ← ENFORCE LiveCache (CLOUD_AUTO alias)
+    # ✔ FIXED — use LiveCache writer
+    con = _auto_conn(rw=True)
+
     try:
         con.row_factory = sqlite3.Row
-        _cp_q_retry(con, "PRAGMA journal_mode=WAL;")
-        _cp_q_retry(con, "PRAGMA busy_timeout=8000;")
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA busy_timeout=8000;")
     except Exception:
         pass
+
     return con
 
 # === PATCH END ==============================================================
@@ -252,7 +268,7 @@ def _q(con: sqlite3.Connection, sql: str, params: tuple = ()):
     return _cp_q_retry(con, sql, params)
 
 # use _db() for every orders/GUI DB open
-def _orders_conn(): return _db()
+
 def _con():         return _db()
 
 
@@ -430,6 +446,11 @@ def _ensure_orders_schema() -> None:
             )
         """)
         cols = {r[1] for r in _q_retry(cur, "PRAGMA table_info(orders)")}
+
+        # NEW COLUMN
+        if "stop_loss_px" not in cols:
+            _q_retry(cur, "ALTER TABLE orders ADD COLUMN stop_loss_px REAL")
+
         def _add(col, ddl): 
             if col not in cols: _q_retry(cur, f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
         _add("role",      "TEXT")          # 'PARENT'|'CHILD'
@@ -995,58 +1016,78 @@ def _start_reconcile_loop(period_s: int = 30):
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: ^def _orders_insert_parent_queued\(
 # --- PATCH START: replace function ------------------------------------
-def _orders_insert_parent_queued(run_id, market_id, selection_id, side, entry_odds, entry_stake, cor, *, source="LEGACY_STRATEGY"):
+def _orders_insert_parent_queued(
+    run_id, market_id, selection_id, side, entry_odds, entry_stake, cor,
+    *, source="LEGACY_STRATEGY", stop_loss_px=None):
     """
     Upsert LIVE parent row as 'queued' with strategy source.
+    Now stores stop_loss_px (raw price) for Overwatcher stop-loss engine.
     """
     _ensure_orders_schema()
+
+    # --- ensure column exists ------------------------------------------------
+    try:
+        con0 = _orders_conn(); cur0 = con0.cursor()
+        cols = {r[1] for r in _q_retry(cur0, "PRAGMA table_info(orders)")}
+        if "stop_loss_px" not in cols:
+            _q_retry(cur0, "ALTER TABLE orders ADD COLUMN stop_loss_px REAL")
+            con0.commit()
+        con0.close()
+    except Exception:
+        pass
+
     fk = _run_fk_id(run_id or "LIVE-AUTO", mode="LIVE")
     con = _orders_conn(); cur = con.cursor()
+
     try:
-        _q_retry(cur, """
+        _q_retry(cur, f"""
             INSERT INTO orders (
                 customerOrderRef, run_id, mode, marketId, selectionId,
                 side, entry_odds, entry_stake, entry_status, opened_at,
-                role, source, engine
+                role, source, engine, stop_loss_px
             )
             VALUES (
-                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'queued', ?, 
-                'PARENT', ?, ?
+                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'queued', ?,
+                'PARENT', ?, ?, ?
             )
             ON CONFLICT(customerOrderRef) DO UPDATE SET
-                run_id=COALESCE(orders.run_id, excluded.run_id),
-                mode='LIVE',
-                marketId=COALESCE(excluded.marketId, orders.marketId),
-                selectionId=COALESCE(excluded.selectionId, orders.selectionId),
-                side=excluded.side,
-                entry_odds=excluded.entry_odds,
-                entry_stake=excluded.entry_stake,
-                entry_status=COALESCE(orders.entry_status, 'queued'),
-                opened_at=COALESCE(orders.opened_at, excluded.opened_at),
-                role='PARENT',
-                source=COALESCE(orders.source, excluded.source),
-                engine=COALESCE(orders.engine, excluded.engine)
+                run_id        = COALESCE(orders.run_id, excluded.run_id),
+                mode          = 'LIVE',
+                marketId      = COALESCE(excluded.marketId, orders.marketId),
+                selectionId   = COALESCE(excluded.selectionId, orders.selectionId),
+                side          = excluded.side,
+                entry_odds    = excluded.entry_odds,
+                entry_stake   = excluded.entry_stake,
+                entry_status  = COALESCE(orders.entry_status, 'queued'),
+                opened_at     = COALESCE(orders.opened_at, excluded.opened_at),
+                role          = 'PARENT',
+                source        = COALESCE(orders.source, excluded.source),
+                engine        = COALESCE(orders.engine, excluded.engine),
+                stop_loss_px  = COALESCE(excluded.stop_loss_px, orders.stop_loss_px)
         """,
         (
-            str(cor),                 # customerOrderRef
-            int(fk),                  # run_id
-            str(market_id),           # marketId
-            str(selection_id),        # selectionId
-            side.upper(),             # side
-            float(entry_odds),        # entry_odds
-            float(entry_stake),       # entry_stake
-            _utcnow_str(),            # opened_at
-            str(source),              # source
-            _engine_from_source(source)  # engine
+            str(cor),
+            int(fk),
+            str(market_id),
+            str(selection_id),
+            side.upper(),
+            float(entry_odds),
+            float(entry_stake),
+            _utcnow_str(),
+            str(source),
+            _engine_from_source(source),
+            float(stop_loss_px) if stop_loss_px is not None else None
         ))
 
         con.commit()
         _orders_probe(cor, note="queued")
     except Exception as e:
-        _log_event("ERROR", "live_router", f"orders upsert queued failed ref={cor}: {e}")
+        _log_event("ERROR", "live_router",
+                   f"orders upsert queued failed ref={cor}: {e}")
     finally:
         try: con.close()
         except Exception: pass
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: ^def _orders_update_parent_placed\(
@@ -2153,6 +2194,147 @@ def place_parent_and_hedge(
             hedge_ticks = 1
     except Exception:
         hedge_ticks = 1
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py : place_parent_and_hedge()
+# 🔎 SEARCH FOR: "if _plan is not None:"  (the COMPAT GLUE block)
+# ⛏ ACTION: Insert THIS block immediately AFTER the COMPAT GLUE normalisation
+# 📆 PATCHED: 2026-01-22 — STOPLOSS Immediate Child Executor for v7
+# ============================================================================
+
+    # --------------------------------------------------------------
+    # STOPLOSS (W-engine) — IMMEDIATE FLATTEN EXIT
+    # --------------------------------------------------------------
+    if _plan and str(_plan.get("engine")).upper() == "OVERWATCHER" \
+              and str(_plan.get("type")).upper() == "STOPLOSS":
+
+        parent_cor = _ctx.get("customerOrderRef") or _plan.get("customerOrderRef")
+        if not parent_cor:
+            parent_cor = _ref("SLP")  # fallback, extremely rare
+
+        # Load parent
+        con_sl = _orders_conn(); con_sl.row_factory = sqlite3.Row
+        parent = _q_retry(con_sl,
+            "SELECT id, side, entry_stake, marketId, selectionId "
+            "FROM orders WHERE customerOrderRef=? LIMIT 1",
+            (str(parent_cor),)
+        ).fetchone()
+
+        if not parent:
+            con_sl.close()
+            return None, "STOPLOSS_NO_PARENT"
+
+        pid        = int(parent["id"])
+        p_side     = str(parent["side"]).upper()
+        p_stake    = float(parent["entry_stake"] or 0.0)
+        p_mid      = str(parent["marketId"])
+        p_sid      = str(parent["selectionId"])
+
+        # STOPLOSS exit direction
+        exit_side = "BACK" if p_side == "LAY" else "LAY"
+        exit_odds = float(_plan.get("px") or 0.0)
+        exit_stake = p_stake  # 1:1 flatten
+
+        # -----------------------------------------
+        # CANCEL ANY EXISTING HEDGE CHILDREN
+        # -----------------------------------------
+        try:
+            cur_sl = con_sl.cursor()
+            hrows = _q_retry(cur_sl, """
+                SELECT id FROM orders
+                 WHERE hedge_of=? AND role='CHILD'
+                   AND exit_kind='HEDGE'
+                   AND (exit_status IS NULL OR exit_status<>'matched')
+            """, (pid,)).fetchall()
+
+            for hr in hrows:
+                _q_retry(cur_sl,
+                    "UPDATE orders SET exit_status='cancelled', "
+                    "closed_at=datetime('now','utc'), exit_kind='SL_Cancel_H' "
+                    "WHERE id=?", (int(hr["id"]),)
+                )
+            con_sl.commit()
+        except Exception:
+            pass
+
+        # -----------------------------------------
+        # IMMEDIATE STOPLOSS CHILD PLACEMENT
+        # -----------------------------------------
+        try:
+            app_key, token = _keys()
+            cref = _ref("SL")
+
+            # Betfair order
+            bet_id, detail = _place(
+                app_key, token,
+                p_mid, p_sid,
+                exit_side,
+                float(exit_odds),
+                float(exit_stake),
+                cref,
+                persistence="LAPSE"
+            )
+
+            if not bet_id:
+                con_sl.close()
+                return None, "STOPLOSS_BETFAIL"
+
+            # Insert DB child row (matched immediately)
+            cur_sl = con_sl.cursor()
+            _q_retry(cur_sl, """
+                INSERT INTO orders(
+                  customerOrderRef, run_id, mode,
+                  marketId, selectionId,
+                  side, entry_odds, entry_stake,
+                  entry_status, opened_at,
+                  entry_bet_id,
+                  role, hedge_of, source, exit_kind, engine
+                ) VALUES (
+                  ?, ?, 'LIVE',
+                  ?, ?,
+                  ?, ?, ?,
+                  'matched', datetime('now','utc'),
+                  ?,
+                  'CHILD', ?, 'S', 'STOPLOSS', 'OVERWATCHER'
+                )
+            """, (
+                cref, parent.get("run_id") or _run_fk_id("LIVE-AUTO", mode="LIVE"),
+                p_mid, p_sid,
+                exit_side, float(exit_odds), float(exit_stake),
+                bet_id,
+                pid
+            ))
+
+            child_id = int(cur_sl.lastrowid)
+
+            # Update parent
+            _q_retry(cur_sl, """
+                UPDATE orders
+                   SET exit_status='matched',
+                       exit_kind='STOPLOSS',
+                       exit_odds=?, exit_stake=?,
+                       closed_at=datetime('now','utc')
+                 WHERE id=?
+            """, (float(exit_odds), float(exit_stake), pid))
+
+            con_sl.commit()
+            con_sl.close()
+
+            _log_event("INFO", "live_router",
+                       f"[SL][EXEC] parent={parent_cor} child_id={child_id} "
+                       f"side={exit_side} odds={exit_odds} stake={exit_stake}")
+
+            return bet_id, cref
+
+        except Exception as e:
+            try: con_sl.close()
+            except: pass
+            _log_event("ERROR", "live_router",
+                       f"[SL][ERR] router_stoploss_exec_failed ref={parent_cor} err={e}")
+            return None, f"STOPLOSS_ERR:{e}"
+
+# === PATCH END ============================================================
+
 
 
     # --- dynamic stake logic ---------------------------------------------------

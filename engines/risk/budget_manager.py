@@ -25,35 +25,90 @@ from engines.mastery import event_sink
 # ============================================================
 #  GLOBAL CONSTANTS AND STATE
 # ============================================================
+# 📍 TARGET: engines/risk/budget_manager.py — global engine constants
+# 🔎 SEARCH: ENGINES = ["LEGACY", "MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY"]
+# 📆 PATCHED: 2026-01-19
 
-ENGINES = ["LEGACY", "MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY"]
+# ----------------------------------------------------------------------
+# Unified Engine Set (v7 Budgeting Model)
+# ----------------------------------------------------------------------
+ENGINES = [
+    "LEGACY",
+    "MSC_EXPLORATORY",
+    "MSC_RISK",
+    "MSC_INPLAY",
+    "OVERWATCHER",
+    "SAFETY_NET",
+]
 
-# base defaults (percentages)
-DEFAULT_ALLOCATIONS = {
+# Baseline allocations (start-of-day percentages)
+BASELINE_PCT = {
     "LEGACY":          0.40,
-    "MSC_EXPLORATORY": 0.20,
-    "MSC_RISK":        0.20,
-    "MSC_INPLAY":      0.20,
+    "MSC_EXPLORATORY": 0.05,
+    "MSC_RISK":        0.05,
+    "MSC_INPLAY":      0.05,
+    "OVERWATCHER":     0.05,
+    "SAFETY_NET":      0.05,
 }
 
-# minimum runway per engine (keeps them firing)
-MIN_ENGINE_PCT = 0.05    # 5%
+# Hard floors (minimum operational runway)
+FLOOR_PCT = {
+    "LEGACY":          0.30,
+    "MSC_EXPLORATORY": 0.05,
+    "MSC_RISK":        0.05,
+    "MSC_INPLAY":      0.05,
+    "OVERWATCHER":     0.05,
+    "SAFETY_NET":      0.05,
+}
 
-# drawdown smoothing coefficient
-ALPHA = 0.25
+# Dynamic pool (total = 35% of daily allocation)
+DYNAMIC_POOL = 0.35
 
-# rebalancing control
-_last_rebalance_day = None
-_alloc_lock = threading.Lock()
+# Exploratory ↔ Legacy performance bonus shift (0 → 10% max)
+_bonus_shift = 0   # increases/decreases by 1 step per rebalance
 
-_current_allocations = DEFAULT_ALLOCATIONS.copy()
+# Initialise working allocations from baseline
+_current_allocations = BASELINE_PCT.copy()
 
-# stored profitability snapshot
+# Initialise profitability tracker for raw_perf calculations
 _profit_tracker = {
-    "LEGACY": {"pnl": 0.0, "count": 0},
-    "MSC_EXPLORATORY": {"pnl": 0.0, "count": 0},
-    "MSC_RISK": {"pnl": 0.0, "count": 0},
-    "MSC_INPLAY": {"pnl": 0.0, "count": 0},
+    eng: {"pnl": 0.0, "count": 0}
+    for eng in ENGINES
+}
+
+# 📍 TARGET: engines/risk/budget_manager.py — add v7 budget table schema
+# 🔎 SEARCH: _profit_tracker = {
+# 📆 PATCHED: 2026-01-19
+
+# ----------------------------------------------------------------------
+# V7 Budget Audit Table (stores ALL reallocation events)
+# ----------------------------------------------------------------------
+def _ensure_v7_table():
+    try:
+        con = _auto_conn(rw=True)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS budgets_v7(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                engine TEXT,
+                pct REAL,
+                raw_pnl REAL,
+                raw_ticks REAL,
+                bonus_shift INTEGER
+            )
+        """)
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+# ensure table exists at import time
+_ensure_v7_table()
+
+# existing profitability tracker follows...
+_profit_tracker = {
+    eng: {"pnl": 0.0, "count": 0}
+    for eng in ENGINES
 }
 
 
@@ -88,56 +143,152 @@ def _collect_pnl_today() -> Dict[str, float]:
 #  REBALANCING ENGINE (midnight or on-demand)
 # ============================================================
 
+# 📍 TARGET: engines/risk/budget_manager.py — add v7 allocator
+# 🔎 SEARCH: #  REBALANCING ENGINE (midnight or on-demand)
+# 📆 PATCHED: 2026-01-19
+
+# ============================================================
+#  V7 PERFORMANCE-DRIVEN ALLOCATOR (NEW)
+# ============================================================
+
+def allocate_with_performance(perf_dict: Dict[str, float],
+                              avg_ticks: Dict[str, float],
+                              live_bank: float):
+    """
+    Full v7 allocation engine:
+      • Baseline percentages
+      • Dynamic pool (35%) weighted by performance
+      • Exploratory–Legacy bonus shift (+/- 1 per rebalance)
+      • Floors (Legacy=30%, others=5%)
+      • Writes full allocation snapshot for review (Option A)
+    """
+
+    global _current_allocations, _bonus_shift
+
+    # -----------------------------
+    # 1) Compute raw performance
+    # -----------------------------
+    raw_perf = {}
+    for eng in ENGINES:
+        pnl = perf_dict.get(eng, 0.0)
+        ticks = avg_ticks.get(eng, 0.0)
+        raw_perf[eng] = pnl + (0.25 * ticks)
+
+    # -----------------------------
+    # 2) Dynamic pool weighting
+    # -----------------------------
+    # Only legacy + MSC engines participate (not overwatcher/safety_net)
+    dyn_engines = [
+        "LEGACY", "MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY"
+    ]
+
+    weights = {eng: max(raw_perf[eng], 0.0) for eng in dyn_engines}
+    total = sum(weights.values()) or 1.0
+    weights = {eng: weights[eng] / total for eng in dyn_engines}
+
+    dynamic_pct = {
+        eng: weights[eng] * DYNAMIC_POOL
+        for eng in dyn_engines
+    }
+
+    # zero dynamic component for static engines
+    dynamic_pct.update({"OVERWATCHER": 0.0, "SAFETY_NET": 0.0})
+
+    # -----------------------------
+    # 3) Bonus shift (Exploratory <→ Legacy)
+    # -----------------------------
+    ex_perf = raw_perf["MSC_EXPLORATORY"]
+    le_perf = raw_perf["LEGACY"]
+
+    if ex_perf > le_perf:
+        _bonus_shift = min(10, _bonus_shift + 1)
+    elif ex_perf < le_perf:
+        _bonus_shift = max(0, _bonus_shift - 1)
+
+    # bonus = 0.01 per shift step
+    bonus = _bonus_shift / 100.0
+
+    # -----------------------------
+    # 4) Combine baseline + bonus + dynamic
+    # -----------------------------
+    final_pct = {}
+
+    for eng in ENGINES:
+        base = BASELINE_PCT[eng]
+        dyn = dynamic_pct.get(eng, 0.0)
+
+        if eng == "LEGACY":
+            v = base - bonus + dyn
+        elif eng == "MSC_EXPLORATORY":
+            v = base + bonus + dyn
+        else:
+            v = base + dyn
+
+        # enforce floors
+        v = max(v, FLOOR_PCT[eng])
+        final_pct[eng] = v
+
+    # normalise to 1.0
+    total_final = sum(final_pct.values()) or 1.0
+    final_pct = {eng: v / total_final for eng, v in final_pct.items()}
+
+    # -----------------------------
+    # 5) Save + persist snapshot
+    # -----------------------------
+    with _alloc_lock:
+        _current_allocations = final_pct.copy()
+
+    # full audit trail (Option A)
+    try:
+        con = _auto_conn(rw=True)
+        today = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        for eng, pct in final_pct.items():
+            con.execute("""
+                INSERT INTO budgets_v7(date, engine, pct, raw_pnl, raw_ticks, bonus_shift)
+                VALUES (?,?,?,?,?,?)
+            """, (today, eng, pct,
+                  raw_perf.get(eng, 0.0),
+                  avg_ticks.get(eng, 0.0),
+                  _bonus_shift))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+    return final_pct
+
+# 📍 TARGET: engines/risk/budget_manager.py — function _rebalance_allocations
+# 🔎 SEARCH: def _rebalance_allocations():
+# 📆 PATCHED: 2026-01-19
+
 def _rebalance_allocations():
-    global _current_allocations, _profit_tracker
+    """
+    V7 Rebalance:
+      • Collect today's pnl per engine
+      • Use stored available_bank from update_available_budget()
+      • Call v7 allocate_with_performance()
+    """
+    global _last_rebalance_day
 
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-
-    global _last_rebalance_day
     if _last_rebalance_day == today:
-        return  # already done for today
+        return
 
     _last_rebalance_day = today
 
-    # 1) collect PNL
-    pnls = _collect_pnl_today()
+    # performance source
+    perf = _collect_pnl_today()
 
-    # 2) update smoothed profitability
-    for eng in ENGINES:
-        prev = _profit_tracker[eng]["pnl"]
-        new  = pnls.get(eng, 0.0)
+    # avg ticks not yet available until lanes rebuild
+    avg_ticks = {eng: 0.0 for eng in ENGINES}
 
-        # exponential smoothing
-        smooth = ALPHA * new + (1 - ALPHA) * prev
+    live_bank = getattr(BudgetManager, "available_budget", 0.0)
 
-        _profit_tracker[eng]["pnl"] = smooth
+    final_pct = allocate_with_performance(perf, avg_ticks, live_bank)
 
-    # 3) convert smoothed pnl → weights (softmax-like absolute weight)
-    raw_scores = {eng: abs(_profit_tracker[eng]["pnl"]) for eng in ENGINES}
+    print("[BUDGET] Rebalanced allocations (V7):",
+          json.dumps(final_pct, indent=2))
 
-    total = sum(raw_scores.values()) or 1.0
-    weights = {eng: raw_scores[eng] / total for eng in ENGINES}
-
-    # 4) enforce minimum runway
-    adjusted = {}
-    residual = 1.0
-    for eng in ENGINES:
-        adjusted[eng] = max(weights[eng], MIN_ENGINE_PCT)
-        residual -= adjusted[eng]
-
-    # If negative, normalise downward proportionally
-    if residual < 0:
-        # scale down to sum to 1.0
-        factor = 1.0 / sum(adjusted.values())
-        for eng in ENGINES:
-            adjusted[eng] = adjusted[eng] * factor
-        residual = 0.0
-
-    # 5) final allocation
-    with _alloc_lock:
-        _current_allocations = adjusted.copy()
-
-    print("[BUDGET] Rebalanced allocations:", json.dumps(_current_allocations, indent=2))
 
 
 def midnight_rebalance_if_needed():
@@ -247,29 +398,54 @@ def global_stake_limit_for(letter: str, engine: str, live_bank: float) -> float:
 #  MANUAL TERMINAL REPORTS (Python-free runnable)
 # ============================================================
 
+# 📍 TARGET: engines/risk/budget_manager.py — reporting functions
+# 🔎 SEARCH: def report_allocations():
+# 📆 PATCHED: 2026-01-19
+
 def report_allocations():
     """
-    Print engine allocations and today's pnl.
+    V7 unified budget report.
+    Always prints all 6 engines.
+    Hidden engines printed separately if 0 activity.
     """
-    pnls = _collect_pnl_today()
-    alloc = get_allocations()
+    final = get_allocations()
+    perf = _collect_pnl_today()
+    exp = exposure_snapshot()
 
-    print("\n=== ENGINE ALLOCATION REPORT ===")
+    print("\n============ V7 ENGINE BUDGET REPORT ============")
     print(f"Day: {datetime.datetime.utcnow().strftime('%Y-%m-%d')}")
+
+    hidden = []
+
     for eng in ENGINES:
-        print(f"{eng:20s} alloc={alloc[eng]*100:5.1f}%   pnl={pnls.get(eng,0):+.2f}")
-    print("================================\n")
+        pct = final.get(eng, 0.0)
+        pnl = perf.get(eng, 0.0)
+        exposure = exp.get(eng, 0.0)
+
+        if pct == 0 and exposure == 0 and pnl == 0:
+            hidden.append(eng)
+
+        print(f"{eng:16s} pct={pct*100:5.1f}%   pnl={pnl:+.2f}   exposure={exposure:.2f}")
+
+    if hidden:
+        print("\n(HIDDEN ENGINES — NO ACTIVITY)")
+        for h in hidden:
+            print(f"  {h}")
+
+    print("=================================================\n")
 
 
 def report_exposure():
     """
-    Print exposure per engine.
+    Maintained for compatibility; prints v7 exposure only.
     """
     exp = exposure_snapshot()
-    print("\n=== ENGINE EXPOSURE REPORT ===")
+    print("\n=== ENGINE EXPOSURE (V7) ===")
     for eng, v in exp.items():
         print(f"{eng:20s} exposure={v:.2f}")
-    print("================================\n")
+    print("============================\n")
+
+
 
 # Add near bottom of budget_manager.py
 

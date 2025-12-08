@@ -3330,6 +3330,7 @@ def _cloud_retention_once():
         except Exception:
             pass  # db-level fail-safe
 
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: def start_live_loop(
@@ -3489,6 +3490,10 @@ def start_live_loop(*args, **kwargs):
     try:
         from engines.config_paths import enable_live_dal
         enable_live_dal()
+        from engines.config_paths import set_db_paths, sync_modes
+        set_db_paths(mode="live", quiet=False)
+        sync_modes()
+
         print("[LIVE DAL] switched → LIVE")
     except Exception as e:
         print(f"[LIVE DAL] warn: {e}")
@@ -3499,6 +3504,43 @@ def start_live_loop(*args, **kwargs):
     except Exception:
         pass
 
+    # ------------------------------------------------------------------
+    # 3A) START DAL WRITER THREAD (CONSUME WRITE QUEUE)
+    # ------------------------------------------------------------------
+    def _dal_writer_loop():
+        import time, traceback
+        from engines.config_paths import _DAL_WRITE_QUEUE, _get_writer
+
+        print("[DAL] writer thread starting…")
+
+        while True:
+            try:
+                fam, sql, params = _DAL_WRITE_QUEUE.get()
+                writer = _get_writer(fam)
+                try:
+                    writer.execute(sql, params)
+                    writer.commit()
+                except Exception:
+                    print("[DAL][ERR] SQL failed:", sql, params)
+                    traceback.print_exc()
+            except Exception:
+                traceback.print_exc()
+            finally:
+                try:
+                    _DAL_WRITE_QUEUE.task_done()
+                except Exception:
+                    pass
+
+    # spawn the DAL writer thread
+    try:
+        import threading
+        t = threading.Thread(target=_dal_writer_loop, name="DALWriter", daemon=True)
+        t.start()
+        print("[DAL] writer thread active")
+    except Exception as e:
+        print("[DAL] writer-start failure:", e)
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: "print(\"[LIVE DAL] switched → LIVE\")"
@@ -3506,7 +3548,7 @@ def start_live_loop(*args, **kwargs):
 # ============================================================================
 
     # ------------------------------------------------------------------
-    # 3A) INITIALISE BANKSTATE (STATIC ENGINE POTS)
+    # 3B) INITIALISE BANKSTATE (STATIC ENGINE POTS)
     # ------------------------------------------------------------------
     try:
         # Import BankState without triggering circular import

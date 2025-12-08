@@ -86,33 +86,172 @@ def read_scope_window(*args, **kwargs):
     return _unified_scope_reader(*args, **kwargs)
 
 # === PATCH END ==============================================================
-# === PATCH START ============================================================
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py:_safe_plan
-# 🛠 ACTION: Remove legacy direction + px + size defaults. Make it minimal.
+
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🆕 ADD FUNCTION: _select_final_plan
+# 📆 PATCHED: 2026-01-19
 # ============================================================================
 
+def _select_final_plan(msc_ex: dict | None,
+                       msc_risk: dict | None,
+                       msc_ip: dict | None,
+                       legacy: dict | None,
+                       w_stoploss: dict | None = None) -> dict | None:
+    """
+    Unified v7 plan selection logic.
+
+    Engines DO NOT suppress each other.
+    Every engine may emit a plan.
+    Lanes selects exactly ONE final plan using the v7 routing priority:
+
+        1) STOPLOSS (W-lane)          ← future Overwatcher integration
+        2) MSC_RISK                    ← risk correction strongest priority
+        3) MSC_EXPLORATORY             ← exploratory entries
+        4) MSC_INPLAY                  ← in-play micro-execution
+        5) LEGACY                      ← macro strategy families
+
+    IMPORTANT:
+      - This function NEVER mutates plans.
+      - It NEVER infers engine or letter.
+      - It ONLY selects which plan to forward to Router.
+    """
+
+    # ----------------------------------------------------------
+    # 1. STOPLOSS — future path (Overwatcher W-engine)
+    # ----------------------------------------------------------
+    if w_stoploss and w_stoploss.get("enter"):
+        return w_stoploss
+
+    # ----------------------------------------------------------
+    # 2. MSC_RISK
+    # ----------------------------------------------------------
+    if msc_risk and msc_risk.get("enter"):
+        return msc_risk
+
+    # ----------------------------------------------------------
+    # 3. MSC_EXPLORATORY
+    # ----------------------------------------------------------
+    if msc_ex and msc_ex.get("enter"):
+        return msc_ex
+
+    # ----------------------------------------------------------
+    # 4. MSC_INPLAY
+    # ----------------------------------------------------------
+    if msc_ip and msc_ip.get("enter"):
+        return msc_ip
+
+    # ----------------------------------------------------------
+    # 5. LEGACY
+    # ----------------------------------------------------------
+    if legacy and legacy.get("enter"):
+        return legacy
+
+    # ----------------------------------------------------------
+    # No plan
+    # ----------------------------------------------------------
+    return None
+
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🆕 ADD FUNCTION: _route_final_plan
+# 📆 PATCHED: 2026-01-19
+# ============================================================================
+
+def _route_final_plan(plan: dict | None, ctx: dict) -> None:
+    """
+    Unified v7 plan executor.
+    Routes exactly ONE plan to LiveRouter.
+    No inference, no overrides, no suppression.
+    """
+    if not plan or not plan.get("enter"):
+        return  # nothing to place
+
+    try:
+        from engines.decision_engine.decide_once.placement import place_from_plan
+        engine = plan.get("engine")
+        if not engine:
+            print("[LANES][WARN] final plan missing engine → skip")
+            return
+
+        place_from_plan(engine, plan, ctx)
+        print(f"[LANES][ROUTE] engine={engine} mid={plan.get('marketId')} "
+              f"sid={plan.get('selectionId')} → {plan}")
+
+    except Exception as e:
+        print(f"[LANES][ROUTE][ERR] {e}")
+
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: ^def _safe_plan
+# 🔧 ACTION: Full function replacement (v7 engine/strategy/letter model)
+# 📆 PATCHED: 2026-01-19
+
 def _safe_plan(fam: str, raw: Any, ctx: dict) -> dict:
+    """
+    v7 Normalised safe-plan:
+      • DOES NOT infer engine
+      • DOES NOT infer letter beyond cosmetic fallback
+      • DOES NOT overwrite MSC or Legacy engine identity
+      • PRESERVES strategy (Legacy-only)
+      • PRESERVES stop_loss_px (MSC STOPLOSS prep)
+      • Guarantees core identity fields (marketId, selectionId)
+      • Ensures 'enter' exists but never forces behaviour
+    """
+
+    # ------------------------------------------------------------------
+    # 1) Guarantee raw is a dict
+    # ------------------------------------------------------------------
     if raw is None or not isinstance(raw, dict):
         raw = {}
 
-    # Required minimal fields
+    # ------------------------------------------------------------------
+    # 2) Preserve engine identity exactly as engines emit it
+    #    (MSC_EXPLORATORY / MSC_RISK / MSC_INPLAY / LEGACY / OVERWATCHER)
+    # ------------------------------------------------------------------
+    # NEVER assign or infer engine here.
+    if "engine" in raw:
+        raw["engine"] = str(raw["engine"]).upper()
+
+    # ------------------------------------------------------------------
+    # 3) Strategy: Legacy-only
+    # ------------------------------------------------------------------
+    # If plan contains strategy already, preserve it.
+    # If not, and engine=LEGACY, strategy letter comes from family.
+    if "strategy" not in raw:
+        if raw.get("engine") == "LEGACY":
+            raw["strategy"] = fam[:1].upper()  # legacy family letter
+        else:
+            raw["strategy"] = None
+
+    # ------------------------------------------------------------------
+    # 4) Letter: optional cosmetic tag
+    # ------------------------------------------------------------------
+    # If engine provided its own 'letter', keep it.
+    # If legacy and strategy exists → letter=strategy
+    # Otherwise keep None (Router must NOT infer engine from letter).
+    if "letter" not in raw or raw.get("letter") is None:
+        if raw.get("engine") == "LEGACY" and raw.get("strategy"):
+            raw["letter"] = raw["strategy"]
+        else:
+            raw["letter"] = None  # purely cosmetic, never routing
+
+    # ------------------------------------------------------------------
+    # 5) Minimal required v7 fields
+    # ------------------------------------------------------------------
     raw.setdefault("enter", False)
-    raw.setdefault("letter", fam[:1].upper())
     raw.setdefault("why", f"{fam}:ok")
 
-    # ❌ REMOVE legacy default direction
-    # ❌ REMOVE legacy px & size defaults
-    # MSC or placement pipeline will fill these properly.
+    # ------------------------------------------------------------------
+    # 6) stop_loss_px must ALWAYS survive (MSC STOPLOSS pipeline)
+    # ------------------------------------------------------------------
+    if "stop_loss_px" in raw:
+        raw["stop_loss_px"] = raw.get("stop_loss_px")
 
-    # Always provide identity
+    # ------------------------------------------------------------------
+    # 7) Guarantee identity fields for Router
+    # ------------------------------------------------------------------
     raw.setdefault("marketId", ctx.get("marketId"))
     raw.setdefault("selectionId", ctx.get("selectionId"))
 
     return raw
-
-# === PATCH END ================================================================
-
-
 
 # Optional market monitor
 try:
@@ -213,24 +352,132 @@ def dryrun():
 
 from typing import Callable, Dict, Any, List, Tuple
 
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: ^def _ensure_plan
+# 🛠 ACTION: Full v7-safe rewrite (preserve engine, strategy, letter; no inference)
+# 📆 PATCHED: 2026-01-19
 
-def _ensure_plan(fam: str, ctx: Dict[str, Any], res: Any) -> Dict[str, Any]:
+def _ensure_plan(fam: str, ctx: Dict[str, Any], raw: Any) -> Dict[str, Any]:
     """
-    Normalize any policy result to a dict. Never return None.
+    v7 Plan Normaliser
+    ------------------
+    Responsibilities:
+      • Normalize plan dicts without altering engine identity
+      • Preserve MSC/Legacy strategy model
+      • Letter = cosmetic only (never influences engine)
+      • Legacy strategy letters preserved; MSC inherits only when appropriate
+      • No direction/px/size inference unless explicit
+      • Guaranteed minimal shape for Router safety
+      • Must NOT overwrite or guess engine type
+      • Must NOT overwrite MSC plan metadata
     """
-    if isinstance(res, dict):
-        # minimal shape so printers/routers are safe
-        res.setdefault("enter", False)
-        res.setdefault("letter", (str(res.get("letter") or fam[:1] or "A")[:1]).upper())
-        res.setdefault("direction", res.get("direction"))
-        res.setdefault("target_ticks", res.get("target_ticks") or res.get("ticks"))
-        # be tolerant on numeric fields
-        try:  res["size"] = float(res.get("size") or 0.0)
-        except Exception: res["size"] = 0.0
-        try:  res["px"] = float(res.get("px") or ctx.get("odds") or 0.0)
-        except Exception: res["px"] = 0.0
-        return res
-    return {"enter": False, "why": f"policy_none:{fam}", "letter": (fam[:1] or "A").upper()}
+
+    # ------------------------------------------------------------------
+    # 1) Ensure raw is a dict
+    # ------------------------------------------------------------------
+    if not isinstance(raw, dict):
+        # Minimal placeholder with NO engine inference
+        return {
+            "enter": False,
+            "why": f"policy_none:{fam}",
+            "engine": None,
+            "strategy": None,
+            "letter": None,
+            "marketId": ctx.get("marketId"),
+            "selectionId": ctx.get("selectionId"),
+        }
+
+    plan = raw.copy()
+
+    # ------------------------------------------------------------------
+    # 2) ENGINE is authoritative (never infer, never overwrite)
+    # ------------------------------------------------------------------
+    if "engine" in plan and plan["engine"]:
+        plan["engine"] = str(plan["engine"]).upper()
+    else:
+        # Engine MUST be explicitly set by the engine that generated the plan.
+        # Lanes NEVER infers it.
+        plan["engine"] = plan.get("engine") or None
+
+    # ------------------------------------------------------------------
+    # 3) STRATEGY handling (Legacy=true, MSC only when defined)
+    # ------------------------------------------------------------------
+    if "strategy" not in plan:
+        if plan.get("engine") == "LEGACY":
+            # Legacy strategy letter comes from family name
+            plan["strategy"] = fam[:1].upper()
+        else:
+            # MSC Risk, MSC InPlay, Overwatcher define their own strategy letters upstream
+            plan["strategy"] = None
+
+    # ------------------------------------------------------------------
+    # 4) LETTER = cosmetic only
+    # ------------------------------------------------------------------
+    if "letter" not in plan or plan["letter"] in (None, ""):
+        # Legacy letters mirror strategy
+        if plan.get("engine") == "LEGACY" and plan.get("strategy"):
+            plan["letter"] = plan["strategy"]
+        else:
+            # MSC EX inherits legacy upstream; MSC RISK = J; MSC INPLAY = V; Overwatcher = W.
+            # Lanes does NOT infer ANYTHING. It simply preserves what engines sent.
+            plan["letter"] = None
+
+    # ------------------------------------------------------------------
+    # 5) Minimal placement safety
+    # ------------------------------------------------------------------
+    plan.setdefault("enter", False)
+
+    # ------------------------------------------------------------------
+    # 6) Direction safety — DO NOT infer or override
+    # ------------------------------------------------------------------
+    # MSC & Legacy engines define direction explicitly.
+    # Lanes must respect whatever is present.
+    plan.setdefault("direction", plan.get("direction"))
+
+    # ------------------------------------------------------------------
+    # 7) Ticks / Size safety — only normalise type, never infer values
+    # ------------------------------------------------------------------
+    def _to_float(v, default=0.0):
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    def _to_int(v, default=0):
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    # Never infer target_ticks or size — only convert types.
+    if "target_ticks" in plan:
+        plan["target_ticks"] = _to_int(plan.get("target_ticks"), None)
+    if "size" in plan:
+        plan["size"] = _to_float(plan.get("size"), None)
+
+    # px/odds safety
+    if "px" in plan:
+        plan["px"] = _to_float(plan.get("px"), ctx.get("odds") or ctx.get("px") or 0.0)
+
+    # ------------------------------------------------------------------
+    # 8) STOPLOSS fields must remain intact
+    # ------------------------------------------------------------------
+    if "stop_loss_px" in plan:
+        plan["stop_loss_px"] = _to_float(plan.get("stop_loss_px"), None)
+
+    # ------------------------------------------------------------------
+    # 9) Identity fields for Router
+    # ------------------------------------------------------------------
+    plan.setdefault("marketId", ctx.get("marketId"))
+    plan.setdefault("selectionId", ctx.get("selectionId"))
+
+    # ------------------------------------------------------------------
+    # 10) Reason field always present
+    # ------------------------------------------------------------------
+    plan.setdefault("why", plan.get("why") or f"{fam}:ok")
+
+    return plan
+
 
 
 
@@ -650,6 +897,19 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
     from engines.micro_scalper_v7.micro_scalper_engine import MicroScalperEngine
     msc = run_all.__dict__.setdefault("_MSC_SINGLETON", MicroScalperEngine())
 
+    # === PATCH START ============================================================
+    # 📍 TARGET: lanes.py (inside run_all(), per-runner loop, after ctx is built)
+    # 🛠 ACTION: Pull STOPLOSS plan from STOPLOSS_QUEUE
+    # 📆 PATCHED: 2026-01-19
+    # ============================================================================
+
+    # STOPLOSS dequeue (Overwatcher W-engine)
+    from engines.live.overwatcher import STOPLOSS_QUEUE
+
+    w_stoploss = STOPLOSS_QUEUE.pop((mids, str(sid)), None)
+    # === PATCH END ================================================================
+
+
     # ------------------------------------------------------------------
     # 3) PER-MARKET / PER-RUNNER LOOP
     # ------------------------------------------------------------------
@@ -737,15 +997,15 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
             except:
                 pass
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/decision_engine/decide_once/lanes.py : inside run_all()
-# 🔎 SEARCH: if msc_plan and msc_plan.get("size") and msc_plan.get("direction"):
-# ⛏ REPLACE the entire block until the next Legacy family loop
-# 📆 PATCHED: 2025-12-06 — MSC routed through DecideOnce placement
-# ============================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: # 4B) **MSC FIRST** (Exploratory + Risk + In-Play)
+# 🛠 ACTION: Replace MSC routing block with v7 engine/strategy identity model
+# 📆 PATCHED: 2026-01-19
+# ================================================================
 
             # --------------------------------------------------------------
-            # 4B) **MSC FIRST** (Exploratory + Risk + In-Play)
+            # 4B) **MSC PLANS (Exploratory, Risk, InPlay)**
+            #     Engines already produce their plans; Lanes only normalises.
             # --------------------------------------------------------------
             try:
                 msc_plan = msc.tick(ctx)
@@ -753,89 +1013,95 @@ def run_all(run_id: str, source: str = "LIVE", logger=None) -> Optional[int]:
                 print(f"[MSC] tick failed mid={mids} sid={sid}: {e}")
                 msc_plan = None
 
-            if msc_plan and msc_plan.get("size") and msc_plan.get("direction"):
-                try:
-                    # Normalize MSC plan for DecideOnce placement
-                    msc_plan["engine"]       = "MSC"
-                    msc_plan["letter"]       = msc_plan.get("source") or msc_plan.get("letter") or "D"
-                    msc_plan["marketId"]     = ctx["marketId"]
-                    msc_plan["selectionId"]  = ctx["selectionId"]
-                    msc_plan["enter"]        = True
+            # If no MSC plan or invalid → skip to legacy
+            if not (msc_plan and isinstance(msc_plan, dict)):
+                msc_plan = None
+            else:
+                # Guarantee core identity fields
+                msc_plan.setdefault("marketId", ctx["marketId"])
+                msc_plan.setdefault("selectionId", ctx["selectionId"])
+                msc_plan["enter"] = bool(msc_plan.get("enter") and msc_plan.get("size") and msc_plan.get("direction"))
 
-                    # MSC → DecideOnce unified placement
-                    from engines.decision_engine.decide_once.placement import place_from_plan
-                    place_from_plan("MSC", msc_plan, ctx)
+                # ----------------------------------------------------------
+                # ENGINE + STRATEGY + LETTER MODEL (v7 canonical mapping)
+                # ----------------------------------------------------------
+                fam = msc_plan.get("family") or msc_plan.get("engine") or ""
 
-                    print(f"[MSC][EXEC] {mids}:{sid} → {msc_plan}")
+                # 1) MSC Exploratory ---------------------------------------
+                if fam.upper() in ("MSC_EX", "MSC_EXPLORATORY", "EXPLORATORY"):
+                    legacy_letter = ctx.get("strategy") or ctx.get("letter")
+                    # exploratory inherits legacy strategy letter
+                    msc_plan["engine"]   = "MSC_EXPLORATORY"
+                    msc_plan["strategy"] = legacy_letter
+                    msc_plan["letter"]   = legacy_letter
 
-                except Exception as e:
-                    print(f"[MSC][EXEC] placement error mid={mids} sid={sid}: {e}")
+                # 2) MSC Risk ----------------------------------------------
+                elif fam.upper() in ("MSC_RISK", "RISK"):
+                    msc_plan["engine"]   = "MSC_RISK"
+                    msc_plan["strategy"] = "J"
+                    msc_plan["letter"]   = "J"
+
+                # 3) MSC In-Play -------------------------------------------
+                elif fam.upper() in ("MSC_IP", "MSC_INPLAY", "INPLAY"):
+                    msc_plan["engine"]   = "MSC_INPLAY"
+                    msc_plan["strategy"] = "V"
+                    msc_plan["letter"]   = "V"
+
+                # 4) Unknown family → MSC disabled --------------------------
+                else:
+                    print(f"[MSC] unknown family '{fam}' → MSC plan ignored for {mids}:{sid}")
+                    msc_plan = None
+
+                # ----------------------------------------------------------
+                # ROUTE MSC PLAN (only if enter=True)
+                # ----------------------------------------------------------
+                pass
+
+# 📍 TARGET: engines/decision_engine/decide_once/lanes.py
+# 🔎 SEARCH: # 4C) **LEGACY MASTERY FAMILIES**
+# 🛠 ACTION: Replace engine-specific placement calls with unified merge+route logic
+# 📆 PATCHED: 2026-01-19
+# ============================================================================
 
             # --------------------------------------------------------------
-            # 4C) **LEGACY MASTERY FAMILIES**
+            # 4C) **COLLECT LEGACY PLAN**
             # --------------------------------------------------------------
-# === PATCH END ==============================================================
+            legacy_plan = None
+            try:
+                from engines.mastery.mastery_policy import plan_for_strategy
+                for fam in legacy_families:
+                    p = plan_for_strategy(fam, ctx)
+                    if p and p.get("enter"):
+                        # Assign engine + strategy letter safely
+                        strat = p.get("letter") or fam[:1].upper()
+                        p["engine"]   = "LEGACY"
+                        p["strategy"] = strat
+                        p["letter"]   = strat
+                        p.setdefault("marketId", mids)
+                        p.setdefault("selectionId", sid)
+                        legacy_plan = p
+                        break
+            except Exception as e:
+                print(f"[LEGACY][ERR] mid={mids} sid={sid}: {e}")
 
-            from engines.mastery.mastery_policy import plan_for_strategy
+            # --------------------------------------------------------------
+            # 4D) **SELECT FINAL PLAN (MSC_EX, MSC_RISK, MSC_INPLAY, LEGACY)**
+            # --------------------------------------------------------------
+            final_plan = _select_final_plan(
+                msc_ex      = msc_plan if msc_plan and msc_plan.get("engine") == "MSC_EXPLORATORY" else None,
+                msc_risk    = msc_plan if msc_plan and msc_plan.get("engine") == "MSC_RISK"         else None,
+                msc_ip      = msc_plan if msc_plan and msc_plan.get("engine") == "MSC_INPLAY"       else None,
+                legacy      = legacy_plan,
+                w_stoploss  = None  # future Overwatcher integration
+            )
 
-            legacy_families = [
-                "BLUEPRINTS",
-                "OG_STRATEGY",
-                "LADDER_STRATEGY",
-                "S4_CROSSOVER",
-                "S5_BREAKOUT",
-                "S6_STEAM_FADE",
-                "BTL_SCOUT",
-                "BTL_AGGR",
-                "IP1_SHOCK_DRIFT",
-                "IP2_TIRED_LEADER",
-                "IP3_CLOSE_FINISH",
-                "IP4_FENCE_ERROR",
-                "IP5_COLLAPSE_FADE",
-            ]
+            # --------------------------------------------------------------
+            # 4E) **ROUTE FINAL PLAN**
+            # --------------------------------------------------------------
+            _route_final_plan(final_plan, ctx)
 
-            for fam in legacy_families:
-                try:
-                    plan = plan_for_strategy(fam, ctx)
-                except Exception as e:
-                    print(f"[LEGACY] {fam} error mid={mids} sid={sid}: {e}")
-                    continue
-
-                # Skip invalid or non-entry plans
-                if not plan or not plan.get("enter"):
-                    continue
-
-                # -------------------------------
-                # NEW: Tag plan + ctx with ENGINE=LEGACY
-                # -------------------------------
-                try:
-                    plan["engine"] = "LEGACY"
-                    ctx["engine"]  = "LEGACY"
-                except Exception:
-                    pass
-
-                # Ensure identity is present
-                plan.setdefault("marketId", mids)
-                plan.setdefault("selectionId", sid)
-
-                # -------------------------------
-                # LiveRouter placement
-                # -------------------------------
-                try:
-                    place_parent_and_hedge(
-                        market_id    = plan.get("marketId") or mids,
-                        selection_id = plan.get("selectionId") or sid,
-                        side         = "LAY" if str(plan.get("direction","")).upper().startswith("LAY") else "BACK",
-                        entry_odds   = float(plan.get("px") or px or 0.0),
-                        stake        = float(plan.get("size") or 0.0),
-                        hedge_ticks  = int(plan.get("target_ticks") or 1),
-                        run_id       = run_id,
-                        source       = plan.get("letter") or fam[:1]
-                    )
-                    print(f"[LEGACY][EXEC] {mids}:{sid} fam={fam} → {plan}")
-                except Exception as e:
-                    print(f"[LEGACY][ERR] mid={mids} sid={sid} fam={fam}: {e}")
-
+            # Proceed to next runner
+            continue
 
     return 1
 

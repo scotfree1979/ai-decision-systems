@@ -115,5 +115,21 @@ def build_micro_state(ctx: Dict[str, Any]) -> Dict[str, Any]:
     state["bias_dir"]            = ctx.get("bias_dir")
     state["bias_conf"]           = ctx.get("bias_conf")
 
+
+    # ------------------------------------------------------------
+    # STOP-LOSS INTEGRATION (NEW)
+    # ------------------------------------------------------------
+    # static SL target set by Exploratory/Risk parent
+    state["stop_loss_px"] = ctx.get("stop_loss_px")
+
+    # stop-loss event fired by Overwatcher for this parent
+    state["stoploss_triggered_for_parent"] = ctx.get(
+            "stoploss_triggered_for_parent"
+    )
+
+    # SLEQ factor (Mastery posterior scaling)
+    state["sleq_multiplier"] = ctx.get("sleq_multiplier")
+
     return state
+
 

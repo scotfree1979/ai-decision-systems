@@ -250,52 +250,197 @@ SPRINT = {
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.8.1 — FOREST–RIVER LIVE SYNC & REINTEGRATION
+        # PHASE 7.9.8.1 — FOREST–RIVER LIVE SYNC & REINTEGRATION (ARCHIVED)
         # ───────────────────────────────────────────────────────────────
         "Phase 7.9.8.1 – Forest–River Live Sync & Reintegration": {
-            "status": "🔜",
+            "status": "❌ ARCHIVED",
             "tasks": [
-                "⬜ Ensure River (LIVE) events persist cleanly from Overwatcher and MSC (no dropped events)",
-                "⬜ Fix Forest→River merge path for next-day training consistency",
-                "⬜ Guarantee schema alignment across mastery_outcomes_raw, river_bucket_state, mastery_posteriors",
-                "⬜ Add live reinforcement (on_settlement_event) reliability checks",
-                "⬜ Ensure nightly Forest run combines River shifts with historical windows",
-                "⬜ Add checksum validation for mid/sid/betId to prevent partial sync failures"
+                "➡ Tasks migrated to Phase 7.9.9.1"
             ]
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.8.2 — LIVE MASTERY → CTX v7 INTEGRATION
+        # PHASE 7.9.8.2 — LIVE MASTERY → CTX v7 INTEGRATION (ARCHIVED)
         # ───────────────────────────────────────────────────────────────
         "Phase 7.9.8.2 – Live Mastery Integration Into CTX v7": {
+            "status": "❌ ARCHIVED",
+            "tasks": [
+                "➡ Tasks migrated to Phase 7.9.9.1"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.8.3 — FULL MICROSTRUCTURE → MSC (RENAMED → 7.9.9) (ARCHIVED)
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.9 – Full Microstructure Integration for MSC v7 (Renamed from 7.9.8.3)": {
+            "status": "❌ ARCHIVED",
+            "tasks": [
+                "➡ Tasks migrated to Phase 7.9.9.1"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.9.1 — POST-LIVE VALIDATION & CONTINUATION (v7.2 GATE)
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.9.1 – Post-Live Validation & Continuation (v7.2 Gate)": {
             "status": "🔜",
             "tasks": [
-                "⬜ Inject mastery-smoothed win_prob into ctx (smoothing & bias correction)",
+
+                # ================================================================
+                # MIGRATED INCOMPLETE TASKS FROM 7.9.8.1 — FOREST–RIVER
+                # ================================================================
+                "⬜ Ensure River (LIVE) events persist cleanly from Overwatcher and MSC",
+                "    → Verify STOPLOSS events (S-child creation) appear in river_bucket_state",
+                "    → Validate Overwatcher → EventSink → River ingestion without dropped or duplicated rows",
+                "    → Confirm DAL Writer (dual-write) preserves row order deterministically",
+
+                "⬜ Fix Forest→River merge path for next-day training consistency",
+                "    → Validate mastery_outcomes_raw rolling windows after live ingestion",
+                "    → Confirm CTX v7 fields align with Forest feature expectations",
+                "    → Ensure nightly consolidation merges RIVER slices with historical data correctly",
+
+                "⬜ Guarantee schema alignment across mastery_outcomes_raw, river_bucket_state, mastery_posteriors",
+                "    → Check column parity after STOPLOSS, H-child cancellation, and parent exit_kind stamping",
+                "    → Ensure schema guards detect drift between mastery DBs and cache DBs",
+                "    → Validate auto-heal logic handles Forest/River schema divergence",
+
+                "⬜ Add live reinforcement (on_settlement_event) reliability checks",
+                "    → settlement_writer must fire consistently now DAL Writer is repaired",
+                "    → Validate that realized_pnl + net_pl flows into mastery_outcomes_raw",
+                "    → Confirm reinforcement deltas feed correctly into mastery_posteriors",
+
+                "⬜ Ensure nightly Forest run combines River shifts with historical windows",
+                "    → Validate v7.1 training inputs after refactor",
+                "    → Ensure no missing slices due to cloud-writer corruption (now fixed)",
+                "    → Confirm stable consolidation of RIVER deltas into Forest epoch windows",
+
+                "⬜ Add checksum validation for mid/sid/betId to prevent partial sync failures",
+                "    → Ensure LiveRouter now stamps bet_id for every parent and child",
+                "    → Add optional sync checksum before nightly Forest run",
+                "    → Detect partial STOPLOSS ingestion or broken River rows",
+
+                # ================================================================
+                # MIGRATED INCOMPLETE TASKS FROM 7.9.8.2 — MASTERY → CTX
+                # ================================================================
+                "⬜ Inject mastery-smoothed win_prob into ctx",
+                "    → CTXv7 now exposes win_prob placeholder field with numeric hardening",
+                "    → Inject smoothed mastery deltas after live tests",
+
                 "⬜ Inject brain_global and macro bucket deltas into ctx",
-                "⬜ Derive cluster features from v_mastery_intel_v7 for MicroScalper direction and mode",
+                "    → Validate MasteryState export for GLOBAL/MACRO coherence",
+                "    → Add mapping layer for ctx injection",
+
+                "⬜ Derive cluster features from v_mastery_intel_v7 for MSC direction and mode",
+                "    → Validate intel stability after LiveCache fix",
+                "    → MSC engines must read intel consistently before versioning",
+
                 "⬜ Add mastery deltas into MSC multiplier (confidence & volatility balancing)",
-                "⬜ Ensure ctx captures mastery feedback for training loops"
-            ]
-        },
+                "    → Confirm multiplier engine receives mastery-feedback deltas",
+                "    → Ensure deltas modulate aggression safely (not over-leveraging)",
 
-        # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.8.3 — FULL MICROSTRUCTURE → MSC INTEGRATION
-        # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.8.3 – Full Microstructure Integration for MSC v7": {
-            "status": "🔜",
-            "tasks": [
-                "⬜ Add full MarketMonitor microstructure fields into ctx (breakout state, range behaviour, micro-variance)",
+                "⬜ Ensure ctx captures mastery feedback for training loops",
+                "    → Validate STOPLOSS updates modify ctx history",
+                "    → Confirm ctx → Mastery pipeline passes deltas unmodified",
+
+                # ================================================================
+                # MIGRATED INCOMPLETE TASKS FROM 7.9.8.3 — MICROSTRUCTURE → MSC
+                # ================================================================
+                "⬜ Add full MarketMonitor microstructure fields into ctx",
+                "    → Integrate breakout, range, momentum-class, micro-variance fields",
+                "    → Confirm stable market monitor snapshots",
+
                 "⬜ Add volatility clusters, micro-zones, WOM-derived states, acceleration curves",
+                "    → Use Overwatcher diagnostic feed to populate advanced microstructure",
+                "    → Integrate into ctx for MSC direction decisions",
+
                 "⬜ Feed OC-timeline deltas into ctx",
+                "    → Validate oc_series correctness after DAL rewrite",
+                "    → Ensure no missing OC deltas from cloud corruption",
+
                 "⬜ Integrate microstructure into direction_engine and multiplier logic",
-                "⬜ Build MSC telemetry and diagnostics for tracking microstructure performance"
+                "    → Confirm MSC direction stability under microstructure influence",
+                "    → Test EX/RISK/IP responses to micro-zones and volatility clusters",
+
+                "⬜ Build MSC telemetry and diagnostics for tracking microstructure performance",
+                "    → Expand Overwatcher diagnostic engine output",
+                "    → Add visualization-friendly MSC telemetry hooks",
+
+                # ================================================================
+                # FULL DOCUMENTATION OF COMPLETED v7.1 ARCHITECTURE REBUILD
+                # (Moved here so Phase 7.9.9.1 becomes the canonical v7.1 record)
+                # ================================================================
+                "✅ Fixed LiveCache corruption (root cause of entire v7 system instability)",
+                "    → Identified cloud DB as single-point-of-failure",
+                "    → Rewrote DAL Writer to dual-write (local + cloud)",
+                "    → Ensured real-time WAL sync ordering and crash safety",
+                "    → Eliminated all silent write failures",
+
+                "✅ Rebuilt LiveRouter with STOPLOSS-aware execution chain",
+                "    → Added S-child creation with immediate flattening",
+                "    → Added SL_Cancel_H to cancel hedge children on STOPLOSS",
+                "    → Added parent exit_kind propagation + pnl stamping",
+                "    → Ensured router no longer hits stale cloud paths",
+
+                "✅ Rebuilt Lanes routing (v7 canonical engine model)",
+                "    → Removed legacy ORDER loop entirely",
+                "    → Normalised plan schema (engine, strategy, direction, px, size)",
+                "    → Ensured Lanes never infers engine identity from letter",
+                "    → Added MSC EX/RISK/IP independence and correct routing",
+                "    → Ensured Overwatcher plans route via v7 plan normalisation",
+
+                "✅ Rebuilt CTX v7 with authoritative, DB-only data",
+                "    → odds_current → inbound_oc_cache → oc_series → bets ordering",
+                "    → Hard numeric defaults + NaN protection",
+                "    → Added OC-phase model (OC0–OC7 pre-off, OC7+ in-play)",
+                "    → Added volatility_state, drift_speed, slope_ppm, bias metrics",
+
+                "✅ Rebuilt MicroScalper v7 (EX, RISK, INPLAY)",
+                "    → MSC Exploratory inherits Legacy letter",
+                "    → MSC Risk uses J, MSC InPlay uses V",
+                "    → Added unified multiplier (AGG/MOD/CON, SLEQ-aware)",
+                "    → Ensured RiskEngine detaches on STOPLOSS",
+                "    → Ensured EX/RISK/IP engines never collide or suppress each other",
+
+                "✅ Rebuilt Overwatcher v7 (guardian layer)",
+                "    → Live microstructure monitoring",
+                "    → Range tracking + WOM signals",
+                "    → cooling windows, volatility detection",
+                "    → Integrated TSL engine",
+                "    → Bridge: Overwatcher → LiveRouter STOPLOSS",
+
+                "✅ Repaired Settlements pipeline",
+                "    → SettlementWriter isolated from cloud corruption",
+                "    → DAL Writer integration ensures clean writes",
+                "    → PnL correctness restored",
+                "    → STOPLOSS exits now settle exactly once",
+
+                "✅ Repaired BankState + BudgetManager",
+                "    → Ensured pot mutation correctness post-STOPLOSS",
+                "    → Verified engine pots reflect live exposure",
+                "    → Ensured BankState no longer reads stale cloud DB rows",
+
+                "✅ Ensured end-to-end LIVE execution path is clean",
+                "    → anchors → OC timeline → CTX v7 → Overwatcher → MSC → Lanes → Router → Orders",
+                "    → ZERO API fallback calls anywhere in execution path",
+
+                # ================================================================
+                # NEXT-STAGE REQUIREMENTS BEFORE v7.2
+                # ================================================================
+                "⬜ Live STOPLOSS test suite (parent → S-child → settle → pot mutation)",
+                "⬜ End-to-end settlements replay test",
+                "⬜ River→Forest data consistency test",
+                "⬜ Mastery feedback-injection test (win_prob, deltas)",
+                "⬜ Microstructure-on executions stability test",
+                "⬜ Dashboard integration readiness check",
+
+                "🏁 Once all tasks above are complete → branch 7.9.9.1 closes and 7.9.9.2 becomes active"
             ]
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.9 — DASHBOARD INTELLIGENCE & GUI SYNC
+        # PHASE 7.9.9.2 — DASHBOARD INTELLIGENCE & GUI SYNC (RENAMED FROM 7.9.9)
         # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.9 – Dashboard Intelligence & GUI Sync": {
+        "Phase 7.9.9.2 – Dashboard Intelligence & GUI Sync": {
             "status": "🔜",
             "tasks": [
                 "🖥️ Wire dashboard data-sources to live brain/goal metrics (v_mastery_brain_input, v_mastery_brain_global)",
@@ -310,7 +455,6 @@ SPRINT = {
                 "🏁 Prepare final matrix for Phase 7.9.10"
             ]
         },
-
 
         # ───────────────────────────────────────────────────────────────
         # PHASE 7.9.10 — FINAL VALIDATION & RELEASE PREP (old 7.9.6)

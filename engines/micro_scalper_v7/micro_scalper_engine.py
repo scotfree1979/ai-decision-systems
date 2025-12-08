@@ -19,6 +19,18 @@ try:
 except Exception:
     _last_brain_pulse = [None]
 
+def _stamp_msc_source(plan, letter):
+    if plan is None:
+        return None
+    plan["source"] = letter     # force letter for MSC family
+    plan["engine"] = {          # DB engine bucket
+        "D": "MSC_EXPLORATORY",
+        "J": "MSC_RISK",
+        "V": "MSC_INPLAY",
+    }.get(letter, "MSC")
+    return plan
+
+
 def _consume_brain_pulse(ctx: dict) -> None:
     """
     Inject the latest Overwatcher Brain Pulse into the MicroScalper context.
@@ -273,6 +285,8 @@ class MicroScalperEngine:
             return self._tick_inplay(ctx)
 
         return None
+
+
 
     # ======================================================================
     # PRE-OFF LOGIC (Exploratory + Risk Reactive)

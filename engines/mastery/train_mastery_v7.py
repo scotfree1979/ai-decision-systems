@@ -629,6 +629,27 @@ def load_training_data() -> pd.DataFrame:
     con.close()
     return df
 
+# === PATCH START ============================================================
+# 📍 Add engine-family classifier as training feature
+# ===========================================================================
+
+if "engine" in df.columns:
+    df["engine_family"] = df["engine"].fillna("LEGACY").astype(str)
+else:
+    df["engine_family"] = "LEGACY"
+
+# Label-encode engine types
+try:
+    from sklearn.preprocessing import LabelEncoder
+    eng_enc = LabelEncoder()
+    df["engine_family_enc"] = eng_enc.fit_transform(df["engine_family"])
+except Exception as e:
+    print(f"[train] warn: engine_family encoding failed: {e}")
+    df["engine_family_enc"] = 0
+
+# === PATCH END ==============================================================
+
+
 # === PATCH START ===
 # 📍 TARGET: engines/mastery/train_mastery_v7.py:train_and_update_posteriors
 # 📆 PATCHED: 2025-11-01Z — Phase 7F Forest–River Hybrid Integration (Part 2/3)
@@ -1022,6 +1043,12 @@ def train_and_update_posteriors(df: pd.DataFrame, epochs: int = 25):
         "pnl","target_ticks","realized_ticks",
         "drift_speed","inplay_progress","expected_race_mins"
     ]
+    # === PATCH START ============================================================
+    # Include engine_family as categorical feature
+    if "engine_family_enc" in df.columns:
+        base_feats.append("engine_family_enc")
+    # === PATCH END ==============================================================
+
     available_feats = [c for c in base_feats if c in df.columns]
     X = df[available_feats].fillna(0)
     success_col = df["success"] if "success" in df.columns else pd.Series([0] * len(df))

@@ -568,11 +568,12 @@ class DALReadProxy:
 # ============================================================================
 
 DUAL_WRITE_FAMILIES = {
-    "auto":        ("auto", "auto"),
-    "bets":        ("bets", "bets"),
-    "settlements": ("settlements", "settlements"),
-    "mastery":     ("mastery", "mastery"),
+    "auto":        ("auto_local", "auto_live"),
+    "bets":        ("bets_local", "bets_live"),
+    "settlements": ("settlements_local", "settlements_live"),
+    "mastery":     ("mastery_local", "mastery_live"),
 }
+
 
 
 # === PATCH END ==============================================================

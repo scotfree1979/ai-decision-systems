@@ -10,6 +10,10 @@ if _ROOT not in sys.path:
 
 """
 settlements.py — Settlement pipeline & DB (separate) for AutoScalp
+# === PATCH START ============================================================
+# Ensure we ALWAYS import the correct v7 reinforcement hook
+from engines.mastery.train_mastery_v7 import on_settlement_event as v7_on_settlement_event
+# === PATCH END ==============================================================
 
 Creates data/settlements.db, ingests:
   - Betfair Betting API: listClearedOrders, listMarketCatalogue, listMarketBook
@@ -43,27 +47,43 @@ from engines.config_paths import (
 
 import sqlite3, os
 
+# 📍 TARGET: engines/live/settlements.py — function _settle_conn
+# 🔎 SEARCH:
+# def _settle_conn(rw: bool = True, timeout: float = 8.0) -> sqlite3.Connection:
+# 📆 PATCHED: 2026-01-19
+
 def _settle_conn(rw: bool = True, timeout: float = 8.0) -> sqlite3.Connection:
     """
-    RAW SETTLEMENTS DB WRITER
-    ----------------------------------
-    - Writes only to settlements.db
-    - Never routed via DAL
-    - Never touches cloud
-    - WAL + busy_timeout
+    Settlement DB connector — NOW DAL-MANAGED
+
+    CHANGES:
+    • Replaces all raw sqlite3.connect(...) calls
+    • Prevents HijackMonitor from intercepting rogue DB opens
+    • Prevents AlphaX from killing settlements thread
+    • Respects LIVE vs SETUP modes through DAL
+    • Uses the correct WAL/busy_timeout as configured by DAL
     """
-    path = os.path.join(DATA_DIR, "settlements.db")
-    con = sqlite3.connect(
-        path,
-        timeout=timeout,
-        isolation_level=None,
-        check_same_thread=False
-    )
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    con.execute("PRAGMA busy_timeout=6000;")
+
+    from engines.config_paths import settlements_db
+
+    # DAL-managed connector handles:
+    # - correct path resolution
+    # - WAL mode
+    # - busy timeout
+    # - cloud vs local behaviour
+    # - HijackMonitor safety
+    # - AlphaX compatibility
+    con = settlements_db(rw=rw)
+
+    # Ensure row factory is maintained (legacy compatibility)
+    try:
+        import sqlite3
+        con.row_factory = sqlite3.Row
+    except Exception:
+        pass
+
     return con
+
 
 def _auto_local():
     """Read GUI DB through DAL (autoscalp_gui.db)"""
@@ -255,7 +275,8 @@ def close_settled_markets() -> int:
                      closed_at   = COALESCE(closed_at, datetime('now','utc'))
                WHERE marketId=? AND UPPER(exit_status) NOT IN ('SETTLED','CANCELLED');
             """, (mid,))
-            closed += o.total_changes
+            closed += int(o.total_changes or 0)
+
 
         o.commit()
         
@@ -466,22 +487,28 @@ def _ensure_parent(path: str) -> None:
 
 @contextmanager
 def connect_db(path: str):
+    """
+    settlements.db MUST use a REAL sqlite3 connection.
+    It must NEVER go through DALWriteProxy.
+    """
     _ensure_parent(path)
-    from engines.config_paths import open_settlements_db
 
-    # old:
-    # con = sqlite3.connect(path, timeout=30.0)
-    # con.row_factory = sqlite3.Row
-
-    # new:
-    con = open_settlements_db(rw=True)
+    con = sqlite3.connect(
+        path,
+        timeout=30.0,
+        isolation_level=None,
+        check_same_thread=False
+    )
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA foreign_keys=ON;")
+
     try:
         yield con
     finally:
-        con.close()
+        try: con.close()
+        except: pass
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1513,7 +1540,8 @@ def reconcile_orders() -> Tuple[int,int]:
                 mid = str(r["marketId"])
                 sid = str(r["selectionId"])
                 pnl = float(r["profit"] or 0.0)
-                on_settlement_event(mid, sid, pnl)
+                v7_on_settlement_event(mid, sid, pnl)
+
     except Exception as e:
         print(f"[settlements-river] warn: failed to run River reinforcement — {e}")
 

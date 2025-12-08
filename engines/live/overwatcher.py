@@ -62,9 +62,96 @@ MSC_STOPLOSS = StopLossEngine()
 # === PATCH END ===
 
 
-from engines.price_math import calculate_tick_distance as _tick_distance  # ✅ FIX
+from engines.price_math import walk_ticks, calculate_tick_distance as _tick_distance  # ✅ FIX
 
 from engines.mastery import event_sink
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🛠 ACTION: Add stop-loss-per-parent executor using stored stop_loss_px
+# 📆 PATCHED: 2025-12-07
+# ============================================================================
+
+def enforce_parent_stoploss_px():
+    """
+    Fires STOPLOSS when current odds cross stored stop_loss_px.
+    Applies ONLY to:
+        • MSC Exploratory parents
+        • MSC Risk parents
+    """
+    # 1) Load all open parents with stop_loss_px
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    rows = _q_retry(con, """
+        SELECT id, customerOrderRef, marketId, selectionId, side,
+               entry_odds, entry_stake, stop_loss_px, source
+          FROM orders
+         WHERE role='PARENT'
+           AND entry_status='matched'
+           AND (exit_status IS NULL OR exit_status <> 'matched')
+           AND stop_loss_px IS NOT NULL
+           AND UPPER(source) LIKE 'MSC%'
+    """).fetchall()
+    con.close()
+
+    if not rows:
+        return
+
+    # 2) Preload current LTP prices
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    px_map = {
+        (str(r["marketId"]), str(r["selectionId"])): float(r["ltp"])
+        for r in _q_retry(con, """
+            SELECT marketId, selectionId, ltp
+              FROM odds_current
+             WHERE ltp IS NOT NULL
+        """).fetchall()
+    }
+    con.close()
+
+    # 3) Evaluate stop-loss per parent
+    for p in rows:
+        mid = str(p["marketId"])
+        sid = str(p["selectionId"])
+        px  = px_map.get((mid, sid))
+        sl  = float(p["stop_loss_px"])
+
+        if px is None:
+            continue
+
+        side = p["side"].upper()
+
+        # Stop-loss condition:
+        # LAY → stop when odds rise to sl
+        # BACK → stop when odds fall to sl
+        hit = (
+            (side == "LAY"  and px >= sl) or
+            (side == "BACK" and px <= sl)
+        )
+
+        if not hit:
+            continue
+
+        # --- FIRE STOPLOSS ------------------------------------------------
+        event = {
+            "type": "stop_loss_triggered",
+            "parent_id": int(p["id"]),
+            "parent_ref": p["customerOrderRef"],
+            "marketId": mid,
+            "selectionId": sid,
+            "entry_side": side,
+            "entry_odds": float(p["entry_odds"]),
+            "entry_stake": float(p["entry_stake"]),
+            "current_odds": px,
+            "stop_loss_px": sl,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+        print(f"[STOPLOSS][PX] fired mid={mid} sid={sid} px={px} sl_px={sl}")
+
+        event_sink.on_decision(event)
+
+# === PATCH END ================================================================
+
 
 
 def check_overwatcher_state():
@@ -156,61 +243,74 @@ from engines.live.live_router import (
     _orders_update_parent_cancelled,
 )
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/overwatcher.py:_process_stoploss_now
+# 🛠 ACTION: Convert STOPLOSS executor into STOPLOSS → Lanes plan emitter
+# 📆 PATCHED: 2026-01-19
+# ============================================================================
+
+# GLOBAL STOPLOSS QUEUE (routed into Lanes)
+STOPLOSS_QUEUE = {}
+
 def _process_stoploss_now(ev):
     """
-    New-world STOPLOSS executor:
-        • Place STOPLOSS child (S)
-        • Cancel any H child for this parent
+    v7 STOPLOSS → Lanes Plan Emitter
+    --------------------------------
+    Overwatcher NO LONGER places STOPLOSS children directly.
+    Instead, it emits a STOPLOSS plan into STOPLOSS_QUEUE.
+
+    Lanes merges:
+        • STOPLOSS (OVERWATCHER)
+        • MSC_RISK
+        • MSC_EXPLORATORY
+        • MSC_INPLAY
+        • LEGACY
+    And routes exactly ONE final plan to Router.
     """
+
     try:
-        pid  = ev.get("parent_id")
         mid  = str(ev.get("marketId"))
         sid  = str(ev.get("selectionId"))
-        side = str(ev.get("entry_side")).upper()
-        entry_odds  = float(ev.get("entry_odds") or 0.0)
-        entry_stake = float(ev.get("entry_stake") or 0.0)
 
-        # -----------------------------
-        # 1) Determine STOPLOSS exit side
-        # -----------------------------
-        exit_side = "BACK" if side == "LAY" else "LAY"
+        entry_side   = str(ev.get("entry_side")).upper()
+        entry_stake  = float(ev.get("entry_stake") or 0)
+        current_odds = float(ev.get("current_odds") or ev.get("px") or 0)
+        sl_px        = float(ev.get("stop_loss_px") or 0)
 
-        # -----------------------------
-        # 2) Place STOPLOSS child NOW
-        # -----------------------------
-        child_id = _place_stoploss_child_now(
-            parent_cor=None,      # resolved below
-            market_id=mid,
-            selection_id=sid,
-            exit_side=exit_side,
-            exit_odds=ev.get("current_odds"),
-            parent_stake=entry_stake,
-            run_id=None
-        )
+        # Determine STOPLOSS exit direction
+        exit_side = "BACK" if entry_side == "LAY" else "LAY"
 
-        # -----------------------------
-        # 3) Cancel existing hedge child
-        # -----------------------------
-        con = _orders_conn(); con.row_factory = sqlite3.Row
-        rows = con.execute("""
-            SELECT id FROM orders
-             WHERE hedge_of=? AND role='CHILD'
-               AND exit_kind='HEDGE'
-               AND (exit_status IS NULL OR exit_status<>'matched')
-        """, (pid,)).fetchall()
+        # Build STOPLOSS plan for Lanes
+        plan = {
+            "enter": True,
+            "engine": "OVERWATCHER",
+            "strategy": None,
+            "letter": "W",
 
-        for r in rows:
-            _orders_update_parent_cancelled(str(pid), reason="SL_Cancel_H")
-        con.close()
+            "type": "STOPLOSS",
+            "family": "STOPLOSS",
 
-        print(f"[STOPLOSS] S child placed for parent={pid}, cancelled {len(rows)} H children")
+            "marketId": mid,
+            "selectionId": sid,
+
+            "direction": exit_side,
+            "size": entry_stake,
+            "px": current_odds,
+
+            "stop_loss_px": sl_px,
+
+            "why": "overwatcher_stoploss",
+            "ts": ev.get("ts"),
+        }
+
+        # Insert plan into global STOPLOSS_QUEUE
+        # (Lanes pulls this per runner)
+        STOPLOSS_QUEUE[(mid, sid)] = plan
+
+        print(f"[W-SL][ENQUEUE] mid={mid} sid={sid} px={current_odds} sl_px={sl_px}")
 
     except Exception as e:
-        print(f"[STOPLOSS][ERR] failed to process stoploss now: {e}")
-
-# Hook it into event pipeline
-event_sink.subscribe(lambda ev: _process_stoploss_now(ev) 
-                     if ev.get("type") == "stop_loss_triggered" else None)
+        print(f"[W-SL][ERR] STOPLOSS emit fail: {e}")
 
 # === PATCH END ================================================================
 
@@ -1367,6 +1467,7 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
 
                 # Legacy boundary exits
                 enforce_legacy_boundaries_and_trailing()
+                enforce_parent_stoploss_px()   # NEW LINE
 
             except Exception as e:
                 print("[OVERWATCHER] loop error", e)
