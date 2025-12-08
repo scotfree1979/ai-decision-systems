@@ -259,18 +259,15 @@ def allocate_with_performance(perf_dict: Dict[str, float],
 
     return final_pct
 
-# 📍 TARGET: engines/risk/budget_manager.py — function _rebalance_allocations
-# 🔎 SEARCH: def _rebalance_allocations():
-# 📆 PATCHED: 2026-01-19
+from engines.daily_config import get_session_token
 
 def _rebalance_allocations():
-    """
-    V7 Rebalance:
-      • Collect today's pnl per engine
-      • Use stored available_bank from update_available_budget()
-      • Call v7 allocate_with_performance()
-    """
     global _last_rebalance_day
+
+    # ⛔ Do NOT rebalance until we actually have a session token
+    if not get_session_token():
+        print("[BUDGET] defer: no session token yet — skipping rebalance")
+        return
 
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     if _last_rebalance_day == today:
@@ -278,18 +275,26 @@ def _rebalance_allocations():
 
     _last_rebalance_day = today
 
-    # performance source
     perf = _collect_pnl_today()
-
-    # avg ticks not yet available until lanes rebuild
     avg_ticks = {eng: 0.0 for eng in ENGINES}
 
-    live_bank = getattr(BudgetManager, "available_budget", 0.0)
+    # === PATCH START =====================================
+    # 📆 PATCHED: 2026-02-10 — Solve circular daily_config import
+    # Lazy import avoids daily_config → bank_state → budget_manager loop
+    try:
+        from engines.daily_config import fetch_available_budget
+        live_bank = float(fetch_available_budget())
+    except Exception as e:
+        print(f"[BUDGET] warn: could not fetch live bank ({e}) — using fallback 0.0")
+        live_bank = 0.0
+    # === PATCH END =======================================
+
 
     final_pct = allocate_with_performance(perf, avg_ticks, live_bank)
 
     print("[BUDGET] Rebalanced allocations (V7):",
           json.dumps(final_pct, indent=2))
+
 
 
 

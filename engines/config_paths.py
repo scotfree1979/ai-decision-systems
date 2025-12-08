@@ -95,6 +95,8 @@ def set_db_paths(
     return BETS_DB_PATH, AUTOSCALP_DB_PATH
 
 # === PATCH END ==============================================================
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/config_paths.py (mode helpers)
 # 🔎 SEARCH: def get_mode()
@@ -648,26 +650,20 @@ _DAL_WRITE_QUEUE = queue.Queue(maxsize=200000)
 _PERSISTENT_WRITERS = {}
 _PERSISTENT_LOCK = threading.Lock()
 
-# === PATCH START: Replace broken _get_writer with correct resolver ==========
-# 📍 TARGET: engines/config_paths.py
-# 🔎 SEARCH: def _get_writer(
-# 📆 PATCHED: 2025-12-04 — remove path_map block, unify writer resolver
-# ============================================================================
-
 def _get_writer(fam: str) -> sqlite3.Connection:
     """
-    Resolve a persistent writer for a *base family* only.
-    fam must be one of:
-        auto, bets, settlements, mastery
-    Dual-write variants (auto_local, auto_live) are normalized BEFORE calling this.
+    Resolve a persistent writer for a *base family*.
+    Dual-write variants (xxx_local / xxx_live) must be normalised FIRST.
     """
-    fam = fam.lower()
+    # 🔥 Normalize BEFORE anything else
+    kind, base = _normalize_writer_family(fam)   # <— REQUIRED FIX
+    fam = base.lower()
 
     with _PERSISTENT_LOCK:
         if fam in _PERSISTENT_WRITERS:
             return _PERSISTENT_WRITERS[fam]
 
-        # Base-family → file mapping
+        # base-family → LIVE path
         path = {
             "auto":        CLOUD_AUTO,
             "bets":        CLOUD_BETS,
@@ -686,7 +682,6 @@ def _get_writer(fam: str) -> sqlite3.Connection:
         _PERSISTENT_WRITERS[fam] = con
         return con
 
-# === PATCH END ===============================================================
 
 
 # === PATCH START: Normalize dual-writer family names =======================
@@ -769,41 +764,44 @@ def _dal_writer_loop():
                 break
 
         # === PATCH START =====================================================
-# === PATCH START: Normalize writer family handling ==========================
-# 📍 TARGET: engines/config_paths.py
-# 🔎 SEARCH: "Dual write: LOCAL first, then LIVE"
-# 📆 PATCHED: 2025-12-04 — Correct mapping of fam → (local/live, base_family)
+# === PATCH START — Normalize writer families (FINAL FIX) ======================
+# 📆 PATCHED: 2026-02-09
+# PURPOSE:
+#   Fix "Unknown writer family: bets_local" by ensuring that
+#   dual-write families (bets_local, bets_live, auto_live, etc.)
+#   are always normalized BEFORE routing to local/live writers.
 # ============================================================================
 
-        # Dual write using normalized families
+        # Dual-write using normalized families
         for fam, sql, params in pending:
 
-            # Normalize: fam may be "auto_local", "auto_live", or "auto"
+            # Normalize fam → (kind, base_family)
+            # examples:
+            #   "bets_local" → ("local", "bets")
+            #   "bets_live"  → ("live",  "bets")
+            #   "bets"       → ("local", "bets")
             kind, base = _normalize_writer_family(fam)
 
             if kind == "local":
-                # LOCAL write path
                 try:
                     wloc = _get_writer_local(base)
                     wloc.execute(sql, params)
                 except Exception as e:
                     print(f"[DAL-WRITER] LOCAL fail fam={fam}: {e} | sql={sql}")
             else:
-                # LIVE write path
                 try:
                     wlive = _get_writer_live(base)
                     wlive.execute(sql, params)
                 except Exception as e:
                     print(f"[DAL-WRITER] LIVE fail fam={fam}: {e} | sql={sql}")
 
-        # Commit whichever writers were touched
+        # Commit whichever were touched
         try: wloc.commit()
         except: pass
         try: wlive.commit()
         except: pass
 
-# === PATCH END ==============================================================
-
+# === PATCH END ================================================================
 
 
         for _ in pending:
@@ -1188,31 +1186,49 @@ def settle_ro(timeout: float = 10.0):
     return _local_db(LOCAL_SETTLE)
 
 # === PATCH END ==============================================================
-# === PATCH START ============================================================
-# 📆 PATCHED: 2025-12-09 — Final alias surface
+# === PATCH START: UNIFIED FINAL ALIAS SURFACE =========================
+# 📆 PATCHED: 2026-02-09 — corrected settlements_db() signature
 
-bets_conn             = open_bets_db
-mastery_conn          = open_mastery_db
-settle_conn           = open_settlements_db
+# Authoritative DB path exposure
+BETS_DB_PATH      = LOCAL_BETS
+AUTOSCALP_DB_PATH = LOCAL_AUTO
+DB_PATH           = BETS_DB_PATH
+GUI_DB_PATH       = AUTOSCALP_DB_PATH
+
+# Official alias surface (used by dashboard, lanes, orchestrator)
+bets_conn              = open_bets_db
+mastery_conn           = open_mastery_db
+settle_conn            = open_settlements_db
 
 connect_auto_db        = auto_conn
 connect_bets_db        = open_bets_db
 connect_mastery_db     = open_mastery_db
 connect_settlements_db = open_settlements_db
 
-def autoscalp_db(): return LOCAL_AUTO
-def bets_db():       return LOCAL_BETS
-def settlements_db():return LOCAL_SETTLE
-def mastery_v7_db(): return LOCAL_MASTERY
+# Upgraded alias functions (must support rw=True)
+def autoscalp_db(*, rw=False, **_):
+    return open_auto_db(rw=rw) if rw else autoscalp_db_path()
 
-AUTO_DB       = LOCAL_AUTO
-BETS_DB       = LOCAL_BETS
-CLOUD_BETS_DB = CLOUD_BETS
-CLOUD_AUTO_DB = CLOUD_AUTO
+def bets_db(*, rw=False, **_):
+    return open_bets_db(rw=rw) if rw else bets_db_path()
 
+def settlements_db(*, rw=False, **_):
+    return open_settlements_db(rw=rw) if rw else settlements_db_path()
+
+def mastery_v7_db(*, rw=False, **_):
+    return open_mastery_db(rw=rw) if rw else mastery_v7_db_path()
+
+
+# Compatibility fast-path (local read-only)
 AUTO_RO = lambda timeout=10: _local_db(LOCAL_AUTO)
 
-# === PATCH END ==============================================================
+# === PATCH END =========================================================
+# === NEW: path-returning helpers for GUI ===
+def autoscalp_db_path(): return LOCAL_AUTO
+def bets_db_path():      return LOCAL_BETS
+def settlements_db_path(): return LOCAL_SETTLE
+def mastery_v7_db_path(): return LOCAL_MASTERY
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/config_paths.py   (or wherever schema bootstrap lives)
 # 🔎 SEARCH: def autoscalp_db(    (just place below DB open helpers)
@@ -1250,30 +1266,6 @@ except Exception:
 
 # === PATCH END ==============================================================
 
-
-# ===============================================================
-# LEGACY ALIASES + HELPERS
-# ===============================================================
-
-BETS_DB_PATH      = LOCAL_BETS
-AUTOSCALP_DB_PATH = LOCAL_AUTO
-DB_PATH           = BETS_DB_PATH
-GUI_DB_PATH       = AUTOSCALP_DB_PATH
-
-bets_conn            = open_bets_db
-mastery_conn         = open_mastery_db
-settle_conn          = open_settlements_db
-connect_auto_db       = auto_conn
-connect_bets_db       = open_bets_db
-connect_mastery_db    = open_mastery_db
-connect_settlements_db = open_settlements_db
-
-def autoscalp_db(): return LOCAL_AUTO
-def bets_db(): return LOCAL_BETS
-def settlements_db(): return LOCAL_SETTLE
-def mastery_v7_db(): return LOCAL_MASTERY
-
-AUTO_RO = lambda timeout=10: _local_db(LOCAL_AUTO)
 
 
 # === PATCH START ============================================================

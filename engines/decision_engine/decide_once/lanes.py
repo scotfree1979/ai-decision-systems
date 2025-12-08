@@ -14,6 +14,13 @@ try:
 except Exception:
     _lane_write_decision = None
 
+# === PATCH START: lanes.py compatibility ============
+def _harden_ctx(ctx):
+    """Legacy no-op context normaliser removed in v7.6 — now just returns the ctx."""
+    return ctx
+# === PATCH END ======================================
+
+
 from .helpers import (
     open_auto_db as _adb,
     q_retry as _q,
@@ -23,7 +30,7 @@ from .helpers import (
 # 📍 TARGET: lanes.py (top of file, near other helper imports)
 # Insert NEW import:
 
-from engines.decision_engine.decide_once.helpers import harden_ctx, harden_plan
+
 
 # === PATCH END ==============================================================
 # === PATCH START ============================================================

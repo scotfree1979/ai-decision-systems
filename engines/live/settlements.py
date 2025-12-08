@@ -47,6 +47,29 @@ from engines.config_paths import (
 
 import sqlite3, os
 
+# ======================================================================
+# 📍 PATCH 1 — Settlement EventSync Emitter
+# 🔎 SEARCH: "Mastery event hooks (stubs for now)"
+# 📆 PATCHED: 2026-02-10
+# ======================================================================
+
+from engines.mastery.event_sink import emit as _emit_event
+
+def _emit_settlement_event(event_type: str, payload: dict):
+    """
+    Unified Settlement → EventSync emitter.
+    All final settlement signals flow through this interface.
+    """
+    try:
+        data = dict(payload)
+        data["event"] = event_type
+        data["ts"] = datetime.now(timezone.utc).isoformat()
+        _emit_event("settlement", data)
+    except Exception as e:
+        print(f"[EventSync][SETTLEMENT] warn: {e}")
+
+
+
 # 📍 TARGET: engines/live/settlements.py — function _settle_conn
 # 🔎 SEARCH:
 # def _settle_conn(rw: bool = True, timeout: float = 8.0) -> sqlite3.Connection:
@@ -197,7 +220,7 @@ def ensure_kpi_views() -> None:
     """
     try:
         ensure_schema()
-        with _settle_conn(rw=True) as con:
+        with connect_db(settlements_db_path()) as con:
             con.executescript(
                 """
                 CREATE VIEW IF NOT EXISTS v_settle_mkt_day AS
@@ -281,6 +304,20 @@ def close_settled_markets() -> int:
         o.commit()
         
     print(f"[settlements] expired all orders in {len(mids)} closed markets → {closed} rows updated")
+    # ======================================================================
+    # 📍 PATCH 4 — EventSync for market expiry settlement
+    # 🔎 SEARCH: "expired all orders in"
+    # 📆 PATCHED: 2026-02-10
+    # ======================================================================
+
+    try:
+        _emit_settlement_event("market_expired", {
+            "marketId": mid,
+            "rows_expired": closed,
+        })
+    except Exception as e:
+        print(f"[EventSync][market_expired] warn: {e}")
+
     return closed
 # === PATCH END ===
 
@@ -614,7 +651,7 @@ CREATE TABLE IF NOT EXISTS bf_settlement_runner_day(
 """
 
 def ensure_schema() -> None:
-    with _settle_conn(rw=True) as con:
+    with connect_db(settlements_db_path()) as con:
         con.executescript(SCHEMA_SQL)
         con.commit()
 
@@ -708,22 +745,26 @@ def sync_orders_into_ledger_from_auto(day_utc: Optional[str] = None) -> int:
         s.commit()
     return n
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py:_close_parents_children
-# 🔎 SEARCH: def _close_parents_children(
-# 📆 PATCHED: 2025-11-21
-from engines.config_paths import auto_conn as _auto_conn
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def _close_parents_children()
+# 🎯 ACTION: Replace entire function (correct per-child EventSync routing)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
 
 def _close_parents_children() -> int:
-    """Cascade SETTLED status + net PnL from parents to their children."""
+    """Cascade SETTLED status + net P&L from parents to their children."""
     con = _auto_conn(rw=True); con.row_factory = sqlite3.Row
     updated = 0
-    # find settled parents
+
     parents = con.execute("""
         SELECT id, marketId, selectionId, net_pl
           FROM orders
-         WHERE exit_status='SETTLED' AND (role IS NULL OR role='PARENT')
+         WHERE exit_status='SETTLED'
+           AND (role IS NULL OR role='PARENT')
     """).fetchall()
+
     for p in parents:
         kids = con.execute("SELECT id FROM orders WHERE hedge_of=?", (p["id"],)).fetchall()
         for k in kids:
@@ -736,25 +777,61 @@ def _close_parents_children() -> int:
                  WHERE id=?
             """, (p["net_pl"], p["net_pl"], k["id"]))
             updated += con.total_changes
+
+            # Per-child EventSync (correct placement)
+            try:
+                _emit_settlement_event("child_settled", {
+                    "marketId": p["marketId"],
+                    "selectionId": p["selectionId"],
+                    "parent_id": p["id"],
+                    "child_id": k["id"],
+                    "net_pl": float(p["net_pl"] or 0.0),
+                })
+            except Exception as e:
+                print(f"[EventSync][child_settled] warn: {e}")
+
     con.commit(); con.close()
     print(f"[settlements] cascaded {updated} child closures")
     return updated
+
+# === PATCH END ===============================================================
+
+    # ======================================================================
+    # 📍 PATCH 3 — EventSync for cascaded child settlements
+    # 🔎 SEARCH: "for k in kids:"
+    # 📆 PATCHED: 2026-02-10
+    # ======================================================================
+
+    try:
+        _emit_settlement_event("child_settled", {
+            "marketId": p["marketId"],
+            "selectionId": p["selectionId"],
+            "parent_id": p["id"],
+            "child_id": k["id"],
+            "net_pl": float(p["net_pl"] or 0.0),
+        })
+    except Exception as e:
+        print(f"[EventSync][child_settled] warn: {e}")
+
+    return updated
 # === PATCH END ===
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py:_update_exposure_cache
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
 # 🔎 SEARCH: def _update_exposure_cache(
-# 📆 PATCHED: 2025-11-21
-from engines.config_paths import auto_conn as _auto_conn
+# 🎯 ACTION: Replace entire function (always use REAL autoscalp_gui.db)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
+from engines.config_paths import open_auto_db as _open_auto
 
 def _update_exposure_cache() -> None:
-    """Compute total open exposure and record safely (non-destructive)."""
-    import sqlite3
+    """Compute total open exposure and append to exposure_log in AUTO DB."""
     from engines.config_paths import q_retry
-    con = _auto_conn(rw=True)
+    con = _open_auto(rw=True)    # ✔ REAL writer
     con.row_factory = sqlite3.Row
 
-    # 1️⃣ Calculate live open exposure
     exposure = float(
         con.execute("""
             SELECT COALESCE(SUM(entry_stake),0)
@@ -763,7 +840,6 @@ def _update_exposure_cache() -> None:
         """).fetchone()[0] or 0.0
     )
 
-    # 2️⃣ Create safe sidecar table if not exists
     q_retry(con, """
         CREATE TABLE IF NOT EXISTS exposure_log(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -773,28 +849,31 @@ def _update_exposure_cache() -> None:
         )
     """)
 
-    # 3️⃣ Append entry
-    q_retry(con, """
-        INSERT INTO exposure_log(day, exposure)
-        VALUES(date('now','utc'), ?)
-    """, (exposure,))
+    q_retry(con,
+        "INSERT INTO exposure_log(day, exposure) VALUES(date('now','utc'), ?)",
+        (exposure,)
+    )
 
     con.commit(); con.close()
-    print(f"[settlements] exposure logged £{exposure:.2f} → exposure_log (schema-verified)")
-# === PATCH END ===
+    print(f"[settlements] exposure logged £{exposure:.2f}")
 
+# === PATCH END ===============================================================
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py:_ensure_restore_view
-# 🔎 SEARCH: def _ensure_restore_view(
-# 📆 PATCHED: 2025-11-21
-from engines.config_paths import auto_conn as _auto_conn
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def _ensure_restore_view()
+# 🎯 ACTION: Replace entire function (ensure view is created in AUTO DB)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
+from engines.config_paths import open_auto_db as _open_auto
 
 def _ensure_restore_view() -> None:
-    """Create view for GUI state restoration."""
-    import sqlite3
+    """Create v_order_restore view inside autoscalp_gui.db (not settlements.db)."""
     from engines.config_paths import q_retry
-    con = _auto_conn(rw=True)
+    con = _open_auto(rw=True)
+
     q_retry(con, """
         CREATE VIEW IF NOT EXISTS v_order_restore AS
         SELECT
@@ -815,9 +894,11 @@ def _ensure_restore_view() -> None:
         LEFT JOIN bets b USING (marketId, selectionId)
         WHERE o.exit_status IN ('OPEN','SETTLED');
     """)
+
     con.commit(); con.close()
     print("[settlements] restore view ensured")
-# === PATCH END ===
+
+# === PATCH END ===============================================================
 
 
 
@@ -1245,7 +1326,7 @@ def fetch_cleared_orders_api(since_iso: Optional[str], to_iso: Optional[str], *,
         )
         items = (result or {}).get("clearedOrders") or []
         more = bool((result or {}).get("moreAvailable"))
-        with _settle_conn(rw=True) as con:
+        with connect_db(settlements_db_path()) as con:
             for it in items:
                 bet_id = it.get("betId")
                 con.execute(
@@ -1292,18 +1373,28 @@ def map_cleared_api(it: Dict[str, Any]) -> Dict[str, Any]:
         "json_raw": json.dumps(it, ensure_ascii=False),
     }
 
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def fetch_market_metadata_api
+# === PATCH START 2026-02-11 ===============================================
+
 def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
     client = BetfairClient()
     ensure_schema()
 
     total_cats, total_books = 0, 0
 
-    # chunker helper
     def chunks(lst, n=40):
         for i in range(0, len(lst), n):
             yield lst[i:i+n]
 
-    with _settle_conn(rw=True) as con:
+    # ✔ USE REAL SQLITE CONNECTION — NOT DALWRITEPROXY
+    from engines.live.settlements import connect_db, settlements_db_path
+
+    with connect_db(settlements_db_path()) as con:
+        # (rest of the function identical)
+
+# === PATCH END ============================================================
+
         # Market Catalogue (metadata)
         for chunk in chunks(market_ids, 40):
             cats = client.list_market_catalogue(chunk)
@@ -1454,6 +1545,25 @@ def reconcile_orders() -> Tuple[int,int]:
 
                 record_playbook_pattern(order_row=row, pnl_row=row, oc_snapshot=None)
 
+                # ======================================================================
+                # 📍 PATCH 2 — EventSync for final Betfair settlement
+                # 🔎 SEARCH: "o.execute("""UPDATE orders"
+                # 📆 PATCHED: 2026-02-10
+                # ======================================================================
+
+                try:
+                    _emit_settlement_event("order_settled", {
+                        "betId": betId,
+                        "marketId": row["marketId"],
+                        "selectionId": row["selectionId"],
+                        "profit": float(profit or 0.0),
+                        "commission": row["commission"],
+                        "settled_at": row["settledDate"],
+                    })
+                except Exception as e:
+                    print(f"[EventSync][settlement] emit failed for betId={betId}: {e}")
+
+
                 if o.total_changes:
                     updated += 1
 
@@ -1548,24 +1658,24 @@ def reconcile_orders() -> Tuple[int,int]:
     return updated, pairs_marked
 # === PATCH END ===
 
+# ========================================================================
+# 📍 TARGET: engines/live/settlements.py : record_playbook_pattern
+# 🔎 SEARCH: con = __settle_conn()
+# 📆 PATCHED: 2026-02-10 — Correct DB routing for playbook writes
+# ========================================================================
+# === PATCH START ========================================================
 
-# === PATCH START: Playbook pattern recorder (settlement-anchored) ===
-# 📍 TARGET: engines/live/settlements.py
-# 🔎 SEARCH: ^def reconcile_orders
-# 📆 PATCHED: 2025-10-16T21:45Z
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+from engines.config_paths import open_auto_db as _open_auto
+
 def record_playbook_pattern(order_row, pnl_row, oc_snapshot=None):
     """
     Persist a canonical Playbook pattern derived from settled orders.
-
-    Args:
-        order_row: row from 'orders' (autoscalp_gui.db)
-        pnl_row  : row from 'bf_cleared_orders' (settlements.db)
-        oc_snapshot: optional dict from oc_series (bets.db) for OC band context
+    Corrected: playbooks must be written into autoscalp_gui.db using a
+    REAL sqlite connection, NOT DALWriteProxy and NOT settlements.db.
     """
     try:
-        # open GUI DB for playbooks (same file used by dashboard + mastery)
-        con = __settle_conn(); con.row_factory = sqlite3.Row
+        con = _open_auto(rw=True)     # ✔ REAL writer to autoscalp_gui.db
+        con.row_factory = sqlite3.Row
         cur = con.cursor()
 
         # ensure table exists
@@ -1695,7 +1805,7 @@ def pick_one_market_id_from_settlements(from_iso: Optional[str], to_iso: Optiona
     Pick a single marketId from settlements.db (bf_cleared_orders) in the settledDate window.
     Chooses the market with the most cleared rows.
     """
-    with _settle_conn(rw=True) as con:
+    with connect_db(settlements_db_path()) as con:
         r = con.execute("""
             SELECT marketId, COUNT(*) AS n
               FROM bf_cleared_orders
@@ -1708,21 +1818,25 @@ def pick_one_market_id_from_settlements(from_iso: Optional[str], to_iso: Optiona
         """, (from_iso, from_iso, to_iso, to_iso)).fetchone()
         return r["marketId"] if r and r["marketId"] else None
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py:_record_training_history
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
 # 🔎 SEARCH: def _record_training_history(
-# 📆 PATCHED: 2025-11-21
-from engines.config_paths import auto_conn as _auto_conn
+# 🎯 ACTION: Replace function (must log into autoscalp_gui.db)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
+from engines.config_paths import open_auto_db as _open_auto
 
 def _record_training_history(epoch, score, goal_alignment):
-    con = _auto_conn(rw=True)
-    con.execute(
+    con = _open_auto(rw=True)
+    _q_retry(con,
         "INSERT INTO training_history(epoch, score, goal_alignment) VALUES (?,?,?)",
         (epoch, score, goal_alignment)
     )
     con.commit(); con.close()
-# === PATCH END ===
 
+# === PATCH END ===============================================================
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1827,7 +1941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # metadata for those markets
         mkt_ids: List[str] = []
-        with _settle_conn(rw=True) as con:
+        with connect_db(settlements_db_path()) as con:
             for r in con.execute("SELECT DISTINCT marketId FROM bf_cleared_orders WHERE marketId IS NOT NULL"):
                 mkt_ids.append(r["marketId"])
 
@@ -1864,7 +1978,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("[settlements] skip-meta enabled (no metadata calls)")
             # optional preview
             if getattr(args, "print_rows", False):
-                with _settle_conn(rw=True) as con:
+                with connect_db(settlements_db_path()) as con:
                     sample = con.execute("""
                         SELECT betId, marketId, selectionId, side, priceMatched, sizeSettled, profit, settledDate
                         FROM bf_cleared_orders
@@ -1908,7 +2022,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # optional preview (unchanged)
         if getattr(args, "print_rows", False):
-            with _settle_conn(rw=True) as con:
+            with connect_db(settlements_db_path()) as con:
                 sample = con.execute("""
                     SELECT betId, marketId, selectionId, side, priceMatched, sizeSettled, profit, settledDate
                     FROM bf_cleared_orders
@@ -1936,49 +2050,91 @@ except Exception:
     def _q_retry(con, sql, params=()):
         cur = con.cursor(); cur.execute(sql, params); return cur
 
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def _orders_conn()  (mastery block near bottom)
+# 🎯 ACTION: Replace function so mastery writes to AUTO DB, not settlements DB
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
+from engines.config_paths import open_auto_db as _open_auto
+
 def _orders_conn() -> sqlite3.Connection:
-    con = __settle_conn(); con.row_factory = sqlite3.Row
+    """Mastery settlement processes must write to AUTOSCALP_GUI.DB."""
+    con = _open_auto(rw=True)
+    con.row_factory = sqlite3.Row
     try:
         _q_retry(con, "PRAGMA busy_timeout=6000")
     except Exception:
         pass
     return con
 
+# === PATCH END ===============================================================
+
+
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def _mastery_log(
+# 🎯 ACTION: Replace function (must log into AUTO DB, not settlements DB)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
+from engines.config_paths import open_auto_db as _open_auto
+
 def _mastery_log(event_type: str, payload: dict):
+    """Write mastery events to autoscalp_gui.db (correct DB)."""
     try:
-        from engines.config_paths import connect_db
-        bdb = connect_db(ro=False)
-        _q_retry(bdb, """
+        con = _open_auto(rw=True)
+        _q_retry(con, """
             CREATE TABLE IF NOT EXISTS mastery_events(
                 event_type TEXT,
                 details_json TEXT,
                 created_at TEXT
             )
         """)
-        _q_retry(bdb, "INSERT INTO mastery_events(event_type, details_json, source) "
-            "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-            (str(event_type), json.dumps(payload, separators=(',', ':'), ensure_ascii=False)))
-        bdb.commit(); bdb.close()
+        _q_retry(con, """
+            INSERT INTO mastery_events(event_type, details_json, created_at)
+            VALUES (?, ?, datetime('now','utc'))
+        """, (event_type, json.dumps(payload, separators=(',',':'), ensure_ascii=False)))
+        con.commit(); con.close()
     except Exception:
         pass
 
+# === PATCH END ===============================================================
+
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def mark_stoploss_for_parent(
+# 🎯 ACTION: Replace function (must update AUTO DB, not settlements DB)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
+from engines.config_paths import open_auto_db as _open_auto
+
 def mark_stoploss_for_parent(parent_cor: str) -> None:
-    """
-    If a stop-loss exit was used outside live_router, call this to label the exit.
-    """
-    con = _orders_conn()
+    con = _open_auto(rw=True)
     try:
-        _q_retry(con, "UPDATE orders SET exit_kind='STOPLOSS' WHERE customerOrderRef=?", (str(parent_cor),))
+        _q_retry(con,
+            "UPDATE orders SET exit_kind='STOPLOSS' WHERE customerOrderRef=?",
+            (str(parent_cor),)
+        )
         _q_retry(con, """
             UPDATE orders
                SET exit_kind='STOPLOSS'
-             WHERE role='CHILD' AND hedge_of=(SELECT id FROM orders WHERE customerOrderRef=? LIMIT 1)
+             WHERE role='CHILD'
+               AND hedge_of=(SELECT id FROM orders WHERE customerOrderRef=? LIMIT 1)
         """, (str(parent_cor),))
         con.commit()
-        _mastery_log("trade_outcome_hint", {"parent_ref": parent_cor, "exit_kind": "STOPLOSS"})
+        _mastery_log("trade_outcome_hint",
+                     {"parent_ref": parent_cor, "exit_kind": "STOPLOSS"})
     finally:
-        try: con.close()
-        except Exception: pass
+        con.close()
+
+# === PATCH END ===============================================================
+
 
 # 📍 engines/live/settlements.py
 # --- Background Settlements Loop ---------------------------------------------
@@ -2063,7 +2219,7 @@ def start_winners_daemon(interval_s: int = 5):
                         if r.get("status") == "WINNER":
                             winners.append((mid, str(r.get("selectionId"))))
                 if winners:
-                    with _settle_conn(rw=True) as con:
+                    with connect_db(settlements_db_path()) as con:
                         for mid, sid in winners:
                             con.execute("""
                                 INSERT INTO runner_form_canonical(
@@ -2098,16 +2254,34 @@ def start_winners_daemon(interval_s: int = 5):
 # start_settlement_daemon(interval_s=300)
 # start_winners_daemon(interval_s=5)
 
+# =============================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def start_all_settlement_services():
+# 🎯 ACTION: Replace function (ensure DB + creds are ready before daemons start)
+# 📆 PATCHED: 2026-02-10
+# =============================================================================
+# === PATCH START =============================================================
+
 def start_all_settlement_services():
-    """Called AFTER Step-1 so creds exist."""
+    """Start settlement services only after DB + credentials exist."""
     try:
+        from engines.config_paths import autoscalp_db
+        db_path = autoscalp_db()
+
+        # delay until DB folder exists
+        if not db_path or not os.path.exists(os.path.dirname(db_path)):
+            print("[settlements] delay: AUTO DB not yet ready")
+            return
+
         start_settlement_daemon(interval_s=300)
         start_winners_daemon(interval_s=5)
-        print("[settlements] services started AFTER Step-1")
+        print("[settlements] services started AFTER DB+creds ready")
+
     except Exception as e:
         print(f"[settlements] failed to start services: {e}")
 
-# === PATCH END ===
+# === PATCH END ===============================================================
+
 
 
 if __name__ == "__main__":

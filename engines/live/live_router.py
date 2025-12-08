@@ -1168,7 +1168,7 @@ def _orders_insert_parent_queued(
                 source        = COALESCE(orders.source, excluded.source),
                 engine        = COALESCE(orders.engine, excluded.engine),
                 stop_loss_px  = COALESCE(excluded.stop_loss_px, orders.stop_loss_px)
-        """,
+        """,   # 👈 FIX: properly close SQL f-string here
         (
             str(cor),
             int(fk),
@@ -1178,10 +1178,11 @@ def _orders_insert_parent_queued(
             float(entry_odds),
             float(entry_stake),
             _utcnow_str(),
-            str(source),
-            _engine_from_source(source),
-            float(stop_loss_px) if stop_loss_px is not None else None
+            source,
+            source,
+            stop_loss_px
         ))
+
 
         con.commit()
         _orders_probe(cor, note="queued")
@@ -1529,22 +1530,29 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         try: con.close()
         except Exception: pass
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def _orders_update_hedge_matched\(
-#    REPLACE the entire function with the version below
-# 📆 PATCHED: 2025-09-29T14:25Z
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _orders_update_hedge_matched(*, cor: str, exit_side: str, exit_odds: float, exit_stake: float) -> None:
+# 🔎 SEARCH: def _orders_update_hedge_matched(
+# 📆 PATCHED: 2026-02-10 — Settlement EventSync A: HEDGE_EXIT
+# ============================================================================
+
+def _orders_update_hedge_matched(*, cor: str, exit_side: str,
+                                 exit_odds: float, exit_stake: float) -> None:
+    """
+    Finalize hedge exit: compute realized PnL, stamp exit row, fire EventSync.
+    """
     _ensure_orders_schema()
     con = _orders_conn(); con.row_factory = sqlite3.Row
     try:
         cur = con.cursor()
-        p = _q_retry(cur, """SELECT id, side, entry_odds, entry_stake, marketId, selectionId,
-                                  COALESCE(source,'') AS source, COALESCE(run_id,'') AS run_id
-                              FROM orders WHERE customerOrderRef=? LIMIT 1""", (str(cor),)).fetchone()
+        p = _q_retry(cur, """
+            SELECT id, side, entry_odds, entry_stake, marketId, selectionId,
+                   COALESCE(source,'') AS source
+              FROM orders
+             WHERE customerOrderRef=? LIMIT 1
+        """, (str(cor),)).fetchone()
         if not p:
-            _log_event("ERROR","live_router", f"hedge_matched: parent missing ref={cor}")
+            _log_event("ERROR","live_router",f"hedge_matched: parent missing ref={cor}")
             return
 
         pid        = int(p["id"])
@@ -1552,7 +1560,7 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str, exit_odds: float, 
         E, S       = float(p["entry_odds"] or 0.0), float(p["entry_stake"] or 0.0)
         H, S2      = float(exit_odds or 0.0),       float(exit_stake or 0.0)
 
-        # realized P&L (same as before)
+        # PnL
         if entry_side == "LAY":
             win  = S2*(H-1.0) - S*(E-1.0)
             lose = S - S2
@@ -1561,29 +1569,34 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str, exit_odds: float, 
             lose = -S + S2
         realized = round(min(win, lose), 2)
 
-        # classify exit_kind
-        child = _q_retry(cur, "SELECT UPPER(COALESCE(exit_kind,'')) AS ek, entry_odds AS child_odds "
-                              "FROM orders WHERE role='CHILD' AND hedge_of=? ORDER BY id DESC LIMIT 1", (pid,)).fetchone()
-        if child and (child["ek"] in ("HEDGE","STOPLOSS")):
-            kind = child["ek"]
-        else:
-            if entry_side == "LAY":
-                kind = "HEDGE" if H > E + 1e-9 else "STOPLOSS"
-            else:
-                kind = "HEDGE" if H < E - 1e-9 else "STOPLOSS"
-
-        # commit exit + kind on the parent row
+        # update parent
         _q_retry(cur, """
             UPDATE orders
                SET exit_status='matched',
+                   exit_kind='HEDGE',
                    exit_odds=?, exit_stake=?,
-                   exit_kind=?,
-                   closed_at=COALESCE(closed_at, datetime('now','utc')),
-                   realized_pnl=?, net_pl=COALESCE(net_pl,0.0)+?, mode='LIVE'
+                   realized_pnl=?, net_pl=COALESCE(net_pl,0)+?,
+                   closed_at=datetime('now','utc'),
+                   mode='LIVE'
              WHERE customerOrderRef=?
-        """, (H, S2, kind, realized, realized, str(cor)))
+        """, (H, S2, realized, realized, str(cor)))
         con.commit()
-        _orders_probe(cor, note=f"hedge_matched/{kind}")
+        _orders_probe(cor, note="hedge_matched")
+
+        # === EVENTSYNC: A — HEDGE EXIT =====================================
+        try:
+            _emit_settlement_router_event(
+                "HEDGE_EXIT",
+                cor=cor,
+                market_id=p["marketId"],
+                selection_id=p["selectionId"],
+                exit_odds=H,
+                exit_stake=S2,
+                realized=realized
+            )
+        except Exception as e:
+            _log_event("WARN","live_router",f"EventSync hedge exit failed: {e}")
+        # ====================================================================
         # === PATCH START: free letter slot after hedge ===
         try:
             mid, sid, src = str(p["marketId"]), str(p["selectionId"]), str(p["source"] or "")
@@ -1915,14 +1928,50 @@ def _orders_insert_child_live(parent_cor: str, *, market_id: str, selection_id: 
         try: con.close()
         except Exception: pass
 
-
-# --- PATCH END ----------------------------------------------------------
-# === PATCH START ==========================================================
+# === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: def _orders_insert_child_live
-# ⛏ ACTION: Insert new STOPLOSS helper immediately after this function
-# 📆 PATCHED: 2025-12-01
-# ==========================================================================
+# 🔎 SEARCH: def _emit_router_event(
+# 📆 PATCHED: 2026-02-10 — Settlement EventSync hook for router exits
+# ============================================================================
+
+from engines.mastery.event_sink import emit as _emit_event
+
+def _emit_settlement_router_event(event_type: str, *, cor: str,
+                                  market_id: str, selection_id: str,
+                                  exit_odds: float | None = None,
+                                  exit_stake: float | None = None,
+                                  realized: float | None = None):
+    """
+    Unified settlement notifier for router exits.
+    Emits:
+        • HEDGE_EXIT
+        • STOPLOSS_EXIT
+        • AUTO_SETTLED
+
+    Always includes:
+        cor, marketId, selectionId, exit_odds, exit_stake, realized_pnl
+    """
+    try:
+        payload = {
+            "event": event_type,
+            "cor": cor,
+            "marketId": str(market_id),
+            "selectionId": str(selection_id),
+            "exit_odds": exit_odds,
+            "exit_stake": exit_stake,
+            "realized_pnl": realized,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        _emit_event("settlement", payload)
+    except Exception as e:
+        print(f"[EventSync][router_exit] warn: {e}")
+
+# === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _place_stoploss_child_now(
+# 📆 PATCHED: 2026-02-10 — Settlement EventSync B: STOPLOSS_EXIT
+# ============================================================================
 
 def _place_stoploss_child_now(
     parent_cor: str,
@@ -1934,19 +1983,10 @@ def _place_stoploss_child_now(
     parent_stake: float,
     run_id: str | None = None
 ) -> Optional[int]:
-    """
-    Immediate STOPLOSS child executor.
-    Called synchronously from Overwatcher trailing-stop-loss events.
-
-    - Does NOT use the background hedge thread
-    - Places stop-loss as a full flatten
-    - Uses 'STOPLOSS' exit_kind for DB clarity
-    - Returns child_id if placed, else None
-    """
 
     try:
-        # 1) load parent row
         con = _orders_conn(); con.row_factory = sqlite3.Row
+
         parent = _q_retry(con, """
             SELECT id, run_id
               FROM orders
@@ -1956,113 +1996,80 @@ def _place_stoploss_child_now(
             con.close()
             return None
 
-        pid = int(parent["id"])
-        fk_run = int(parent["run_id"] or 0)
+        pid  = int(parent["id"])
+        fk   = int(parent["run_id"] or 0)
+        S2   = float(parent_stake)
+        H    = float(exit_odds)
 
         app_key, token = _keys()
-
-        # 2) prepare immediate STOPLOSS flatten stake (equal exposure)
-        exit_stake = float(parent_stake)
-
-        # 3) Betfair placeOrders (synchronous)
         cref = _ref("SL")
-        bet_id, detail = _place(
-            app_key, token,
-            market_id, selection_id,
-            exit_side, float(exit_odds), float(exit_stake),
-            cref, persistence="LAPSE"
-        )
+        bet_id, _ = _place(app_key, token,
+                           market_id, selection_id,
+                           exit_side, H, S2,
+                           cref, persistence="LAPSE")
 
         if not bet_id:
             con.close()
             return None
 
-        # 4) Insert CHILD row now
         cur = con.cursor()
         _q_retry(cur, """
             INSERT INTO orders(
               customerOrderRef, run_id, mode,
               marketId, selectionId,
               side, entry_odds, entry_stake,
-              entry_status, opened_at,
-              entry_bet_id,
+              entry_status, opened_at, entry_bet_id,
               role, hedge_of, source, exit_kind
+            ) VALUES (
+              ?, ?, 'LIVE',
+              ?, ?,
+              ?, ?, ?,
+              'matched', datetime('now','utc'), ?,
+              'CHILD', ?, 'S', 'STOPLOSS'
             )
-            VALUES (?, ?, 'LIVE',
-                    ?, ?,
-                    ?, ?, ?,
-                    'matched', datetime('now','utc'),
-                    ?,
-                    'CHILD', ?, 'S', 'STOPLOSS',)
-        """, (
-            cref, fk_run,
-            str(market_id), str(selection_id),
-            exit_side.upper(), float(exit_odds), float(exit_stake),
-            str(bet_id), pid
-        ))
-        child_id = cur.lastrowid
-        con.commit()
+        """, (cref, fk,
+              str(market_id), str(selection_id),
+              exit_side.upper(), H, S2,
+              bet_id, pid))
 
-        # 5) Update parent exit fields
+        child_id = int(cur.lastrowid)
+
+        # stamp parent
         _q_retry(cur, """
             UPDATE orders
                SET exit_status='matched',
                    exit_kind='STOPLOSS',
-                   closed_at=datetime('now','utc'),
-                   exit_odds=?, exit_stake=?
+                   exit_odds=?, exit_stake=?,
+                   closed_at=datetime('now','utc')
              WHERE customerOrderRef=?
-        """, (float(exit_odds), float(exit_stake), str(parent_cor)))
+        """, (H, S2, str(parent_cor)))
         con.commit()
         con.close()
 
-        _log_event("INFO", "live_router",
-                   f"[SL-IMMEDIATE] parent={parent_cor} bet={bet_id} exit_odds={exit_odds}")
-
-        return int(child_id)
-
-        # === PATCH 4B: Settlement EventSync for STOPLOSS exit ==============
+        # === EVENTSYNC: B — STOPLOSS EXIT ==================================
         try:
             _emit_settlement_router_event(
-                parent_cor,
-                outcome="STOPLOSS_EXIT",
+                "STOPLOSS_EXIT",
+                cor=parent_cor,
                 market_id=market_id,
                 selection_id=selection_id,
+                exit_odds=H,
+                exit_stake=S2,
+                realized=None   # parent realized PnL is finalized later in reconcile
             )
-        except Exception:
-            pass
+        except Exception as e:
+            _log_event("WARN","live_router",f"EventSync stoploss exit failed: {e}")
         # ====================================================================
 
+        return child_id
 
     except Exception as e:
-        try:
-            con.close()
-        except:
-            pass
-        _log_event("ERROR", "live_router",
-                   f"_place_stoploss_child_now failed ref={parent_cor}: {e}")
+        _log_event("ERROR","live_router",f"_place_stoploss_child_now failed ref={parent_cor}: {e}")
         return None
 
-# === PATCH END ============================================================
-# === PATCH WALL 4 START — Settlement EventSync ============================
-from engines.mastery.live_event_api import emit_settlement_event
+# === PATCH END ==============================================================
 
-def _emit_settlement_router_event(cor: str, *, outcome: str, market_id: str, selection_id: str):
-    """
-    Push settlement lifecycle updates into EventSync.
-    Called whenever router marks an order as SETTLED or CLOSED.
-    """
-    try:
-        payload = {
-            "marketId": str(market_id),
-            "selectionId": str(selection_id),
-            "cor": str(cor),
-            "outcome": outcome,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        emit_settlement_event(payload)
-    except Exception as e:
-        print(f"[EventSync][SETTLEMENT] warn: {e}")
-# === PATCH WALL 4 END =======================================================
+
 
 
 def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
@@ -2118,40 +2125,44 @@ def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
 
         con.commit(); con.close()
 
-        # ---------------------------------------------------------------------
-        # 4C — EventSync emission for AUTO settlement (correct indentation)
-        # ---------------------------------------------------------------------
-        if n_cancel or n_settle:
-            if n_settle:
-                try:
-                    # Re-open DB to fetch the set of newly-settled parents
-                    con2 = _orders_conn(); con2.row_factory = sqlite3.Row
-                    cur2 = con2.cursor()
-                    settled_rows = _q_retry(cur2, f"""
-                        SELECT customerOrderRef AS cor,
-                               marketId,
-                               selectionId
-                          FROM orders
-                         WHERE mode='LIVE'
-                           AND marketId IN ({qph})
-                           AND UPPER(COALESCE(exit_status,''))='SETTLED'
-                    """, tuple(mids)).fetchall()
 
-                    for row in settled_rows:
-                        try:
-                            _emit_settlement_router_event(
-                                row["cor"],
-                                outcome="AUTO_SETTLED",
-                                market_id=row["marketId"],
-                                selection_id=row["selectionId"],
-                            )
-                        except Exception:
-                            pass
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: "AUTO_SETTLED"
+# 📆 PATCHED: 2026-02-10 — Settlement EventSync C: AUTO_SETTLED
+# ============================================================================
 
-                    con2.close()
-                except Exception as e:
-                    _log_event("WARN", "live_router",
-                               f"EventSync settle emit failed: {e}")
+        # -----------------------------------------------------------------
+        # EVENTSYNC: C — AUTO-SETTLED PARENTS
+        # -----------------------------------------------------------------
+        if n_settle:
+            try:
+                con2 = _orders_conn(); con2.row_factory = sqlite3.Row
+                rows2 = _q_retry(con2, f"""
+                    SELECT customerOrderRef AS cor, marketId, selectionId,
+                           exit_odds, exit_stake, realized_pnl
+                      FROM orders
+                     WHERE mode='LIVE'
+                       AND marketId IN ({qph})
+                       AND UPPER(exit_status)='SETTLED'
+                """, tuple(mids)).fetchall()
+                con2.close()
+
+                for r2 in rows2:
+                    _emit_settlement_router_event(
+                        "AUTO_SETTLED",
+                        cor=r2["cor"],
+                        market_id=r2["marketId"],
+                        selection_id=r2["selectionId"],
+                        exit_odds=r2["exit_odds"],
+                        exit_stake=r2["exit_stake"],
+                        realized=r2["realized_pnl"],
+                    )
+            except Exception as e:
+                _log_event("WARN","live_router",f"AUTO_SETTLED EventSync failed: {e}")
+
+# === PATCH END ==============================================================
+
 
             _log_event(
                 "INFO", "live_router",
