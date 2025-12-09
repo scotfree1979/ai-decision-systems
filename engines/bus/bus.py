@@ -104,25 +104,16 @@ class DecisionBus:
         mids = [str(m) for m in mids]
 
         # ----------------------------------------------------------------------
-        # 1) FETCH RUNNERS FROM ODD_SERVICE
+        # 1) FETCH RUNNERS (via MarketMonitor — canonical runner source)
         # ----------------------------------------------------------------------
-        from engines.odds.odds_service_state import ODD_SERVICE_STATE
+        from engines.market_monitor.monitor import get_market_state
 
-        # Ensure OddService has the latest runner states for these markets
-        try:
-            ODD_SERVICE_STATE.refresh(mids)
-        except Exception as e:
-            print(f"[BUS][WARN] OddService refresh failed: {e}")
-
-        # Now fetch per-market runner maps (ACTIVE + PASSIVE)
         runner_map = {}
         for mid in mids:
-            state = ODD_SERVICE_STATE.state_for(mid)
-            if not state:
-                continue
-            active  = state.get("active_sids", [])
-            passive = state.get("passive_sids", [])
-            runner_map[mid] = list(dict.fromkeys(active + passive))
+            st = get_market_state(mid) or {}
+            runners = (st.get("runners") or {}).keys()
+            runner_map[mid] = list(runners)
+
 
         # ----------------------------------------------------------------------
         # 2) BUILD BASE CTX
