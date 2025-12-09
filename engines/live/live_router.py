@@ -9,7 +9,7 @@ from engines import price_math as pm
 # === PATCH START: use LiveCache-only DB connector for router ===
 from engines.config_paths import auto_conn_live as _auto_conn
 # === PATCH END ===
-
+import uuid
 import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
@@ -544,7 +544,7 @@ def place_from_bus(plan: dict, ctx: dict):
     }, _ctx=ctx)
 
 # === PATCH END ================================================================
-export AUTOSCALP_SHADOW=1
+
 
 
 # ── DB bootstrap (orders + events) ───────────────────────────────────────────

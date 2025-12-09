@@ -30,6 +30,23 @@ def _safe_read(sql: str, params=()):
     except Exception:
         return []
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py
+# 📆 PATCHED: 2026-02-15 — compatibility export for BUS
+# ============================================================================
+
+def goal_adapter_evaluate(ctx: dict):
+    """
+    Compatibility wrapper for BUS → new GoalAdapter class.
+    """
+    try:
+        ga = GoalAdapter()   # your existing class
+        return ga.evaluate(ctx)
+    except Exception as e:
+        return {"enter": False, "why": f"goal_adapter_error: {e}"}
+# === PATCH END ==============================================================
+
+
 # === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:_trade_stats
 # 📆 PATCHED: 2025-12-12 — DAL-safe + MATCHED + correct dashboard column

@@ -26,14 +26,24 @@ class RiskEngine:
         7. Use SLEQ (from ctx) to widen/narrow child stake
     """
 
-    def __init__(self, parent_id: int):
-        self.parent_id = parent_id
+# === PATCH START ============================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def __init__(self, parent_id: int):
+# 📆 PATCHED: 2026-02-14 — BUS-Compatible RiskEngine Constructor
+# ============================================================================
+
+    def __init__(self):
+        # parent_id now resolved dynamically from ctx["legacy_parent_id"]
+        self.parent_id = None
         self.attached = False
-        self.entry_px = None          # parent entry odds
-        self.entry_side = None        # "LAY" or "BACK"
+        self.entry_px = None
+        self.entry_side = None
         self.last_px = None
-        self.active_plan = None       # the current child
+        self.active_plan = None
         self.mode = "MODERATE"
+
+# === PATCH END ==============================================================
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
@@ -159,6 +169,22 @@ class RiskEngine:
         entry_ticks = int(de.get("entry_ticks", 2))
         stop_ticks = int(de.get("stop_ticks", 4))
         self.mode  = de.get("mode", "MODERATE")
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def tick(self, ctx: Dict[str, Any]):
+# 📆 PATCHED: 2026-02-14 — Assign parent_id dynamically
+# ============================================================================
+
+        pid = ctx.get("legacy_parent_id")
+        if pid is None:
+            return None
+
+        # assign active parent_id
+        self.parent_id = pid
+
+# === PATCH END ==============================================================
+
 
         # parent metadata
         self.entry_side = (ctx.get("legacy_entry_side") or "").upper()

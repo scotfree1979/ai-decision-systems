@@ -3650,21 +3650,25 @@ def start_live_loop(*args, **kwargs):
     # ------------------------------------------------------------------
 # === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: def start_live_loop(
-# 📆 PATCHED: 2026-02-12 — replace Lanes with BUS
+# 🔎 SEARCH: "# 5) MAIN LIVE LOOP — CLEAN VERSION"
+# ⛏️ ACTION: Replace the block below that comment with the following:
 # ============================================================================
 
-    # OLD:
-    # from engines.decision_engine.decide_once.lanes import run_all
-
-    # NEW:
+    # ------------------------------------------------------------------
+    # 5) MAIN LIVE LOOP — CLEAN VERSION (BUS-driven)
+    # ------------------------------------------------------------------
     from engines.bus.bus import BUS
 
+    # The BUS loop **must** be inside start_live_loop(), at this indentation.
     while True:
-        BUS.tick()
+        try:
+            BUS.tick()
+        except Exception as e:
+            print(f"[BUS][ERR] {e}")
         time.sleep(max(0.5, 1.0 / hz))
 
 # === PATCH END ================================================================
+
 
 
 

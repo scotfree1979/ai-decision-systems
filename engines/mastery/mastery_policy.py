@@ -1517,38 +1517,20 @@ def size_for_letter(ctx: dict, letter: str, *, confidence: float, direction: str
 # -----------------------------------------------------------------------------
 # Public planner (used by orchestrator): returns a plan with plan_why
 def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
-    # === PATCH START ===
-    # 📍 TARGET: mastery_policy.propose_trade
+    # === FIX: create working ctx immediately ===
+    ctx = dict(context or {})
+
     if ENABLE_LEGACY_ONLY:
-        context = _enrich_ctx(context)
-    # === PATCH END ===
+        ctx = _enrich_ctx(ctx)
 
-    """
-    Mastery planner:
-      • Enrich context (odds/time/WOM)
-      • Gate by letter/time/odds
-      • Try analyzer/story/mid-window; if quiet → px-based fallback (no 'A' force)
-      • Size and produce a complete plan
-      • Record in plan_ledger (plan_id attached on success)
-    """
     _ensure_row_factory_monkeypatch()
-# === PATCH START ============================================================
-# 📍 TARGET: engines/mastery/mastery_policy.py
-# 🔎 SEARCH: def propose_trade(context:
-# 📆 PATCHED: 2026-02-12 — direction-first legacy via Bus override
-# ============================================================================
 
-    # --- DIRECTION-FIRST (BUS OVERRIDE) ------------------------------------
-    dir_override = context.get("direction_override")
+    # --- BUS DIRECTION OVERRIDE ---
+    dir_override = ctx.get("direction_override")
     if dir_override:
         ctx["direction"] = dir_override
-# === PATCH END ================================================================
-# === PATCH START ============================================================
-# 📍 TARGET: mastery_policy.propose_trade
-# 📆 PATCHED: 2026-02-13 — MSC direction-first mode
-# ============================================================================
 
-    # MSC Direction-first injection
+    # --- MSC DIRECTION-FIRST INJECTION ---
     if ctx.get("direction") is None:
         try:
             from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
@@ -1559,11 +1541,9 @@ def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
-# Continue existing plan logic
-# === PATCH END ================================================================
+    # === FIX: enrich ctx, not context ===
+    ctx = _enrich_ctx(ctx)
 
-
-    ctx = _enrich_ctx(context)
     # --- Scope filter -----------------------------------------------------
     try:
         mid = str(ctx.get("marketId") or "")

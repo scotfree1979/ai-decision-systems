@@ -45,19 +45,19 @@ ENGINES = [
 
 # Baseline allocations (start-of-day percentages)
 BASELINE_PCT = {
-    "LEGACY":          0.40,
-    "MSC_EXPLORATORY": 0.05,
-    "MSC_RISK":        0.05,
-    "MSC_INPLAY":      0.05,
-    "OVERWATCHER":     0.05,
-    "SAFETY_NET":      0.05,
+    "LEGACY":          0.30,
+    "MSC_EXPLORATORY": 0.20,
+    "MSC_RISK":        0.15,
+    "MSC_INPLAY":      0.10,
+    "OVERWATCHER":     0.06,
+    "SAFETY_NET":      0.04,
 }
 
 # Hard floors (minimum operational runway)
 FLOOR_PCT = {
-    "LEGACY":          0.30,
-    "MSC_EXPLORATORY": 0.05,
-    "MSC_RISK":        0.05,
+    "LEGACY":          0.25,
+    "MSC_EXPLORATORY": 0.15,
+    "MSC_RISK":        0.15,
     "MSC_INPLAY":      0.05,
     "OVERWATCHER":     0.05,
     "SAFETY_NET":      0.05,
@@ -65,8 +65,8 @@ FLOOR_PCT = {
 
 
 
-# Dynamic pool (total = 35% of daily allocation)
-DYNAMIC_POOL = 0.35
+# Dynamic pool (total = 15% of daily allocation)
+DYNAMIC_POOL = 0.15
 
 # Exploratory ↔ Legacy performance bonus shift (0 → 10% max)
 _bonus_shift = 0   # increases/decreases by 1 step per rebalance

@@ -77,6 +77,7 @@ print("[DEBUG-GUI] DAL_MODE =", CP.DAL_MODE)
 import engines.config_paths as cp
 # near top of file
 from gui.dashboard import DashboardView, open_dashboard_window
+from engines.live import bank_state
 
 # === PATCH START ===
 # 📍 TARGET: gui/GUI.py (top-level imports)
@@ -1732,6 +1733,119 @@ except Exception:
 # ------------------------------------------------------------------------------
 # GUI
 # ------------------------------------------------------------------------------
+def initialise_daily_bank():
+    """
+    Initialise today's bank balance following these rules:
+
+      • If today's row does NOT exist:
+            today_balance = fetched_balance or yesterday_last_nonzero
+            INSERT row
+
+      • If today's row exists:
+            If today_balance <= 0:
+                today_balance = max(fetched_balance, yesterday_last_nonzero)
+                UPDATE row
+            Elif today_balance < fetched_balance:
+                # Betfair init glitch, keep continuity
+                today_balance = yesterday_last_nonzero
+                UPDATE row
+
+      • Return today_balance
+
+    Table schema expected:
+        internal_bank(day TEXT PRIMARY KEY, current_balance REAL)
+    """
+
+    import sqlite3
+    from datetime import datetime, timezone
+    from engines.daily_config import fetch_available_budget
+    from engines.config_paths import auto_conn
+
+    # -- Helpers ------------------------------------------------------------
+    def utc_day():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def get_yesterday_balance(con):
+        """
+        Returns the most recent non-zero balance BEFORE today.
+        """
+        rows = con.execute("""
+            SELECT current_balance
+              FROM internal_bank
+             WHERE current_balance > 0
+               AND day < date('now','utc')
+             ORDER BY day DESC
+             LIMIT 1
+        """).fetchone()
+        return float(rows[0]) if rows else 0.0
+
+    # -- Begin --------------------------------------------------------------
+    today = utc_day()
+    fetched_balance = float(fetch_available_budget() or 0.0)
+
+    con = auto_conn(rw=True)
+    con.row_factory = sqlite3.Row
+
+    # Create table if missing
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS internal_bank(
+            day TEXT PRIMARY KEY,
+            current_balance REAL
+        )
+    """)
+
+    # What was yesterday's last non-zero balance?
+    yesterday_balance = get_yesterday_balance(con)
+
+    # Get today's row if it exists
+    row = con.execute("""
+        SELECT current_balance FROM internal_bank
+         WHERE day = ?
+    """, (today,)).fetchone()
+
+    # ----------------------------------------------------------------------
+    # 1. TODAY ROW DOES NOT EXIST → INSERT
+    # ----------------------------------------------------------------------
+    if not row:
+        today_balance = fetched_balance or yesterday_balance
+        con.execute("""
+            INSERT INTO internal_bank(day, current_balance)
+            VALUES (?,?)
+        """, (today, float(today_balance)))
+        con.commit()
+        return float(today_balance)
+
+    # ----------------------------------------------------------------------
+    # 2. TODAY ROW EXISTS → CLEAN-UP / REPAIR
+    # ----------------------------------------------------------------------
+    today_balance = float(row["current_balance"] or 0.0)
+
+    # CASE A: today's balance invalid / zero
+    if today_balance <= 0:
+        today_balance = max(fetched_balance, yesterday_balance)
+        con.execute("""
+            UPDATE internal_bank
+               SET current_balance = ?
+             WHERE day = ?
+        """, (float(today_balance), today))
+        con.commit()
+        return float(today_balance)
+
+    # CASE B: Betfair's fetched balance is higher (glitch on startup)
+    if fetched_balance > 0 and today_balance < fetched_balance:
+        # We DO NOT trust Betfair’s new number during init,
+        # revert to continuity.
+        today_balance = yesterday_balance
+        con.execute("""
+            UPDATE internal_bank
+               SET current_balance = ?
+             WHERE day = ?
+        """, (float(today_balance), today))
+        con.commit()
+        return float(today_balance)
+
+    # CASE C: all good — use stored value
+    return float(today_balance)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 📍 TARGET: gui/GUI.py
@@ -2571,6 +2685,13 @@ class PhaseGUI(tk.Tk):
         import os, sys
         mode_now = (self._mode.get() or "learning").lower()
         token = (self._token.get() or "").strip()
+        # Initialise BankState once at startup
+        try:
+            bank_state.init_bank_state()
+            print("[BankState] static engine pots initialised")
+        except Exception as e:
+            print(f"[BankState] warn: {e}")
+
 
         # ✅ Always take canonical app key from daily_config
         try:
@@ -2587,6 +2708,7 @@ class PhaseGUI(tk.Tk):
             ensure_db_ready()
         except Exception as e:
             print(f"[db-preflight] ensure_db_ready warn: {e}")
+            
 
         # === PATCH START ============================================================
 # 📍 TARGET: gui/GUI.py

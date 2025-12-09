@@ -375,5 +375,35 @@ def engine_allocations() -> dict:
 def engine_pots_snapshot() -> dict:
     return ENGINE_POTS_SNAPSHOT()
 # === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/daily_config.py
+# 📆 PATCHED: 2026-02-15 — stake defaults for DynamicStake v7
+# ============================================================================
+
+# Base stake per strategy letter (legacy compatibility)
+BASE_STAKE = 2.0        # default £2
+STAKE_MAX = 25.0        # max hard cap per bet unless overridden
+LETTER_MULT = {
+    "A": 1.0,
+    "B": 1.0,
+    "C": 1.0,
+    "D": 1.0,
+    "E": 1.0,
+    "F": 1.0,
+    "G": 1.0,
+    "I": 1.0,
+    "L": 1.0,
+    "R": 1.0,
+    "S": 1.0,
+    "T": 1.0,
+    "X": 1.0,
+}
+
+BANK_PCT_PER_ENTRY = 0.01   # 1% of pot allowed per bet
+MIN_STAKE = 2.0             # never allow less than £2
+HARD_CAP_PRE = 50.0         # max stake allowed in PRE
+HARD_CAP_IP = 25.0          # max stake allowed INPLAY
+# === PATCH END ==============================================================
+
 
 

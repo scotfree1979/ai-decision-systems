@@ -54,7 +54,7 @@ from engines.live.live_router import _keys
 
 # overwatcher.py (patched)
 
-from engines.bus.bus_engine import BUS
+
 
 def _process_stoploss_now(ev):
     BUS.push_stoploss(ev)

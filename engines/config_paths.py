@@ -956,12 +956,47 @@ def open_settlements_db(*, rw=False, **_):
         return DALWriteProxy("settlements")
     return DALReadProxy("settlements")
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py
+# 🔎 SEARCH: def open_mastery_db(
+# 📆 PATCHED: 2026-02-20 — mastery DB always uses REAL sqlite connection
+# ============================================================================
+
 def open_mastery_db(*, rw=False, **_):
-    if DAL_MODE == "SETUP":
-        return _local_db(LOCAL_MASTERY)
-    if rw:
-        return DALWriteProxy("mastery")
-    return DALReadProxy("mastery")
+    """
+    Mastery DB must ALWAYS be a real sqlite3 connection.
+    • No DAL write proxy
+    • No AlphaX
+    • No LiveCache routing
+    • WAL + busy_timeout + attach-all-local
+    """
+
+    import sqlite3
+
+    # Always open LOCAL mastery_v7.db
+    path = LOCAL_MASTERY
+
+    # READ + WRITE both use the same real connection
+    con = sqlite3.connect(
+        path,
+        timeout=10,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=8000")
+
+    # Attach all four LOCAL DBs for unified view access
+    try:
+        _attach_all_four_local(con)
+    except Exception as e:
+        print(f"[paths][mastery_attach_warn] {e}")
+
+    return con
+
+# === PATCH END ============================================================
+
 
 
 def open_db(family: str, ro=False, rw=False, **_):
