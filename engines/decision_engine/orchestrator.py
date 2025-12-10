@@ -2789,13 +2789,12 @@ _GATE_BUCKET_MIN: int | None = None        # wall-minute bucket
 _GATE_COUNTS: dict[str, int] = {}          # reason -> count
 
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Price reads (AUTOSCALP_DB)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ------------------------------------------------------------------
+# CLEAN VERSION (BUS-driven)
+# ------------------------------------------------------------------
+from engines.bus.bus import BUS
+print(f"[BUS][BOOT] Engines registered: {list(BUS.engines.keys())}")
+print(f"[BUS][BOOT] Strategies registered: {[n for (n, _) in BUS.legacy_strategies]}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # END OF DECIDE ONCE
@@ -3645,197 +3644,51 @@ def start_live_loop(*args, **kwargs):
     global F_ENABLE_STRATS
     F_ENABLE_STRATS = False
 
-    # ------------------------------------------------------------------
-    # 5) MAIN LIVE LOOP — CLEAN VERSION
-    # ------------------------------------------------------------------
-# === PATCH START ============================================================
+# === PATCH START ============================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: "# 5) MAIN LIVE LOOP — CLEAN VERSION"
-# ⛏️ ACTION: Replace the block below that comment with the following:
-# ============================================================================
+# 🔎 SEARCH: "# 4) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY"
+# ⛏️ ACTION: insert BUS startup thread directly above this comment
+# 📆 PATCHED: 2026-02-15 — Start BUS as independent live engine loop
+# =============================================================
 
-    # ------------------------------------------------------------------
-    # 5) MAIN LIVE LOOP — CLEAN VERSION (BUS-driven)
-    # ------------------------------------------------------------------
-    from engines.bus.bus import BUS
+    # --------------------------------------------------------------
+    # START BUS TICKER (dedicated engine loop)
+    # --------------------------------------------------------------
+    try:
+        from engines.bus.bus import BUS
 
-    # The BUS loop **must** be inside start_live_loop(), at this indentation.
-    while True:
-        try:
-            BUS.tick()
-        except Exception as e:
-            print(f"[BUS][ERR] {e}")
-        time.sleep(max(0.5, 1.0 / hz))
+        def _bus_loop():
+            import time
+            print("[BUS] loop started")
+            while True:
+                try:
+                    BUS.tick()
+                except Exception as e:
+                    print(f"[BUS][ERR] {e}")
+                time.sleep(interval)
 
-# === PATCH END ================================================================
+        t = threading.Thread(
+            target=_bus_loop,
+            name="BUSLoop",
+            daemon=True,
+        )
+        t.start()
+        print("[BUS] background ticker started")
 
+    except Exception as e:
+        print(f"[BUS][FATAL] could not start BUS loop: {e}")
+
+# === PATCH END ==============================================
 
 
 
 def run_test_day(run_id: str, seconds: int = 600, hz: int = 4, logger=None) -> None:
-    import engines.config_paths as cp
-    cp.set_db_paths(mode="test", quiet=False)   # force TEST file paths
-    _close_conns()                              # drop any old connections created in other modes
-    from engines.config_paths import bets_db, autoscalp_db
-    if logger: logger(f"[paths] mode={cp.os.environ.get('AUTOSCALP_MODE','(unset)')} "
-                      f"BETS_DB={bets_db()} AUTO_DB={autoscalp_db()}")
-
-    """Compressed session: full-day markets streamed; decisions/hedges operate off the feed."""
-    # Stop-file kill switch (so the UI can ask us to stop safely)
-    stop_flag = os.path.join(os.path.dirname(autoscalp_db()), ".stop_testday")
-    try:
-        if os.path.exists(stop_flag):
-            os.remove(stop_flag)
-    except Exception:
-        pass
-
-    # reset per-run
-    try:
-        reset_for_new_run(run_id, logger=logger)
-    except Exception as e:
-        if logger:
-            logger(f"reset error: {e}")
-
-    run_day, month_index = _start_run_ledger(run_id)
-    if logger:
-        logger(f"run_day={run_day} month={month_index}")
-
-    try:
-        _bootstrap_priors_if_empty()
-        if logger:
-            logger("priors ready for TEST")
-    except Exception as e:
-        if logger:
-            logger(f"prior seed error: {e}")
-
-    # build blueprint + seed + start day streamer
-    now = _dt.utcnow()
-    markets, speed = build_compressed_day(
-        now=now, real_duration_sec=seconds, virtual_span_minutes=300, n_markets=27
-    )
-    _seed_day(markets, speed_min_per_sec=speed)
-    day = TestDayRunner(markets=markets, seconds=seconds, hz=hz, logger=logger)
-    day.start()
-
-    interval = 1.0 / max(1, hz)
-    t0 = time.time()
-    live: Dict[int, Tuple[str, float, int, float, Optional[str], Optional[str], Dict]] = {}
-
-    # One-shot: show which mastery_policy is actually executing
-    try:
-        import engines.mastery.mastery_policy as _mp_dbg
-        if logger:
-            logger(f"[POLICY] using {_mp_dbg.__file__} line={_mp_dbg.propose_trade.__code__.co_firstlineno}")
-    except Exception:
-        pass
-
-    try:
-        while (time.time() - t0) < seconds:
-            # kill switch (safe early exit)
-            if os.path.exists(stop_flag):
-                if logger:
-                    logger("STOP requested — ending TestDay loop")
-                break
-
-            # --- Heartbeat so you can see feed activity every tick
-            try:
-                bdb_dbg = connect_db(ro=True)
-                oc1_total = int(
-                    _q_retry(bdb_dbg, "SELECT COUNT(*) FROM inbound_oc_cache WHERE oc1 IS NOT NULL").fetchone()[0] or 0
-                )
-                recent = int(
-                    _q_retry(bdb_dbg, "SELECT COUNT(*) FROM inbound_oc_cache "
-                        "WHERE oc1 IS NOT NULL AND datetime(COALESCE(last_sync_ts,'')) >= datetime('now','-60 seconds'')"
-                    ).fetchone()[0] or 0
-                )
-                if logger:
-                    logger(f"HB | oc1_total={oc1_total} recent60s={recent}")
-            except Exception as _e:
-                if logger:
-                    logger(f"HB | error: {_e}")
-            finally:
-                try:
-                    bdb_dbg.close()
-                except Exception:
-                    pass
-
-            # --- Decide once
-            try:
-                oid = decide_once(run_id, source_override="TEST", logger=logger)
-
-                if oid is None:
-                    # Always emit a useful reason so stalls are visible
-                    try:
-                        from engines.mastery.context_builder import build_context
-                        ctx_dbg, _m = build_context(source="TEST")
-                        plan_dbg = mp.propose_trade(ctx_dbg)
-                        if plan_dbg.get("enter"):
-                            if logger:
-                                logger(f"DBG would ENTER | dir={plan_dbg.get('direction')} "
-                                       f"n={plan_dbg.get('target_ticks')} why={plan_dbg.get('why','')}")
-                        else:
-                            if logger:
-                                logger(f"NO-TRADE | {plan_dbg.get('why','(no reason)')}")
-                    except Exception as _e:
-                        if logger:
-                            logger(f"NO-TRADE | (debug fail) {_e}")
-                else:
-                    if logger:
-                        logger(f"ENTER order_id={oid}")
-                    con = _auto_conn()  # DO NOT close this singleton
-                    row = _q_retry(con, "SELECT meta_json FROM decisions WHERE order_id=? ORDER BY id DESC LIMIT 1",
-                        (oid,)
-                    ).fetchone()
-                    if row:
-                        meta = json.loads(row["meta_json"])
-                        plan = meta.get("plan", {})
-                        ctx = meta.get("ctx", {})
-                        live[oid] = (
-                            plan.get("direction", "LAY->BACK"),
-                            float(ctx.get("entry_odds", 6.0)) if ctx.get("entry_odds") else 6.0,
-                            int(plan.get("target_ticks") or 1),
-                            float(plan.get("size") or 2.0),
-                            ctx.get("marketId"),
-                            ctx.get("selectionId"),
-                            ctx,
-                        )
-            except Exception as e:
-                import traceback as _tb
-                if logger:
-                    logger(f"decide error: {e} | {_tb.format_exc().splitlines()[-1]}")
-
-            # --- Try to close any live orders
-            to_remove = []
-            for oid, (dir_tag, entry_odds, target_ticks, stake, mid, sid, ctx) in list(live.items()):
-                try:
-                    if check_and_close(oid, dir_tag, entry_odds, target_ticks, stake, mid, sid, ctx):
-                        if logger:
-                            logger(f"MATCH order_id={oid} ticks={target_ticks}")
-                        to_remove.append(oid)
-                except Exception as e:
-                    if logger:
-                        logger(f"close error: {e}")
-            for oid in to_remove:
-                live.pop(oid, None)
-
-            time.sleep(interval)
-    finally:
-        # stop the day and finish ledger/eod
-        try:
-            if os.path.exists(stop_flag):
-                os.remove(stop_flag)
-        except Exception:
-            pass
-        day.stop(join=True)
-        try:
-            day_amount = _sum_pnl_trades_test()
-        except Exception:
-            day_amount = 0.0
-        _end_run_ledger(run_id, amount=day_amount, run_day=run_day, month_index=month_index)
-        _eod_report(run_id, run_day, month_index, logger=logger)
-        if logger:
-            logger(f"day P&L={day_amount:+.2f}")
-        _close_conns()
+    """
+    NO-OP PLACEHOLDER.
+    Legacy TestDay runner is disabled under BUS-mode orchestration.
+    This function intentionally does nothing, preserving API compatibility.
+    """
+    return None
 
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: def _adapt_and_decide(
@@ -3848,28 +3701,8 @@ def _adapt_and_decide(strat, market_ctx: dict | None, runner_ctx: dict | None, l
 
     Returns the strategy's Instruction(s) or None.
     """
-    name = getattr(strat, "name", getattr(strat, "__name__", type(strat).__name__))
-    try:
-        # New family (OOP): StrategyBase.evaluate(market_ctx, runner_ctx)
-        if hasattr(strat, "evaluate") and callable(getattr(strat, "evaluate")):
-            return strat.evaluate(market_ctx or {}, runner_ctx or {})
-
-        # Legacy OOP: .decide(runner_ctx)
-        if hasattr(strat, "decide") and callable(getattr(strat, "decide")):
-            return strat.decide(runner_ctx or {})
-
-        # Function-style strategy: decide(ctx) at module level
-        if callable(strat):
-            return strat(runner_ctx or {})
-
-        if logger:
-            logger(f"[STRAT {name}] decide warn: '{type(strat).__name__}' object is not callable")
-        return None
-    except Exception as e:
-        if logger:
-            logger(f"[STRAT {name}] decide error: {e!s}")
-        return None
-
+    return None
+ 
 # ───────── minute windows & tags ─────────
 _MIN_PRE_START = 60   # start PRE passes at T-60m
 _MIN_PRE_STOP  = 0    # ⬅ change from 5 to 0: stop at the off (T-0)

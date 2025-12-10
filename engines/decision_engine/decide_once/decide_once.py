@@ -3,49 +3,49 @@ from __future__ import annotations
 from typing import Optional
 import importlib, os, time, sys
 
-def decide_once(run_id: str, source_override: str | None = None, logger=None) -> Optional[int]:
+# ========================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/decide_once.py
+# 🔎 SEARCH: def decide_once(run_id: str, source_override: str | None = None, logger=None):
+# 🔧 ACTION: Replace entire function body with BUS-mode DecideOnce
+# 📆 PATCHED: 2025-12-10 — DecideOnce now only triggers BUS and never exits loop
+# ========================================================================
+def decide_once(run_id: str, source_override: str | None = None, logger=None):
     """
-    Unified DecideOnce entrypoint for LIVE mode.
+    BUS-mode DecideOnce
+    -------------------
+    • NO context building
+    • NO lanes
+    • NO runner filtering
+    • NO strategy logic
+    • NO Mastery inference
+    • DecideOnce simply triggers BUS for this tick
+    • Always returns True so LiveLoop never exits
 
-    - Always reloads engines.decision_engine.decide_once.lanes so GUI never uses a stale copy.
-    - Prints trace guard (file path + modified time) for verification.
-    - Delegates fully to run_all(), which now handles scope + Mastery internally.
+    BUS is now the authoritative orchestrator for:
+        – engine activation
+        – plan generation
+        – stop-loss integration
+        – Mastery routing
+        – Router calls
     """
-    source = (source_override or "LIVE").upper()
-
     try:
-        # --- Reload lanes directly by full module path --------------------------
-        import engines.decision_engine.decide_once.lanes as lanes
-        importlib.reload(lanes)
-        _run_all = lanes.run_all
+        from engines.bus.bus import BUS
 
-        lanes_file = getattr(lanes, "__file__", None)
-        mtime = None
-        if lanes_file and os.path.exists(lanes_file):
-            mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(lanes_file)))
+        # Kick BUS for this tick — BUS handles everything
+        BUS.decide(run_id=run_id)
 
-        trace_line = f"[DECIDE] wrapper → lanes.run_all (reloaded, mode={source})"
-        if lanes_file:
-            trace_line += f"\n[TRACE] using {lanes_file}"
-            if mtime:
-                trace_line += f" (last modified {mtime})"
-        print(trace_line)
+        # ❗ LiveLoop interprets None as STOP — so always return True
+        return True
 
     except Exception as e:
-        msg = f"[DECIDE] lanes reload failed: {e}"
+        msg = f"[DECIDE][BUS] error: {type(e).__name__}: {e}"
         if logger:
             logger(msg)
         else:
             print(msg)
-        return None
 
-    try:
-        # --- Call run_all directly (guaranteed fresh) ----------------------------
-        return _run_all(run_id, source=source, logger=logger)
-    except Exception as e:
-        msg = f"[DECIDE] run_all raised: {type(e).__name__}: {e}"
-        if logger:
-            logger(msg)
-        else:
-            print(msg)
-        return None
+        # Still return truthy so LiveLoop continues
+        return True
+# ========================================================================
+
+

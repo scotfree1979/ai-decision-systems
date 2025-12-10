@@ -19,9 +19,26 @@ class DecisionBus:
 
     def __init__(self):
         self.tick_id = 0
-        self.expl = ExploratoryEngine()
-        self.inplay = InPlayEngine()
-        self.risk = RiskEngine()
+
+        # === PATCH START ============================================================
+        # 📍 TARGET: engines/bus/bus.py::DecisionBus.__init__
+        # 📆 PATCHED: 2026-02-20 — Engine + Strategy Binding Layer
+        # ============================================================================
+
+        from engines.bus.engine_registry import ENGINE_REGISTRY
+        from engines.decision_engine.strategies.registry import ORDER as STRATEGY_ORDER
+
+        # Bind engines + strategies
+        self.engines = ENGINE_REGISTRY                # dict[str, EngineInstance]
+        self.legacy_strategies = STRATEGY_ORDER       # list[(name, func)]
+
+        print("[BUS] registered engines:", list(self.engines.keys()))
+        print("[BUS] registered strategies:",
+              [name for (name, _fn) in self.legacy_strategies])
+
+        # === PATCH END ============================================================
+
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -137,65 +154,117 @@ class DecisionBus:
 
             for sid in sids:
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py::DecisionBus.tick
+# 🔎 SEARCH: "# Build per-runner CTX"
+# 📆 PATCHED: 2026-02-20 — CTXv7 merge + Legacy propose_trade + Overwatcher CTX
+# PURPOSE:
+#   • Merge CTXv7 (Mastery canonical context) into BUS ctx
+#   • Restore mp.propose_trade(ctx) for legacy strategies
+#   • Ensure Overwatcher receives correct CTX
+# ============================================================================
+
                 # ---------------------------
-                # Build per-runner CTX
+                # BUILD PER-RUNNER CTX (BUS BASE)
                 # ---------------------------
                 ctx = dict(base_ctx)
                 ctx["marketId"] = mid
                 ctx["selectionId"] = sid
 
-                # Attach latest runner odds + band + fav
+                # BUS layer runner state
                 st = get_market_state(mid) or {}
                 rn = (st.get("runners") or {}).get(sid) or {}
-                ctx["ltp"] = rn.get("px")
+
                 ctx["odds"] = rn.get("px")
+                ctx["ltp"]  = rn.get("px")
                 ctx["band"] = rn.get("band")
                 ctx["is_fav"] = rn.get("is_fav", False)
 
                 # ------------------------------------------------------------------
-                # Compute OC-phase → minutes_to_off (snap) for compatibility
+                # CTXv7 MERGE (safe — no local build_context shadowing)
+                # ------------------------------------------------------------------
+                try:
+                    ctx_v7, _meta = build_context(source="LIVE")   # use module-level import only
+                except Exception:
+                    ctx_v7 = {}
+
+                if ctx_v7:
+                    for k, v in ctx_v7.items():
+                        ctx.setdefault(k, v)
+
+                # ------------------------------------------------------------------
+                # OC-PHASE → minutes_to_off normalisation (BUS-compatible)
                 # ------------------------------------------------------------------
                 oc_phase = int(ctx.get("oc_phase") or 0)
                 if oc_phase <= 0:
                     ctx["minutes_to_off"] = 120
                 elif oc_phase < 7:
-                    # OC 1–6: linearly map to {80,60,40,20,10,5}
                     mto_map = {1: 80, 2: 60, 3: 40, 4: 20, 5: 10, 6: 5}
                     ctx["minutes_to_off"] = mto_map.get(oc_phase, 20)
                 else:
-                    # OC7+ → negative: -1, -2, … capped to -50
-                    offset = min(-(oc_phase - 7), -50)
-                    ctx["minutes_to_off"] = offset
+                    ctx["minutes_to_off"] = min(-(oc_phase - 7), -50)
+
+                # ------------------------------------------------------------------
+                # RESTORE LEGACY PLAN SOURCE — mp.propose_trade(ctx)
+                # (Lanes did this; BUS must do it too)
+                # ------------------------------------------------------------------
+                try:
+                    import engines.mastery.mastery_policy as mp
+                    ctx["_legacy_plan"] = mp.propose_trade(dict(ctx))
+                except Exception:
+                    ctx["_legacy_plan"] = {"enter": False, "why": "legacy-propose-failed"}
+
+                # ------------------------------------------------------------------
+                # OVERWATCHER: attach CTXv7 fields directly
+                # ------------------------------------------------------------------
+                ctx["_ov_ctx"] = dict(ctx)
+
+# === PATCH END ==============================================================
+
 
                 # ================================================================
                 # DEMAND PLANS FROM ALL MSC ENGINES
                 # ================================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py::DecisionBus.tick
+# 📆 PATCHED: 2026-02-20 — Registry-driven MSC Demand
+# ============================================================================
+
                 # 3A) MSC Exploratory
                 try:
-                    p = self.expl.tick(ctx)
-                    if p and p.get("enter"):
-                        p["engine"] = "MSC_EXPLORATORY"
-                        plan_queue.append(("MSC_EXPLORATORY", p, ctx))
+                    eng = self.engines.get("MSC_EXPLORATORY")
+                    if eng:
+                        p = eng.tick(ctx)
+                        if p and p.get("enter"):
+                            p["engine"] = "MSC_EXPLORATORY"
+                            plan_queue.append(("MSC_EXPLORATORY", p, ctx))
                 except Exception:
                     pass
 
                 # 3B) MSC InPlay
                 try:
-                    p = self.inplay.tick(ctx)
-                    if p and p.get("enter"):
-                        p["engine"] = "MSC_INPLAY"
-                        plan_queue.append(("MSC_INPLAY", p, ctx))
+                    eng = self.engines.get("MSC_INPLAY")
+                    if eng:
+                        p = eng.tick(ctx)
+                        if p and p.get("enter"):
+                            p["engine"] = "MSC_INPLAY"
+                            plan_queue.append(("MSC_INPLAY", p, ctx))
                 except Exception:
                     pass
 
                 # 3C) MSC Risk
                 try:
-                    p = self.risk.tick(ctx)
-                    if p and p.get("enter"):
-                        p["engine"] = "MSC_RISK"
-                        plan_queue.append(("MSC_RISK", p, ctx))
+                    eng = self.engines.get("MSC_RISK")
+                    if eng:
+                        p = eng.tick(ctx)
+                        if p and p.get("enter"):
+                            p["engine"] = "MSC_RISK"
+                            plan_queue.append(("MSC_RISK", p, ctx))
                 except Exception:
                     pass
+
+# === PATCH END ============================================================
+
 
                 # ================================================================
                 # DEMAND STOPLOSS PLAN
@@ -207,6 +276,25 @@ class DecisionBus:
                         plan_queue.append(("OVERWATCHER", slp, ctx))
                 except Exception:
                     pass
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py::DecisionBus.tick
+# 🔎 ANCHOR: right before "DEMAND LEGACY STRATEGY PLANS"
+# 📆 PATCHED: 2025-12-10 — Legacy MasteryPolicy propose_trade injection
+
+                # -------------------------------------------------------
+                # Legacy MasteryPolicy (propose_trade) — returns a plan for A-lane style logic
+                # -------------------------------------------------------
+                try:
+                    import engines.mastery.mastery_policy as _mp
+                    legacy_plan = _mp.propose_trade(dict(ctx))
+                    if legacy_plan and legacy_plan.get("enter"):
+                        legacy_plan["engine"] = "LEGACY"
+                        legacy_plan["strategy"] = "PROPOSED"
+                        plan_queue.append(("LEGACY", legacy_plan, ctx))
+                except Exception:
+                    pass
+# === PATCH END ============================================================
+
 
                 # ================================================================
                 # DEMAND LEGACY STRATEGY PLANS
@@ -216,7 +304,13 @@ class DecisionBus:
                 except Exception:
                     STRATEGY_ORDER = []
 
-                for strat_name, strat_fn in STRATEGY_ORDER:
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py::DecisionBus.tick — Legacy demand
+# 📆 PATCHED: 2026-02-20 — Registry-driven Legacy Strategy Demand
+# ============================================================================
+
+                for strat_name, strat_fn in self.legacy_strategies:
+                    # Skip special strategies
                     if strat_name.upper() in ("ALWAYS_ON", "MLM", "L"):
                         continue
                     try:
@@ -227,6 +321,8 @@ class DecisionBus:
                             plan_queue.append(("LEGACY", lp, ctx))
                     except Exception:
                         pass
+
+# === PATCH END ============================================================
 
         # ----------------------------------------------------------------------
         # 4) ENRICH PLANS (MINUTES_TO_OFF, DIRECTION, TICK SNAPPING)
@@ -250,7 +346,7 @@ class DecisionBus:
 
 
                 # --------------------------------------------------------------
-                # Direction enforcement for MSC + Legacy
+                # Direction harmonisation — MSC direction ADVISORY ONLY
                 # --------------------------------------------------------------
                 try:
                     dec = compute_msc_decision(ctx)
@@ -258,14 +354,9 @@ class DecisionBus:
                 except Exception:
                     msc_dir = None
 
-                if eng != "OVERWATCHER" and eng != "MSC_RISK":
-                    # If plan has direction and disagrees with MSC → DROP
-                    if p.get("direction") and msc_dir and p["direction"] != msc_dir:
-                        continue
-                    # If plan missing direction → assign MSC direction
-                    if not p.get("direction") and msc_dir:
-                        p["direction"] = msc_dir
-
+                # Adopt MSC direction only when legacy/engine leaves it empty
+                if not p.get("direction") and msc_dir:
+                    p["direction"] = msc_dir
                 # --------------------------------------------------------------
                 # Snap ticks
                 # --------------------------------------------------------------
@@ -465,6 +556,33 @@ class DecisionBus:
             print(f"[BUS][VIOLATION] missing engine: {plan}")
             return
 
+        # ------------------------------------------------------------------
+        # PRICE NORMALISATION (PX) — derive from plan or ctx if missing
+        # ------------------------------------------------------------------
+        if not plan.get("px"):
+            # Try plan-level fields
+            plan_px = (
+                plan.get("px") or
+                plan.get("price") or
+                plan.get("entry_odds") or
+                plan.get("ltp")
+            )
+
+            # Try CTX-level fields
+            ctx_px = (
+                ctx.get("px") or
+                ctx.get("ltp") or
+                ctx.get("odds")
+            )
+
+            final_px = plan_px or ctx_px
+            if final_px:
+                try:
+                    plan["px"] = float(final_px)
+                except Exception:
+                    pass
+
+        # Final validation
         if plan.get("px") in (None, 0):
             self._tick_missing_ctx.append(f"{engine}:missing-px")
             print(f"[BUS][VIOLATION] missing px: {plan}")
@@ -569,5 +687,6 @@ class DecisionBus:
 
 # Global BUS instance
 BUS = DecisionBus()
+
 
 # === PATCH END ================================================================
