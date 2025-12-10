@@ -2685,6 +2685,8 @@ class PhaseGUI(tk.Tk):
         import os, sys
         mode_now = (self._mode.get() or "learning").lower()
         token = (self._token.get() or "").strip()
+     
+          
         # Initialise BankState once at startup
         try:
             bank_state.init_bank_state()
@@ -4485,10 +4487,7 @@ class PhaseGUI(tk.Tk):
 def main():
     print(f"[GUI] DB_PATH = {DB_PATH}")
     print("[GUI] Start app → choose: Launch TEST or run Step 1.")
-    try:
-        ensure_order_events_triggers()
-    except Exception:
-        pass
+
 
     app = PhaseGUI()
     app.mainloop()

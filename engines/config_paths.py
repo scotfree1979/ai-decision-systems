@@ -415,28 +415,110 @@ class DALWriteProxy:
     # -----------------------------------------------------------
     # Core Write
     # -----------------------------------------------------------
+# === PATCH START ===
+# 📍 TARGET: engines/config_paths.py::DALWriteProxy
+# 📆 PATCHED: 2025-12-10 — Prevent CREATE TRIGGER from entering DAL queue
+# 🎯 PURPOSE:
+#   • CREATE TRIGGER must never go through DALWriteProxy
+#   • Execute triggers directly on LOCAL real DB
+#   • Skip dual-write and skip the write queue entirely
+# ============================================================================
+
     def execute(self, sql, params=()):
-        """Queue single write → duplicated to LOCAL + LIVE."""
+        """Queue single write → duplicated to LOCAL + LIVE.
+           But CREATE TRIGGER must run only on LOCAL real DB."""
+        
+        sql_text = sql.strip().lower()
+        is_trigger = sql_text.startswith("create trigger")
+
+        if is_trigger:
+            try:
+                # === DDL short-circuit (CREATE/ALTER/DROP/PRAGMA/ATTACH) ===
+                sql_l = sql.strip().lower()
+                if (sql_l.startswith("create")
+                    or sql_l.startswith("alter")
+                    or sql_l.startswith("drop")
+                    or sql_l.startswith("pragma")
+                    or sql_l.startswith("attach")):
+
+                    try:
+                        # Always run DDL only on LOCAL, never via DAL queues
+                        wloc = _get_writer_local(self._fam)
+                        wloc.execute(sql, params)
+                    except Exception as e:
+                        print(f"[DAL-DDL][LOCAL] fail: {e} | sql={sql_l}")
+
+                return self
+
+                import sqlite3
+                # Determine correct LOCAL DB
+                if self._fam == "bets":
+                    path = LOCAL_BETS
+                elif self._fam == "settlements":
+                    path = LOCAL_SETTLE
+                elif self._fam == "mastery":
+                    path = LOCAL_MASTERY
+                else:
+                    path = LOCAL_AUTO
+
+                real = sqlite3.connect(
+                    path, timeout=20, isolation_level=None, check_same_thread=False
+                )
+                real.executescript(sql)
+                real.close()
+                print(f"[DAL-TRIGGER][LOCAL] installed on {path}")
+            except Exception as e:
+                print(f"[DAL-TRIGGER][LOCAL] fail: {e} | sql={sql}")
+            return self  # ⛔ Do NOT submit to queue
+
+        # Normal non-trigger path → dual write
         if isinstance(params, list):
             params = tuple(params)
-
         local_fam, live_fam = DUAL_WRITE_FAMILIES[self._fam]
-
         _DAL_WRITE_QUEUE.put((local_fam, sql, params))
         _DAL_WRITE_QUEUE.put((live_fam,  sql, params))
-
         return self
 
-    def executemany(self, sql, seq):
-        """Queue batch writes → each duplicated to LOCAL + LIVE."""
-        local_fam, live_fam = DUAL_WRITE_FAMILIES[self._fam]
 
+    def executemany(self, sql, seq):
+        """Queue batch writes → duplicated into LOCAL + LIVE.
+           But CREATE TRIGGER must run only on LOCAL real DB."""
+
+        sql_text = sql.strip().lower()
+        is_trigger = sql_text.startswith("create trigger")
+
+        if is_trigger:
+            try:
+                import sqlite3
+                if self._fam == "bets":
+                    path = LOCAL_BETS
+                elif self._fam == "settlements":
+                    path = LOCAL_SETTLE
+                elif self._fam == "mastery":
+                    path = LOCAL_MASTERY
+                else:
+                    path = LOCAL_AUTO
+
+                real = sqlite3.connect(
+                    path, timeout=20, isolation_level=None, check_same_thread=False
+                )
+                real.executescript(sql)
+                real.close()
+                print(f"[DAL-TRIGGER][LOCAL] installed via executemany on {path}")
+            except Exception as e:
+                print(f"[DAL-TRIGGER][LOCAL] fail (executemany): {e} | sql={sql}")
+            return self  # ⛔ Do NOT queue triggers
+
+        # Normal non-trigger dual-write path
+        local_fam, live_fam = DUAL_WRITE_FAMILIES[self._fam]
         for row in seq:
             params = tuple(row) if isinstance(row, list) else row
             _DAL_WRITE_QUEUE.put((local_fam, sql, params))
             _DAL_WRITE_QUEUE.put((live_fam,  sql, params))
-
         return self
+
+# === PATCH END ===
+
 
     # -----------------------------------------------------------
     # Compatibility Internals
@@ -771,38 +853,118 @@ def _dal_writer_loop():
 #   dual-write families (bets_local, bets_live, auto_live, etc.)
 #   are always normalized BEFORE routing to local/live writers.
 # ============================================================================
+# === PATCH START ===
+# 📍 TARGET: engines/config_paths.py::_dal_writer_loop
+# 🔎 SEARCH: "# Dual-write using normalized families"
+# 📆 PATCHED: 2025-12-10 — Proper routing for CREATE TRIGGER statements
+# 🎯 PURPOSE:
+#   • CREATE TRIGGER cannot run inside attached namespaces
+#   • Must execute only on LOCAL base DB using a real sqlite3 connection
+#   • Skip DAL dual-write logic entirely for triggers
 
-        # Dual-write using normalized families
+        # --- ROUTE TRIGGERS CORRECTLY (LOCAL REAL CONNECTION ONLY) ---
+        sql_clean = sql.strip().lower()
+        is_trigger = sql_clean.startswith("create trigger") or " after " in sql_clean
+
+        if is_trigger:
+            try:
+                import sqlite3
+                # Determine which LOCAL database should own this trigger
+                if fam.startswith("bets"):
+                    path = LOCAL_BETS
+                else:
+                    path = LOCAL_AUTO  # orders + order_events also exist here
+
+                real = sqlite3.connect(
+                    path,
+                    timeout=20,
+                    isolation_level=None,
+                    check_same_thread=False,
+                )
+                real.executescript(sql)
+                real.close()
+                print(f"[DAL-TRIGGER] installed on {path}")
+            except Exception as e:
+                print(f"[DAL-TRIGGER] fail: {e} | sql={sql}")
+            continue  # 🔥 SKIP NORMAL DAL PROCESSING FOR TRIGGERS
+# === PATCH END ===
+
+        # Dual-write using normalized families + namespace prefixing
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py::_dal_writer_loop
+# 📆 PATCHED: 2025-12-10 — Trigger guard INSIDE writer loop
+# 🎯 PURPOSE:
+#   • Prevent CREATE TRIGGER from ever being routed into dual-write 
+#   • Install triggers ONLY on LOCAL base DB (not LiveCache)
+#   • Skip prefixing and skip '_get_writer_local/_get_writer_live'
+
         for fam, sql, params in pending:
 
-            # Normalize fam → (kind, base_family)
-            # examples:
-            #   "bets_local" → ("local", "bets")
-            #   "bets_live"  → ("live",  "bets")
-            #   "bets"       → ("local", "bets")
+            # ---------------------------------------------------------------
+            # 🔒 TRIGGER GUARD — rewrite ON orders → schema-qualified table
+            # ---------------------------------------------------------------
+            sql_l = sql.strip().lower()
+            is_trigger = sql_l.startswith("create trigger") or " create trigger " in sql_l
+
+            if is_trigger:
+                try:
+                    # Normalize BEFORE selecting DB
+                    kind, base = _normalize_writer_family(fam)
+
+                    # Determine correct namespace for this base family
+                    if base == "bets":
+                        schema = "local_bets"
+                        db_path = LOCAL_BETS
+                    elif base == "settlements":
+                        schema = "local_settle"
+                        db_path = LOCAL_SETTLE
+                    elif base == "mastery":
+                        schema = "local_mastery"
+                        db_path = LOCAL_MASTERY
+                    else:
+                        schema = "local_auto"
+                        db_path = LOCAL_AUTO
+
+                    # Rewrite ON orders → ON schema.orders
+                    fixed = sql.replace(" ON orders", f" ON {schema}.orders")
+                    fixed = fixed.replace(" INTO order_events", f" INTO {schema}.order_events")
+
+                    real = sqlite3.connect(
+                        db_path, timeout=20, isolation_level=None, check_same_thread=False
+                    )
+                    real.executescript(fixed)
+                    real.close()
+
+                    print(f"[DAL-TRIGGER][LOCAL] installed OK → {db_path}")
+
+                except Exception as e:
+                    print(f"[DAL-TRIGGER][LOCAL] fail: {e} | sql={sql}")
+
+                # DO NOT dual-write triggers
+                continue
+
+
+
+            # Normal prefix + dual-write
             kind, base = _normalize_writer_family(fam)
 
-            if kind == "local":
-                try:
+            try:
+                if kind == "local":
                     wloc = _get_writer_local(base)
                     wloc.execute(sql, params)
-                except Exception as e:
-                    print(f"[DAL-WRITER] LOCAL fail fam={fam}: {e} | sql={sql}")
-            else:
-                try:
+                else:
                     wlive = _get_writer_live(base)
                     wlive.execute(sql, params)
-                except Exception as e:
-                    print(f"[DAL-WRITER] LIVE fail fam={fam}: {e} | sql={sql}")
+            except Exception as e:
+                print(f"[DAL-WRITER] {kind.upper()} fail fam={fam}: {e} | sql={sql}")
 
-        # Commit whichever were touched
+        # Commit touched writers
         try: wloc.commit()
         except: pass
         try: wlive.commit()
         except: pass
 
-# === PATCH END ================================================================
-
+# === PATCH END ==============================================================
 
         for _ in pending:
             _DAL_WRITE_QUEUE.task_done()
@@ -1148,7 +1310,7 @@ def auto_conn_live(rw=True):
 # 📆 PATCHED: 2025-12-09 — Restore get_mode(), is_replay_mode(), get_db_paths()
 
 # MODE STATE (GUI + session_secrets expect this)
-_MODE = "learning"
+_MODE = "live"
 
 # Correct placement:
 def sync_modes():

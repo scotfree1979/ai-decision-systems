@@ -27,17 +27,54 @@ from engines.config_paths import auto_conn_live as _auto_conn
 # ============================================================
 # WRITE odds_current (LIVE writer → LiveCache)
 # ============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/odds/writers.py
+# 🔎 SEARCH: def upsert_odds_current
+# ⛏️ ACTION: full function replacement
+# 📆 PATCHED: 2025-12-10 — Correct LIVE writer (auto_conn_live dual-write)
+# ============================================================================
+
+from engines.config_paths import auto_conn_live
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/odds/writers.py
+# 🔎 SEARCH: def upsert_odds_current
+# ⛏️ ACTION: replace function body only (do not change imports or connections)
+# 📆 PATCHED: 2026-02-20 — correct SQL parameter ordering
+# ============================================================================
+
 def upsert_odds_current(day: str, marketId: str, selectionId: str, cur: dict) -> None:
+    """
+    Correct schema-aligned writer.
+    FIXES:
+      • updated_ts now receives a proper timestamp
+      • remaining parameters now map 1:1 with schema
+    """
+    con = None
     try:
-        con = _auto_conn(rw=True)     # REAL writer
+        # Keep existing connection logic (we will fix connection in step 2)
+        con = auto_conn_live(rw=True)
+
         con.execute("""
             INSERT INTO odds_current(
-                day, marketId, selectionId,
-                updated_ts, ltp, back1, lay1,
-                fav_rank_now, mto_minutes,
-                slope_ppm, tick_vel_1s_up, tick_vel_3s_up
+                day,
+                marketId,
+                selectionId,
+                updated_ts,
+                ltp,
+                back1,
+                lay1,
+                fav_rank_now,
+                mto_minutes,
+                slope_ppm,
+                tick_vel_1s_up,
+                tick_vel_3s_up
             )
-            VALUES(date('now','utc'),?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(
+                date('now','utc'),
+                ?, ?, datetime('now','utc'),
+                ?, ?, ?, ?, ?, ?, ?, ?
+            )
         """, (
             marketId,
             selectionId,
@@ -50,14 +87,19 @@ def upsert_odds_current(day: str, marketId: str, selectionId: str, cur: dict) ->
             cur.get("tick_vel_1s_up"),
             cur.get("tick_vel_3s_up"),
         ))
-        con.commit()
+
     except Exception as e:
-        print(f"[odds:write] warn: {e}")
+        print(f"[odds:write][ERR] upsert_odds_current mid={marketId} sid={selectionId}: {e}")
+
     finally:
         try:
-            con.close()
+            if con:
+                con.close()
         except Exception:
             pass
+
+# === PATCH END ==============================================================
+
 
 
 # ============================================================

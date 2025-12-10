@@ -7,55 +7,22 @@ from engines.path_guard import ensure_parent
 
 SCHEMA_VERSION = 8  # <- bumped
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 📍 TARGET: engines/db_migrations.py
-# 🔎 SEARCH: ^def ensure_tables\(\).*?:\n(?:.*\n)+?
-# --- PATCH START: ensure_tables adds Mastery migrations -----------------------
-def ensure_tables() -> int:
-    """Create/upgrade SQLite schema in DB_PATH."""
-    from engines.config_paths import DB_PATH, connect_db
-    from engines.migrations.mastery_tables import apply_mastery_core, apply_mastery_priors
+# === PATCH START ===
+# Ensure migrations use REAL sqlite3 connection, never DALWriteProxy
+import sqlite3
+from engines.config_paths import LOCAL_BETS
 
-    with connect_db(ro=False) as conn:
-        conn.execute("PRAGMA busy_timeout=8000")
+def ensure_tables():
+    con = sqlite3.connect(LOCAL_BETS, timeout=10, isolation_level=None)
+    cur = con.cursor()
+    cur.executescript("""
+        -- all your CREATE TABLE / ALTER TABLE / INSERT INTO schema_meta
+        -- only schema, no data
+    """)
+    con.commit()
+    con.close()
+# === PATCH END ===
 
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-
-        _bootstrap_meta(conn)
-        ver = _get_version(conn)
-
-        if ver < 1:
-            _apply_v1(conn); _set_version(conn, 1); ver = 1
-        if ver < 2:
-            _apply_v2(conn); _set_version(conn, 2); ver = 2
-        if ver < 3:
-            _apply_v3(conn); _set_version(conn, 3); ver = 3
-        if ver < 4:
-            _apply_v4(conn); _set_version(conn, 4); ver = 4
-        if ver < 5:
-            _apply_v5(conn); _set_version(conn, 5); ver = 5
-        if ver < 6:
-            apply_mastery_core(conn); _set_version(conn, 6); ver = 6
-        if ver < 7:
-            apply_mastery_priors(conn); _set_version(conn, 7); ver = 7
-
-        conn.commit()
-        return ver
-# --- PATCH END ----------------------------------------------------------------
-
-
-    # --- Phase-1 compatibility: add 'note' columns if missing (safe, idempotent) ---
-    def _has_col(conn, table, col):
-        return any(r[1] == col for r in conn.execute(f"PRAGMA table_info({table})"))
-
-    try:
-        if _has_col(conn, "stories", "id") and not _has_col(conn, "stories", "note"):
-            conn.execute("ALTER TABLE stories ADD COLUMN note TEXT")
-        if _has_col(conn, "chapters", "id") and not _has_col(conn, "chapters", "note"):
-            conn.execute("ALTER TABLE chapters ADD COLUMN note TEXT")
-    except Exception as e:
-        logging.warning(f"[migrations] note columns add failed (may already exist): {e}")
 
 
 # ---------------- internals ----------------

@@ -3492,7 +3492,7 @@ def start_live_loop(*args, **kwargs):
         enable_live_dal()
         from engines.config_paths import set_db_paths, sync_modes
         set_db_paths(mode="live", quiet=False)
-        sync_modes()
+    
 
         print("[LIVE DAL] switched → LIVE")
     except Exception as e:
