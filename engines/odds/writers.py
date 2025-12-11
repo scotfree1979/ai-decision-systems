@@ -27,33 +27,28 @@ from engines.config_paths import auto_conn_live as _auto_conn
 # ============================================================
 # WRITE odds_current (LIVE writer → LiveCache)
 # ============================================================
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/odds/writers.py
 # 🔎 SEARCH: def upsert_odds_current
 # ⛏️ ACTION: full function replacement
-# 📆 PATCHED: 2025-12-10 — Correct LIVE writer (auto_conn_live dual-write)
+# 📆 PATCHED: 2026-02-20 — LOCAL writer (restore legacy odds_current behaviour)
 # ============================================================================
 
-from engines.config_paths import auto_conn_live
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/odds/writers.py
-# 🔎 SEARCH: def upsert_odds_current
-# ⛏️ ACTION: replace function body only (do not change imports or connections)
-# 📆 PATCHED: 2026-02-20 — correct SQL parameter ordering
-# ============================================================================
+from engines.config_paths import open_auto_db   # <-- LOCAL database writer
 
 def upsert_odds_current(day: str, marketId: str, selectionId: str, cur: dict) -> None:
     """
-    Correct schema-aligned writer.
-    FIXES:
-      • updated_ts now receives a proper timestamp
-      • remaining parameters now map 1:1 with schema
+    LOCAL-ONLY odds_current writer.
+    BUS, Scope, MarketMonitor, CTXv7 all read from autoscalp_gui.db.
+    OddsService MUST therefore write into LOCAL autoscalp_gui.db to keep
+    the decision pipeline alive.
     """
     con = None
     try:
-        # Keep existing connection logic (we will fix connection in step 2)
-        con = auto_conn_live(rw=True)
+        # LOCAL direct write — absolutely NOT auto_conn_live
+        con = open_auto_db(rw=True)
 
         con.execute("""
             INSERT INTO odds_current(
@@ -88,6 +83,8 @@ def upsert_odds_current(day: str, marketId: str, selectionId: str, cur: dict) ->
             cur.get("tick_vel_3s_up"),
         ))
 
+        con.commit()
+
     except Exception as e:
         print(f"[odds:write][ERR] upsert_odds_current mid={marketId} sid={selectionId}: {e}")
 
@@ -101,14 +98,26 @@ def upsert_odds_current(day: str, marketId: str, selectionId: str, cur: dict) ->
 # === PATCH END ==============================================================
 
 
+# === PATCH END ==============================================================
+
+
 
 # ============================================================
 # WRITE odds_snapshots
 # ============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/odds/writers.py
+# 🔎 SEARCH: def append_snapshot
+# ⛏️ ACTION: replace writer connection
+# 📆 PATCHED: 2026-02-20 — LOCAL snapshot writer
+# ============================================================================
+
+from engines.config_paths import open_auto_db
+
 def append_snapshot(marketId: str, selectionId: str, snap: Dict[str,Any]) -> None:
     try:
-        con = _auto_conn(rw=True)
-        _q(con, """
+        con = open_auto_db(rw=True)   # LOCAL writer
+        con.execute("""
           INSERT INTO odds_snapshots(
             ts,marketId,selectionId,ltp,back1,lay1,slope_ppm,
             tick_vel_1s_up,tick_vel_3s_up,fav_rank_now,fav_rank_30s,
@@ -116,21 +125,27 @@ def append_snapshot(marketId: str, selectionId: str, snap: Dict[str,Any]) -> Non
           )
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            _utcnow(), marketId, selectionId,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            marketId, selectionId,
             snap.get("ltp"), snap.get("back1"), snap.get("lay1"),
             snap.get("slope_ppm"), snap.get("tick_vel_1s_up"),
             snap.get("tick_vel_3s_up"), snap.get("fav_rank_now"),
             snap.get("fav_rank_30s"), snap.get("mto_minutes"),
-            snap.get("source")
+            snap.get("source"),
         ))
         con.commit()
+
     except Exception as e:
         print(f"[odds:snapshot] warn: {e}")
+
     finally:
         try:
             con.close()
-        except Exception:
+        except:
             pass
+
+# === PATCH END ==============================================================
+
 
 
 # ============================================================

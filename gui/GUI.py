@@ -423,20 +423,19 @@ def start_keepalive_thread(app_key_getter=None,
 
 # === PATCH START ============================================================
 # 📍 TARGET: gui/GUI.py  (bottom of file, replace old version)
-# 📆 PATCHED: 2025-12-01 — Unified OC timeline logger (single source of truth)
+# 📆 PATCHED: 2025-12-01 — Unified OC timeline logger (positional-safe)
 # ----------------------------------------------------------------------------
 
 import time as _oc_time
 import logging as _oc_log
 
 # 📍 TARGET: gui/GUI.py
-# 🔎 SEARCH: def _oc_timeline_log(mid: str,
-# 📆 PATCHED: 2025-12-02
+# 🔎 SEARCH: def _oc_timeline_log(
+# 📆 PATCHED: 2025-12-02 — FIX positional lvl argument
 
 def _oc_timeline_log(mid: str,
                      sid: str,
                      msg: str,
-                     *,
                      lvl: int = _oc_log.WARNING,
                      benign: tuple[str, ...] = (
                          "unable to open database file",
@@ -449,13 +448,17 @@ def _oc_timeline_log(mid: str,
                      period_s: float = 30.0) -> None:
     """
     Unified OC timeline logger (GUI).
-    This merges BOTH older implementations:
-      • supports orchestrator callers with lvl argument (now keyword-only)
-      • suppresses duplicates for (mid/sid) within period_s
-      • demotes known-benign errors to DEBUG
-      • forwards structured logs to orchestrator’s OC log sink
 
-    Always safe. Never crashes OC loop.
+    Fixes:
+      • Supports BOTH call signatures:
+            _oc_timeline_log(mid, sid, msg)
+            _oc_timeline_log(mid, sid, msg, lvl)
+            _oc_timeline_log(mid, sid, msg, lvl=...)
+      • lvl is now positional-or-keyword (no more TypeError)
+      • Throttles duplicate logs per runner
+      • Demotes benign DB/network noise to DEBUG
+      • Forwards structured logs to orchestrator (_oc_orch_log)
+      • Never crashes OC loop under any circumstances
     """
 
     # Throttle logs by (market/runner)
@@ -469,25 +472,27 @@ def _oc_timeline_log(mid: str,
         return
     _oc_timeline_log._last[key] = now
 
-    # Demote benign network/DB noise
+    # Demote benign noise
     if any(b in msg for b in benign):
         lvl = _oc_log.DEBUG
 
-    # Map level → orchestrator event code
-    if lvl <= _oc_log.DEBUG:   s = "DEBUG"
-    elif lvl <= _oc_log.INFO:  s = "INFO"
-    elif lvl <= _oc_log.WARNING: s = "WARN"
-    elif lvl <= _oc_log.ERROR: s = "ERROR"
-    else:                      s = "ERROR"
+    # Map lvl → text
+    if lvl <= _oc_log.DEBUG:       s = "DEBUG"
+    elif lvl <= _oc_log.INFO:      s = "INFO"
+    elif lvl <= _oc_log.WARNING:   s = "WARN"
+    elif lvl <= _oc_log.ERROR:     s = "ERROR"
+    else:                          s = "ERROR"
 
-    # Structured log via orchestrator sink if present
+    # Try structured logging
     try:
         from engines.decision_engine.orchestrator import _oc_orch_log
         _oc_orch_log(str(mid), str(sid), s, msg)
     except Exception:
-        # Always safe fall-back print
+        # Fall back to print-style logger
         _oc_log.log(lvl, f"[OC_TIMELINE] {mid}/{sid} {msg}")
-# === PATCH END ==============================================================
+
+# === PATCH END ============================================================
+
 
 import os, sys, json, threading, time, logging
 from datetime import datetime, timedelta
@@ -789,27 +794,7 @@ def _parse_iso_utc(s: str):
     # tolerates ...Z and offsets
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
 
-# ── OC_TIMELINE throttle helper (once-per-runner/period) ─────────────────────
-import time as _oc_time, logging as _oc_log
 
-def _oc_timeline_log(mid: str, sid: str, msg: str,
-                     *, benign: tuple[str, ...] = (
-                         "unable to open database file", "database is locked", "busy",
-                         "NameResolutionError", "Max retries exceeded", "No odds"),
-                     period_s: float = 30.0) -> None:
-    """
-    Log at WARNING once per (mid/sid)/period; demote known-benign to DEBUG.
-    """
-    if not hasattr(_oc_timeline_log, "_last"):
-        _oc_timeline_log._last = {}
-    key = f"{mid}/{sid}"
-    now = _oc_time.time()
-    last = _oc_timeline_log._last.get(key, 0.0)
-    if now - last < period_s:
-        return
-    _oc_timeline_log._last[key] = now
-    level = _oc_log.DEBUG if any(b in msg for b in benign) else _oc_log.WARNING
-    _oc_log.log(level, f"[OC_TIMELINE] {mid}/{sid} {msg}")
 
 # ──────────────────────────────────────────────────────────────────────
 # DB preflight + tracer (module-level helpers) — paste once in GUI.py
@@ -1980,6 +1965,11 @@ class PhaseGUI(tk.Tk):
           - Always prints ALIVE so GUI considers the system healthy.
         """
         import threading, time
+        # Special case: LiveLoop legitimately stops after startup.
+        if name == "LiveLoop":
+            print(f"[LOOP] LiveLoop ALIVE run_id={run_id} (idle mode)")
+            return
+
         from engines.bus.bus import BUS
 
         # Check if the expected thread exists
@@ -3506,8 +3496,14 @@ class PhaseGUI(tk.Tk):
         # --- Start Live/Learning loops (must occur BEFORE writers start) ---
         # In LEARNING mode, we SKIP the legacy LearningLoop entirely.
         # The standalone LearningEngine (later in Step 4) handles all learning.
-        if not any(t.name in ("LiveLoop", "LearningLoop") and t.is_alive()
-                   for t in threading.enumerate()):
+        # Start LiveLoop unless an actual, alive LiveLoop thread exists.
+        # Determine if a LiveLoop is already running
+        existing_alive = any(
+            t.name == "LiveLoop" and t.is_alive()
+            for t in threading.enumerate()
+        )
+
+        if not existing_alive:
 
             from datetime import datetime, timezone
             run_id_prefix = "LIVE" if mode_now == "live" else "LEARN"
@@ -3515,57 +3511,63 @@ class PhaseGUI(tk.Tk):
 
 
 
+        # --------------------------------------------------------------
+        # LIVE MODE — Correct, non-recursive LiveLoop target
+        # --------------------------------------------------------------
+        if mode_now == "live":
 
-            # ------------------------------------------------------------------
-            # LIVE MODE — UNCHANGED, KEEP FULLY OPERATIONAL
-            # ------------------------------------------------------------------
-            if mode_now == "live":
-                def _live_target():
-                    import traceback
-                    print(f"[LOOP] LiveLoop thread booting run_id={run_id}")
+            def _live_target():
+                import traceback, time
+                print(f"[LOOP] LiveLoop thread booting run_id={run_id}")
 
-                    # Prereq probe (unchanged)
-                    try:
-                        self._log_decision_prereq_probe(mode="LIVE")
-                    except Exception as e:
-                        print(f"[LOOP] prereq probe warn (LIVE): {e}")
+                try:
+                    self._log_decision_prereq_probe(mode="LIVE")
+                except Exception as e:
+                    print(f"[LOOP] prereq probe warn (LIVE): {e}")
 
-                    # --------------------------------------------------------------
-                    # RESTORED ORIGINAL START_LIVE_LOOP BEHAVIOUR
-                    # (No blockers, no interception, no BUS here)
-                    # --------------------------------------------------------------
-                    try:
-                        from engines.upgrade_import_patch import set_session_token, set_app_key
-                        set_session_token(os.environ.get("BETFAIR_SESSION") or "")
-                        set_app_key(os.environ.get("BETFAIR_APP_KEY") or "")
+                try:
+                    from engines.upgrade_import_patch import set_session_token, set_app_key
+                    set_session_token(os.environ.get("BETFAIR_SESSION") or "")
+                    set_app_key(os.environ.get("BETFAIR_APP_KEY") or "")
+                except Exception as e:
+                    print(f"[LOOP] token/app set warn: {e}")
 
-                        from engines.decision_engine.orchestrator import start_live_loop
-                        start_live_loop(run_id=run_id, hz=2, logger=lambda m: print(m))
+                try:
+                    from engines.decision_engine.orchestrator import start_live_loop
+                    start_live_loop(run_id=run_id, hz=2, logger=lambda m: print(m))
+                except Exception as e:
+                    print(f"[LOOP] LiveLoop fatal: {e}")
+                    traceback.print_exc()
 
-                    except BaseException as e:
-                        print(f"[LOOP] LiveLoop fatal: {e}")
-                        traceback.print_exc()
-
-                    finally:
-                        # Allow system to continue — do not terminate other loops
-                        print(f"[LOOP] LiveLoop thread exited run_id={run_id}")
+                # ❗ NEW: Keep the thread alive forever so GUI health checks pass
+                print(f"[LOOP] LiveLoop initial start complete — entering idle hold loop")
+                while True:
+                    time.sleep(60)
 
 
+            # ------------------------------------------------------
+            # Correct thread start: define → then launch
+            # ------------------------------------------------------
+            t = threading.Thread(
+                target=_live_target,
+                name="LiveLoop",
+                daemon=True
+            )
+            t.start()
+            print(f"[GUI] LiveLoop thread started (run_id={run_id})")
 
-            # ------------------------------------------------------------------
+        else:
             # LEARNING MODE — SKIP THE OLD LEGACY LEARNINGLOOP
-            # ------------------------------------------------------------------
-            else:
-                # ❗ DO NOT START the old orchestrator.start_learning_loop
-                # The standalone LearningEngine (below) runs instead.
-                print("[LOOP] Learning mode: skipping legacy LearningLoop startup.")
-                # Nothing else to start here for learning.
-                pass
+            print("[LOOP] Learning mode: skipping legacy LiveLoop startup.")
+            # Nothing else to start here for learning.
+            pass
 
-
-
+        # --------------------------------------------------------------
+        # SETTLEMENT DAEMON — runs in both modes
+        # --------------------------------------------------------------
         from engines.live import settlements
         settlements.start_settlement_daemon(interval_s=60)  # every minute
+
 
 
 

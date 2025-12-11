@@ -3540,11 +3540,11 @@ def start_live_loop(*args, **kwargs):
         print("[DAL] writer-start failure:", e)
 
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: "# 3B) INITIALISE BANKSTATE (STATIC ENGINE POTS)"
-# 📆 PATCHED: 2026-02-12 — BudgetManager first, THEN BankState
-# ============================================================================
+    # === PATCH START ============================================================
+    # 📍 TARGET: engines/decision_engine/orchestrator.py
+    # 🔎 SEARCH: "# 3B) INITIALISE BANKSTATE (STATIC ENGINE POTS)"
+    # 📆 PATCHED: 2026-02-12 — BudgetManager first, THEN BankState
+    # ============================================================================
 
     # ------------------------------------------------------------------
     # 3B) INITIALISE BUDGET MANAGER → THEN BANKSTATE
@@ -3573,7 +3573,7 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[INIT] BudgetManager/BankState setup warn: {e}")
 
-# === PATCH END ==============================================================
+    # === PATCH END ==============================================================
 
 
 
@@ -3618,13 +3618,13 @@ def start_live_loop(*args, **kwargs):
         print("[CloudKeeper] LiveCache retention done (5-day window)")
     except Exception as e:
         print(f"[CloudKeeper] warn: {e}")
-# === END OF PATCH INSERT =========================================
+    # === END OF PATCH INSERT =========================================
 
  
 
 
     # ------------------------------------------------------------------
-    # 4) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY
+    # 6) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY
     # ------------------------------------------------------------------
     try:
         from engines.blueprint.runtime import load_blueprints
@@ -3644,21 +3644,53 @@ def start_live_loop(*args, **kwargs):
     global F_ENABLE_STRATS
     F_ENABLE_STRATS = False
 
-# === PATCH START ============================================
+# === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: "# 4) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY"
-# ⛏️ ACTION: insert BUS startup thread directly above this comment
-# 📆 PATCHED: 2026-02-15 — Start BUS as independent live engine loop
-# =============================================================
+# 🔎 SEARCH: "# 7) START BUS TICKER"
+# 📆 PATCHED: 2026-02-15 — MarketMonitor prime before BUS ticker
+# PURPOSE:
+#   • LiveLoop/BUS must never see stale runner PX
+#   • Ensures MarketMonitor.refresh() is called every cycle
+#   • Fixes CTX px=None, band=None issues
+# ============================================================================
 
     # --------------------------------------------------------------
-    # START BUS TICKER (dedicated engine loop)
+    # 6B) MARKET MONITOR PRIMER (runs once before BUS starts)
+    # --------------------------------------------------------------
+    try:
+        from engines.market_monitor.monitor import refresh as mm_refresh
+        from engines.decision_engine.decide_once.scope import build_and_maintain_scope
+
+        scope0 = build_and_maintain_scope() or {}
+        mids0  = [m["marketId"] for m in scope0.get("markets", []) if isinstance(m, dict)]
+
+        if mids0:
+            print(f"[ORCH] priming MarketMonitor for {len(mids0)} markets…")
+            mm_refresh(mids0, max_runners=20)
+            print("[ORCH] MarketMonitor primed successfully")
+        else:
+            print("[ORCH] no mids found at bootstrap, MarketMonitor skipped")
+
+    except Exception as e:
+        print(f"[ORCH][WARN] MarketMonitor bootstrap failed: {e}")
+
+# === PATCH END ==============================================================
+
+
+# === PATCH START ============================================
+# 📍 TARGET: engines/decision_engine/orchestrator.py
+# 🔎 SEARCH: "# 7) START BUS TICKER"
+# 📆 PATCHED: 2026-02-15 — Final BUS starter (correct indentation)
+# ============================================================
+
+    # --------------------------------------------------------------
+    # 7) START BUS TICKER (canonical correct placement)
     # --------------------------------------------------------------
     try:
         from engines.bus.bus import BUS
+        import threading, time
 
         def _bus_loop():
-            import time
             print("[BUS] loop started")
             while True:
                 try:
@@ -3670,7 +3702,7 @@ def start_live_loop(*args, **kwargs):
         t = threading.Thread(
             target=_bus_loop,
             name="BUSLoop",
-            daemon=True,
+            daemon=True
         )
         t.start()
         print("[BUS] background ticker started")
@@ -3678,7 +3710,8 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[BUS][FATAL] could not start BUS loop: {e}")
 
-# === PATCH END ==============================================
+
+
 
 
 

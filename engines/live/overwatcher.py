@@ -2,6 +2,8 @@
 # engines/live/overwatcher.py
 import time, threading, sqlite3, json
 from datetime import datetime, timezone
+from engines.config_paths import open_auto_db
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
 # 🔎 SEARCH: from engines.config_paths import auto_conn, q_retry as _q, autoscalp_db
@@ -1479,7 +1481,7 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
 
             try:
                 # DALReadProxy does NOT support `with`, so use explicit open/close
-                conn = auto_conn(rw=False)
+                conn = open_auto_db(rw=False)
 
                 # Core guardian / liability / micro-scalper diagnostics
                 _evaluate_market_guardian(conn)
