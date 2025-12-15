@@ -95,17 +95,65 @@ def set_db_paths(
     return BETS_DB_PATH, AUTOSCALP_DB_PATH
 
 # === PATCH END ==============================================================
+# ===============================================================
+# 🔒 ATTACH INTENT MAP (authoritative)
+# ===============================================================
 
+_ATTACH_INTENT_MAP = {
+    # decision / live loop
+    "scope":        {"auto"},
+    "market_monitor": {"auto"},
+    "bus":          {"auto"},
+    "context":      {"auto"},
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py (mode helpers)
-# 🔎 SEARCH: def get_mode()
-# 📆 PATCHED: 2025-12-09 — synchronize DAL_MODE with _MODE
-# ============================================================================
+    # execution
+    "live_router":  {"auto", "bets"},
+    "overwatcher":  {"auto", "bets"},
 
+    # settlement
+    "settlements":  {"auto", "settlements"},
 
+    # learning
+    "mastery":      {"auto", "mastery"},
 
-# === PATCH END ============================================================
+    # ui
+    "dashboard":    {"auto", "bets"},
+}
+
+import inspect
+
+def _infer_attach_intent() -> set[str]:
+    """
+    Infer attach intent based on calling module.
+    Returns a set of DB families required.
+    Defaults to {'auto'}.
+    """
+    for frame in inspect.stack()[2:]:
+        mod = frame.frame.f_globals.get("__name__", "")
+        if not mod:
+            continue
+
+        if "scope" in mod:
+            return _ATTACH_INTENT_MAP["scope"]
+        if "market_monitor" in mod:
+            return _ATTACH_INTENT_MAP["market_monitor"]
+        if "bus" in mod:
+            return _ATTACH_INTENT_MAP["bus"]
+        if "context_builder" in mod:
+            return _ATTACH_INTENT_MAP["context"]
+        if "live_router" in mod:
+            return _ATTACH_INTENT_MAP["live_router"]
+        if "overwatcher" in mod:
+            return _ATTACH_INTENT_MAP["overwatcher"]
+        if "settlements" in mod:
+            return _ATTACH_INTENT_MAP["settlements"]
+        if "mastery" in mod:
+            return _ATTACH_INTENT_MAP["mastery"]
+        if "dashboard" in mod:
+            return _ATTACH_INTENT_MAP["dashboard"]
+
+    # safest default
+    return {"auto"}
 
 
 # ===============================================================
@@ -283,21 +331,25 @@ _DAL_READ_QUEUE = queue.Queue(maxsize=200000)
 _PERSISTENT_READERS = {}
 _PERSISTENT_READ_LOCK = threading.Lock()
 
-def _get_reader(fam: str) -> sqlite3.Connection:
-    """
-    Persistent pooled reader for each DB family.
-    Avoids repeated sqlite3.connect() calls and prevents FD churn.
-    Readers are LOCAL dbs (mirrored) and are READ ONLY.
-    """
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py::_get_reader
+# 📆 PATCHED: 2025-12-12 — SINGLE persistent read-only connection per family
+# PURPOSE:
+#   • Eliminate sqlite connect storms
+#   • Eliminate ATTACH during live ticks
+#   • Stabilise DALReadProxy
+# ============================================================================
+
+def _get_reader(fam: str):
     with _PERSISTENT_READ_LOCK:
         if fam in _PERSISTENT_READERS:
             return _PERSISTENT_READERS[fam]
 
         path = {
-            "auto": LOCAL_AUTO,
-            "bets": LOCAL_BETS,
+            "auto":        LOCAL_AUTO,
+            "bets":        LOCAL_BETS,
             "settlements": LOCAL_SETTLE,
-            "mastery": LOCAL_MASTERY,
+            "mastery":     LOCAL_MASTERY,
         }[fam]
 
         con = sqlite3.connect(
@@ -309,7 +361,10 @@ def _get_reader(fam: str) -> sqlite3.Connection:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA busy_timeout=8000")
-        _attach_all_four_local(con)   # always attach LOCAL families
+
+        # ❗ ATTACH ONLY IN SETUP
+        if DAL_MODE != "LIVE":
+            _attach_all_four_local(con)
 
         _PERSISTENT_READERS[fam] = con
         return con
@@ -833,66 +888,148 @@ if not any(t.name == "DAL-Writer" for t in threading.enumerate()):
     print("[DAL] Writer thread ACTIVE")
 
 # ===============================================================
-# 🔧 ATTACH-ALL-FOUR HELPER
+# 🧩 PHASE-2 ATTACH ORCHESTRATOR (IDLE-WINDOW BATCHED)
 # ===============================================================
-# === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py::_attach_all_four_local
-# 📆 PATCHED: 2026-02-15 — Attach Orchestrator (Global Lock + Attach Map)
-# 🧠 PURPOSE:
-#   • Prevent ALL attach-related DB errors
-#   • Ensure SQLite never receives concurrent ATTACH requests
-#   • Reduce attach frequency: attach ONLY missing families
-#   • Maintain SAME function name for full compatibility
-#   • Bible-architecture: simplest, fastest, least changes elsewhere
-# ============================================================================
 
-import threading
+import threading, time, sqlite3
 
-# Global lock preventing race conditions during DB attach operations
+# ----------------------------------------------------------------
+# Global attach coordination
+# ----------------------------------------------------------------
+
 _ATT_LOCK = threading.Lock()
 
-# Global map tracking which connections have already attached which families
-# Key = id(con), Value = set(["auto","bets","settlements","mastery"])
+# Track which families are attached per connection
+# key = id(con) → set({"auto","bets","settlements","mastery"})
 _ATTACHED_MAP = {}
 
+# Pending attach requests
+# key = (id(con), fam) → (con, fam)
+_ATTACH_REQUESTS = {}
+_ATTACH_REQ_LOCK = threading.Lock()
+
+# Activity heartbeat (used to detect idle windows)
+_LAST_ACTIVITY_TS = [time.time()]
+_IDLE_THRESHOLD_S = 0.25   # 250ms quiet window (tuneable)
+
+
+def _mark_activity():
+    """Mark system activity to delay ATTACH during busy periods."""
+    _LAST_ACTIVITY_TS[0] = time.time()
+
+
+# ----------------------------------------------------------------
+# ATTACH-ALL-FOUR (UPGRADED → ORCHESTRATED)
+# ----------------------------------------------------------------
 def _attach_all_four_local(con: sqlite3.Connection):
     """
-    ATTACH-ORCHESTRATOR (LOCAL)
-    -------------------------------------------
-    • Ensures each DB connection only attaches missing DB families.
-    • Prevents attach storms across threads using a global lock.
-    • Eliminates 'unable to open database file' errors caused by
-      concurrent ATTACH attempts during OC timeline / LiveLoop.
-    • Keeps SAME exact function name for compatibility.
+    SETUP-ONLY ATTACH
+
+    In LIVE mode, ATTACH is forbidden.
+    This function becomes a no-op to prevent:
+      • schema locks
+      • retry storms
+      • WAL contention
+      • closed-db attach attempts
     """
 
-    fams = {
+    # 🔒 HARD BLOCK IN LIVE
+    if DAL_MODE == "LIVE":
+        return
+
+    # ---------------------------
+    # SETUP / REPLAY / TRAINING
+    # ---------------------------
+    # Original attach logic stays here if you want it
+    required = _infer_attach_intent()
+    cid = id(con)
+
+    with _ATT_LOCK:
+        attached = _ATTACHED_MAP.setdefault(cid, set())
+        for fam in required:
+            if fam in attached:
+                continue
+
+            try:
+                con.execute(
+                    f"ATTACH DATABASE ? AS {fam}",
+                    ({
+                        "auto":        LOCAL_AUTO,
+                        "bets":        LOCAL_BETS,
+                        "settlements": LOCAL_SETTLE,
+                        "mastery":     LOCAL_MASTERY,
+                    }[fam],)
+                )
+                attached.add(fam)
+            except Exception as e:
+                print(f"[DAL-ATTACH][SETUP-WARN] {fam}: {e}")
+
+
+
+# ----------------------------------------------------------------
+# IDLE-WINDOW ATTACH FLUSHER (BATCHED)
+# ----------------------------------------------------------------
+def _attach_idle_flusher():
+    """
+    Executes pending ATTACH requests ONLY during idle windows.
+    Batches schema operations to avoid SQLite lock storms.
+    """
+
+    fam_paths = {
         "auto":        LOCAL_AUTO,
         "bets":        LOCAL_BETS,
         "settlements": LOCAL_SETTLE,
         "mastery":     LOCAL_MASTERY,
     }
 
-    cid = id(con)
+    while True:
+        time.sleep(0.05)  # poll ~20×/sec
 
-    with _ATT_LOCK:
+        now = time.time()
+        if now - _LAST_ACTIVITY_TS[0] < _IDLE_THRESHOLD_S:
+            continue  # system busy → skip
 
-        # Initialize the attached set for this connection
-        attached = _ATTACHED_MAP.setdefault(cid, set())
+        with _ATTACH_REQ_LOCK:
+            if not _ATTACH_REQUESTS:
+                continue
 
-        # Attach ONLY missing DBs
-        for alias, path in fams.items():
-            if alias in attached:
-                continue  # Already attached → skip
+            batch = list(_ATTACH_REQUESTS.items())
+            _ATTACH_REQUESTS.clear()
 
-            try:
-                con.execute(f"ATTACH DATABASE ? AS {alias}", (path,))
-                attached.add(alias)
-            except Exception as e:
-                # We log, but we DO NOT raise → no crash allowed
-                print(f"[DAL-ATTACH-LOCAL] warn attaching {alias}: {e}")
+        # Perform batched attaches under global ATT lock
+        with _ATT_LOCK:
+            for (cid, fam), (con, fam_name) in batch:
+                try:
+                    attached = _ATTACHED_MAP.setdefault(cid, set())
+                    if fam_name in attached:
+                        continue
 
-# === PATCH END ==============================================================
+                    # Skip dead / closed connections
+                    try:
+                        con.execute("SELECT 1")
+                    except Exception:
+                        # Connection is closed or invalid → drop attach intent
+                        _ATTACHED_MAP.pop(cid, None)
+                        continue
+
+                    # Safe to attach
+                    con.execute(
+                        f"ATTACH DATABASE ? AS {fam_name}",
+                        (fam_paths[fam_name],)
+                    )
+                    attached.add(fam_name)
+
+
+                except Exception as e:
+                    # Re-queue safely on failure (no drop)
+                    with _ATTACH_REQ_LOCK:
+                        _ATTACH_REQUESTS[(cid, fam_name)] = (con, fam_name)
+                    print(f"[DAL-ATTACH][RETRY] {fam_name}: {e}")
+
+
+
+
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/config_paths.py::_attach_all_four_cloud
@@ -1064,12 +1201,64 @@ def open_db(family: str, ro=False, rw=False, **_):
 # AUTOCONN / LIVE-ROUTE AUTOCONN
 # ===============================================================
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/config_paths.py::auto_conn
+# 📆 PATCHED: 2025-12-12 — Enforce DALReadProxy for LIVE read-only hot paths
+# PURPOSE:
+#   • Prevent sqlite3.connect() during BUS.tick / MasteryPolicy execution
+#   • Eliminate WAL + ATTACH storms inside live ticks
+#   • Restore tick completion and routing
+# ============================================================================
+
+import inspect
+
 def auto_conn(*, rw=False, **_):
+    """
+    Canonical AUTO DB connector.
+
+    RULES:
+    - SETUP mode → real sqlite connection
+    - LIVE mode:
+        • rw=True  → DAL writer (existing behaviour)
+        • rw=False → DALReadProxy for live hot paths
+    """
+
+    # -------------------------------
+    # SETUP MODE (unchanged)
+    # -------------------------------
     if DAL_MODE == "SETUP":
         return _local_db(LOCAL_AUTO)
+
+    # -------------------------------
+    # LIVE MODE — WRITE PATH (unchanged)
+    # -------------------------------
     if rw is True:
         return DALWriteProxy("auto")
+
+    # -------------------------------
+    # LIVE MODE — READ PATH (CRITICAL FIX)
+    # -------------------------------
+    # Detect live hot-path callers (BUS / Mastery / DecideOnce / Monitor)
+    for frame in inspect.stack()[1:]:
+        fn = frame.filename.replace("\\", "/")
+
+        if (
+            "/mastery/" in fn
+            or "/decision_engine/" in fn
+            or "/bus/" in fn
+            or "/market_monitor/" in fn
+        ):
+            # 🔒 HOT PATH: use DAL reader, NEVER open sqlite
+            return DALReadProxy("auto")
+
+    # -------------------------------
+    # LIVE MODE — non-hot-path read (fallback)
+    # -------------------------------
+    # Safe for dashboards, setup helpers, background tools
     return _local_db(LOCAL_AUTO)
+
+# === PATCH END ==============================================================
+
 
 
 def auto_conn_live(rw=True):
@@ -1262,21 +1451,37 @@ try:
 except Exception:
     pass
 
-# === PATCH END ==============================================================
-
-
-
 # === PATCH START ============================================================
-# 📍 TARGET: engines/config_paths.py — restore q_retry()
-# 📆 PATCHED: 2025-12-09
+# 📍 TARGET: engines/config_paths.py::q_retry
+# 📆 PATCHED: 2025-12-12 — DALReadProxy-safe retry logic
+# PURPOSE:
+#   • Prevent retry storms on DALReadProxy
+#   • Restore BUS.tick completion
+#   • Ensure retries only apply to real sqlite connections
+# ============================================================================
 
-def q_retry(con: sqlite3.Connection, sql: str, params=(),
+def q_retry(con, sql: str, params=(),
             *, tries: int = 6, delay_s: float = 0.08):
     """
-    Retry wrapper for transient SQLITE_BUSY / SQLITE_LOCKED states.
-    Used throughout GUI, dashboard, lanes, live_router, event sink, and v7 engines.
-    This must exist exactly with this signature for legacy imports.
+    Retry wrapper.
+
+    IMPORTANT RULE:
+      • DALReadProxy → NO RETRY (queue handles ordering)
+      • sqlite3.Connection → retry on BUSY/LOCKED
     """
+
+    # -------------------------------------------------
+    # DALReadProxy path (NO RETRY)
+    # -------------------------------------------------
+    from engines.config_paths import DALReadProxy
+
+    if isinstance(con, DALReadProxy):
+        # Single enqueue only — retries handled by DAL reader thread
+        return con.execute(sql, params)
+
+    # -------------------------------------------------
+    # Real sqlite connection path (legacy)
+    # -------------------------------------------------
     last_err = None
     for i in range(max(1, tries)):
         try:
@@ -1288,15 +1493,17 @@ def q_retry(con: sqlite3.Connection, sql: str, params=(),
                 time.sleep(delay_s * (i + 1))
                 continue
             raise
+
     if last_err:
         raise last_err
 
-# legacy-compatible alias (must always exist)
+# legacy aliases
 _q_retry = q_retry
 q        = q_retry
 _q       = q_retry
 
 # === PATCH END ==============================================================
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/config_paths.py (legacy connector section)

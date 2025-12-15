@@ -282,41 +282,47 @@ class MicroScalperEngine:
             pass
         # === PATCH END ========================================================
 
+        # === PATCH START ============================================================
+        # 📍 TARGET: engines/micro_scalper_v7/micro_scalper_engine.py:tick
+        # 📆 PATCHED: 2025-12-12 — REMOVE ALL TIME GATES FROM MSC
+        # ----------------------------------------------------------------------------
+        # MSC no longer time-gates execution.
+        # Scope + banding + engine logic determine eligibility.
+        # ----------------------------------------------------------------------------
 
-        # 1) PHASE SWITCHING
-        if oc_phase < 7:
-            self.state = MSCGlobalState.PRE_OFF
-        else:
-            self.state = MSCGlobalState.IN_PLAY
+        # Inject Brain Pulse if present
+        try:
+            _consume_brain_pulse(ctx)
+        except Exception:
+            pass
 
-        # === PATCH START (EventSync MSC emission wrapper) =============================
-
-        # 2) PRE-OFF MODE → run exploratory + risk engines
-        if self.state == MSCGlobalState.PRE_OFF:
-            plan = self._tick_preoff(ctx)
-            if plan and isinstance(plan, dict) and plan.get("enter"):
-                try:
-                    # MSC must always emit event BEFORE Lanes sees the plan
-                    payload = dict(plan)
-                    payload["marketId"] = ctx.get("marketId")
-                    payload["selectionId"] = ctx.get("selectionId")
-                    emit_msc_plan(payload)
-                except Exception as _ev_err:
-                    print(f"[MSC][EVENTSYNC] warn (preoff): {_ev_err}")
+        # 1) STOPLOSS / RISK / EXPLORATORY (always evaluated)
+        plan = self._tick_preoff(ctx)
+        if plan and isinstance(plan, dict) and plan.get("enter"):
+            try:
+                payload = dict(plan)
+                payload["marketId"] = ctx.get("marketId")
+                payload["selectionId"] = ctx.get("selectionId")
+                emit_msc_plan(payload)
+            except Exception as _ev_err:
+                print(f"[MSC][EVENTSYNC] warn (preoff): {_ev_err}")
             return plan
 
-        # 3) IN-PLAY MODE → run in-play laying engine
-        if self.state == MSCGlobalState.IN_PLAY:
-            plan = self._tick_inplay(ctx)
-            if plan and isinstance(plan, dict) and plan.get("enter"):
-                try:
-                    payload = dict(plan)
-                    payload["marketId"] = ctx.get("marketId")
-                    payload["selectionId"] = ctx.get("selectionId")
-                    emit_msc_plan(payload)
-                except Exception as _ev_err:
-                    print(f"[MSC][EVENTSYNC] warn (inplay): {_ev_err}")
+        # 2) IN-PLAY ENGINE (self-gated by data, not time)
+        plan = self._tick_inplay(ctx)
+        if plan and isinstance(plan, dict) and plan.get("enter"):
+            try:
+                payload = dict(plan)
+                payload["marketId"] = ctx.get("marketId")
+                payload["selectionId"] = ctx.get("selectionId")
+                emit_msc_plan(payload)
+            except Exception as _ev_err:
+                print(f"[MSC][EVENTSYNC] warn (inplay): {_ev_err}")
             return plan
+
+        return None
+        # === PATCH END ==============================================================
+
 
         # === PATCH START (close error catcher) =======================================
         except Exception as e:

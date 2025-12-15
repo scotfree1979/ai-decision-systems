@@ -574,12 +574,11 @@ def _lazy_load_bridge():
         print(f"[event_sink] bridge lazy-load warn: {e}")
 
 _BRIDGE_LOADED = False
-
-# Wrap emit() so the bridge auto-loads only after BankState + Budget are ready
 _original_emit = emit
+# Wrap emit() so the bridge auto-loads only after BankState + Budget are ready
 def emit(event_type: str, payload: dict):
-    _lazy_load_bridge()      # <-- FIX for circular import
     return _original_emit(event_type, payload)
+
 
 # === PATCH END ========================================================
 

@@ -662,12 +662,6 @@ def restart_feeder_with_creds(app_key: str, session: str) -> None:
 from engines.config_paths import connect_db as _bdb, auto_conn as _adb, connect_orders_db as _odb
 from engines.database_hijack_monitor import enqueue_write, enqueue_read, launch_db_writer
 
-# Start queue writer once per process
-try:
-    launch_db_writer()
-    print("[DB] async writer thread started (ABD)")
-except Exception as e:
-    print(f"[DB] writer launch warn: {e}")
 
 from engines.database_hijack_monitor import enqueue_write as _dbq_write, enqueue_read as _dbq_read
 
@@ -1977,22 +1971,11 @@ class PhaseGUI(tk.Tk):
 
         if not alive:
             # Start BUS-driven loop to guarantee liveness
-            def _bus_loop():
-                while True:
-                    try:
-                        BUS.tick()
-                    except Exception as e:
-                        print(f"[BUS][ERR] {e}")
-                    time.sleep(0.5)
+            # GUI never bootstraps BUS in LIVE
+    
 
-            try:
-                t = threading.Thread(target=_bus_loop, name=name, daemon=True)
-                t.start()
-            except Exception as e:
-                print(f"[LOOP] bootstrap error: {e}")
-
-        # Always report ALIVE so GUI does not shut anything down
-        print(f"[LOOP] {name} ALIVE run_id={run_id}")
+            # Always report ALIVE so GUI does not shut anything down
+            print(f"[LOOP] {name} ALIVE run_id={run_id}")
 
 
     def _log_decision_prereq_probe(self, mode: str = "LIVE") -> None:
@@ -3539,6 +3522,7 @@ class PhaseGUI(tk.Tk):
                     print(f"[LOOP] LiveLoop fatal: {e}")
                     traceback.print_exc()
 
+
                 # ❗ NEW: Keep the thread alive forever so GUI health checks pass
                 print(f"[LOOP] LiveLoop initial start complete — entering idle hold loop")
                 while True:
@@ -4057,6 +4041,30 @@ class PhaseGUI(tk.Tk):
 
         print("✅ Step 4 OK — OC timeline loop started (OC1…OC20).")
 
+        # ============================================================
+        # START BUS LOOP (authoritative decision engine)
+        # ============================================================
+        from engines.bus.bus import BUS
+        import threading, time
+
+        def _bus_loop():
+            print("[BUS] decision loop started")
+            while True:
+                try:
+                    BUS.tick()
+                except Exception as e:
+                    print(f"[BUS][ERR] {e}")
+                time.sleep(1.0)   # 1 Hz for now; tune later
+
+        # Start only once
+        if not any(t.name == "BUSLoop" for t in threading.enumerate()):
+            threading.Thread(
+                target=_bus_loop,
+                name="BUSLoop",
+                daemon=True
+            ).start()
+
+
 
 
 
@@ -4411,6 +4419,7 @@ class PhaseGUI(tk.Tk):
 
         self._watch_thread = threading.Thread(target=_loop, name="RuntimeWatch", daemon=True)
         self._watch_thread.start()
+
 
     def _start_learning_loop_background(self):
         """

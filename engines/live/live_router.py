@@ -1518,6 +1518,31 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         """, (realized, realized, pid))
         con.commit()
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py:_place_stoploss_child_now
+# 📆 PATCHED: 2025-12-12 — Engine penalty on stoploss
+# ============================================================================
+
+        try:
+            engine = _engine_from_source(parent.get("source"))
+            _emit_router_event(
+                "plan_outcome",
+                {
+                    "engine": engine,
+                    "outcome": "BAD",
+                    "reason": "stoploss_matched",
+                    "marketId": str(market_id),
+                    "selectionId": str(selection_id),
+                    "parent_cor": str(parent_cor),
+                    "letter": str(parent.get("source") or "")[:1].upper(),
+                }
+            )
+        except Exception:
+            pass
+
+# === PATCH END ==============================================================
+
+
         # === NEW: persist cap number snapshot to Mastery v7 cloud (safe path) ===
         try:
             from engines.config_paths import connect_mastery_v7_cache
@@ -1712,6 +1737,29 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str,
         except Exception:
             pass
         # ====================================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py:_orders_update_hedge_matched
+# 📆 PATCHED: 2025-12-12 — Engine reward on successful hedge
+# ============================================================================
+
+        try:
+            engine = _engine_from_source(p["source"])
+            _emit_router_event(
+                "plan_outcome",
+                {
+                    "engine": engine,
+                    "outcome": "GOOD",
+                    "reason": "hedge_matched",
+                    "marketId": str(p["marketId"]),
+                    "selectionId": str(p["selectionId"]),
+                    "parent_cor": str(cor),
+                    "letter": str(p["source"] or "")[:1].upper(),
+                }
+            )
+        except Exception:
+            pass
+
+# === PATCH END ==============================================================
 
 
         try:

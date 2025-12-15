@@ -1091,10 +1091,20 @@ def _scope_pass(run_id: str, ctx: dict, logger=None) -> Optional[int]:
             ctx["tto_minutes"]    = float(mto_fix)
             ctx["tto_window"]     = win_fix
             ctx["phase"]          = phase
+            # 🔒 HARD STRATEGY ISOLATION (L included)
+            # Blueprint data is ONLY valid for P
+            if "blueprint_key" in ctx or "blueprint_conf" in ctx or "blueprint_match" in ctx:
+                # We do not know the family yet, so default to stripping
+                # P will reattach via overlay later
+                ctx.pop("blueprint_key", None)
+                ctx.pop("blueprint_conf", None)
+                ctx.pop("blueprint_match", None)
+
 
             # one-line snapshot
             try:
                 _log_gate_snapshot(mid, sid, dict(ctx))
+         
             except Exception:
                 pass
 
@@ -1146,6 +1156,7 @@ def _scope_pass(run_id: str, ctx: dict, logger=None) -> Optional[int]:
             if planA and planA.get("enter"):
                 try:
                     from engines.blueprint.overlay import overlay_plan as _bp_overlay
+                    
                     planA = _bp_overlay(mid, sid, ctx, planA)
                 except Exception:
                     pass
@@ -1162,11 +1173,11 @@ def _scope_pass(run_id: str, ctx: dict, logger=None) -> Optional[int]:
             elapsed_by = {m: e for (m, e) in scope.get("in_play", [])}
 
             for (fname, ffn) in (ORDER_LIST or []):
+                letter = _strat_letter_for(fname)
                 if not _is_enabled(fname):
                     logger(f"[{fname}] disabled by registry")
                     continue
 
-                letter = _strat_letter_for(fname)
                 if letter == "A":
                     continue  # A handled above
 
@@ -1230,6 +1241,7 @@ def _scope_pass(run_id: str, ctx: dict, logger=None) -> Optional[int]:
                 # Blueprint overlay (best-effort)
                 try:
                     from engines.blueprint.overlay import overlay_plan as _bp_overlay
+                 
                     plan2 = _bp_overlay(mid, sid, ctx, plan2)
                 except Exception:
                     pass
@@ -3674,46 +3686,6 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[ORCH][WARN] MarketMonitor bootstrap failed: {e}")
 
-# === PATCH END ==============================================================
-
-
-# === PATCH START ============================================
-# 📍 TARGET: engines/decision_engine/orchestrator.py
-# 🔎 SEARCH: "# 7) START BUS TICKER"
-# 📆 PATCHED: 2026-02-15 — Final BUS starter (correct indentation)
-# ============================================================
-
-    # --------------------------------------------------------------
-    # 7) START BUS TICKER (canonical correct placement)
-    # --------------------------------------------------------------
-    try:
-        from engines.bus.bus import BUS
-        import threading, time
-
-        def _bus_loop():
-            print("[BUS] loop started")
-            while True:
-                try:
-                    BUS.tick()
-                except Exception as e:
-                    print(f"[BUS][ERR] {e}")
-                time.sleep(interval)
-
-        t = threading.Thread(
-            target=_bus_loop,
-            name="BUSLoop",
-            daemon=True
-        )
-        t.start()
-        print("[BUS] background ticker started")
-
-    except Exception as e:
-        print(f"[BUS][FATAL] could not start BUS loop: {e}")
-
-
-
-
-
 
 def run_test_day(run_id: str, seconds: int = 600, hz: int = 4, logger=None) -> None:
     """
@@ -4053,9 +4025,11 @@ def _family_lanes_pass(run_id: str, ctx: dict, logger=None) -> Optional[int]:
                             plan = None
                     if not plan or not plan.get("enter"):
                         plan = _fallback_plan_for_letter(letter, ctx)
+                
                     from engines.blueprint.overlay import overlay_plan as _bp_overlay
-                    if plan and plan.get("enter"):
-                        plan = _bp_overlay(mid, sid, ctx, plan)
+                    if plan and plan.get("enter") and letter == "P":
+                        if letter == "P":
+                            plan = _bp_overlay(mid, sid, ctx, plan)
 
                     # Rulebook gate (use next tag for pass number) — no stray try/except
                     preview_code = _next_pair_tag(letter, mid)
@@ -4121,8 +4095,9 @@ def _family_lanes_pass(run_id: str, ctx: dict, logger=None) -> Optional[int]:
                         plan = _fallback_plan_for_letter(letter, ctx)
 
                     from engines.blueprint.overlay import overlay_plan as _bp_overlay
-                    if plan and plan.get("enter"):
-                        plan = _bp_overlay(mid, sid, ctx, plan)
+                    if plan and plan.get("enter") and letter == "P":
+                        if letter == "P":
+                            plan = _bp_overlay(mid, sid, ctx, plan)
 
                     # Rulebook gate — no stray try/except
                     preview_code = _next_pair_tag(letter, mid)

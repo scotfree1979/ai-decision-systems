@@ -3,7 +3,7 @@
 # 🔎 SEARCH: class RiskEngine
 # 📆 PATCHED: 2025-12-02 — Full v7 Risk-MicroScalper rewrite
 # ==============================================================================
-
+from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 from typing import Dict, Any, Optional
 
 class RiskEngine:
@@ -56,21 +56,46 @@ class RiskEngine:
     ENABLE_FOR_LEGACY = True
     ENABLE_FOR_EXPLORATORY = False  # phase 1 constraint
 
-    def tick(self, ctx: dict):
-        """
-        Legacy parent rescue engine.
-        Only runs when parent is LEGACY unless exploratory mode toggled ON.
-        """
-        # Guard by engine type
-        if ctx.get("parent_engine") == "LEGACY" and self.ENABLE_FOR_LEGACY:
-            return self._tick_impl(ctx)
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def tick(self, ctx:
+# 📆 PATCHED: 2025-12-12 — no silent None, risk observability
+# ======================================================================================================
 
-        if ctx.get("parent_engine") == "MSC_EXPLORATORY" and self.ENABLE_FOR_EXPLORATORY:
-            return self._tick_impl(ctx)
+    def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
 
-        return None
+        if not ctx.get("open_position"):
+            return self._no_signal(ctx, reason="no_open_position")
 
-# === PATCH END ================================================================
+        try:
+            plan = self._build_risk_plan(ctx)
+            if plan:
+                plan["enter"] = True
+                plan["engine"] = "MSC_RISK"
+                return plan
+        except Exception:
+            pass
+
+        return self._no_signal(ctx, reason="risk_conditions_not_met")
+
+    def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+        from engines.mastery.event_sink import emit
+
+        payload = {
+            "enter": False,
+            "blocked": True,
+            "engine": "MSC_RISK",
+            "reason": reason,
+            "re_eval": True,
+        }
+
+        try:
+            emit("msc_risk.no_signal", payload)
+        except Exception:
+            pass
+
+        return payload
+
 
 
 # === PATCH START ============================================================

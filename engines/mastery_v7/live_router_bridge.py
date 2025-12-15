@@ -14,56 +14,84 @@ def _safe_float(v, d=0.0):
     try: return float(v)
     except: return d
 
-# === PATCH START ===
-# 📍 TARGET: engines/mastery_v7/live_router_bridge.py:_force_place
-# 📆 PATCHED: 2025-11-10Z — unify bridge path for stoploss/micro/greenup events
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery_v7/live_router_bridge.py
+# 🔎 SEARCH: def _force_place(event: dict):
+# 📆 PATCHED: 2025-12-12 — hard safety filter for live routing
+# PURPOSE:
+#   • Prevent telemetry from reaching router
+#   • Prevent sid=None crashes
+#   • Keep BUS ticking under all conditions
+# ============================================================================
+
 def _force_place(event: dict):
     """
-    Force-place any actionable event (stoploss, scalp, greenup, etc.)
-    through the same brain bridge used by live pulses.
-    Ensures all live-layer decisions share one routing logic.
+    Force-place ONLY executable trade events through live_router.
+    Telemetry events are explicitly ignored.
     """
+
+    if not isinstance(event, dict):
+        return
+
+    etype = (event.get("type") or "").lower()
+
+    # --- BLOCK telemetry / non-trade events -------------------------------
+    if etype in (
+        "liability_signal",
+        "probability_risk_signal",
+        "market_risk",
+        "cashout_tick",
+        "loss_cut_signal",
+    ):
+        return
+
+    mid = event.get("marketId")
+    sid = event.get("selectionId")
+
+    # --- HARD REQUIRE identifiers -----------------------------------------
+    if not mid or not sid:
+        return
+
+    odds = event.get("odds_now") or event.get("odds")
+    stake = event.get("stake")
+
+    if not odds or not stake:
+        return
+
+    side = event.get("side")
+    if not side:
+        return
+
     try:
-        plan = {
-            "marketId": event.get("marketId"),
-            "selectionId": event.get("selectionId"),
-            "side": event.get("side") or ("LAY" if event.get("type") in ("stoploss","stop_loss_breached") else "BACK"),
-            "odds": event.get("odds_now") or event.get("odds") or 0,
-            "stake": event.get("stake") or 2.0,
-            "reason": event.get("type"),
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
-        print(f"[v7-bridge] forcing placement → {plan['reason']} mid={plan['marketId']} sid={plan['selectionId']} odds={plan['odds']} stake={plan['stake']}")
         live_router.place_parent_and_hedge(
-            market_id=plan["marketId"],
-            selection_id=plan["selectionId"],
-            side=plan["side"],
-            entry_odds=float(plan["odds"] or 0),
-            stake=float(plan["stake"] or 2.0),
-            source=str(plan["reason"] or "BRAIN_BRIDGE")
+            market_id=mid,
+            selection_id=sid,
+            side=side,
+            entry_odds=float(odds),
+            stake=float(stake),
+            source=str(event.get("type") or "V7_BRIDGE"),
         )
+    except Exception:
+        # swallow — NEVER kill the bridge thread
+        return
 
-    except Exception as e:
-        print(f"[v7-bridge] force_place warn: {e}")
-# === PATCH END ===
-
-
-# === PATCH START ===
-# 📍 TARGET: engines/mastery_v7/live_router_bridge.py
-# 📆 PATCHED: 2025-11-02Z — unify Overwatcher + Mastery bridge to live_router
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import importlib
+# === PATCH END ==============================================================
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/mastery_v7/live_router_bridge.py
-# 🔎 SEARCH: in handle_mastery_event(event)
-# 📆 PATCHED: 2025-12-02 — restrict events to Overwatcher-only decisions
+# 🔎 SEARCH: def handle_mastery_event(event):
+# 📆 PATCHED: 2025-12-12 — restrict bridge to executable trade events
 # ============================================================================
+
 def handle_mastery_event(event):
+    """
+    Route ONLY executable Overwatcher trade decisions.
+    All telemetry events are ignored.
+    """
+
     t = (event.get("type") or "").lower()
 
-    # --- NEW FILTER: ONLY react to events produced by Overwatcher ---
+    # --- ONLY real trade actions ------------------------------------------
     if t in (
         "stop_loss_triggered",
         "stop_loss_breached",
@@ -71,18 +99,13 @@ def handle_mastery_event(event):
         "msc_trailing_positive",
         "msc_trailing_negative",
         "market_end_exit",
-
         "micro_lay",
-
-        "probability_risk_signal",
-        "liability_signal",
     ):
         _force_place(event)
 
-    # --- IGNORE ALL OTHER EVENTS (brain_plan, bridge_pulse, etc.) ---
-    # This prevents infinite loops and invalid placements.
-# === PATCH END ==============================================================
+    # Everything else is telemetry → ignore
 
+# === PATCH END ==============================================================
 
 # ensure event_sink live before subscribing
 try:
@@ -99,28 +122,34 @@ es.subscribe(handle_mastery_event)
 print("[v7-bridge] unified event_sink subscriber active ✅")
 # === PATCH END ===
 
-# === PATCH START ===
+# === PATCH START ============================================================
 # 📍 TARGET: engines/mastery_v7/live_router_bridge.py
-# 📆 PATCHED: 2025-11-09Z — expose callable send_plan_through_bridge() for brain pulses
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔎 SEARCH: def send_plan_through_bridge(plan: dict):
+# 📆 PATCHED: 2025-12-12 — guard invalid plans
+# ============================================================================
+
 def send_plan_through_bridge(plan: dict):
-    """
-    Public entrypoint for Mastery Brain or other modules to
-    force execution of a plan through the live_router bridge.
-    """
+    if not isinstance(plan, dict):
+        return
+
+    if not plan.get("marketId") or not plan.get("selectionId"):
+        return
+
+    if not plan.get("side") or not plan.get("odds") or not plan.get("stake"):
+        return
+
     try:
-        # Reuse the same logic that handle_mastery_event uses
         live_router.place_parent_and_hedge(
             market_id=plan.get("marketId"),
             selection_id=plan.get("selectionId"),
             side=plan.get("side"),
-            entry_odds=float(plan.get("odds") or 0),
-            stake=float(plan.get("stake") or 2.0),
-            source=str(plan.get("reason") or "BRAIN_BRIDGE")
+            entry_odds=float(plan.get("odds")),
+            stake=float(plan.get("stake")),
+            source=str(plan.get("reason") or "BRAIN_BRIDGE"),
         )
+    except Exception:
+        return
 
-    except Exception as e:
-        print(f"[v7-bridge] send_plan_through_bridge warn: {e}")
-# === PATCH END ===
+# === PATCH END ==============================================================
 
 

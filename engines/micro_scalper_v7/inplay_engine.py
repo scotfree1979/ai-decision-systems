@@ -11,6 +11,7 @@ from .intel_adapter import build_micro_state
 from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 from engines.cashout_calc import cashout_calc
 
+from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 
 class InPlayEngine:
     """
@@ -45,26 +46,46 @@ class InPlayEngine:
     # ----------------------------------------------------------------------
     # PUBLIC API
     # ----------------------------------------------------------------------
-    def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        oc_phase = ctx.get("oc_phase", 0)
-        if oc_phase < 7:
-            self.state = InPlaySubState.IDLE
-            self.active_plan = None
-            return None
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: def tick(self, ctx:
+# 📆 PATCHED: 2025-12-12 — eliminate silent None, emit NO-SIGNAL
+# ======================================================================================================
 
-        # Build v7 microstate
-        m = build_micro_state(ctx)
+    def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
 
-        # Load canonical PnL for this runner (if possible)
-        self._load_runner_pnl(ctx)
+        if ctx.get("oc_phase", 0) < 7:
+            return self._no_signal(ctx, reason="not_inplay")
 
-        if self.state == InPlaySubState.IDLE:
-            return self._try_open(ctx, m)
+        try:
+            plan = self._build_inplay_plan(ctx)
+            if plan:
+                plan["enter"] = True
+                plan["engine"] = "MSC_INPLAY"
+                return plan
+        except Exception:
+            pass
 
-        if self.state == InPlaySubState.MONITOR:
-            return self._monitor(ctx, m)
+        return self._no_signal(ctx, reason="no_signal")
 
-        return None
+    def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+        from engines.mastery.event_sink import emit
+
+        payload = {
+            "enter": False,
+            "blocked": True,
+            "engine": "MSC_INPLAY",
+            "reason": reason,
+            "re_eval": True,
+        }
+
+        try:
+            emit("msc_inplay.no_signal", payload)
+        except Exception:
+            pass
+
+        return payload
+
 
     # ----------------------------------------------------------------------
     # INTERNAL LOGIC — ENTRY

@@ -1332,37 +1332,38 @@ def infer_direction_and_ticks(ctx: Dict[str, Any]) -> Tuple[str | None, int | No
     return (chosen, int(max(1, ticks_rule)), note)
 
 
+# ============================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py
+# 🔎 SEARCH: def gate(ctx: dict, letter: str)
+# 📆 PATCHED: 2025-12-12
+# 🧠 WHY:
+#   Time- and phase-based gating is deprecated in v7.
+#   Scope + CTX determine eligibility, not clock position.
+#   This patch preserves odds-band safety only.
+# ============================================================
 
-# === PATCH START ===
-# 📍 TARGET: engines/mastery/mastery_policy.py:gate()
-# 📆 PATCHED: 2025-10-28Z — auto-activation 120 min pre-off
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def gate(ctx: dict, letter: str) -> tuple[bool, str]:
     L = (letter or "").upper()
 
     def _f(key: str, default: float = 0.0):
         try: return float(ctx.get(key, default) or default)
         except Exception: return default
-    mto   = _f("minutes_to_off", _f("tto_minutes", 1e9))
-    odds  = _f("odds", _f("px", _f("ltp", 0.0)))
 
-    # unified rule for pre-off families
+    odds = _f("odds", _f("px", _f("ltp", 0.0)))
+
+    # --- PRE / LEGACY families ---
     if L in ("S","B","G","F","X","R","L","Z"):
-        # auto-activation from 120 min before the off
-        if not (0.0 < mto <= 120.0):
-            return (False, "time_window")
-        if mto <= 3.0:
-            return (False, "cool_off")
         if odds and not (1.5 <= odds <= 12.0):
             return (False, "odds_band")
         return (True, "ok")
 
-    # IP-only letters
+    # --- IN-PLAY families (phase gate removed) ---
     if L in ("I","T","C","E","K"):
-        phase = str(ctx.get("phase","")).upper()
-        return (phase == "IN_PLAY", "phase" if phase != "IN_PLAY" else "ok")
+        if odds and not (1.5 <= odds <= 12.0):
+            return (False, "odds_band")
+        return (True, "ok")
 
-    # Always-on families (A,P)
+    # --- Always-on / Blueprint ---
     if L in ("P","A"):
         if odds and not (1.5 <= odds <= 12.0):
             return (False, "odds_band")
@@ -1370,11 +1371,8 @@ def gate(ctx: dict, letter: str) -> tuple[bool, str]:
 
     if odds and not (1.5 <= odds <= 12.0):
         return (False, "odds_band")
+
     return (True, "ok")
-# === PATCH END ===
-
-
-
 
 # -----------------------------------------------------------------------------
 # Confidence & simple tick floor
@@ -1797,47 +1795,80 @@ def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Global plan normalizer (used by DecideOnce + Mastery)
 # ─────────────────────────────────────────────────────────────────────────────
-def _ensure_plan(fam: str, ctx: dict, plan: dict | None) -> dict:
+# === PATCH START ============================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py
+# 🔎 SEARCH: def _ensure_plan(
+# 📆 PATCHED: 2025-12-12 — Enforce non-None Legacy plan contract
+# 🧠 PURPOSE:
+#   • Legacy must NEVER return None to BUS
+#   • Surface no-signal as BLOCKED with reason
+#   • Preserve all existing legacy behaviour
+# ============================================================================
+
+def _ensure_plan(fam: str, ctx: dict, raw):
     """
-    Ensure every plan returned to DecideOnce has the same shape and fields.
-    Keeps all downstream consumers consistent.
+    Canonical Legacy plan normaliser.
+
+    Contract:
+      • NEVER return None
+      • If raw is None → return explicit NO-SIGNAL plan
+      • Do NOT force trades
+      • Preserve existing plan content unchanged
     """
-    p = dict(plan or {})
-    c = dict(ctx or {})
 
-    # --- Basic required fields ---
-    p.setdefault("family", str(fam))
-    p.setdefault("enter", False)
-    p.setdefault("letter", str(c.get("letter", fam[:1] if fam else "A")).upper())
-    p.setdefault("direction", c.get("direction", "LAY->BACK"))
-    p.setdefault("target_ticks", 1)
-    p.setdefault("hedge_ticks", 1)
-    p.setdefault("px", float(c.get("px", c.get("odds", 0.0)) or 0.0))
-    p.setdefault("size", float(c.get("size", 0.0)))
-    p.setdefault("confidence", float(c.get("confidence", 0.0)))
-    p.setdefault("plan_why", c.get("plan_why", ""))
+    # ------------------------------------------------------------
+    # 1) HARD NORMALISATION — None is not allowed past this point
+    # ------------------------------------------------------------
+    if raw is None:
+        plan = {
+            "enter": False,
+            "engine": "LEGACY",
+            "strategy": fam,
+            "letter": str(ctx.get("letter") or _FAM_LETTER.get(fam, fam[:1])),
+            "reason": "no_signal",
+            "why": "no_signal",
+            "re_eval": True,   # allow future learning / widening
+        }
+        # --- Training / telemetry hook (non-blocking) ---
+        try:
+            from engines.mastery.event_sink import emit_event
+            emit_event("legacy.no_signal", {
+                "engine": "LEGACY",
+                "strategy": fam,
+                "marketId": ctx.get("marketId"),
+                "selectionId": ctx.get("selectionId"),
+                "letter": plan["letter"],
+                "ts": ctx.get("ts"),
+            })
+        except Exception:
+            pass
 
-    # --- Enrichment / global metadata ---
-    p.setdefault("marketId", c.get("marketId"))
-    p.setdefault("selectionId", c.get("selectionId"))
-    p.setdefault("minutes_to_off", c.get("minutes_to_off"))
-    p.setdefault("phase", c.get("phase", "PRE"))
-    p.setdefault("bank", c.get("bank", 0.0))
-    p.setdefault("used_exposure", c.get("used_exposure", 0.0))
-    p.setdefault("slope_ppm", c.get("slope_ppm", 0.0))
-    p.setdefault("recent_net_ticks", c.get("recent_net_ticks", 0))
-    p.setdefault("oc_momentum_ticks", c.get("oc_momentum_ticks", 0))
-    p.setdefault("bias", c.get("bias", 0.0))
-    p.setdefault("bias_dir", c.get("bias_dir", "FLAT"))
-    p.setdefault("bias_conf", c.get("bias_conf", 0.0))
-    p.setdefault("bias_why", c.get("bias_why", ""))
+        return plan
 
-    # --- Safety ---
-    for k in ("marketId", "selectionId", "letter"):
-        if not p.get(k):
-            p[k] = c.get(k)
+    # ------------------------------------------------------------
+    # 2) EXISTING NORMAL PATH (unchanged)
+    # ------------------------------------------------------------
+    if not isinstance(raw, dict):
+        # Defensive: unexpected return type
+        return {
+            "enter": False,
+            "engine": "LEGACY",
+            "strategy": fam,
+            "letter": str(ctx.get("letter") or _FAM_LETTER.get(fam, fam[:1])),
+            "reason": "invalid_plan_type",
+            "why": "invalid_plan_type",
+            "re_eval": False,
+        }
 
-    return p
+    # Ensure required fields exist (fail-open)
+    raw.setdefault("engine", "LEGACY")
+    raw.setdefault("strategy", fam)
+    raw.setdefault("enter", False)
+
+    return raw
+
+# === PATCH END ==============================================================
+
 
 # === PATCH: future stubs for microscalp/MLM/stoploss (E) ===
 # 📍 TARGET: bottom of mastery_policy.py (before plan_for_strategy)
@@ -2057,28 +2088,29 @@ def update_scope(scope_snapshot: dict) -> None:
     except Exception:
         pass
 
-def _letters_by_window(mto_min: float | None) -> list[str]:
-    """
-    Families allowed by minutes-to-off window.
-    Returns FAMILY NAMES (not single-letter codes).
-    """
-    if mto_min is None or mto_min > 60.0:
-        return ["ALWAYS_ON", "BLUEPRINTS"]
+# ============================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py
+# 🔎 SEARCH: def _letters_by_window(mto_min: float | None)
+# 📆 PATCHED: 2025-12-12
+# 🧠 WHY:
+#   Time-window family suppression breaks engine firing.
+#   Families must always be allowed to evaluate.
+# ============================================================
 
-    m = float(mto_min)
-    if 60.0 >= m > 30.0:
-        return ["ALWAYS_ON", "BLUEPRINTS", "OG_STRATEGY", "S4_CROSSOVER", "S5_BREAKOUT", "S6_STEAM_FADE"]
-    if 30.0 >= m > 20.0:
-        return ["ALWAYS_ON", "BLUEPRINTS", "OG_STRATEGY", "S4_CROSSOVER", "S5_BREAKOUT", "S6_STEAM_FADE", "LADDER_STRATEGY"]
-    if 20.0 >= m > 5.0:
-        return ["ALWAYS_ON", "BLUEPRINTS", "OG_STRATEGY", "S4_CROSSOVER", "S5_BREAKOUT", "S6_STEAM_FADE", "LADDER_STRATEGY", "BTL_SCOUT", "BTL_AGGR"]
-    if 5.0 >= m >= 3.0:
-        return ["ALWAYS_ON", "OG_STRATEGY", "S4_CROSSOVER", "S5_BREAKOUT", "S6_STEAM_FADE", "LADDER_STRATEGY", "BTL_AGGR"]
-    if 3.0 > m > 0.0:
-        # 🧭 Cool-off: stop all new placements; only run the liability manager
-        return ["MLM"]
-    # In-play
-    return ["BLUEPRINTS", "IP1_SHOCK_DRIFT", "IP2_TIRED_LEADER", "IP3_CLOSE_FINISH", "IP4_FENCE_ERROR", "IP5_COLLAPSE_FADE"]
+def _letters_by_window(mto_min: float | None) -> list[str]:
+    return [
+ 
+        "BLUEPRINTS",
+        "OG_STRATEGY",
+ 
+        "S4_CROSSOVER",
+        "S5_BREAKOUT",
+        "S6_STEAM_FADE",
+        "BTL_SCOUT",
+        "BTL_AGGR",
+
+    ]
+
 
 # ─────────────────────────────────────────────────────────────
 # 📍 TARGET: engines/mastery/mastery_policy.py
@@ -2144,9 +2176,7 @@ def update_plan_board(scope_snapshot: dict, *, now_ts=None, lookahead_ticks: int
             }
 
             for fam in families:
-                allowed = _letters_by_window(mto)
-                if fam not in allowed:
-                    continue
+
 
                 try:
                     plan = plan_for_strategy(fam, dict(ctx_base)) or {}

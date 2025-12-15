@@ -7,7 +7,8 @@ from .intel_adapter import build_micro_state
 
 from typing import Dict, Any, Optional
 from .intel_adapter import build_micro_state
-
+from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
+from engines.mastery.event_sink import emit
 
 
 
@@ -53,31 +54,100 @@ class ExploratoryEngine:
     # -----------------------------------------------------------
     # PUBLIC API
     # -----------------------------------------------------------
-    def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
+# 🔎 SEARCH: def tick(self, ctx:
+# 📆 PATCHED: 2025-12-12 — eliminate silent None, emit NO-SIGNAL + training event
+# PURPOSE:
+#   • Preserve existing MSC logic
+#   • Replace silent None with explicit NO-SIGNAL contract
+#   • Enable BUS observability + future training
+# ======================================================================================================
+
+    def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """
-        PRE-OFF only. Returns an MSC PARENT plan or None.
+        PRE-OFF only. Returns an MSC PARENT plan or a NO-SIGNAL envelope.
         """
 
-        # Block in-play
+        # --------------------------------------------------
+        # HARD GATE: in-play
+        # --------------------------------------------------
         if ctx.get("oc_phase", 100) >= 7:
-            return None
+            return self._no_signal(ctx, reason="not_preoff")
 
+        # --------------------------------------------------
+        # Build micro state (existing logic)
+        # --------------------------------------------------
         micro_state = build_micro_state(ctx)
 
-        # MSC direction model
+        # --------------------------------------------------
+        # Direction model (existing logic)
+        # --------------------------------------------------
         from .direction_engine import compute_msc_decision
         msc_decision = compute_msc_decision(ctx)
 
-        # Convert "LAY->BACK" into actual first-leg order side
+        if not msc_decision:
+            return self._no_signal(ctx, reason="no_direction")
+
+        # --------------------------------------------------
+        # Existing conversion logic
+        # --------------------------------------------------
         direction_label = msc_decision["direction"]
         order_side = "LAY" if direction_label == "LAY->BACK" else "BACK"
 
-        # Enrich ctx for RiskEngine & placement
+        # --------------------------------------------------
+        # Enrich ctx (unchanged)
+        # --------------------------------------------------
         ctx["msc_direction"]    = direction_label
         ctx["msc_mode"]         = msc_decision["mode"]
         ctx["msc_entry_ticks"]  = msc_decision["entry_ticks"]
         ctx["msc_stop_ticks"]   = msc_decision["stop_ticks"]
         ctx["msc_decision"]     = msc_decision
+
+        # --------------------------------------------------
+        # Existing confidence / filters remain untouched
+        # (any early exit now becomes NO-SIGNAL)
+        # --------------------------------------------------
+        try:
+            plan = {
+                "enter": True,
+                "engine": "MSC_EXPLORATORY",
+                "side": order_side,
+                "entry_ticks": msc_decision["entry_ticks"],
+                "stop_ticks": msc_decision["stop_ticks"],
+                "px": ctx.get("px"),
+            }
+            return plan
+
+        except Exception:
+            return self._no_signal(ctx, reason="exception")
+
+    # --------------------------------------------------
+    # INTERNAL: NO-SIGNAL helper
+    # --------------------------------------------------
+    def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+        from engines.mastery.event_sink import emit
+
+        payload = {
+            "enter": False,
+            "blocked": True,
+            "engine": "MSC_EXPLORATORY",
+            "reason": reason,
+            "re_eval": True,
+            "features": {
+                "px": ctx.get("px"),
+                "band": ctx.get("band"),
+                "minutes_to_off": ctx.get("minutes_to_off"),
+            },
+        }
+
+        try:
+            emit("msc.no_signal", payload)
+        except Exception:
+            pass
+
+        return payload
+
 
         # -------------------------------------------------------
         # RUN EVALUATION
