@@ -7,7 +7,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 3795,
+      "total": 3833,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24,7 +24,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1930,
+      "total": 1940,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -41,7 +41,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1837,
+      "total": 1843,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -58,7 +58,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1759,
+      "total": 1770,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -75,7 +75,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1588,
+      "total": 1593,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -92,7 +92,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1339,
+      "total": 1343,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -109,7 +109,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1303,
+      "total": 1307,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -126,7 +126,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1274,
+      "total": 1276,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -143,7 +143,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1276,
+      "total": 1278,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -160,7 +160,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1247,
+      "total": 1249,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -330,7 +330,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 2914,
+      "total": 2938,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -347,7 +347,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1863,
+      "total": 1878,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -364,7 +364,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1806,
+      "total": 1817,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -381,7 +381,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1561,
+      "total": 1566,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -398,7 +398,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1367,
+      "total": 1371,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -415,7 +415,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1318,
+      "total": 1321,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -432,7 +432,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1286,
+      "total": 1289,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -449,7 +449,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1278,
+      "total": 1279,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -466,7 +466,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1243,
+      "total": 1245,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -636,7 +636,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 2740,
+      "total": 2768,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -653,7 +653,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1829,
+      "total": 1835,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -670,7 +670,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1645,
+      "total": 1650,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -687,7 +687,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1377,
+      "total": 1380,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -704,7 +704,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1305,
+      "total": 1306,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -721,7 +721,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1293,
+      "total": 1294,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -738,7 +738,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1261,
+      "total": 1263,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -755,7 +755,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1251,
+      "total": 1253,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -772,7 +772,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1243,
+      "total": 1244,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -925,7 +925,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 2487,
+      "total": 2512,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -942,7 +942,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1641,
+      "total": 1648,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -959,7 +959,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1360,
+      "total": 1361,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -976,7 +976,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1321,
+      "total": 1323,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -993,7 +993,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1287,
+      "total": 1290,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1010,7 +1010,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1267,
+      "total": 1272,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1027,7 +1027,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1245,
+      "total": 1247,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1197,7 +1197,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1743,
+      "total": 1751,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1214,7 +1214,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1403,
+      "total": 1409,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1231,7 +1231,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1340,
+      "total": 1343,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1248,7 +1248,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1287,
+      "total": 1292,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1265,7 +1265,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1271,
+      "total": 1272,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1282,7 +1282,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1254,
+      "total": 1256,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1452,7 +1452,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1517,
+      "total": 1530,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1469,7 +1469,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1421,
+      "total": 1425,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1486,7 +1486,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1298,
+      "total": 1301,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1503,7 +1503,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1287,
+      "total": 1292,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1520,7 +1520,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1259,
+      "total": 1260,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1537,7 +1537,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1242,
+      "total": 1244,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1690,7 +1690,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1284,
+      "total": 1294,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1707,7 +1707,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1265,
+      "total": 1269,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1724,7 +1724,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1250,
+      "total": 1254,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1741,7 +1741,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1238,
+      "total": 1239,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1758,7 +1758,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1234,
+      "total": 1235,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1775,7 +1775,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1232,
+      "total": 1233,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1792,7 +1792,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1231,
+      "total": 1232,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1911,7 +1911,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1263,
+      "total": 1268,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1928,7 +1928,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1254,
+      "total": 1257,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -1945,7 +1945,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1237,
+      "total": 1241,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2115,7 +2115,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1255,
+      "total": 1256,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2132,7 +2132,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1244,
+      "total": 1245,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2149,7 +2149,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1239,
+      "total": 1240,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2302,7 +2302,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1247,
+      "total": 1249,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2472,7 +2472,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1250,
+      "total": 1253,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2489,7 +2489,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1237,
+      "total": 1239,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2506,7 +2506,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1235,
+      "total": 1236,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2625,7 +2625,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1244,
+      "total": 1249,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2642,7 +2642,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1237,
+      "total": 1238,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2761,7 +2761,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1241,
+      "total": 1245,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2778,7 +2778,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1235,
+      "total": 1237,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2880,7 +2880,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1240,
+      "total": 1242,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2897,7 +2897,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1234,
+      "total": 1235,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -2982,7 +2982,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1236,
+      "total": 1238,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3067,7 +3067,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1241,
+      "total": 1242,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3135,7 +3135,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1240,
+      "total": 1241,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3186,7 +3186,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1235,
+      "total": 1236,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3237,7 +3237,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 439,
+      "total": 441,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3322,7 +3322,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 432,
+      "total": 435,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3373,7 +3373,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 406,
+      "total": 407,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3560,7 +3560,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 431,
+      "total": 432,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3577,7 +3577,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 402,
+      "total": 403,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3594,7 +3594,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 429,
+      "total": 430,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3628,7 +3628,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 421,
+      "total": 422,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3679,7 +3679,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 401,
+      "total": 402,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3866,7 +3866,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 426,
+      "total": 427,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3917,7 +3917,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 422,
+      "total": 423,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -3934,7 +3934,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 413,
+      "total": 414,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -4461,7 +4461,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 414,
+      "total": 415,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -4682,7 +4682,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 519,
+      "total": 521,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -4699,7 +4699,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 463,
+      "total": 468,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -4733,7 +4733,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 411,
+      "total": 413,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -4920,7 +4920,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 425,
+      "total": 428,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -4937,7 +4937,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 422,
+      "total": 423,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -5175,7 +5175,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 401,
+      "total": 402,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -5345,7 +5345,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 406,
+      "total": 407,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8150,7 +8150,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 762,
+      "total": 764,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8167,7 +8167,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 753,
+      "total": 755,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8184,7 +8184,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 725,
+      "total": 726,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8405,7 +8405,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 726,
+      "total": 728,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8592,7 +8592,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 740,
+      "total": 741,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8762,7 +8762,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 763,
+      "total": 764,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -8779,7 +8779,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 740,
+      "total": 741,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9085,7 +9085,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 738,
+      "total": 739,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9442,7 +9442,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 721,
+      "total": 722,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9697,7 +9697,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 2893,
+      "total": 2954,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9714,7 +9714,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3007,
+      "total": 3072,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9731,7 +9731,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3208,
+      "total": 3275,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9748,7 +9748,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3100,
+      "total": 3167,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9765,7 +9765,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3441,
+      "total": 3526,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9782,7 +9782,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1134,
+      "total": 1159,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9799,7 +9799,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 883,
+      "total": 908,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9816,7 +9816,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3281,
+      "total": 3346,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9833,7 +9833,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3280,
+      "total": 3335,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9850,7 +9850,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3258,
+      "total": 3321,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9867,7 +9867,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3604,
+      "total": 3685,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9884,7 +9884,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1165,
+      "total": 1190,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9901,7 +9901,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 925,
+      "total": 950,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9918,7 +9918,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3567,
+      "total": 3625,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9935,7 +9935,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3379,
+      "total": 3446,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9952,7 +9952,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3791,
+      "total": 3874,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9969,7 +9969,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1175,
+      "total": 1201,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -9986,7 +9986,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 912,
+      "total": 937,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10003,7 +10003,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3415,
+      "total": 3491,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10020,7 +10020,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3788,
+      "total": 3871,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10037,7 +10037,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1144,
+      "total": 1170,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10054,7 +10054,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 898,
+      "total": 923,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10071,7 +10071,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3839,
+      "total": 3925,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10088,7 +10088,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 868,
+      "total": 893,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10105,7 +10105,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 305,
+      "total": 313,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10122,7 +10122,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 845,
+      "total": 869,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10139,7 +10139,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 530,
+      "total": 546,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10156,7 +10156,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 520,
+      "total": 527,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10173,7 +10173,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 81,
+      "total": 82,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10190,7 +10190,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3287,
+      "total": 3355,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10207,7 +10207,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 91,
+      "total": 92,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10224,7 +10224,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 908,
+      "total": 926,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10241,7 +10241,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 119,
+      "total": 120,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10258,7 +10258,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 223,
+      "total": 248,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10275,7 +10275,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3272,
+      "total": 3331,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10292,7 +10292,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2795,
+      "total": 2843,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10309,7 +10309,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2107,
+      "total": 2141,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10326,7 +10326,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1271,
+      "total": 1298,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10343,7 +10343,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2761,
+      "total": 2816,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10377,7 +10377,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 65,
+      "total": 66,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10394,7 +10394,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2627,
+      "total": 2684,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10411,7 +10411,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1554,
+      "total": 1597,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10428,7 +10428,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2601,
+      "total": 2650,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10445,7 +10445,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 151,
+      "total": 153,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10462,7 +10462,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 65,
+      "total": 66,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10479,7 +10479,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3547,
+      "total": 3621,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10496,7 +10496,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1987,
+      "total": 2036,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10513,7 +10513,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2369,
+      "total": 2411,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10530,7 +10530,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 168,
+      "total": 169,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10547,7 +10547,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 67,
+      "total": 68,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10564,7 +10564,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3234,
+      "total": 3294,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10581,7 +10581,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1096,
+      "total": 1121,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10598,7 +10598,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1229,
+      "total": 1259,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10615,7 +10615,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1895,
+      "total": 1945,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10632,7 +10632,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1602,
+      "total": 1651,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10649,7 +10649,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1089,
+      "total": 1139,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10666,7 +10666,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3909,
+      "total": 3981,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10683,7 +10683,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1340,
+      "total": 1367,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10700,7 +10700,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1654,
+      "total": 1711,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10717,7 +10717,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1122,
+      "total": 1165,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10734,7 +10734,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1582,
+      "total": 1634,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10751,7 +10751,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1076,
+      "total": 1117,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10768,7 +10768,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1219,
+      "total": 1286,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10785,7 +10785,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1054,
+      "total": 1102,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10802,7 +10802,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1280,
+      "total": 1313,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10819,7 +10819,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 946,
+      "total": 992,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10836,7 +10836,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1252,
+      "total": 1301,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10853,7 +10853,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 357,
+      "total": 365,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10870,7 +10870,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 501,
+      "total": 512,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10887,7 +10887,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2502,
+      "total": 2556,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10904,7 +10904,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2161,
+      "total": 2202,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10921,7 +10921,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1604,
+      "total": 1642,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10938,7 +10938,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1520,
+      "total": 1565,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10955,7 +10955,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1286,
+      "total": 1351,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10972,7 +10972,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 741,
+      "total": 788,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -10989,7 +10989,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 443,
+      "total": 485,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11006,7 +11006,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 999,
+      "total": 1049,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11023,7 +11023,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 597,
+      "total": 643,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11040,7 +11040,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1091,
+      "total": 1148,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11057,7 +11057,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 643,
+      "total": 692,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11074,7 +11074,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1150,
+      "total": 1211,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11091,7 +11091,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 639,
+      "total": 690,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11108,7 +11108,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 677,
+      "total": 729,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11125,7 +11125,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1166,
+      "total": 1228,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11142,7 +11142,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 678,
+      "total": 724,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11159,7 +11159,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1018,
+      "total": 1044,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11176,7 +11176,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1155,
+      "total": 1184,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11193,7 +11193,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 711,
+      "total": 749,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11210,7 +11210,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 214,
+      "total": 217,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11227,7 +11227,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1785,
+      "total": 1816,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11244,7 +11244,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 297,
+      "total": 298,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11261,7 +11261,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 171,
+      "total": 172,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11278,7 +11278,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 328,
+      "total": 332,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11295,7 +11295,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 127,
+      "total": 129,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11312,7 +11312,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 182,
+      "total": 184,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11329,7 +11329,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 792,
+      "total": 808,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11346,7 +11346,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 904,
+      "total": 951,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11363,7 +11363,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 473,
+      "total": 503,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11380,7 +11380,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 909,
+      "total": 952,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11397,7 +11397,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 474,
+      "total": 505,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11414,7 +11414,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 781,
+      "total": 823,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11431,7 +11431,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 386,
+      "total": 413,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11448,7 +11448,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 517,
+      "total": 548,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11465,7 +11465,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 251,
+      "total": 274,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11482,7 +11482,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 386,
+      "total": 395,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11499,7 +11499,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 118,
+      "total": 138,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11516,7 +11516,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 201,
+      "total": 208,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11533,7 +11533,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 169,
+      "total": 178,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11550,7 +11550,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 138,
+      "total": 169,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11567,7 +11567,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 694,
+      "total": 720,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11584,7 +11584,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 704,
+      "total": 730,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11601,7 +11601,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 690,
+      "total": 717,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11618,7 +11618,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 649,
+      "total": 672,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11635,7 +11635,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 366,
+      "total": 382,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11652,7 +11652,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 183,
+      "total": 198,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11669,7 +11669,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1399,
+      "total": 1450,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11686,7 +11686,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 355,
+      "total": 372,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11703,7 +11703,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 116,
+      "total": 119,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11754,7 +11754,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1388,
+      "total": 1432,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11771,7 +11771,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 354,
+      "total": 371,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11788,7 +11788,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 115,
+      "total": 118,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11839,7 +11839,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1391,
+      "total": 1448,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11856,7 +11856,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 360,
+      "total": 377,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11873,7 +11873,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 26,
+      "total": 28,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11924,7 +11924,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1348,
+      "total": 1401,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11941,7 +11941,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 350,
+      "total": 366,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11958,7 +11958,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 23,
+      "total": 25,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -11992,7 +11992,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 218,
+      "total": 232,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12043,7 +12043,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 8,
+      "total": 9,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12060,7 +12060,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 41,
+      "total": 42,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12162,7 +12162,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1240,
+      "total": 1270,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12196,7 +12196,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1266,
+      "total": 1295,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12230,7 +12230,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1264,
+      "total": 1293,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12247,7 +12247,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 469,
+      "total": 504,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12264,7 +12264,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 111,
+      "total": 114,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12298,7 +12298,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1239,
+      "total": 1268,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12315,7 +12315,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 453,
+      "total": 484,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12332,7 +12332,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 105,
+      "total": 108,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12383,7 +12383,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 213,
+      "total": 222,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12519,7 +12519,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 889,
+      "total": 942,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12536,7 +12536,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 926,
+      "total": 979,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12553,7 +12553,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 970,
+      "total": 1027,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12570,7 +12570,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 998,
+      "total": 1056,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12587,7 +12587,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 100,
+      "total": 102,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12604,7 +12604,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 155,
+      "total": 158,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12621,7 +12621,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 391,
+      "total": 393,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12655,7 +12655,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 667,
+      "total": 715,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12689,7 +12689,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 384,
+      "total": 385,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12706,7 +12706,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 455,
+      "total": 456,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12723,7 +12723,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 689,
+      "total": 739,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12774,7 +12774,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 480,
+      "total": 481,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12791,7 +12791,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 670,
+      "total": 721,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12808,7 +12808,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 327,
+      "total": 328,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12825,7 +12825,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 460,
+      "total": 461,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12842,7 +12842,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 649,
+      "total": 696,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12859,7 +12859,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 380,
+      "total": 381,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12876,7 +12876,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 574,
+      "total": 611,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12893,7 +12893,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 401,
+      "total": 438,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12927,7 +12927,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 269,
+      "total": 278,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12944,7 +12944,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 260,
+      "total": 294,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12961,7 +12961,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 286,
+      "total": 325,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12978,7 +12978,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 288,
+      "total": 325,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -12995,7 +12995,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 312,
+      "total": 352,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13012,7 +13012,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 307,
+      "total": 345,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13029,7 +13029,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 322,
+      "total": 363,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13046,7 +13046,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 505,
+      "total": 539,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13063,7 +13063,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 541,
+      "total": 575,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13080,7 +13080,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 543,
+      "total": 577,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13097,7 +13097,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 537,
+      "total": 571,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13114,7 +13114,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 508,
+      "total": 541,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13131,7 +13131,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 499,
+      "total": 530,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13165,7 +13165,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1539,
+      "total": 1565,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13250,7 +13250,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 432,
+      "total": 480,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13267,7 +13267,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 476,
+      "total": 525,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13284,7 +13284,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 519,
+      "total": 569,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13301,7 +13301,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 525,
+      "total": 579,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13318,7 +13318,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 520,
+      "total": 571,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13335,7 +13335,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 526,
+      "total": 579,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13352,7 +13352,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 310,
+      "total": 359,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13369,7 +13369,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 939,
+      "total": 982,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13386,7 +13386,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 891,
+      "total": 924,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13403,7 +13403,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 399,
+      "total": 405,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13420,7 +13420,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 714,
+      "total": 741,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13437,7 +13437,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 709,
+      "total": 735,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13454,7 +13454,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 153,
+      "total": 157,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13471,7 +13471,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 114,
+      "total": 116,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13488,7 +13488,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 384,
+      "total": 386,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13505,7 +13505,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 54,
+      "total": 55,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13522,7 +13522,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 138,
+      "total": 140,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13539,7 +13539,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 1251,
+      "total": 1303,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13556,7 +13556,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 341,
+      "total": 358,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13573,7 +13573,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 973,
+      "total": 1001,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13590,7 +13590,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 326,
+      "total": 343,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13607,7 +13607,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 195,
+      "total": 209,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13624,7 +13624,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 237,
+      "total": 247,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13641,7 +13641,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1205,
+      "total": 1233,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13658,7 +13658,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1055,
+      "total": 1079,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13675,7 +13675,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 345,
+      "total": 367,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13692,7 +13692,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 82,
+      "total": 98,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13709,7 +13709,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 169,
+      "total": 177,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13726,7 +13726,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 166,
+      "total": 174,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13743,7 +13743,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 162,
+      "total": 170,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13760,7 +13760,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 152,
+      "total": 160,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13777,7 +13777,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 134,
+      "total": 141,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13794,7 +13794,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 71,
+      "total": 72,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13811,7 +13811,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 346,
+      "total": 395,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13828,7 +13828,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 65,
+      "total": 66,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13845,7 +13845,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 195,
+      "total": 202,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13862,7 +13862,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 74,
+      "total": 75,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13879,7 +13879,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 54,
+      "total": 56,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13896,7 +13896,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 251,
+      "total": 253,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13913,7 +13913,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 201,
+      "total": 209,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13930,7 +13930,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 200,
+      "total": 222,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13947,7 +13947,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 8,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13964,7 +13964,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 170,
+      "total": 197,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13981,7 +13981,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 178,
+      "total": 204,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -13998,7 +13998,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 175,
+      "total": 202,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14015,7 +14015,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 187,
+      "total": 217,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14032,7 +14032,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 200,
+      "total": 227,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14049,7 +14049,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 8,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14066,7 +14066,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1002,
+      "total": 1056,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14083,7 +14083,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 425,
+      "total": 434,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14100,7 +14100,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 1056,
+      "total": 1115,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14117,7 +14117,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 32,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14185,7 +14185,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 133,
+      "total": 135,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14202,7 +14202,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 117,
+      "total": 118,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14219,7 +14219,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 25,
+      "total": 26,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14236,7 +14236,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 133,
+      "total": 135,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14253,7 +14253,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 158,
+      "total": 160,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14270,7 +14270,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 69,
+      "total": 75,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14287,7 +14287,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 52,
+      "total": 63,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14321,7 +14321,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 42,
+      "total": 44,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14338,7 +14338,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 73,
+      "total": 75,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14355,7 +14355,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 32,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14372,7 +14372,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 232,
+      "total": 269,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14389,7 +14389,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 112,
+      "total": 114,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14423,7 +14423,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 93,
+      "total": 94,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14440,7 +14440,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 149,
+      "total": 151,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14508,7 +14508,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 44,
+      "total": 45,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14525,7 +14525,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 147,
+      "total": 181,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14542,7 +14542,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 126,
+      "total": 144,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14559,7 +14559,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 317,
+      "total": 348,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14576,7 +14576,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 247,
+      "total": 268,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14593,7 +14593,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 318,
+      "total": 337,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14610,7 +14610,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 329,
+      "total": 347,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14627,7 +14627,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 320,
+      "total": 338,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14644,7 +14644,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 187,
+      "total": 189,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14661,7 +14661,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 305,
+      "total": 325,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14678,7 +14678,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 22,
+      "total": 29,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14695,7 +14695,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 255,
+      "total": 273,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14712,7 +14712,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 9,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14729,7 +14729,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 138,
+      "total": 140,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14746,7 +14746,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 21,
+      "total": 27,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14763,7 +14763,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 141,
+      "total": 144,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14780,7 +14780,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 124,
+      "total": 129,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14797,7 +14797,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 126,
+      "total": 131,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14814,7 +14814,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 304,
+      "total": 319,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14831,7 +14831,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 278,
+      "total": 288,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14848,7 +14848,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 44,
+      "total": 53,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14865,7 +14865,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 46,
+      "total": 58,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14882,7 +14882,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 37,
+      "total": 47,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14899,7 +14899,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 40,
+      "total": 52,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14916,7 +14916,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 30,
+      "total": 38,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14933,7 +14933,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 31,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -14950,7 +14950,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 92,
+      "total": 94,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15001,7 +15001,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 46,
+      "total": 50,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15018,7 +15018,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 274,
+      "total": 286,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15035,7 +15035,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 77,
+      "total": 79,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15052,7 +15052,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 75,
+      "total": 77,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15069,7 +15069,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 70,
+      "total": 72,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15086,7 +15086,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 72,
+      "total": 74,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15103,7 +15103,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 63,
+      "total": 65,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15120,7 +15120,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 92,
+      "total": 99,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15137,7 +15137,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 50,
+      "total": 52,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15171,7 +15171,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 37,
+      "total": 38,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15188,7 +15188,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 114,
+      "total": 115,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15205,7 +15205,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 45,
+      "total": 46,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15222,7 +15222,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 105,
+      "total": 107,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15239,7 +15239,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 52,
+      "total": 53,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15256,7 +15256,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 58,
+      "total": 59,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15273,7 +15273,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 67,
+      "total": 68,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15290,7 +15290,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 104,
+      "total": 107,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15307,7 +15307,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 176,
+      "total": 194,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15324,7 +15324,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 72,
+      "total": 80,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15341,7 +15341,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 39,
+      "total": 52,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15358,7 +15358,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 97,
+      "total": 107,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15375,7 +15375,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 130,
+      "total": 148,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15392,7 +15392,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 82,
+      "total": 95,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15409,7 +15409,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 143,
+      "total": 167,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15426,7 +15426,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 92,
+      "total": 99,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15443,7 +15443,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 228,
+      "total": 254,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15460,7 +15460,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 133,
+      "total": 156,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15477,7 +15477,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 299,
+      "total": 350,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15494,7 +15494,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 475,
+      "total": 521,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15511,7 +15511,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 415,
+      "total": 434,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15528,7 +15528,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 339,
+      "total": 352,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15545,7 +15545,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 222,
+      "total": 234,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15562,7 +15562,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 219,
+      "total": 231,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15579,7 +15579,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 219,
+      "total": 231,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15596,7 +15596,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 218,
+      "total": 229,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15613,7 +15613,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 217,
+      "total": 228,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15630,7 +15630,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 200,
+      "total": 211,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15647,7 +15647,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 127,
+      "total": 137,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15664,7 +15664,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 120,
+      "total": 130,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15681,7 +15681,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 282,
+      "total": 291,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15698,7 +15698,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 357,
+      "total": 409,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15715,7 +15715,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 237,
+      "total": 275,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15732,7 +15732,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 219,
+      "total": 265,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15749,7 +15749,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 51,
+      "total": 59,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15766,7 +15766,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 52,
+      "total": 66,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15783,7 +15783,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 45,
+      "total": 50,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15800,7 +15800,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 13,
+      "total": 15,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15834,7 +15834,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 277,
+      "total": 291,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15851,7 +15851,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 163,
+      "total": 177,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15868,7 +15868,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 90,
+      "total": 93,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15885,7 +15885,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 277,
+      "total": 284,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15919,7 +15919,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 75,
+      "total": 77,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15953,7 +15953,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 36,
+      "total": 57,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15970,7 +15970,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 236,
+      "total": 265,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -15987,7 +15987,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 41,
+      "total": 42,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16004,7 +16004,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 182,
+      "total": 193,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16021,7 +16021,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 170,
+      "total": 180,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16038,7 +16038,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 280,
+      "total": 329,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16055,7 +16055,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 130,
+      "total": 160,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16072,7 +16072,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 172,
+      "total": 201,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16089,7 +16089,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 76,
+      "total": 91,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16106,7 +16106,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 30,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16123,7 +16123,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 87,
+      "total": 102,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16140,7 +16140,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 29,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16157,7 +16157,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 92,
+      "total": 107,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16174,7 +16174,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 33,
+      "total": 36,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16191,7 +16191,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 96,
+      "total": 111,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16208,7 +16208,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 31,
+      "total": 34,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16225,7 +16225,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 86,
+      "total": 101,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16242,7 +16242,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 30,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16259,7 +16259,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 96,
+      "total": 111,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16276,7 +16276,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 31,
+      "total": 34,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16293,7 +16293,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 213,
+      "total": 251,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16310,7 +16310,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 132,
+      "total": 163,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16327,7 +16327,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 51,
+      "total": 65,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16344,7 +16344,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 31,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16361,7 +16361,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 129,
+      "total": 159,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16378,7 +16378,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 64,
+      "total": 80,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16395,7 +16395,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 28,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16412,7 +16412,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 75,
+      "total": 76,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16429,7 +16429,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 61,
+      "total": 64,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16446,7 +16446,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 37,
+      "total": 38,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16463,7 +16463,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 100,
+      "total": 120,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16497,7 +16497,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16514,7 +16514,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 21,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16531,7 +16531,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 145,
+      "total": 168,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16548,7 +16548,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 116,
+      "total": 120,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16565,7 +16565,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 117,
+      "total": 121,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16582,7 +16582,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 123,
+      "total": 127,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16599,7 +16599,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 119,
+      "total": 123,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16616,7 +16616,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 116,
+      "total": 120,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16633,7 +16633,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 111,
+      "total": 115,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16650,7 +16650,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 59,
+      "total": 63,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16667,7 +16667,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 62,
+      "total": 66,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16718,7 +16718,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 124,
+      "total": 125,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16769,7 +16769,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 48,
+      "total": 50,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16786,7 +16786,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 89,
+      "total": 94,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16837,7 +16837,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 53,
+      "total": 54,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16854,7 +16854,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 36,
+      "total": 37,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16871,7 +16871,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 26,
+      "total": 29,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16888,7 +16888,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 22,
+      "total": 24,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16905,7 +16905,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 55,
+      "total": 69,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16973,7 +16973,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 20,
+      "total": 21,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -16990,7 +16990,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17007,7 +17007,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 21,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17041,7 +17041,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 63,
+      "total": 80,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17058,7 +17058,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 119,
+      "total": 120,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17075,7 +17075,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 142,
+      "total": 145,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17092,7 +17092,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 135,
+      "total": 146,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17109,7 +17109,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 33,
+      "total": 36,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17126,7 +17126,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 77,
+      "total": 93,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17143,7 +17143,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 44,
+      "total": 45,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17483,7 +17483,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 23,
+      "total": 25,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17500,7 +17500,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 19,
+      "total": 21,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17551,7 +17551,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 92,
+      "total": 103,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17568,7 +17568,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 107,
+      "total": 116,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17585,7 +17585,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 51,
+      "total": 54,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17602,7 +17602,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 173,
+      "total": 217,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17636,7 +17636,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 23,
+      "total": 25,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17653,7 +17653,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17670,7 +17670,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 28,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17687,7 +17687,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 27,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17704,7 +17704,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 26,
+      "total": 27,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17721,7 +17721,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 72,
+      "total": 76,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17738,7 +17738,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 53,
+      "total": 57,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17755,7 +17755,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 41,
+      "total": 47,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17772,7 +17772,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 18,
+      "total": 20,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17789,7 +17789,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 22,
+      "total": 23,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17806,7 +17806,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 36,
+      "total": 37,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -17823,7 +17823,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18163,7 +18163,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 43,
+      "total": 44,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18384,7 +18384,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18503,7 +18503,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 14,
+      "total": 15,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18520,7 +18520,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 5,
+      "total": 6,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18537,7 +18537,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 8,
+      "total": 9,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18554,7 +18554,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 28,
+      "total": 29,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18571,7 +18571,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18588,7 +18588,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 11,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18707,7 +18707,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 11,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18775,7 +18775,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 67,
+      "total": 83,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18792,7 +18792,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 72,
+      "total": 89,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18826,7 +18826,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 56,
+      "total": 72,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18843,7 +18843,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 40,
+      "total": 49,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -18945,7 +18945,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 6,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19047,7 +19047,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 26,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19064,7 +19064,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 19,
+      "total": 21,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19081,7 +19081,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 11,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19098,7 +19098,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 66,
+      "total": 68,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19115,7 +19115,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 71,
+      "total": 74,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19132,7 +19132,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 98,
+      "total": 118,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19149,7 +19149,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 25,
+      "total": 26,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19183,7 +19183,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 21,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19200,7 +19200,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 63,
+      "total": 65,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19217,7 +19217,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 50,
+      "total": 58,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19251,7 +19251,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 91,
+      "total": 92,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19268,7 +19268,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 25,
+      "total": 27,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19285,7 +19285,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 14,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19302,7 +19302,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 24,
+      "total": 26,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19319,7 +19319,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 12,
+      "total": 13,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19336,7 +19336,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19353,7 +19353,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 12,
+      "total": 13,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19370,7 +19370,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19387,7 +19387,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19404,7 +19404,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 16,
+      "total": 17,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19455,7 +19455,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 21,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19591,7 +19591,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19659,7 +19659,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 11,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19676,7 +19676,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 8,
+      "total": 9,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19693,7 +19693,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 12,
+      "total": 13,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19710,7 +19710,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19727,7 +19727,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19744,7 +19744,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 19,
+      "total": 21,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19761,7 +19761,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19948,7 +19948,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 14,
+      "total": 15,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -19999,7 +19999,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 58,
+      "total": 62,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20016,7 +20016,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 28,
+      "total": 30,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20050,7 +20050,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 34,
+      "total": 46,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20203,7 +20203,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 36,
+      "total": 37,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20220,7 +20220,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 152,
+      "total": 160,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20254,7 +20254,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20271,7 +20271,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20288,7 +20288,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 7,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20305,7 +20305,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 240,
+      "total": 282,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20339,7 +20339,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 143,
+      "total": 181,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20356,7 +20356,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 124,
+      "total": 136,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20373,7 +20373,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 30,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20390,7 +20390,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 107,
+      "total": 119,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20407,7 +20407,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 65,
+      "total": 67,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20492,7 +20492,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 39,
+      "total": 45,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20526,7 +20526,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 35,
+      "total": 40,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20543,7 +20543,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 34,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20560,7 +20560,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 31,
+      "total": 34,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20577,7 +20577,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 37,
+      "total": 40,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20594,7 +20594,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20611,7 +20611,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 44,
+      "total": 47,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20645,7 +20645,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 6,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20662,7 +20662,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 71,
+      "total": 91,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20713,7 +20713,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 67,
+      "total": 71,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20730,7 +20730,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 18,
+      "total": 20,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20747,7 +20747,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20764,7 +20764,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 6,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20781,7 +20781,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 5,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20798,7 +20798,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 11,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20815,7 +20815,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 7,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20832,7 +20832,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 5,
+      "total": 9,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20849,7 +20849,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 17,
+      "total": 20,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20866,7 +20866,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 38,
+      "total": 44,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20883,7 +20883,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 11,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20900,7 +20900,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 21,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20951,7 +20951,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 8,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -20985,7 +20985,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 17,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21002,7 +21002,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 23,
+      "total": 25,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21019,7 +21019,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 29,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21036,7 +21036,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 29,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21070,7 +21070,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 38,
+      "total": 39,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21087,7 +21087,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 33,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21104,7 +21104,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 29,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21121,7 +21121,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 27,
+      "total": 28,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21138,7 +21138,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 60,
+      "total": 62,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21342,7 +21342,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 25,
+      "total": 26,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21444,7 +21444,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21512,7 +21512,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 15,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21529,7 +21529,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 79,
+      "total": 102,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21546,7 +21546,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 15,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21733,7 +21733,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 6,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21750,7 +21750,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 132,
+      "total": 160,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21767,7 +21767,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 14,
+      "total": 15,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21784,7 +21784,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 62,
+      "total": 77,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -21801,7 +21801,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 6,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22005,7 +22005,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 23,
+      "total": 24,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22022,7 +22022,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 13,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22039,7 +22039,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 15,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22107,7 +22107,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 29,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22124,7 +22124,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22141,7 +22141,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 19,
+      "total": 20,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22175,7 +22175,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 19,
+      "total": 20,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22192,7 +22192,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 17,
+      "total": 18,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22209,7 +22209,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 15,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22226,7 +22226,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 17,
+      "total": 18,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22243,7 +22243,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22294,7 +22294,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 21,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22328,7 +22328,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 21,
+      "total": 23,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22362,7 +22362,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 17,
+      "total": 18,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22413,7 +22413,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 19,
+      "total": 20,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22583,7 +22583,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 22,
+      "total": 24,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22651,7 +22651,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 2,
+      "total": 3,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22685,7 +22685,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 24,
+      "total": 26,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22736,7 +22736,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 30,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22770,7 +22770,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 24,
+      "total": 25,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22804,7 +22804,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 29,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22872,7 +22872,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 22,
+      "total": 24,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22889,7 +22889,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 22,
+      "total": 24,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -22991,7 +22991,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 39,
+      "total": 51,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23008,7 +23008,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 20,
+      "total": 22,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23025,7 +23025,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 90,
+      "total": 102,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23042,7 +23042,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 22,
+      "total": 23,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23059,7 +23059,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23093,7 +23093,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 69,
+      "total": 73,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23110,7 +23110,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 5,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23144,7 +23144,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 9,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23178,7 +23178,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 29,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23195,7 +23195,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 23,
+      "total": 24,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23212,7 +23212,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 12,
+      "total": 13,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23229,7 +23229,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 32,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23246,7 +23246,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 45,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23263,7 +23263,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 44,
+      "total": 65,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23280,7 +23280,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 63,
+      "total": 73,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23297,7 +23297,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 65,
+      "total": 83,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23348,7 +23348,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 17,
+      "total": 18,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23450,7 +23450,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 15,
+      "total": 18,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23535,7 +23535,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 5,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23807,7 +23807,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 29,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23841,7 +23841,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 31,
+      "total": 55,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23875,7 +23875,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3,
+      "total": 6,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23892,7 +23892,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3,
+      "total": 6,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23909,7 +23909,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3,
+      "total": 4,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23960,7 +23960,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 22,
+      "total": 23,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -23977,7 +23977,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 28,
+      "total": 30,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24011,7 +24011,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 16,
+      "total": 17,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24028,7 +24028,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 4,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24045,7 +24045,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 41,
+      "total": 47,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24062,7 +24062,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 24,
+      "total": 28,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24079,7 +24079,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24096,7 +24096,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 18,
+      "total": 19,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24113,7 +24113,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 14,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24147,7 +24147,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 12,
+      "total": 29,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24198,7 +24198,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 12,
+      "total": 15,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24215,7 +24215,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 7,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24232,7 +24232,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 18,
+      "total": 31,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24283,7 +24283,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 14,
+      "total": 15,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24300,7 +24300,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 8,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24368,7 +24368,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 8,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24453,7 +24453,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 7,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24504,7 +24504,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 7,
+      "total": 10,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24555,7 +24555,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 8,
+      "total": 12,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24980,7 +24980,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 13,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -24997,7 +24997,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 7,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25014,7 +25014,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 8,
+      "total": 9,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25031,7 +25031,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25065,7 +25065,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 10,
+      "total": 11,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25082,7 +25082,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 13,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25099,7 +25099,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 13,
+      "total": 14,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25150,7 +25150,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2,
+      "total": 4,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25184,7 +25184,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 15,
+      "total": 16,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25235,7 +25235,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 6,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25371,7 +25371,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 7,
+      "total": 8,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -25660,7 +25660,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 5,
+      "total": 6,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26289,7 +26289,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26306,7 +26306,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26340,7 +26340,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26374,7 +26374,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26391,7 +26391,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26408,7 +26408,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3,
+      "total": 4,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26425,7 +26425,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 3,
+      "total": 4,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26442,7 +26442,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26459,7 +26459,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26476,7 +26476,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 6,
+      "total": 7,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26493,7 +26493,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "lay-to-back"
     ],
     "meta": {
-      "total": 4,
+      "total": 5,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -26952,7 +26952,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2,
+      "total": 3,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -27411,7 +27411,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 3,
+      "total": 6,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -27819,7 +27819,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "back-to-lay"
     ],
     "meta": {
-      "total": 2,
+      "total": 3,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -29961,7 +29961,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1,
+      "total": 2,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -29978,7 +29978,7 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "neutral"
     ],
     "meta": {
-      "total": 1,
+      "total": 2,
       "profitable": 0,
       "win_rate": 0.0,
       "avg_confidence": 0.65,
@@ -30002,6 +30002,125 @@ KNOWN_BLUEPRINT_PATTERNS = {
       "story_phase": "Ketsu",
       "oc_band": "OC6-OC9",
       "story_id": "OC6-Ketsu"
+    }
+  },
+  "drift\u2192OC13-OC19\u2192pingpong\u2192lay-to-back": {
+    "sequence": [
+      "drift",
+      "OC13-OC19",
+      "pingpong",
+      "lay-to-back"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC13-OC19",
+      "story_id": "OC13-Ketsu"
+    }
+  },
+  "flat\u2192OC15-OC19\u2192pingpong\u2192neutral": {
+    "sequence": [
+      "flat",
+      "OC15-OC19",
+      "pingpong",
+      "neutral"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC15-OC19",
+      "story_id": "OC15-Ketsu"
+    }
+  },
+  "flat\u2192OC16-OC19\u2192pingpong\u2192neutral": {
+    "sequence": [
+      "flat",
+      "OC16-OC19",
+      "pingpong",
+      "neutral"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC16-OC19",
+      "story_id": "OC16-Ketsu"
+    }
+  },
+  "flat\u2192OC17-OC19\u2192pingpong\u2192neutral": {
+    "sequence": [
+      "flat",
+      "OC17-OC19",
+      "pingpong",
+      "neutral"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC17-OC19",
+      "story_id": "OC17-Ketsu"
+    }
+  },
+  "steam\u2192OC13-OC14\u2192drift\u2192back-to-lay": {
+    "sequence": [
+      "steam",
+      "OC13-OC14",
+      "drift",
+      "back-to-lay"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC13-OC14",
+      "story_id": "OC13-Ketsu"
+    }
+  },
+  "flat\u2192OC12-OC14\u2192pingpong\u2192neutral": {
+    "sequence": [
+      "flat",
+      "OC12-OC14",
+      "pingpong",
+      "neutral"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC12-OC14",
+      "story_id": "OC12-Ketsu"
+    }
+  },
+  "steam\u2192OC12-OC15\u2192pingpong\u2192back-to-lay": {
+    "sequence": [
+      "steam",
+      "OC12-OC15",
+      "pingpong",
+      "back-to-lay"
+    ],
+    "meta": {
+      "total": 1,
+      "profitable": 0,
+      "win_rate": 0.0,
+      "avg_confidence": 0.65,
+      "story_phase": "Ketsu",
+      "oc_band": "OC12-OC15",
+      "story_id": "OC12-Ketsu"
     }
   }
 }

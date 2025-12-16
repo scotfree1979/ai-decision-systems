@@ -4041,34 +4041,6 @@ class PhaseGUI(tk.Tk):
 
         print("✅ Step 4 OK — OC timeline loop started (OC1…OC20).")
 
-        # ============================================================
-        # START BUS LOOP (authoritative decision engine)
-        # ============================================================
-        from engines.bus.bus import BUS
-        import threading, time
-
-        def _bus_loop():
-            print("[BUS] decision loop started")
-            while True:
-                try:
-                    BUS.tick()
-                except Exception as e:
-                    print(f"[BUS][ERR] {e}")
-                time.sleep(1.0)   # 1 Hz for now; tune later
-
-        # Start only once
-        if not any(t.name == "BUSLoop" for t in threading.enumerate()):
-            threading.Thread(
-                target=_bus_loop,
-                name="BUSLoop",
-                daemon=True
-            ).start()
-
-
-
-
-
-
 
 # === PATCH START ===
 # 📍 TARGET: gui/GUI.py:_step4 warm-up block

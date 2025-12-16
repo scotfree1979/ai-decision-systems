@@ -68,6 +68,61 @@ class DecisionBus:
         }
 
 
+    def run_live(self, hz: float = 1.0):
+        interval = max(0.05, 1.0 / max(0.1, hz))
+        print(f"[BUS] live loop started (hz={hz})")
+
+        while True:
+            try:
+                self.tick()
+            except Exception as e:
+                print(f"[BUS][ERR] tick failed: {e}")
+
+            time.sleep(interval)
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: class DecisionBus
+# 🧩 ACTION: ADD (new helper method, no replacements)
+# 📆 PATCHED: 2025-12-15 — Unconditional TICK context container
+# ======================================================================================================
+
+    def _new_tick_ctx(self):
+        """
+        Create a fresh, per-tick diagnostic context.
+        This is ANALYSIS FIRST — execution does not depend on this existing.
+        """
+        return {
+            # identity
+            "tick_id": self.tick_id,
+            "ts_start": time.time(),
+            "ts_end": None,
+            "duration": None,
+
+            # phase flags
+            "analysis_ran": False,
+            "enrichment_ran": False,
+            "routing_ran": False,
+
+            # analysis
+            "markets_seen": 0,
+            "runners_seen": 0,
+            "engine_outcomes": {},   # engine -> {evaluated, fired, why}
+            "plans_raw": [],         # all raw plans emitted by engines
+
+            # enrichment
+            "plans_enriched": [],
+            "plans_rejected": [],    # (plan, reason)
+
+            # routing
+            "plans_routed": [],
+            "plans_route_failed": [],
+
+            # errors (never fatal)
+            "errors": [],
+        }
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus
@@ -102,6 +157,19 @@ class DecisionBus:
         except Exception:
             return False
 
+            # --------------------------------------------------
+            # RUNNER COUNT (DIAGNOSTIC — REAL, NOT DERIVED)
+            # --------------------------------------------------
+            try:
+                st = get_market_state(mid) or {}
+                tick_ctx["runners_seen"] = len(
+                    [
+                        r for r in (st.get("runners") or {}).values()
+                        if r.get("band") in ("ACTIVE", "PASSIVE")
+                    ]
+                )
+            except Exception:
+                tick_ctx["runners_seen"] = 0
 
 
     # ======================================================================
@@ -188,6 +256,18 @@ class DecisionBus:
 
         plans = []
 
+        # --------------------------------------------------
+        # Helper — engine decision surface capture ONLY
+        # (no behavioural impact)
+        # --------------------------------------------------
+        def _record(engine, evaluated=True, fired=False, why=None):
+            engine_report.setdefault(engine, {})
+            engine_report[engine].update({
+                "evaluated": evaluated,
+                "fired": fired,
+                "why": why,
+            })
+
         # ============================
         # MSC Exploratory
         # ============================
@@ -197,18 +277,20 @@ class DecisionBus:
                 p = eng.tick(ctx)
 
                 if p is None:
-                    engine_report["MSC_EXPLORATORY"]["blocked"] = "no_plan"
+                    _record("MSC_EXPLORATORY", evaluated=True, fired=False, why="no_plan")
                 elif p.get("enter"):
                     p["engine"] = "MSC_EXPLORATORY"
-                    engine_report["MSC_EXPLORATORY"]["fired"] += 1
-                    engine_report["MSC_EXPLORATORY"]["blocked"] = None
+                    _record("MSC_EXPLORATORY", evaluated=True, fired=True)
                     plans.append(("MSC_EXPLORATORY", p, ctx))
                 else:
-                    engine_report["MSC_EXPLORATORY"]["blocked"] = (
-                        p.get("reason") or p.get("why") or "blocked"
+                    _record(
+                        "MSC_EXPLORATORY",
+                        evaluated=True,
+                        fired=False,
+                        why=p.get("reason") or p.get("why") or "blocked",
                     )
-        except Exception:
-            pass
+        except Exception as e:
+            _record("MSC_EXPLORATORY", evaluated=False, fired=False, why=str(e))
 
         # ============================
         # MSC In-Play
@@ -219,20 +301,20 @@ class DecisionBus:
                 p = eng.tick(ctx)
 
                 if p is None:
-                    engine_report["MSC_INPLAY"]["blocked"] = "no_plan"
+                    _record("MSC_INPLAY", evaluated=True, fired=False, why="no_plan")
                 elif p.get("enter"):
                     p["engine"] = "MSC_INPLAY"
-                    engine_report["MSC_INPLAY"]["fired"] += 1
-                    engine_report["MSC_INPLAY"]["blocked"] = None
+                    _record("MSC_INPLAY", evaluated=True, fired=True)
                     plans.append(("MSC_INPLAY", p, ctx))
                 else:
-                    engine_report["MSC_INPLAY"]["blocked"] = (
-                        p.get("reason") or p.get("why") or "blocked"
+                    _record(
+                        "MSC_INPLAY",
+                        evaluated=True,
+                        fired=False,
+                        why=p.get("reason") or p.get("why") or "blocked",
                     )
-        except Exception:
-            pass
-
-
+        except Exception as e:
+            _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
 
         # ============================
         # Legacy propose_trade
@@ -242,19 +324,21 @@ class DecisionBus:
             lp = mp.propose_trade(dict(ctx))
 
             if lp is None:
-                engine_report["LEGACY"]["blocked"] = "no_plan"
+                _record("LEGACY", evaluated=True, fired=False, why="no_plan")
             elif lp.get("enter"):
                 lp["engine"] = "LEGACY"
                 lp["strategy"] = "PROPOSE_TRADE"
-                engine_report["LEGACY"]["fired"] += 1
-                engine_report["LEGACY"]["blocked"] = None
+                _record("LEGACY", evaluated=True, fired=True)
                 plans.append(("LEGACY", lp, ctx))
             else:
-                engine_report["LEGACY"]["blocked"] = (
-                    lp.get("reason") or lp.get("why") or "blocked"
+                _record(
+                    "LEGACY",
+                    evaluated=True,
+                    fired=False,
+                    why=lp.get("reason") or lp.get("why") or "blocked",
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            _record("LEGACY", evaluated=False, fired=False, why=str(e))
 
         # ============================
         # Legacy strategy registry
@@ -267,21 +351,39 @@ class DecisionBus:
                 sp = plan_for_strategy(strat_name, ctx)
 
                 if sp is None:
-                    engine_report["LEGACY"]["blocked"] = "no_plan"
+                    _record("LEGACY", evaluated=True, fired=False, why="no_plan")
                 elif sp.get("enter"):
                     sp["engine"] = "LEGACY"
                     sp["strategy"] = strat_name
-                    engine_report["LEGACY"]["fired"] += 1
-                    engine_report["LEGACY"]["blocked"] = None
+                    _record("LEGACY", evaluated=True, fired=True)
                     plans.append(("LEGACY", sp, ctx))
                 else:
-                    engine_report["LEGACY"]["blocked"] = (
-                        sp.get("reason") or sp.get("why") or "blocked"
+                    _record(
+                        "LEGACY",
+                        evaluated=True,
+                        fired=False,
+                        why=sp.get("reason") or sp.get("why") or "blocked",
                     )
-        except Exception:
-            pass
+        except Exception as e:
+            _record("LEGACY", evaluated=False, fired=False, why=str(e))
 
         return plans
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: def _run_engines_for_tick(self, mid, sid, ctx, engine_report):
+# 🧩 ACTION: ADD (capture engine decision outcomes, no replacement)
+# 📆 PATCHED: 2025-12-15 — Engine decision surface capture
+# ======================================================================================================
+
+        def _record(engine, evaluated=True, fired=False, why=None):
+            engine_report.setdefault(engine, {})
+            engine_report[engine].update({
+                "evaluated": evaluated,
+                "fired": fired,
+                "why": why,
+            })
+
 
 
     # ======================================================================
@@ -326,321 +428,550 @@ class DecisionBus:
     # ======================================================================
     def tick(self):
         self.tick_id += 1
-        tick_ts = time.time()
+        tick_ctx = self._new_tick_ctx()
+     
 
-        tick_record = {
-            "tick_id": self.tick_id,
-            "ts": tick_ts,
-            "mode": "LIVE",
-            "markets_seen": 0,
-            "markets_ready": 0,
-            "runners_seen": 0,
-            "plans_generated": 0,
-            "plans_routed": 0,
-            "reason": "OK",
-        }
-
-
-        # ------------------------------------
-        # PER-TICK ENGINE REPORT (RESET EACH TICK)
-        # ------------------------------------
-        engine_report = {
-            "LEGACY":          {"fired": 0, "blocked": None},
-            "MSC_EXPLORATORY": {"fired": 0, "blocked": None},
-            "MSC_INPLAY":      {"fired": 0, "blocked": None},
-            "MSC_RISK":        {"fired": 0, "blocked": None},
-            "OVERWATCHER":     {"fired": 0, "blocked": None},
-        }
-
-
-        # SCOPE
-        
-        scope = build_and_maintain_scope()
-      
-
-        mids = [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
-        if not mids:
-            tick_record["reason"] = "no_markets_in_scope"
-            self._persist_tick(tick_record)
-            self._print_tick(tick_record)
-            return
-
-
-        # ------------------------------------
-        # BASE CTX (MUST COME FIRST)
-        # ------------------------------------
-        _bc = build_context(source="LIVE")
-        if isinstance(_bc, tuple):
-            base_ctx, _meta = _bc
-        else:
-            base_ctx, _meta = _bc, {}
-
-
-        # ------------------------------------
-        # PLAN QUEUE (MUST EXIST BEFORE USE)
-        # ------------------------------------
-        plan_queue = []
-
-        # ------------------------------------
-        # MARKET MONITOR — ANALYSE, THEN READ
-        # ------------------------------------
-        import engines.market_monitor.monitor as monitor
 
         try:
-            # 🔑 ACTIVE STEP: tell Monitor to analyse these markets
-            monitor.refresh(mids, max_runners=20)
-        except Exception as e:
-            print(f"[BUS][WARN] MarketMonitor refresh failed: {e}")
+            # ==================================================
+            # PHASE A — ANALYSIS (UNCONDITIONAL)
+            # ==================================================
+            tick_ctx["analysis_ran"] = True
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH START:
-#     for mid in mids:
-# 🔎 SEARCH END:
-#     plan_queue.extend(plans)
-# 🧩 ACTION: REPLACE ENTIRE BLOCK
-# 📆 PATCHED: 2025-12-14 — One runner per tick (bucket + market aware)
-# ======================================================================================================
+            scope = build_and_maintain_scope() or {}
+            markets = scope.get("markets") or []
+            mids = [m["marketId"] for m in markets if isinstance(m, dict)]
+            tick_ctx["markets_seen"] = len(mids)
 
-        from engines.market_monitor.monitor import get_market_state
+            base_ctx_raw = build_context(source="LIVE")
+            base_ctx = base_ctx_raw[0] if isinstance(base_ctx_raw, tuple) else base_ctx_raw
 
-     
-        bucketed = scope.get("buckets")
-        if not bucketed:
-            # Fallback: treat all markets as near20 if buckets not provided
-            bucketed = {
-                "near20": [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
+            # MarketMonitor refresh is advisory — never fatal
+            try:
+                import engines.market_monitor.monitor as monitor
+                if mids:
+                    monitor.refresh(mids, max_runners=20)
+            except Exception as e:
+                tick_ctx["errors"].append(("market_monitor_refresh", str(e)))
+
+            # ------------------------------------
+            # PER-TICK ENGINE REPORT (RESET EACH TICK)
+            # ------------------------------------
+            engine_report = {
+                "LEGACY":          {"fired": 0, "blocked": None},
+                "MSC_EXPLORATORY": {"fired": 0, "blocked": None},
+                "MSC_INPLAY":      {"fired": 0, "blocked": None},
+                "MSC_RISK":        {"fired": 0, "blocked": None},
+                "OVERWATCHER":     {"fired": 0, "blocked": None},
             }
 
-        selected = None
 
-        # Priority order (locked)
-        for bucket_name in ("in_play", "near20", "near60", "next5"):
+            # SCOPE
+            
+            scope = build_and_maintain_scope()
+          
 
-            mids_in_bucket = bucketed.get(bucket_name) or []
-            if not mids_in_bucket:
-                continue
+            mids = [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
+            if not mids:
+                tick_ctx["errors"].append(("analysis", "no_markets_in_scope"))
 
-            candidates = []
-            for mid in mids_in_bucket:
-                st = get_market_state(mid) or {}
-                for sid, r in (st.get("runners") or {}).items():
-                    if r.get("band") in ("ACTIVE", "PASSIVE"):
-                        candidates.append((mid, sid))
 
-            if not candidates:
-                continue
 
-            seen = self._bucket_seen[bucket_name]
+            # ------------------------------------
+            # BASE CTX (MUST COME FIRST)
+            # ------------------------------------
+            _bc = build_context(source="LIVE")
+            if isinstance(_bc, tuple):
+                base_ctx, _meta = _bc
+            else:
+                base_ctx, _meta = _bc, {}
 
-            # Reset once all candidates seen
-            if len(seen) >= len(candidates):
-                seen.clear()
 
-            for mid, sid in candidates:
-                key = (mid, sid)
-                if key not in seen:
-                    selected = (bucket_name, mid, sid)
-                    seen.add(key)
+            # ------------------------------------
+            # PLAN QUEUE (MUST EXIST BEFORE USE)
+            # ------------------------------------
+            plan_queue = []
+
+            # ------------------------------------
+            # MARKET MONITOR — ANALYSE, THEN READ
+            # ------------------------------------
+            import engines.market_monitor.monitor as monitor
+
+            try:
+                # 🔑 ACTIVE STEP: tell Monitor to analyse these markets
+                monitor.refresh(mids, max_runners=20)
+            except Exception as e:
+                print(f"[BUS][WARN] MarketMonitor refresh failed: {e}")
+
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🔎 SEARCH START:
+    #     for mid in mids:
+    # 🔎 SEARCH END:
+    #     plan_queue.extend(plans)
+    # 🧩 ACTION: REPLACE ENTIRE BLOCK
+    # 📆 PATCHED: 2025-12-14 — One runner per tick (bucket + market aware)
+    # ======================================================================================================
+
+            from engines.market_monitor.monitor import get_market_state
+
+         
+            bucketed = scope.get("buckets")
+            if not bucketed:
+                # Fallback: treat all markets as near20 if buckets not provided
+                bucketed = {
+                    "near20": [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
+                }
+
+            selected = None
+
+            # Priority order (locked)
+            for bucket_name in ("in_play", "near20", "near60", "next5"):
+
+                mids_in_bucket = bucketed.get(bucket_name) or []
+                if not mids_in_bucket:
+                    continue
+
+                candidates = []
+                for mid in mids_in_bucket:
+                    st = get_market_state(mid) or {}
+                    for sid, r in (st.get("runners") or {}).items():
+                        if r.get("band") in ("ACTIVE", "PASSIVE"):
+                            tick_ctx["runners_seen"] += 1
+                            candidates.append((mid, sid))
+
+
+
+                if not candidates:
+                    continue
+
+                seen = self._bucket_seen[bucket_name]
+
+                # Reset once all candidates seen
+                if len(seen) >= len(candidates):
+                    seen.clear()
+
+                for mid, sid in candidates:
+                    key = (mid, sid)
+                    if key not in seen:
+                        selected = (bucket_name, mid, sid)
+                        seen.add(key)
+                        break
+
+                if selected:
                     break
 
-            if selected:
-                break
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🔎 ANCHOR: if not selected:
+    # 🧩 ACTION: REPLACE ENTIRE BLOCK
+    # 📆 PATCHED: 2025-12-15 — Prevent silent tick on no_runnable_runners
+    # ======================================================================================================
 
-        if not selected:
-            tick_record["reason"] = "no_runnable_runners"
-            self._persist_tick(tick_record)
-            self._print_tick(tick_record)
-            return
-
-        bucket_name, mid, sid = selected
-
-        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-        if not ctx:
-            tick_record["reason"] = "ctx_build_failed"
-            self._persist_tick(tick_record)
-            self._print_tick(tick_record)
-            return
-
-        plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
-        plan_queue.extend(plans)
+            if not selected:
+                tick_ctx["errors"].append(("analysis", "no_runnable_runners"))
+                # do NOT return — allow final TICK report
 
 
+            bucket_name, mid, sid = selected
 
-        # Enrichment — unchanged
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: after plans = self._run_engines_for_tick(...)
-# 🧩 ACTION: ADD
-# 📆 PATCHED: 2025-12-14 — Execution enrichment + integrity blockers
-# ======================================================================================================
+            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🔎 ANCHOR: if not ctx:
+    # 🧩 ACTION: REPLACE ENTIRE BLOCK
+    # 📆 PATCHED: 2025-12-15 — Prevent silent tick on ctx_build_failed
+    # ======================================================================================================
 
-        from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+            if not ctx:
+                tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
+                # do NOT return — allow final TICK report
 
-        final_plans = []
 
-        for eng, plan, ctx in plans:
-
+            plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
             # --------------------------------------------------
-            # Execution enrichment (ONLY missing execution fields)
+            # PHASE 1 REPORT — ANALYSIS
             # --------------------------------------------------
-            plan.setdefault("marketId", ctx.get("marketId"))
-            plan.setdefault("selectionId", ctx.get("selectionId"))
-            plan.setdefault("px", ctx.get("px"))
+            print("────────────────────────────────────────────────────────")
+            print(f"[BUS][PHASE 1][ANALYSIS] tick=#{self.tick_id}")
+            print("────────────────────────────────────────────────────────")
 
-            # --------------------------------------------------
-            # Direction check (execution truth)
-            # --------------------------------------------------
-            dec = None
-            try:
-                dec = compute_msc_decision(ctx)
-            except Exception:
-                dec = None
+            print("SCOPE")
+            print(f"  markets_seen   : {tick_ctx['markets_seen']}")
+            print(f"  runners_seen   : {tick_ctx['runners_seen']}")
 
-            exec_dir = dec.get("direction") if isinstance(dec, dict) else None
-            plan_dir = plan.get("direction")
+            evaluated = len(engine_report)
+            fired = sum(1 for r in engine_report.values() if r.get("fired"))
 
-            # Inject direction if missing
-            if not plan_dir and exec_dir:
-                plan["direction"] = exec_dir
-                plan_dir = exec_dir
+            print("\nENGINES")
+            print(f"  evaluated      : {evaluated}")
+            print(f"  fired          : {fired}")
 
-            # Blocker 1 — direction invalidated
-            if plan_dir and exec_dir and plan_dir != exec_dir:
-                engine_report[plan["engine"]]["blocked"] = "direction_changed"
-                continue
+            print("\nENGINE OUTCOMES")
+            for eng, info in engine_report.items():
+                print(
+                    f"  {eng:<16} "
+                    f"evaluated={info.get('evaluated')} "
+                    f"fired={info.get('fired')} "
+                    f"why={info.get('why')}"
+                )
 
-            # Blocker 2 — budget pre-check (BUS-level only)
-            if not self._has_budget(plan, ctx):
-                engine_report[plan["engine"]]["blocked"] = "insufficient_budget"
-                continue
+            print("\nPLANS")
+            print(f"  raw            : {len(plans)}")
 
-            final_plans.append((eng, plan, ctx))
-
-
-        # Routing
-        for eng, p, ctx in final_plans:
-
-            # --------------------------------------------------
-            # 🔥 NORMALISE ROUTING IDENTITY (CRITICAL)
-            # --------------------------------------------------
-            if "marketId" not in p or p.get("marketId") is None:
-                p["marketId"] = ctx.get("marketId")
-
-            if "selectionId" not in p or p.get("selectionId") is None:
-                p["selectionId"] = ctx.get("selectionId")
-
-            # --------------------------------------------------
-            # Route the plan
-            # --------------------------------------------------
-            self._route(p, ctx)
-
-        # ------------------------------------
-        # FINALISE TICK RECORD  ✅ THIS IS THE PLACE
-        # ------------------------------------
-        tick_record["plans_generated"] = len(plan_queue)
-        tick_record["plans_routed"] = len(final_plans)
-
-        self._persist_tick(tick_record)
-        self._print_tick(tick_record)
-
-        # ------------------------------------
-        # TICK REPORT — ALWAYS PRINT
-        # ------------------------------------
-        runner_count = sum(
-            1 for mid in mids
-            for r in (get_market_state(mid) or {}).get("runners", {}).values()
-            if r.get("band") in ("ACTIVE", "PASSIVE")
-        )
-
-        print("────────────────────────────────────────────────────────")
-        print(f"[BUS][TICK] #{self.tick_id}   markets={len(mids)} runners={runner_count}")
-        print("────────────────────────────────────────────────────────\n")
-
-        print("ENGINE SUMMARY")
-        print("────────────────────────────────────────────────────────")
-        for eng, r in engine_report.items():
-            if r["fired"] > 0:
-                print(f"{eng:<16}: FIRED    ({r['fired']} plans)")
+            print("\nERRORS")
+            if tick_ctx["errors"]:
+                for e in tick_ctx["errors"]:
+                    print(f"  - {e}")
             else:
-                print(f"{eng:<16}: BLOCKED  reason={r['blocked']}")
+                print("  none")
 
-        print("\nEXECUTION")
-        print("────────────────────────────────────────────────────────")
-        print(f"plans_generated : {len(plan_queue)}")
-        print(f"plans_routed    : {len(final_plans)}")
+            print("────────────────────────────────────────────────────────\n")
 
-        try:
-            from engines.analytics.snapshot import bus_snapshot
-            snap = bus_snapshot()
-            print(f"exposure        : {snap['exposure']:.2f}")
-        except Exception:
-            print("exposure        : unavailable")
+            # ==================================================
+            # PHASE 2 — ENRICHMENT (BEGINS)
+            # ==================================================
 
-        print("────────────────────────────────────────────────────────")
+            # ------------------------------------
+            # ENGINE OUTCOME BINDING (reporting)
+            # ------------------------------------
+            tick_ctx["engine_outcomes"] = engine_report
 
+            plan_queue.extend(plans)
+
+            # ------------------------------------
+            # RAW PLAN CAPTURE (analysis visibility)
+            # ------------------------------------
+            for _eng, _plan, _ctx in plans:
+                tick_ctx["plans_raw"].append(_plan)
+
+
+
+
+            # Enrichment — unchanged
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🔎 ANCHOR: after plans = self._run_engines_for_tick(...)
+    # 🧩 ACTION: ADD
+    # 📆 PATCHED: 2025-12-14 — Execution enrichment + integrity blockers
+    # ======================================================================================================
+
+            from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+
+            final_plans = []
+
+            for eng, plan, ctx in plans:
+
+                # --------------------------------------------------
+                # Execution enrichment (ONLY missing execution fields)
+                # --------------------------------------------------
+                plan.setdefault("marketId", ctx.get("marketId"))
+                plan.setdefault("selectionId", ctx.get("selectionId"))
+                plan.setdefault("px", ctx.get("px"))
+
+                # --------------------------------------------------
+                # Direction check (execution truth)
+                # --------------------------------------------------
+                dec = None
+                try:
+                    dec = compute_msc_decision(ctx)
+                except Exception:
+                    dec = None
+
+                exec_dir = dec.get("direction") if isinstance(dec, dict) else None
+                plan_dir = plan.get("direction")
+
+                # Inject direction if missing
+                if not plan_dir and exec_dir:
+                    plan["direction"] = exec_dir
+                    plan_dir = exec_dir
+
+                # Blocker 1 — direction invalidated
+                if plan_dir and exec_dir and plan_dir != exec_dir:
+                    engine_report[plan["engine"]]["blocked"] = "direction_changed"
+                    tick_ctx["plans_rejected"].append((plan, "direction_changed"))
+                    continue
+
+                # Blocker 2 — budget pre-check (BUS-level only)
+                if not self._has_budget(plan, ctx):
+                    engine_report[plan["engine"]]["blocked"] = "insufficient_budget"
+                    tick_ctx["plans_rejected"].append((plan, "insufficient_budget"))
+                    continue
+
+                final_plans.append((eng, plan, ctx))
+                tick_ctx["plans_enriched"].append(plan)
+
+            # --------------------------------------------------
+            # PHASE 2 REPORT — ENRICHMENT
+            # --------------------------------------------------
+            print("────────────────────────────────────────────────────────")
+            print(f"[BUS][PHASE 2][ENRICHMENT] tick=#{self.tick_id}")
+            print("────────────────────────────────────────────────────────")
+
+            print("PLANS IN")
+            print(f"  raw            : {len(tick_ctx['plans_raw'])}")
+
+            print("\nENRICHMENT")
+            print(f"  enriched       : {len(tick_ctx['plans_enriched'])}")
+            print(f"  rejected       : {len(tick_ctx['plans_rejected'])}")
+
+            # --------------------------------------------------
+            # Rejection reason breakdown (diagnostic)
+            # --------------------------------------------------
+            reasons = {}
+            for _plan, reason in tick_ctx["plans_rejected"]:
+                reasons[reason] = reasons.get(reason, 0) + 1
+
+            print("\nREJECTIONS")
+            if reasons:
+                for reason, count in reasons.items():
+                    print(f"  {reason:<22} : {count}")
+            else:
+                print("  none")
+
+            print("────────────────────────────────────────────────────────\n")
+
+            # ==================================================
+            # PHASE 3 — ROUTING (BEGINS)
+            # ==================================================
+
+
+            # Routing
+            for eng, p, ctx in final_plans:
+
+                # --------------------------------------------------
+                # 🔥 NORMALISE ROUTING IDENTITY (CRITICAL)
+                # --------------------------------------------------
+                if "marketId" not in p or p.get("marketId") is None:
+                    p["marketId"] = ctx.get("marketId")
+
+                if "selectionId" not in p or p.get("selectionId") is None:
+                    p["selectionId"] = ctx.get("selectionId")
+
+                # --------------------------------------------------
+                # Route the plan
+                # --------------------------------------------------
+                self._route(p, ctx)
+
+
+
+            # ==================================================
+            # PHASE 3 — ROUTING REPORT (ROUTER REALITY)
+            # DB-SOURCED — AUTHORITATIVE
+            # ==================================================
+            tick_ctx["routing_ran"] = True
+
+            from engines.config_paths import auto_conn_live
+            import sqlite3
+
+            con = auto_conn_live(rw=False)
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+
+            attempted = cur.execute("""
+                SELECT COUNT(*)
+                FROM orders
+                WHERE mode='LIVE'
+                  AND role='PARENT'
+                  AND opened_at >= datetime(?, 'unixepoch')
+            """, (tick_ctx["ts_start"],)).fetchone()[0]
+
+            parents = cur.execute("""
+                SELECT
+                    entry_status,
+                    COUNT(*) AS n
+                FROM orders
+                WHERE mode='LIVE'
+                  AND role='PARENT'
+                  AND opened_at >= datetime(?, 'unixepoch')
+                GROUP BY entry_status
+            """, (tick_ctx["ts_start"],)).fetchall()
+
+            failures = cur.execute("""
+                SELECT
+                    COALESCE(error, 'unknown') AS reason,
+                    COUNT(*) AS n
+                FROM orders
+                WHERE mode='LIVE'
+                  AND role='PARENT'
+                  AND entry_status='failed'
+                  AND opened_at >= datetime(?, 'unixepoch')
+                GROUP BY error
+            """, (tick_ctx["ts_start"],)).fetchall()
+
+            con.close()
+
+            # Persist into tick_ctx for 10-tick rollup
+            tick_ctx["plans_routed"] = sum(
+                r["n"] for r in parents if r["entry_status"] != "failed"
+            )
+            tick_ctx["plans_route_failed"] = [
+                (f["reason"], f["n"]) for f in failures
+            ]
+
+            print("────────────────────────────────────────────────────────")
+            print(f"[BUS][PHASE 3][ROUTING] tick=#{self.tick_id}")
+            print("────────────────────────────────────────────────────────")
+
+            print("ROUTING ATTEMPTS")
+            print(f"  attempted      : {attempted}")
+
+            print("\nROUTER STATES (PARENTS)")
+            if parents:
+                for r in parents:
+                    print(f"  {r['entry_status']:<10} : {r['n']}")
+            else:
+                print("  none")
+
+            print("\nROUTER FAILURES")
+            if failures:
+                for f in failures:
+                    print(f"  {f['reason']:<22} : {f['n']}")
+            else:
+                print("  none")
+
+            print("────────────────────────────────────────────────────────\n")
+
+
+
+            # ------------------------------------
+            # TICK REPORT — ALWAYS PRINT
+            # ------------------------------------
+            runner_count = sum(
+                1 for mid in mids
+                for r in (get_market_state(mid) or {}).get("runners", {}).values()
+                if r.get("band") in ("ACTIVE", "PASSIVE")
+            )
+
+            print("────────────────────────────────────────────────────────")
+            print(f"[BUS][TICK] #{self.tick_id}   markets={len(mids)} runners={runner_count}")
+            print("────────────────────────────────────────────────────────\n")
+
+            print("ENGINE SUMMARY")
+            print("────────────────────────────────────────────────────────")
+            for eng, r in engine_report.items():
+                if r["fired"] > 0:
+                    print(f"{eng:<16}: FIRED    ({r['fired']} plans)")
+                else:
+                    print(f"{eng:<16}: BLOCKED  reason={r['blocked']}")
+
+            print("\nEXECUTION")
+            print("────────────────────────────────────────────────────────")
+            print(f"plans_generated : {len(plan_queue)}")
+            print(f"plans_routed    : {len(final_plans)}")
+
+            try:
+                from engines.analytics.snapshot import bus_snapshot
+                snap = bus_snapshot()
+                print(f"exposure        : {snap['exposure']:.2f}")
+            except Exception:
+                print("exposure        : unavailable")
+
+            print("────────────────────────────────────────────────────────")
+
+
+
+
+        finally:
+            # ------------------------------------
+            # END-OF-TICK SUMMARY (EVERY 10 TICKS)
+            # ------------------------------------
+            if tick_ctx["tick_id"] % 10 == 0:
+                tick_ctx["ts_end"] = time.time()
+                tick_ctx["duration"] = tick_ctx["ts_end"] - tick_ctx["ts_start"]
+
+                engines_evaluated = len(tick_ctx["engine_outcomes"])
+                engines_fired = sum(
+                    1 for v in tick_ctx["engine_outcomes"].values()
+                    if v.get("fired")
+                )
+
+                print("\n════════════════════════════════════════")
+                print(
+                    f"[BUS][TICK END] #{tick_ctx['tick_id']}  "
+                    f"duration={tick_ctx['duration']:.3f}s"
+                )
+                print("════════════════════════════════════════")
+
+                print("PHASES")
+                print(f"  analysis_ran   : {tick_ctx['analysis_ran']}")
+                print(f"  enrichment_ran : {tick_ctx['enrichment_ran']}")
+                print(f"  routing_ran    : {tick_ctx['routing_ran']}")
+
+                print("\nSCOPE")
+                print(f"  markets_seen  : {tick_ctx['markets_seen']}")
+                print(f"  runners_seen  : {tick_ctx['runners_seen']}")
+
+                print("\nENGINES")
+                print(f"  evaluated     : {engines_evaluated}")
+                print(f"  fired         : {engines_fired}")
+
+                print("\nPLANS")
+                print(f"  raw           : {len(tick_ctx['plans_raw'])}")
+                print(f"  enriched      : {len(tick_ctx['plans_enriched'])}")
+                print(f"  rejected      : {len(tick_ctx['plans_rejected'])}")
+                print(f"  routed        : {len(tick_ctx['plans_routed'])}")
+                print(f"  route_failed  : {len(tick_ctx['plans_route_failed'])}")
+
+                print("\nERRORS")
+                if tick_ctx["errors"]:
+                    for e in tick_ctx["errors"]:
+                        print(f"  - {e}")
+                else:
+                    print("  none")
+
+                print("════════════════════════════════════════\n")
+
+                # ------------------------------------
+                # SYSTEM ANALYTICS SNAPSHOT
+                # ------------------------------------
+                self.analytics_report()
 
 
     # ======================================================================
-    # ROUTING — unchanged
+    # PHASE 3 — ROUTING (DELEGATION ONLY)
+    # BUS does NOT validate, enrich, or decide here.
+    # It delegates to the Live Router and records observable outcomes only.
     # ======================================================================
     def _route(self, plan, ctx):
-        engine = plan.get("engine")
-        if not engine:
-            print(f"[BUS][DROP] missing engine → {plan}")
-            return
+        """
+        Phase 3 routing + reporting anchor.
+        Execution is delegated based on engine type.
+        """
 
-        from engines.live.bank_state import get_engine_pot, get_engine_available
-
-        plan["budget"] = get_engine_pot(engine)
+        engine = (plan.get("engine") or "").upper()
 
         try:
-            dyn = compute_dynamic_stake(ctx, engine)
-            plan["size"] = float(dyn)
-        except Exception as e:
-            print(f"[BUS][DYN-STAKE-ERR] {engine}: {e}")
-            return
+            # --------------------------------------------------
+            # MSC engines → direct router path
+            # --------------------------------------------------
+            if engine.startswith("MSC_"):
+                from engines.live.live_router import place_from_bus
+                place_from_bus(plan, ctx)
 
-        if not plan.get("px"):
-            px = plan.get("px") or ctx.get("px") or ctx.get("ltp") or ctx.get("odds")
-            try:
-                plan["px"] = float(px)
-            except Exception:
-                print(f"[BUS][VIOLATION] missing px → {plan}")
-                return
-
-        if not plan.get("size"):
-            print(f"[BUS][VIOLATION] missing size → {plan}")
-            return
-
-
-        try:
-            avail = get_engine_available(engine)
-            size = float(plan["size"])
-            px = float(plan["px"])
-            dirn = plan["direction"]
-
-            if dirn == "BACK->LAY":
-                liab = size
+            # --------------------------------------------------
+            # Legacy engines → legacy placement pipeline
+            # --------------------------------------------------
             else:
-                liab = size * max(px - 1.0, 0.0)
-
-            req = liab * 2
-
+                from engines.live.live_router import place_legacy_from_bus
+                place_legacy_from_bus(plan, ctx)
 
         except Exception as e:
-            print(f"[BUS][LIAB-ERR] {e}")
-            return
+            # Routing errors must never stop the tick
+            try:
+                self._tick_ctx["plans_route_failed"].append(
+                    (plan, f"router_error:{e}")
+                )
+            except Exception:
+                pass
 
-        try:
-            place_from_bus(plan, ctx)
-        except Exception as e:
-            print(f"[BUS][ERR] router failed mid={plan.get('marketId')} sid={plan.get('selectionId')}: {e}")
-            return
 
-        print(f"[BUS][ROUTE] {engine:<15} mid={plan.get('marketId')} "
-              f"sid={plan.get('selectionId')} dir={plan.get('direction')} "
-              f"px={plan.get('px')} size={plan.get('size')}")
+
+
+
+# ======================================================================
+# END OF def tick(self)
+# ======================================================================
 
 
 # Global BUS instance

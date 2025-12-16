@@ -69,6 +69,53 @@ def _compute_exposure(mid: str, sid: str):
             "runner_net_pl": 0.0
         }
 
+# === Router execution queue ==========================================
+from queue import Queue, Empty
+import threading
+
+_ROUTER_QUEUE: Queue[tuple[dict, dict]] = Queue()
+_ROUTER_WORKER_STARTED = False
+
+
+def _router_worker():
+    """
+    Router-owned execution loop.
+    This is the ONLY place that may call place_parent_and_hedge().
+    """
+    while True:
+        try:
+            plan, ctx = _ROUTER_QUEUE.get()
+            try:
+                place_parent_and_hedge(
+                    _name=plan.get("engine"),
+                    _plan=plan,
+                    _ctx=ctx
+                )
+            except Exception as e:
+                _log_event(
+                    "ERROR",
+                    "live_router",
+                    f"router_worker failed plan={plan.get('engine')} err={e}"
+                )
+            finally:
+                _ROUTER_QUEUE.task_done()
+        except Exception:
+            time.sleep(0.1)
+
+def _ensure_router_worker():
+    global _ROUTER_WORKER_STARTED
+    if _ROUTER_WORKER_STARTED:
+        return
+
+    t = threading.Thread(
+        target=_router_worker,
+        name="RouterWorker",
+        daemon=True
+    )
+    t.start()
+    _ROUTER_WORKER_STARTED = True
+
+
 def _compute_letter_exposure(mid: str, sid: str, letter: str):
     """
     Compute per-letter exposure for MSC/Legacy engines.
@@ -484,66 +531,52 @@ def _safe_int(x, default=1):
     except Exception:
         return default
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🆕 ADD: place_from_bus()
-# 📆 PATCHED: 2026-02-13
-# ============================================================================
+# engines/live/live_router.py
 
 def place_from_bus(plan: dict, ctx: dict):
     """
-    Direct BUS→Router placement.
-    All engines pass through here.
-    No Lanes, no Placement stage.
-    `plan` contains engine, px, size, direction.
+    Canonical BUS → Router entry.
+    BUS delegates execution.
+    Router owns the entire lifecycle.
     """
-# === PATCH START ============================================================
-# 📍 TARGET: live_router.place_from_bus
-# 📆 PATCHED: 2026-02-14 — Shadow Mode Switch
-# ============================================================================
+    _ensure_router_worker()
 
-    import os
-    SHADOW = os.environ.get("AUTOSCALP_SHADOW", "0") == "1"
-
-    if SHADOW:
-        print(f"[ROUTER][SHADOW] {direction} {size}@{odds} mid={mid} sid={sid}")
-        return None
-
-# === PATCH END ================================================================
-
+    _ROUTER_QUEUE.put((plan, ctx))
     mid = str(plan.get("marketId"))
     sid = str(plan.get("selectionId"))
     odds = float(plan.get("px") or 0)
     size = float(plan.get("size") or 0)
     direction = plan.get("direction")
 
-    # create order reference
-    cref = f"{plan.get('engine','?')}-{uuid.uuid4().hex[:10]}"
+    import os
+    SHADOW = os.environ.get("AUTOSCALP_SHADOW", "0") == "1"
+    if SHADOW:
+        print(f"[ROUTER][SHADOW] {direction} {size}@{odds} mid={mid} sid={sid}")
+        return None
 
-    # insert via existing helper
-    from engines.live.live_router import _orders_insert_parent_queued
-    parent_id = _orders_insert_parent_queued(
-        run_id=ctx.get("run_id"),
-        market_id=mid,
-        selection_id=sid,
-        side="LAY" if direction.startswith("LAY") else "BACK",
-        entry_odds=odds,
-        entry_stake=size,
-        cor=cref,
-        source=plan.get("engine"),
+    # 🚨 SINGLE ENTRY POINT — NO MANUAL INSERTS
+
+    place_parent_and_hedge(
+        _name=plan.get("engine"),
+        _plan={
+            "px": odds,
+            "size": size,
+            "direction": direction,
+            "marketId": mid,
+            "selectionId": sid,
+        },
+        _ctx=ctx
     )
 
-    # push into main router path
-    _place(_name=plan.get("engine"), _plan={
-        "px": odds,
-        "size": size,
-        "direction": direction,
-        "customerOrderRef": cref,
-        "marketId": mid,
-        "selectionId": sid
-    }, _ctx=ctx)
+def place_legacy_from_bus(plan: dict, ctx: dict):
+    """
+    Legacy BUS → Placement → Router path.
+    Preserves full legacy placement semantics.
+    """
+    from engines.decision_engine.decide_once.placement import place_from_plan
 
-# === PATCH END ================================================================
+    engine = plan.get("engine") or ctx.get("engine")
+    return place_from_plan(engine, plan, ctx)
 
 
 
@@ -3376,4 +3409,5 @@ def init_live_router():
     Called by GUI or orchestrator after full system startup.
     """
     _repair_orphan_run_ids_on_startup()
+    _ensure_router_worker()
 

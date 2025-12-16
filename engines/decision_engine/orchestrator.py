@@ -3686,6 +3686,29 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[ORCH][WARN] MarketMonitor bootstrap failed: {e}")
 
+    # ------------------------------------------------------------------
+    # 7) START BUS LOOP (BUS-OWNED LOOP)
+    # ------------------------------------------------------------------
+    try:
+        from engines.bus.bus import BUS
+        import threading
+
+        t = threading.Thread(
+            target=BUS.run_live,
+            kwargs={"hz": hz},
+            name="BUSLoop",
+            daemon=True,
+        )
+        t.start()
+
+        print("[ORCH] BUS live loop started")
+
+    except Exception as e:
+        print(f"[ORCH][WARN] BUS loop failed to start: {e}")
+
+
+
+
 
 def run_test_day(run_id: str, seconds: int = 600, hz: int = 4, logger=None) -> None:
     """
