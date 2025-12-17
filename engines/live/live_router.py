@@ -6,9 +6,7 @@ import json, time, threading, random, sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 from engines import price_math as pm
-# === PATCH START: use LiveCache-only DB connector for router ===
-from engines.config_paths import auto_conn_live as _auto_conn
-# === PATCH END ===
+
 import uuid
 import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
@@ -69,51 +67,125 @@ def _compute_exposure(mid: str, sid: str):
             "runner_net_pl": 0.0
         }
 
-# === Router execution queue ==========================================
-from queue import Queue, Empty
+# ============================================================
+# Router execution queue + worker (OWNED LOOP)
+# ============================================================
+
+from queue import Queue
 import threading
+import time
 
 _ROUTER_QUEUE: Queue[tuple[dict, dict]] = Queue()
-_ROUTER_WORKER_STARTED = False
+_ROUTER_THREAD = None
 
 
-def _router_worker():
+def _router_worker_loop():
     """
-    Router-owned execution loop.
-    This is the ONLY place that may call place_parent_and_hedge().
+    Router-owned infinite execution loop.
+    This loop MUST be running for bets to be placed.
     """
     while True:
         try:
-            plan, ctx = _ROUTER_QUEUE.get()
+            plan, ctx = _ROUTER_QUEUE.get(block=True)
+
             try:
                 place_parent_and_hedge(
                     _name=plan.get("engine"),
                     _plan=plan,
-                    _ctx=ctx
+                    _ctx=ctx,
                 )
             except Exception as e:
                 _log_event(
                     "ERROR",
                     "live_router",
-                    f"router_worker failed plan={plan.get('engine')} err={e}"
+                    f"router_worker failed engine={plan.get('engine')} err={e}"
                 )
             finally:
                 _ROUTER_QUEUE.task_done()
+
         except Exception:
+            # Absolute safety net — never exit the loop
             time.sleep(0.1)
 
-def _ensure_router_worker():
-    global _ROUTER_WORKER_STARTED
-    if _ROUTER_WORKER_STARTED:
-        return
+def start_live_router_worker():
+    """
+    Explicitly start the LiveRouter worker loop.
+    Must be called exactly once before BUS starts ticking.
+    """
+    global _ROUTER_THREAD
 
-    t = threading.Thread(
-        target=_router_worker,
-        name="RouterWorker",
-        daemon=True
+    if _ROUTER_THREAD and _ROUTER_THREAD.is_alive():
+        return  # already running, safe no-op
+
+    _ROUTER_THREAD = threading.Thread(
+        target=_router_worker_loop,
+        name="LiveRouterWorker",
+        daemon=True,
     )
-    t.start()
-    _ROUTER_WORKER_STARTED = True
+    _ROUTER_THREAD.start()
+
+# ============================================================
+# Legacy execution queue + worker (OWNED LOOP)
+# ============================================================
+
+from queue import Queue
+import threading
+import time
+
+_LEGACY_QUEUE: Queue[tuple[dict, dict]] = Queue()
+_LEGACY_THREAD = None
+
+
+def _legacy_worker_loop():
+    """
+    Legacy-owned infinite execution loop.
+    Drains legacy plans and executes placement → router.
+    """
+    while True:
+        try:
+            plan, ctx = _LEGACY_QUEUE.get(block=True)
+
+            try:
+                from engines.decision_engine.decide_once.placement import place_from_plan
+
+                engine = plan.get("engine") or ctx.get("engine")
+                place_from_plan(engine, plan, ctx)
+
+            except Exception as e:
+                _log_event(
+                    "ERROR",
+                    "legacy_worker",
+                    f"legacy_worker failed engine={plan.get('engine')} err={e}"
+                )
+
+            finally:
+                _LEGACY_QUEUE.task_done()
+
+        except Exception:
+            # Absolute safety net — never exit loop
+            time.sleep(0.1)
+
+
+def start_legacy_worker():
+    """
+    Explicitly start the Legacy worker loop.
+    Must be called exactly once before BUS starts ticking.
+    """
+    global _LEGACY_THREAD
+
+    if _LEGACY_THREAD and _LEGACY_THREAD.is_alive():
+        return  # already running
+
+    _LEGACY_THREAD = threading.Thread(
+        target=_legacy_worker_loop,
+        name="LegacyWorker",
+        daemon=True,
+    )
+    _LEGACY_THREAD.start()
+
+
+
+
 
 
 def _compute_letter_exposure(mid: str, sid: str, letter: str):
@@ -151,15 +223,15 @@ def _compute_letter_exposure(mid: str, sid: str, letter: str):
 # 📆 PATCHED: 2025-12-10 — route all LIVE writes to dual-writer
 # =============================================================
 
-from engines.config_paths import auto_conn_live
+
 
 def _orders_conn():
     """
-    LiveRouter MUST write to dual-writer:
-        LOCAL + LiveCache simultanously.
-    auto_conn_live(rw=True) provides this.
+    Router must NEVER open a real sqlite writer.
+    All writes go through DALWriteProxy to avoid WAL contention.
     """
-    return auto_conn_live(rw=True)
+    from engines.config_paths import DALWriteProxy
+    return DALWriteProxy("auto")
 
 # === PATCH END ==============================================
 
@@ -373,22 +445,14 @@ from engines.config_paths import autoscalp_db
 
 def _db() -> sqlite3.Connection:
     """
-    LiveRouter MUST write to the LiveCache DB (autoscalp_livecache.db).
-    This connector (_auto_conn) is imported as:
-        from engines.config_paths import auto_conn_live as _auto_conn
-    The previous implementation incorrectly routed through auto_conn(),
-    causing all writes to go to LOCAL or nowhere.
+    LiveRouter writes ALL orders via DALWriteProxy("auto").
+
+    The DAL is the single source of truth for routing writes
+    to the canonical AUTO orders database.
+
+    This function must NEVER point directly at sqlite paths.
     """
-    # ✔ FIXED — use LiveCache writer
-    con = _auto_conn(rw=True)
-
-    try:
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA busy_timeout=8000;")
-    except Exception:
-        pass
-
+    con = _orders_conn()
     return con
 
 # === PATCH END ==============================================================
@@ -534,49 +598,22 @@ def _safe_int(x, default=1):
 # engines/live/live_router.py
 
 def place_from_bus(plan: dict, ctx: dict):
-    """
-    Canonical BUS → Router entry.
-    BUS delegates execution.
-    Router owns the entire lifecycle.
-    """
-    _ensure_router_worker()
-
+    start_live_router_worker()
     _ROUTER_QUEUE.put((plan, ctx))
-    mid = str(plan.get("marketId"))
-    sid = str(plan.get("selectionId"))
-    odds = float(plan.get("px") or 0)
-    size = float(plan.get("size") or 0)
-    direction = plan.get("direction")
+    return True
 
-    import os
-    SHADOW = os.environ.get("AUTOSCALP_SHADOW", "0") == "1"
-    if SHADOW:
-        print(f"[ROUTER][SHADOW] {direction} {size}@{odds} mid={mid} sid={sid}")
-        return None
 
-    # 🚨 SINGLE ENTRY POINT — NO MANUAL INSERTS
-
-    place_parent_and_hedge(
-        _name=plan.get("engine"),
-        _plan={
-            "px": odds,
-            "size": size,
-            "direction": direction,
-            "marketId": mid,
-            "selectionId": sid,
-        },
-        _ctx=ctx
-    )
 
 def place_legacy_from_bus(plan: dict, ctx: dict):
     """
-    Legacy BUS → Placement → Router path.
-    Preserves full legacy placement semantics.
+    Legacy BUS → Placement path.
+    MUST go through placement, MUST be non-blocking.
     """
-    from engines.decision_engine.decide_once.placement import place_from_plan
+    start_legacy_worker()
+    _LEGACY_QUEUE.put((plan, ctx))
+    return True
 
-    engine = plan.get("engine") or ctx.get("engine")
-    return place_from_plan(engine, plan, ctx)
+
 
 
 
@@ -761,7 +798,7 @@ def _log_db_path_once():
     if _DB_PATH_LOGGED:
         return
     try:
-        _log_event("INFO", "live_router", f"orders DB path = {autoscalp_db()}")
+        _log_event("INFO", "live_router", "orders DB = DALWriteProxy('auto')")
     except Exception:
         pass
     _DB_PATH_LOGGED = True
@@ -3409,5 +3446,6 @@ def init_live_router():
     Called by GUI or orchestrator after full system startup.
     """
     _repair_orphan_run_ids_on_startup()
-    _ensure_router_worker()
+    start_live_router_worker()
+    start_legacy_worker()
 

@@ -3519,37 +3519,11 @@ def start_live_loop(*args, **kwargs):
     # 3A) START DAL WRITER THREAD (CONSUME WRITE QUEUE)
     # ------------------------------------------------------------------
     def _dal_writer_loop():
-        import time, traceback
-        from engines.config_paths import _DAL_WRITE_QUEUE, _get_writer
+        raise RuntimeError(
+            "FATAL: Orchestrator DAL writer loop must not run. "
+            "Use config_paths.DALWriteProxy only."
+        )
 
-        print("[DAL] writer thread starting…")
-
-        while True:
-            try:
-                fam, sql, params = _DAL_WRITE_QUEUE.get()
-                writer = _get_writer(fam)
-                try:
-                    writer.execute(sql, params)
-                    writer.commit()
-                except Exception:
-                    print("[DAL][ERR] SQL failed:", sql, params)
-                    traceback.print_exc()
-            except Exception:
-                traceback.print_exc()
-            finally:
-                try:
-                    _DAL_WRITE_QUEUE.task_done()
-                except Exception:
-                    pass
-
-    # spawn the DAL writer thread
-    try:
-        import threading
-        t = threading.Thread(target=_dal_writer_loop, name="DALWriter", daemon=True)
-        t.start()
-        print("[DAL] writer thread active")
-    except Exception as e:
-        print("[DAL] writer-start failure:", e)
 
 
     # === PATCH START ============================================================
@@ -3685,6 +3659,32 @@ def start_live_loop(*args, **kwargs):
 
     except Exception as e:
         print(f"[ORCH][WARN] MarketMonitor bootstrap failed: {e}")
+
+    # --------------------------------------------------------------
+    # 6C) START LIVE ROUTER WORKER (MUST PRECEDE BUS)
+    # --------------------------------------------------------------
+    try:
+        from engines.live.live_router import start_live_router_worker
+        start_live_router_worker()
+        print("[ORCH] LiveRouter worker started")
+    except Exception as e:
+        print(f"[ORCH][FATAL] LiveRouter worker failed to start: {e}")
+
+    # --------------------------------------------------------------
+    # 6D) START LEGACY WORKER (MUST PRECEDE BUS)
+    # --------------------------------------------------------------
+    try:
+        from engines.live.live_router import start_legacy_worker
+        start_legacy_worker()
+        print("[ORCH] Legacy worker started")
+    except Exception as e:
+        print(f"[ORCH][FATAL] Legacy worker failed to start: {e}")
+
+    # --------------------------------------------------------------
+    # 6E) START BRAIN LISTENER
+    # --------------------------------------------------------------
+    from engines.brain.brain_listener import start_brain_listener
+        start_brain_listener()
 
     # ------------------------------------------------------------------
     # 7) START BUS LOOP (BUS-OWNED LOOP)

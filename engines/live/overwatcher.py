@@ -28,22 +28,22 @@ _q_retry = _q   # back-compat alias
 # === PATCH END ===
 
 
-try:
-    from engines.live.live_router import _round_odds, _calc_hedge_stake, _ref, _place, _cancel
-except ImportError:
-    from engines.live import live_router
-    def _calc_hedge_stake(entry_stake, entry_odds, exit_odds, side):
-        if side.upper() == "LAY":
-            return round(entry_stake * entry_odds / max(exit_odds, 1.01), 4)
-        return round(entry_stake * (exit_odds - 1) / max(entry_odds - 1, 0.01), 4)
-    def _calc_exposure_drift(anchor, current):
-        try:
-            return round(((current - anchor) / anchor) * 100.0, 2)
-        except Exception:
-            return 0.0
-    live_router._calc_hedge_stake = _calc_hedge_stake
-    live_router._calc_exposure_drift = _calc_exposure_drift
-    print("[OVERWATCHER] ⚙️  auto-patched hedge helpers into live_router")
+#try:
+#    from engines.live.live_router import _round_odds, _calc_hedge_stake, _ref, _place, _cancel
+#except ImportError:
+#    from engines.live import live_router
+#    def _calc_hedge_stake(entry_stake, entry_odds, exit_odds, side):
+#        if side.upper() == "LAY":
+#            return round(entry_stake * entry_odds / max(exit_odds, 1.01), 4)
+#        return round(entry_stake * (exit_odds - 1) / max(entry_odds - 1, 0.01), 4)
+#    def _calc_exposure_drift(anchor, current):
+#        try:
+#            return round(((current - anchor) / anchor) * 100.0, 2)
+#        except Exception:
+#            return 0.0
+#    live_router._calc_hedge_stake = _calc_hedge_stake
+#    live_router._calc_exposure_drift = _calc_exposure_drift
+#    print("[OVERWATCHER] ⚙️  auto-patched hedge helpers into live_router")
 
 from engines.live.live_router import _orders_conn, _orders_update_parent_cancelled
 from engines.utils.api_tools import fetch_live_odds
@@ -158,7 +158,12 @@ def enforce_parent_stoploss_px():
 
         print(f"[STOPLOSS][PX] fired mid={mid} sid={sid} px={px} sl_px={sl}")
 
-        event_sink.on_decision(event)
+        # 1️⃣ EXECUTION PATH (BUS-controlled)
+        _process_stoploss_now(event)
+
+        # 2️⃣ TELEMETRY PATH (Mastery-only, NO execution)
+        event_sink.emit("stoploss_event", event)
+
 
 # === PATCH END ================================================================
 
@@ -247,11 +252,8 @@ _TSL_LAST_PARENT = None
 # 🛠 ACTION: When stop-loss fires → place S child + cancel H child
 # 📆 PATCHED: 2025-12-06
 
-from engines.live.live_router import (
-    _place_stoploss_child_now,
-    _orders_conn,
-    _orders_update_parent_cancelled,
-)
+from engines.live.live_router import _orders_conn
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py:_process_stoploss_now
@@ -577,17 +579,7 @@ def enforce_legacy_boundaries_and_trailing():
             continue
 
         # Mark exit
-        con = _orders_conn()
-        _q_retry(con, """
-            UPDATE orders
-               SET exit_status='matched',
-                   exit_kind='BOUNDARY',
-                   exit_odds=?, exit_stake=entry_stake,
-                   closed_at=datetime('now','utc')
-             WHERE customerOrderRef=?
-        """, (ltp, p["customerOrderRef"]))
-        con.commit()
-        con.close()
+
 
         event_sink.on_decision({
             "type": "legacy_boundary_exit",
@@ -1400,7 +1392,8 @@ def _evaluate_liability_cap(conn: sqlite3.Connection):
         if not mid:
             return
         reason = meta.get("why") or "mlm_cap_hit"
-        _cancel_orphan_children(conn, mid)
+
+
         event_sink.on_decision({
             "type": "mlm_enforced",
             "marketId": mid,
@@ -1448,7 +1441,13 @@ def _evaluate_liability_alerts(conn: sqlite3.Connection):
             print(f"[OVERWATCHER][LIAB] {level:<9} mid={mid} £{liab:>7.2f}")
             # --- optional enforcement for CAP --------------------------------
             if liab >= CAP:
-                _cancel_orphan_children(conn, mid)
+                event_sink.on_decision({
+                    "type": "mlm_enforced",
+                    "marketId": mid,
+                    "reason": reason,
+                    "meta": meta,
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")
+                })
     except Exception as e:
         print(f"[OVERWATCHER][LIAB] warn: {e}")
 # === PATCH END ===

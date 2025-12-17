@@ -457,15 +457,6 @@ class DALWriteProxy:
         self._fam = fam
         self._shim = _AttrShim()      # absorbs row_factory/text_factory
 
-    # -----------------------------------------------------------
-    # Context Manager Support
-    # -----------------------------------------------------------
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        # DAL writer is async — nothing to commit/rollback here.
-        return False
 
     # -----------------------------------------------------------
     # Core Write
@@ -483,63 +474,86 @@ class DALWriteProxy:
         """
         LOCAL-ONLY WRITE MODE:
             • All writes go to the LOCAL DB for this family.
-            • LiveCache writes are disabled (architecture preserved but unused).
-            • CREATE TRIGGER / DDL statements run directly on LOCAL DB.
+            • LiveCache writes are disabled.
+            • CREATE TRIGGER / DDL statements execute immediately.
         """
-        # Normalise parameters
-        if isinstance(params, list):
+
+        # -------------------------------
+        # PARAM NORMALISATION (CRITICAL)
+        # -------------------------------
+        if params is None:
+            params = ()
+        elif isinstance(params, list):
             params = tuple(params)
+        elif not isinstance(params, tuple):
+            # single scalar → wrap
+            params = (params,)
 
         sql_text = sql.strip().lower()
         is_trigger = sql_text.startswith("create trigger")
 
-        # --- TRIGGER / DDL PATH → EXECUTE DIRECTLY ON LOCAL ---
+        # -------------------------------
+        # DDL / TRIGGER PATH
+        # -------------------------------
         if is_trigger:
             try:
                 wloc = _get_writer_local(self._fam)
                 wloc.executescript(sql)
                 print(f"[DAL-LOCAL-ONLY] Trigger/DDL installed into LOCAL {self._fam}")
             except Exception as e:
-                print(f"[DAL-LOCAL-ONLY][DDL] fail: {e} | sql={sql}")
+                print(f"[DAL-LOCAL-ONLY][DDL] fail fam={self._fam}: {e} | sql={sql}")
             return self
 
-        # --- NORMAL WRITE → LOCAL ONLY ---
-        try:
-            wloc = _get_writer_local(self._fam)
-            wloc.execute(sql, params)
-        except Exception as e:
-            print(f"[DAL-LOCAL-ONLY] write fail fam={self._fam}: {e} | sql={sql}")
-
+        # -------------------------------
+        # NORMAL WRITE → QUEUED
+        # -------------------------------
+        _DAL_WRITE_QUEUE.put((self._fam, sql, params))
         return self
+
 
     def executemany(self, sql, seq):
         """
-        LOCAL-ONLY WRITE MODE for batch executions.
+        LOCAL-ONLY batch write.
         LiveCache writes disabled.
         """
+
         sql_text = sql.strip().lower()
         is_trigger = sql_text.startswith("create trigger")
 
-        # --- TRIGGER / DDL PATH ---
+        # -------------------------------
+        # DDL / TRIGGER PATH
+        # -------------------------------
         if is_trigger:
             try:
                 wloc = _get_writer_local(self._fam)
                 wloc.executescript(sql)
                 print(f"[DAL-LOCAL-ONLY] Trigger installed via executemany into LOCAL {self._fam}")
             except Exception as e:
-                print(f"[DAL-LOCAL-ONLY][DDL-many] fail: {e} | sql={sql}")
+                print(f"[DAL-LOCAL-ONLY][DDL-many] fail fam={self._fam}: {e} | sql={sql}")
             return self
 
-        # --- NORMAL BATCH → LOCAL ONLY ---
+        # -------------------------------
+        # NORMAL BATCH → QUEUED
+        # -------------------------------
         try:
-            wloc = _get_writer_local(self._fam)
             for row in seq:
-                params = tuple(row) if isinstance(row, list) else row
-                wloc.execute(sql, params)
+                if row is None:
+                    params = ()
+                elif isinstance(row, list):
+                    params = tuple(row)
+                elif isinstance(row, tuple):
+                    params = row
+                else:
+                    params = (row,)
+
+                _DAL_WRITE_QUEUE.put((self._fam, sql, params))
+
+            return self
+
         except Exception as e:
             print(f"[DAL-LOCAL-ONLY] batch fail fam={self._fam}: {e} | sql={sql}")
+            return self
 
-        return self
 
 
     # -----------------------------------------------------------
@@ -621,42 +635,6 @@ class _AttrShim:
     __slots__ = ()
     def __getattr__(self, k): return None
     def __setattr__(self, k, v): pass
-
-
-class DALReadProxy:
-    """
-    Lightweight read-only connection proxy.
-    Absorbs row_factory/text_factory assignments, so legacy code keeps working.
-    """
-    __slots__ = ("_fam", "_shim")
-
-    def __init__(self, fam: str):
-        self._fam = fam
-        self._shim = _AttrShim()
-
-    # absorb row_factory, text_factory, etc.
-    def __setattr__(self, k, v):
-        if k in ("_fam", "_shim"):
-            object.__setattr__(self, k, v)
-        else:
-            setattr(self._shim, k, v)
-
-    def __getattr__(self, k):
-        return getattr(self._shim, k, None)
-
-    # core EXECUTE API
-    def execute(self, sql: str, params=()):
-        fut = _ReadFuture()
-        _DAL_READ_QUEUE.put((self._fam, sql, params or (), fut))
-        return fut
-
-    def cursor(self): return self
-    def fetchall(self): return []
-    def fetchone(self): return None
-    def close(self): return None
-
-
-# === PATCH END ==============================================================
 
 
 # ---------------------------------------------------------------------------
@@ -765,55 +743,6 @@ def _get_writer(fam: str) -> sqlite3.Connection:
 
 
 
-# === PATCH START: Normalize dual-writer family names =======================
-# 📍 TARGET: engines/config_paths.py
-# 🔎 SEARCH: def _get_writer(
-# 📆 PATCHED: 2025-12-04
-
-def _normalize_writer_family(fam: str) -> tuple[str, str]:
-    """
-    Normalise dual-write family names.
-
-    Input families:
-        auto_local, auto_live
-        bets_local, bets_live
-        settle_local, settle_live
-        mastery_local, mastery_live
-
-    Output family:
-        ('local'/'live', base_family)
-    """
-    fam = fam.lower()
-
-    if fam.endswith("_local"):
-        return "local", fam.replace("_local", "")
-
-    if fam.endswith("_live"):
-        return "live", fam.replace("_live", "")
-
-    # Already base family
-    return "local", fam
-
-
-# Patch point inside the writer loop:
-# Replace:
-#     wloc = _get_writer_local(fam)
-#     wlive = _get_writer_live(fam)
-# With:
-#     kind, base = _normalize_writer_family(fam)
-#     if kind == "local":
-#         wloc = _get_writer_local(base)
-#         wloc.execute(sql, params)
-#     else:
-#         wlive = _get_writer_live(base)
-#         wlive.execute(sql, params)
-# === PATCH END ==============================================================
-
-
-
-
-# === PATCH END ==============================================================
-
 
 # ===============================================================
 # ⚡ BATCH WRITE WORKER
@@ -845,16 +774,29 @@ def _dal_writer_loop():
             except queue.Empty:
                 break
 
+        writers_used = set()
+
         # Process batch → LOCAL ONLY
         for fam, sql, params in pending:
             sql_l = sql.strip().lower()
             is_trigger = sql_l.startswith("create trigger")
+
+            # -------------------------------
+            # PARAM NORMALISATION (CRITICAL)
+            # -------------------------------
+            if params is None:
+                params = ()
+            elif isinstance(params, list):
+                params = tuple(params)
+            elif not isinstance(params, tuple):
+                params = (params,)
 
             # TRIGGER / DDL path
             if is_trigger:
                 try:
                     wloc = _get_writer_local(fam)
                     wloc.executescript(sql)
+                    writers_used.add(wloc)
                     print(f"[DAL-LOCAL-ONLY] trigger installed in LOCAL writer: {fam}")
                 except Exception as e:
                     print(f"[DAL-LOCAL-ONLY][trigger] fail fam={fam}: {e}")
@@ -863,23 +805,24 @@ def _dal_writer_loop():
             # NORMAL WRITE → LOCAL ONLY
             try:
                 wloc = _get_writer_local(fam)
-                if isinstance(params, list):
-                    params = tuple(params)
                 wloc.execute(sql, params)
+                writers_used.add(wloc)
             except Exception as e:
-                print(f"[DAL-LOCAL-ONLY] write fail fam={fam}: {e} | sql={sql}")
+                print(f"[DAL-LOCAL-ONLY] write fail fam={fam}: {e} | sql={sql} | params={params}")
 
-        # Commit LOCAL writer
-        try:
-            wloc.commit()
-        except:
-            pass
+        # Commit ALL writers touched in this batch
+        for w in writers_used:
+            try:
+                w.commit()
+            except Exception:
+                pass
 
         # Acknowledge batch
         for _ in pending:
             _DAL_WRITE_QUEUE.task_done()
 
         pending.clear()
+
 
 
 # Start writer thread

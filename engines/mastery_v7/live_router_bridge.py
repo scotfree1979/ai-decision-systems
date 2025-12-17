@@ -77,35 +77,45 @@ def _force_place(event: dict):
 
 # === PATCH END ==============================================================
 
-# === PATCH START ============================================================
+# ======================================================================================================
 # 📍 TARGET: engines/mastery_v7/live_router_bridge.py
-# 🔎 SEARCH: def handle_mastery_event(event):
-# 📆 PATCHED: 2025-12-12 — restrict bridge to executable trade events
-# ============================================================================
+# 🔎 ANCHOR: handle_mastery_event(event)
+# 🧩 ACTION: Restrict bridge to Brain-only execution intents
+# 📆 PATCHED: 2025-12-16 — Brain-only LiveRouter bridge
+# ======================================================================================================
 
-def handle_mastery_event(event):
+def handle_mastery_event(event: dict):
     """
-    Route ONLY executable Overwatcher trade decisions.
-    All telemetry events are ignored.
+    Live Router Bridge — Brain-only execution path.
+
+    This bridge MUST only execute true Brain trade intents.
+    All telemetry, Overwatcher signals, and training events are ignored.
     """
 
-    t = (event.get("type") or "").lower()
+    if not isinstance(event, dict):
+        return
 
-    # --- ONLY real trade actions ------------------------------------------
-    if t in (
-        "stop_loss_triggered",
-        "stop_loss_breached",
-        "legacy_boundary_exit",
-        "msc_trailing_positive",
-        "msc_trailing_negative",
-        "market_end_exit",
-        "micro_lay",
+    event_type = str(event.get("type") or "").lower()
+
+    # ─────────────────────────────────────────────
+    # ✅ ALLOW: Brain-generated execution intents
+    # ─────────────────────────────────────────────
+    if event_type in (
+        "brain_trade_intent",
+        "brain_place_order",
+        "brain_adjust_order",
     ):
-        _force_place(event)
+        try:
+            _force_place(event)
+        except Exception:
+            # Never allow bridge failure to affect runtime
+            return
 
-    # Everything else is telemetry → ignore
+    # ─────────────────────────────────────────────
+    # ❌ BLOCK: Everything else (telemetry, overwatcher, risk, etc.)
+    # ─────────────────────────────────────────────
+    return
 
-# === PATCH END ==============================================================
 
 # ensure event_sink live before subscribing
 try:

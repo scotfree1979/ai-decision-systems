@@ -734,6 +734,11 @@ class DecisionBus:
             # ==================================================
             # PHASE 3 — ROUTING (BEGINS)
             # ==================================================
+            from engines.live.overwatcher import pull_stoploss_for
+
+            sl_plan = pull_stoploss_for(mid, sid)
+            if sl_plan:
+                plans.append(sl_plan)
 
 
             # Routing
@@ -910,7 +915,8 @@ class DecisionBus:
                 print(f"  raw           : {len(tick_ctx['plans_raw'])}")
                 print(f"  enriched      : {len(tick_ctx['plans_enriched'])}")
                 print(f"  rejected      : {len(tick_ctx['plans_rejected'])}")
-                print(f"  routed        : {len(tick_ctx['plans_routed'])}")
+                print(f"  routed        : {tick_ctx['plans_routed']}")
+
                 print(f"  route_failed  : {len(tick_ctx['plans_route_failed'])}")
 
                 print("\nERRORS")
@@ -940,8 +946,15 @@ class DecisionBus:
         """
 
         engine = (plan.get("engine") or "").upper()
-
+        ptype  = (plan.get("type") or "").upper()
         try:
+            # --------------------------------------------------
+            # OVERWATCHER STOPLOSS → CHILD-ONLY execution
+            # --------------------------------------------------
+            if engine == "OVERWATCHER" and ptype == "STOPLOSS":
+                from engines.live.live_router import place_from_bus
+                place_from_bus(plan, ctx)
+                return
             # --------------------------------------------------
             # MSC engines → direct router path
             # --------------------------------------------------
