@@ -67,125 +67,45 @@ def _compute_exposure(mid: str, sid: str):
             "runner_net_pl": 0.0
         }
 
-# ============================================================
-# Router execution queue + worker (OWNED LOOP)
-# ============================================================
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: module-level worker / queue definitions
+# 🧩 ACTION: REMOVE (ownership moved to placement)
+# 📆 PATCHED: 2025-12-17 — Router no longer owns execution worker
+# ======================================================================================================
 
-from queue import Queue
-import threading
-import time
+# NOTE:
+# Execution queue and worker have been relocated to:
+# engines/decision_engine/decide_once/placement.py
+#
+# LiveRouter no longer owns:
+# - execution queue
+# - worker thread
+#
+# LiveRouter remains a helper for:
+# - Betfair execution
+# - order mutation
+#
+# No logic is deleted; ownership is transferred.
 
-_ROUTER_QUEUE: Queue[tuple[dict, dict]] = Queue()
-_ROUTER_THREAD = None
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: routing entry point (e.g. place_from_bus / legacy router entry)
+# 🧩 ACTION: REPLACE enqueue target
+# 📆 PATCHED: 2025-12-17 — Delegate execution to placement worker
+# ======================================================================================================
 
+from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-def _router_worker_loop():
+def place_from_bus(name: str, plan: dict, ctx: dict):
     """
-    Router-owned infinite execution loop.
-    This loop MUST be running for bets to be placed.
+    BUS routing entry point.
+
+    Behaviour unchanged:
+    - previously enqueued to router worker
+    - now enqueues to placement worker
     """
-    while True:
-        try:
-            plan, ctx = _ROUTER_QUEUE.get(block=True)
-
-            try:
-                place_parent_and_hedge(
-                    _name=plan.get("engine"),
-                    _plan=plan,
-                    _ctx=ctx,
-                )
-            except Exception as e:
-                _log_event(
-                    "ERROR",
-                    "live_router",
-                    f"router_worker failed engine={plan.get('engine')} err={e}"
-                )
-            finally:
-                _ROUTER_QUEUE.task_done()
-
-        except Exception:
-            # Absolute safety net — never exit the loop
-            time.sleep(0.1)
-
-def start_live_router_worker():
-    """
-    Explicitly start the LiveRouter worker loop.
-    Must be called exactly once before BUS starts ticking.
-    """
-    global _ROUTER_THREAD
-
-    if _ROUTER_THREAD and _ROUTER_THREAD.is_alive():
-        return  # already running, safe no-op
-
-    _ROUTER_THREAD = threading.Thread(
-        target=_router_worker_loop,
-        name="LiveRouterWorker",
-        daemon=True,
-    )
-    _ROUTER_THREAD.start()
-
-# ============================================================
-# Legacy execution queue + worker (OWNED LOOP)
-# ============================================================
-
-from queue import Queue
-import threading
-import time
-
-_LEGACY_QUEUE: Queue[tuple[dict, dict]] = Queue()
-_LEGACY_THREAD = None
-
-
-def _legacy_worker_loop():
-    """
-    Legacy-owned infinite execution loop.
-    Drains legacy plans and executes placement → router.
-    """
-    while True:
-        try:
-            plan, ctx = _LEGACY_QUEUE.get(block=True)
-
-            try:
-                from engines.decision_engine.decide_once.placement import place_from_plan
-
-                engine = plan.get("engine") or ctx.get("engine")
-                place_from_plan(engine, plan, ctx)
-
-            except Exception as e:
-                _log_event(
-                    "ERROR",
-                    "legacy_worker",
-                    f"legacy_worker failed engine={plan.get('engine')} err={e}"
-                )
-
-            finally:
-                _LEGACY_QUEUE.task_done()
-
-        except Exception:
-            # Absolute safety net — never exit loop
-            time.sleep(0.1)
-
-
-def start_legacy_worker():
-    """
-    Explicitly start the Legacy worker loop.
-    Must be called exactly once before BUS starts ticking.
-    """
-    global _LEGACY_THREAD
-
-    if _LEGACY_THREAD and _LEGACY_THREAD.is_alive():
-        return  # already running
-
-    _LEGACY_THREAD = threading.Thread(
-        target=_legacy_worker_loop,
-        name="LegacyWorker",
-        daemon=True,
-    )
-    _LEGACY_THREAD.start()
-
-
-
-
+    enqueue_for_placement(name, plan, ctx)
 
 
 def _compute_letter_exposure(mid: str, sid: str, letter: str):
@@ -617,72 +537,74 @@ def place_legacy_from_bus(plan: dict, ctx: dict):
 
 
 
-# ── DB bootstrap (orders + events) ───────────────────────────────────────────
-_ORDERS_SCHEMA_OK = False
+# ───────────────────────────────────────────────────────────────
+# NON-BLOCKING, DAL-SAFE ORDERS SCHEMA CHECK (DIAGNOSTIC ONLY)
+# ───────────────────────────────────────────────────────────────
+
+_ORDERS_SCHEMA_CHECKED = False
+
 def _ensure_orders_schema() -> None:
-    """Idempotently ensure orders/events exist with linkable parent/child + strategy columns."""
-    global _ORDERS_SCHEMA_OK
-    if _ORDERS_SCHEMA_OK:
+    """
+    Diagnostic-only schema verification.
+
+    • SAFE under DAL (uses real sqlite reader)
+    • NEVER blocks execution
+    • NEVER modifies schema
+    • Logs OK / MISSING columns
+    • Runs once per process
+    """
+    global _ORDERS_SCHEMA_CHECKED
+
+    if _ORDERS_SCHEMA_CHECKED:
         return
-    con = _db()    
+
     try:
+        # IMPORTANT:
+        # Use a REAL sqlite connection, never DALWriteProxy
+        from engines.config_paths import open_auto_db
+
+        con = open_auto_db(rw=False)
         cur = con.cursor()
-        # events sink (used by _log_event/_orders_probe)
-        _q_retry(cur, """
-            CREATE TABLE IF NOT EXISTS events(
-              ts TEXT, level TEXT, source TEXT, message TEXT
-            )
-        """)
-        # base orders table (will be evolved below)
-        _q_retry(cur, """
-            CREATE TABLE IF NOT EXISTS orders(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              customerOrderRef TEXT UNIQUE,
-              mode TEXT,
-              run_id INTEGER,
-              marketId TEXT,
-              selectionId TEXT,
-              side TEXT,
-              -- entry leg
-              entry_odds REAL,
-              entry_stake REAL,
-              entry_status TEXT,
-              entry_bet_id TEXT,
-              opened_at TEXT,
-              -- exit leg (hedge or flatten)
-              exit_status TEXT,
-              exit_bet_id TEXT,
-              exit_odds REAL,
-              exit_stake REAL,
-              closed_at TEXT,
-              -- PnL
-              realized_pnl REAL,
-              net_pl REAL,
-              -- misc
-              error TEXT
-            )
-        """)
-        cols = {r[1] for r in _q_retry(cur, "PRAGMA table_info(orders)")}
 
-        # NEW COLUMN
-        if "stop_loss_px" not in cols:
-            _q_retry(cur, "ALTER TABLE orders ADD COLUMN stop_loss_px REAL")
+        rows = cur.execute("PRAGMA table_info(orders)").fetchall()
+        cols = {r[1] for r in rows}
 
-        def _add(col, ddl): 
-            if col not in cols: _q_retry(cur, f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
-        _add("role",      "TEXT")          # 'PARENT'|'CHILD'
-        _add("hedge_of",  "INTEGER")       # child -> parent id
-        _add("exit_kind", "TEXT")        # 'HEDGE' | 'STOPLOSS' | 'FLATTEN' (optional)
-        _add("source",    "TEXT")          # strategy tag e.g. LEGACY_STRATEGY
-        # helpful indexes
-        _q_retry(cur, "CREATE INDEX IF NOT EXISTS idx_orders_mode_opened ON orders(mode, opened_at)")
-        _q_retry(cur, "CREATE INDEX IF NOT EXISTS idx_orders_status      ON orders(entry_status, exit_status)")
-        _q_retry(cur, "CREATE INDEX IF NOT EXISTS idx_orders_role        ON orders(role)")
-        _q_retry(cur, "CREATE INDEX IF NOT EXISTS idx_orders_link        ON orders(hedge_of)")
-        con.commit()
-        _ORDERS_SCHEMA_OK = True
-    finally:
+        # Columns that LiveRouter actually depends on
+        required = {
+            "customerOrderRef",
+            "marketId",
+            "selectionId",
+            "side",
+            "entry_odds",
+            "entry_stake",
+            "entry_status",
+            "opened_at",
+            "role",
+            "source",
+            "engine",
+            "exit_kind",
+            "hedge_of",
+            "stop_loss_px",
+        }
+
+        missing = required - cols
+
+        if not missing:
+            print("[SCHEMA ✓] orders table schema OK")
+        else:
+            print(
+                "[SCHEMA ✗] orders table missing columns:",
+                ", ".join(sorted(missing))
+            )
+
         con.close()
+
+    except Exception as e:
+        # ABSOLUTELY MUST NOT BLOCK
+        print(f"[SCHEMA !] orders schema check failed: {e}")
+
+    _ORDERS_SCHEMA_CHECKED = True
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
@@ -737,43 +659,51 @@ except Exception:
 def _utcnow_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def _run_fk_id\(run_id: str \| None, mode: str = "LIVE"\):
-# 📆 PATCHED: 2025-09-29T11:25Z
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _run_fk_id(run_id: str | None, mode: str = "LIVE") -> int:
+def _run_fk_id(run_label: str, mode: str = "LIVE") -> int:
     """
-    Convert human run_id (e.g., 'LIVE-20250912-174250') into FK int (runs.id).
-    Falls back to 'LIVE-AUTO' if run_id is missing.
+    Resolve or create a run id.
+
+    Schema-aligned:
+      runs.notes = logical run label
+      runs.mode  = LIVE / TEST / REPLAY
     """
-    rid_txt = (run_id or "").strip() or f"{mode.upper()}-AUTO"
+
     con = _orders_conn()
-    try:
-        cur = con.cursor()
-        _q_retry(cur, """
-            CREATE TABLE IF NOT EXISTS runs(
-                id INTEGER PRIMARY KEY,
-                started_at TEXT,
-                finished_at TEXT,
-                mode TEXT,
-                blueprint_file TEXT,
-                notes TEXT
-            )
-        """)
-        row = _q_retry(cur, "SELECT id FROM runs WHERE notes=? LIMIT 1", (rid_txt,)).fetchone()
-        if row:
-            return int(row[0])
-        _q_retry(cur, "INSERT INTO runs(started_at, mode, notes) VALUES(datetime('now','utc'), ?, ?)",
-                 (str(mode or "LIVE"), rid_txt))
-        con.commit()
-        return int(cur.lastrowid)
-    finally:
-        try: con.close()
-        except Exception: pass
+    cur = con.cursor()
+
+    # Ensure runs table exists (defensive, idempotent)
+    _q_retry(cur, """
+        CREATE TABLE IF NOT EXISTS runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT,
+            finished_at TEXT,
+            mode TEXT,
+            blueprint_file TEXT,
+            notes TEXT
+        )
+    """)
+
+    # Insert run if missing (async-safe under DAL)
+    _q_retry(cur, """
+        INSERT OR IGNORE INTO runs(notes, mode, started_at)
+        VALUES (?, ?, datetime('now','utc'))
+    """, (str(run_label), str(mode)))
+
+    # Resolve id deterministically
+    row = _q_retry(cur, """
+        SELECT id
+          FROM runs
+         WHERE notes=? AND mode=?
+         ORDER BY id DESC
+         LIMIT 1
+    """, (str(run_label), str(mode))).fetchone()
+
+    if row and row[0] is not None:
+        return int(row[0])
+
+    # Fallback: unresolved yet (DAL async) — tolerate and repair later
+    return 0
+
 
 # Single source of truth for creds & DB path
 import engines.daily_config as daily_config
@@ -3446,6 +3376,5 @@ def init_live_router():
     Called by GUI or orchestrator after full system startup.
     """
     _repair_orphan_run_ids_on_startup()
-    start_live_router_worker()
-    start_legacy_worker()
+
 

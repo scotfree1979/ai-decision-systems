@@ -34,6 +34,8 @@ class DecisionBus:
 
     def __init__(self):
         self.tick_id = 0
+        self.live_run_id: str | None = None
+
 
         # Engine + strategy binding (existing working behaviour)
         from engines.bus.engine_registry import ENGINE_REGISTRY
@@ -66,6 +68,9 @@ class DecisionBus:
             "near60": set(),
             "next5": set(),
         }
+
+    def set_live_run_id(self, run_id: str):
+        self.live_run_id = run_id
 
 
     def run_live(self, hz: float = 1.0):
@@ -188,6 +193,10 @@ class DecisionBus:
         from engines.market_monitor.monitor import get_market_state
 
         ctx = dict(base_ctx)
+        if not self.live_run_id:
+            raise RuntimeError("BUS missing live_run_id")
+        ctx["run_id"] = self.live_run_id
+
         ctx["marketId"] = mid
         ctx["selectionId"] = sid
 
@@ -589,6 +598,39 @@ class DecisionBus:
 
 
             plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+# 🧩 ACTION: ADD (BUS plan_id normalisation — authoritative identity)
+# 📆 PATCHED: 2025-12-17 — BUS guarantees plan_id invariant
+# ======================================================================================================
+
+            # ------------------------------------------------------------------
+            # BUS PLAN ID NORMALISATION (AUTHORITATIVE)
+            #
+            # Rule:
+            # - Every plan MUST have plan_id
+            # - Preserve upstream plan_id if present
+            # - Prefix with BUS execution identity
+            # ------------------------------------------------------------------
+            import uuid
+
+            bus_exec_id = f"BUS-{self.tick_id}"
+
+            normalised_plans = []
+            for eng, plan, ctx in plans:
+                plan = dict(plan)  # defensive copy
+
+                upstream_pid = plan.get("plan_id")
+                if upstream_pid:
+                    plan["plan_id"] = f"{bus_exec_id}-{upstream_pid}"
+                else:
+                    plan["plan_id"] = bus_exec_id
+
+                normalised_plans.append((eng, plan, ctx))
+
+            plans = normalised_plans
+
             # --------------------------------------------------
             # PHASE 1 REPORT — ANALYSIS
             # --------------------------------------------------
@@ -686,20 +728,25 @@ class DecisionBus:
                     plan["direction"] = exec_dir
                     plan_dir = exec_dir
 
-                # Blocker 1 — direction invalidated
+                # --- BUS MUST NEVER BLOCK EXECUTION ---
+                # Annotate only, router decides.
+
+                # Direction drift annotation
                 if plan_dir and exec_dir and plan_dir != exec_dir:
+                    plan["_bus_note"] = "direction_changed"
                     engine_report[plan["engine"]]["blocked"] = "direction_changed"
                     tick_ctx["plans_rejected"].append((plan, "direction_changed"))
-                    continue
 
-                # Blocker 2 — budget pre-check (BUS-level only)
+                # Budget annotation (informational only)
                 if not self._has_budget(plan, ctx):
+                    plan["_bus_note"] = "insufficient_budget_at_plan_time"
                     engine_report[plan["engine"]]["blocked"] = "insufficient_budget"
                     tick_ctx["plans_rejected"].append((plan, "insufficient_budget"))
-                    continue
 
+                # ALWAYS forward
                 final_plans.append((eng, plan, ctx))
                 tick_ctx["plans_enriched"].append(plan)
+
 
             # --------------------------------------------------
             # PHASE 2 REPORT — ENRICHMENT
@@ -760,82 +807,53 @@ class DecisionBus:
 
 
 
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: PHASE 3 — ROUTING REPORT
+# 🧩 ACTION: REPLACE (reporting only, routing untouched)
+# 📆 PATCHED: 2025-12-18 — Collapse PHASE 3 to BUS-truthful routing diagnostics
+#
+# RATIONALE:
+# BUS must report only what it knows synchronously.
+# Router / DB / Betfair outcomes are post-BUS and reported elsewhere.
+# ======================================================================================================
+
+
             # ==================================================
-            # PHASE 3 — ROUTING REPORT (ROUTER REALITY)
-            # DB-SOURCED — AUTHORITATIVE
+            # PHASE 3 — ROUTING REPORT (BUS-LOCAL DIAGNOSTICS)
             # ==================================================
-            tick_ctx["routing_ran"] = True
 
-            from engines.config_paths import auto_conn_live
-            import sqlite3
+            plans_generated = len(plan_queue)
+            plans_delegated = len(final_plans)
+            plans_not_delegated = max(plans_generated - plans_delegated, 0)
 
-            con = auto_conn_live(rw=False)
-            con.row_factory = sqlite3.Row
-            cur = con.cursor()
-
-            attempted = cur.execute("""
-                SELECT COUNT(*)
-                FROM orders
-                WHERE mode='LIVE'
-                  AND role='PARENT'
-                  AND opened_at >= datetime(?, 'unixepoch')
-            """, (tick_ctx["ts_start"],)).fetchone()[0]
-
-            parents = cur.execute("""
-                SELECT
-                    entry_status,
-                    COUNT(*) AS n
-                FROM orders
-                WHERE mode='LIVE'
-                  AND role='PARENT'
-                  AND opened_at >= datetime(?, 'unixepoch')
-                GROUP BY entry_status
-            """, (tick_ctx["ts_start"],)).fetchall()
-
-            failures = cur.execute("""
-                SELECT
-                    COALESCE(error, 'unknown') AS reason,
-                    COUNT(*) AS n
-                FROM orders
-                WHERE mode='LIVE'
-                  AND role='PARENT'
-                  AND entry_status='failed'
-                  AND opened_at >= datetime(?, 'unixepoch')
-                GROUP BY error
-            """, (tick_ctx["ts_start"],)).fetchall()
-
-            con.close()
-
-            # Persist into tick_ctx for 10-tick rollup
-            tick_ctx["plans_routed"] = sum(
-                r["n"] for r in parents if r["entry_status"] != "failed"
-            )
-            tick_ctx["plans_route_failed"] = [
-                (f["reason"], f["n"]) for f in failures
-            ]
+            tick_ctx["plans_routed"] = plans_delegated
+            tick_ctx["plans_route_failed"] = tick_ctx["plans_rejected"]
 
             print("────────────────────────────────────────────────────────")
             print(f"[BUS][PHASE 3][ROUTING] tick=#{self.tick_id}")
             print("────────────────────────────────────────────────────────")
 
-            print("ROUTING ATTEMPTS")
-            print(f"  attempted      : {attempted}")
+            print("ROUTING (BUS-LOCAL)")
+            print(f"  plans_generated : {plans_generated}")
+            print(f"  plans_delegated : {plans_delegated}")
+            print(f"  not_delegated   : {plans_not_delegated}")
 
-            print("\nROUTER STATES (PARENTS)")
-            if parents:
-                for r in parents:
-                    print(f"  {r['entry_status']:<10} : {r['n']}")
+            if tick_ctx["plans_rejected"]:
+                print("\nBUS ANNOTATIONS")
+                reasons = {}
+                for _plan, reason in tick_ctx["plans_rejected"]:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                for reason, count in reasons.items():
+                    print(f"  {reason:<22} : {count}")
             else:
-                print("  none")
-
-            print("\nROUTER FAILURES")
-            if failures:
-                for f in failures:
-                    print(f"  {f['reason']:<22} : {f['n']}")
-            else:
+                print("\nBUS ANNOTATIONS")
                 print("  none")
 
             print("────────────────────────────────────────────────────────\n")
+
 
 
 
@@ -937,50 +955,30 @@ class DecisionBus:
     # ======================================================================
     # PHASE 3 — ROUTING (DELEGATION ONLY)
     # BUS does NOT validate, enrich, or decide here.
-    # It delegates to the Live Router and records observable outcomes only.
+    # It delegates execution to Placement (execution owner).
     # ======================================================================
     def _route(self, plan, ctx):
         """
         Phase 3 routing + reporting anchor.
-        Execution is delegated based on engine type.
+        Execution is delegated to Placement (authoritative owner).
         """
 
-        engine = (plan.get("engine") or "").upper()
-        ptype  = (plan.get("type") or "").upper()
         try:
-            # --------------------------------------------------
-            # OVERWATCHER STOPLOSS → CHILD-ONLY execution
-            # --------------------------------------------------
-            if engine == "OVERWATCHER" and ptype == "STOPLOSS":
-                from engines.live.live_router import place_from_bus
-                place_from_bus(plan, ctx)
-                return
-            # --------------------------------------------------
-            # MSC engines → direct router path
-            # --------------------------------------------------
-            if engine.startswith("MSC_"):
-                from engines.live.live_router import place_from_bus
-                place_from_bus(plan, ctx)
+            from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-            # --------------------------------------------------
-            # Legacy engines → legacy placement pipeline
-            # --------------------------------------------------
-            else:
-                from engines.live.live_router import place_legacy_from_bus
-                place_legacy_from_bus(plan, ctx)
+            # name is used for legacy letter / audit only
+            name = plan.get("engine") or "UNKNOWN"
+
+            enqueue_for_placement(name, plan, ctx)
 
         except Exception as e:
             # Routing errors must never stop the tick
             try:
                 self._tick_ctx["plans_route_failed"].append(
-                    (plan, f"router_error:{e}")
+                    (plan, f"placement_enqueue_error:{e}")
                 )
             except Exception:
                 pass
-
-
-
-
 
 # ======================================================================
 # END OF def tick(self)

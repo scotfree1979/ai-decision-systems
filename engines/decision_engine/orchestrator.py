@@ -3660,31 +3660,30 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[ORCH][WARN] MarketMonitor bootstrap failed: {e}")
 
-    # --------------------------------------------------------------
-    # 6C) START LIVE ROUTER WORKER (MUST PRECEDE BUS)
-    # --------------------------------------------------------------
-    try:
-        from engines.live.live_router import start_live_router_worker
-        start_live_router_worker()
-        print("[ORCH] LiveRouter worker started")
-    except Exception as e:
-        print(f"[ORCH][FATAL] LiveRouter worker failed to start: {e}")
 
     # --------------------------------------------------------------
-    # 6D) START LEGACY WORKER (MUST PRECEDE BUS)
+    # 6C) START PLACEMENT WORKER
     # --------------------------------------------------------------
-    try:
-        from engines.live.live_router import start_legacy_worker
-        start_legacy_worker()
-        print("[ORCH] Legacy worker started")
-    except Exception as e:
-        print(f"[ORCH][FATAL] Legacy worker failed to start: {e}")
+    # ======================================================================================================
+    # 📍 TARGET: live startup / orchestrator file
+    # 🔎 ANCHOR: start_live_loop / startup section
+    # 🧩 ACTION: REPLACE worker startup import + call
+    # 📆 PATCHED: 2025-12-17 — Start placement worker (execution owner)
+    # ======================================================================================================
+
+    # OLD (remove or comment)
+    # from engines.live.live_router import start_router_worker
+    # start_router_worker()
+
+    # NEW
+    from engines.decision_engine.decide_once.placement import start_placement_worker
+    start_placement_worker()
 
     # --------------------------------------------------------------
-    # 6E) START BRAIN LISTENER
+    # 6D) START BRAIN LISTENER
     # --------------------------------------------------------------
     from engines.brain.brain_listener import start_brain_listener
-        start_brain_listener()
+    start_brain_listener()
 
     # ------------------------------------------------------------------
     # 7) START BUS LOOP (BUS-OWNED LOOP)

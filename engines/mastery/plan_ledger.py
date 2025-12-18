@@ -65,17 +65,7 @@ def ensure_schema() -> None:
           decided_at TEXT,
           updated_at TEXT
         )""")
-        # idempotent add-cols for older DBs
-        for col, ddl in [
-            ("epic_id",       "ALTER TABLE plan_ledger ADD COLUMN epic_id TEXT"),
-            ("epic_stories",  "ALTER TABLE plan_ledger ADD COLUMN epic_stories INTEGER"),
-            ("epic_rank",     "ALTER TABLE plan_ledger ADD COLUMN epic_rank INTEGER"),
-        ]:
-            try:
-                have = any(r[1].lower()==col for r in con.execute("PRAGMA table_info(plan_ledger)").fetchall())
-                if not have: con.execute(ddl)
-            except Exception:
-                pass
+
 
         con.execute("CREATE INDEX IF NOT EXISTS idx_plan_ledger_midsid ON plan_ledger(marketId, selectionId)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_plan_ledger_status ON plan_ledger(status)")
@@ -85,6 +75,7 @@ def ensure_schema() -> None:
     finally:
         con.close()
 # === PATCH F END ===
+
 def _ensure_letter_credits(con):
     con.execute("""
       CREATE TABLE IF NOT EXISTS letter_credits(

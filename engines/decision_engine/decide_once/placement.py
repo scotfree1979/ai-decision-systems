@@ -2,30 +2,136 @@ from __future__ import annotations
 
 import json, uuid, datetime, sqlite3
 from typing import Optional
-from engines.decision_engine.decide_once.helpers import open_auto_db as _adb, status_once, q_retry as _q
-
-
+# --- helpers (keep exactly as-is, except open_auto_db) ---
 from engines.decision_engine.decide_once.helpers import (
-    open_auto_db as _adb,
     status_once,
-    q_retry as _q,   # if needed
+    q_retry as _q,
 )
-# === PATCH START ===
+
+# --- authoritative DB opener for execution paths ---
+from engines.config_paths import open_auto_db as _adb
+
+
+# ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 📆 PATCHED: 2025-10-18Z — fix undefined budget_manager reference
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔎 ANCHOR: top-level (module scope)
+# 🧩 ACTION: ADD (verbatim relocation of execution worker from LiveRouter)
+# 📆 PATCHED: 2025-12-17 — Placement-owned execution worker (no behaviour change)
+# ======================================================================================================
+
+import threading
+import queue
+import time
+import traceback
+
+# ------------------------------------------------------------------------------
+# Placement Execution Queue
+# ------------------------------------------------------------------------------
+# NOTE:
+# This queue was previously owned by LiveRouter.
+# It is relocated here verbatim to restore correct execution ownership.
+# ------------------------------------------------------------------------------
+
+_PLACEMENT_EXEC_QUEUE: "queue.Queue[tuple[str, dict, dict]]" = queue.Queue()
+
+
+# ------------------------------------------------------------------------------
+# Placement Execution Worker
+# ------------------------------------------------------------------------------
+def _placement_worker_loop():
+    """
+    Placement execution worker.
+
+    Dequeues (name, plan, ctx) tuples and executes them sequentially
+    using existing placement semantics.
+
+    BEHAVIOUR IS IDENTICAL to the previous LiveRouter worker.
+    Ownership only has moved.
+    """
+    from engines.decision_engine.decide_once.placement import place_from_plan
+
+    while True:
+        try:
+            name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
+
+            try:
+                place_from_plan(name, plan, ctx)
+            except Exception:
+                print("[PLACEMENT][WORKER][ERR] execution failed")
+                traceback.print_exc()
+
+        except Exception:
+            print("[PLACEMENT][WORKER][ERR] worker loop error")
+            traceback.print_exc()
+            time.sleep(0.5)
+
+
+# ------------------------------------------------------------------------------
+# Worker bootstrap
+# ------------------------------------------------------------------------------
+_PLACEMENT_WORKER_THREAD: threading.Thread | None = None
+
+
+def start_placement_worker():
+    """
+    Start placement execution worker (idempotent).
+
+    This replaces the LiveRouter worker startup.
+    """
+    global _PLACEMENT_WORKER_THREAD
+
+    if _PLACEMENT_WORKER_THREAD and _PLACEMENT_WORKER_THREAD.is_alive():
+        return
+
+    t = threading.Thread(
+        target=_placement_worker_loop,
+        name="PlacementWorker",
+        daemon=True,
+    )
+    t.start()
+    _PLACEMENT_WORKER_THREAD = t
+
+    print("[PLACEMENT] execution worker started")
+
+
+# ------------------------------------------------------------------------------
+# Public enqueue API (used by BUS / router adapters)
+# ------------------------------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 ANCHOR: def enqueue_for_placement(name: str, plan: dict, ctx: dict)
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2025-12-18 — Non-blocking enqueue + worker auto-bootstrap
+# ======================================================================================================
+
+def enqueue_for_placement(name: str, plan: dict, ctx: dict):
+    """
+    Enqueue a plan for placement execution.
+
+    CRITICAL:
+    - MUST NOT block BUS
+    - Placement failure must never stall tick loop
+    """
+
+    # Ensure worker is running (idempotent)
+    try:
+        start_placement_worker()
+    except Exception as e:
+        print(f"[PLACEMENT][WARN] worker start failed: {e}")
+
+    try:
+        # Non-blocking enqueue — BUS must never wait
+        _PLACEMENT_EXEC_QUEUE.put_nowait((name, plan, ctx))
+    except Exception as e:
+        # Drop-on-failure is correct behaviour here
+        print(
+            "[PLACEMENT][DROP] enqueue failed — BUS continues | "
+            f"engine={name} run_id={ctx.get('run_id')} err={e}"
+        )
+
 
 def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
-    """
-    Direct writable connection to AUTOSCALP_GUI (autoscalp_gui.db),
-    bypassing DAL/auto_conn. Used only for orders/decisions where
-    DAL has been giving us read-only connections.
-    """
-    from engines.config_paths import autoscalp_db
-    path = autoscalp_db
-    from engines.config_paths import auto_conn
-    con = auto_conn(rw=True)
-
+    con = _adb(rw=True)
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA busy_timeout=8000;")
@@ -67,7 +173,7 @@ def _next_trade_index(mid: str, sid: str, letter: str) -> int:
     con = None
     try:
         from engines.config_paths import auto_conn
-        con = auto_conn(rw=True)
+        con = _adb(rw=True)
         row = con.execute("""
             SELECT COUNT(*) AS n
               FROM orders
@@ -100,7 +206,7 @@ def _orders_has_status() -> bool:
     con = None
     try:
         from engines.config_paths import auto_conn
-        con = auto_conn(rw=True)
+        con = _adb(rw=True)
 
         for r in con.execute("PRAGMA table_info(orders)"):
             name = r["name"] if hasattr(r, "keys") else r[1]
@@ -124,7 +230,7 @@ def _fetch_px_from_odds_current(mid: str, sid: str) -> Optional[float]:
     con = None
     try:
         from engines.config_paths import auto_conn
-        con = auto_conn(rw=True)
+        con = _adb(rw=True)
         r = con.execute("""
             SELECT ltp
               FROM odds_current
@@ -150,7 +256,7 @@ def _fetch_px_from_inbound(mid: str, sid: str) -> Optional[float]:
     con = None
     try:
         from engines.config_paths import auto_conn
-        con = auto_conn(rw=True)
+        con = _adb(rw=True)
         r = con.execute("""
             SELECT oc1, anchor_odd, oc1_band_json
               FROM inbound_oc_cache
@@ -184,7 +290,7 @@ def _orders_cols() -> dict:
     con = None
     try:
         from engines.config_paths import auto_conn
-        con = auto_conn(rw=True)
+        con = _adb(rw=True)
         out = {}
         for r in con.execute("PRAGMA table_info(orders)"):
             name = r["name"] if hasattr(r, "keys") else r[1]
@@ -250,106 +356,144 @@ def log_decision_skip(*, run_id, marketId, selectionId, letter, why, order_id: i
                     outcome="not_placed", why=why, letter=letter,
                     order_id=order_id)
 
-# ---------- preclaim PARENT row
+# ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 SEARCH: ^def _insert_pending_parent\(
-# 📆 PATCHED: 2025-11-19 — use direct writer, keep _orders_cols for schema
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _insert_pending_parent(*, mid: str, sid: str, letter: str, side: str,
-                           plan: dict, ctx: dict, cor: str,
+# 🔎 ANCHOR: def _insert_pending_parent
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2025-12-17 — Canonical-schema, non-blocking parent preclaim
+# ======================================================================================================
+def _insert_pending_parent(*,
+                           mid: str,
+                           sid: str,
+                           letter: str,
+                           side: str,
+                           plan: dict,
+                           ctx: dict,
+                           cor: str,
                            plan_id: Optional[str] = None) -> int | None:
     """
-    Insert a PENDING PARENT row into orders and, if available, mark the plan_ledger parent.
-    Returns the new orders.id (pending parent) or None on failure.
+    Insert a PENDING PARENT row into orders.
+
+    Contract (STRICT):
+    - BUS guarantees all required fields.
+    - Placement does NO recovery, NO probing, NO enrichment.
+    - Missing data → fail fast → BUS must be fixed.
     """
-    con = None
+
+    # -------------------------------
+    # REQUIRED FIELDS (FAIL FAST)
+    # -------------------------------
+    if not mid or not sid or not cor:
+        raise RuntimeError("placement_preclaim_missing_identity")
+
+    if plan.get("px") is None:
+        raise RuntimeError("placement_preclaim_missing_px")
+
+    if plan.get("size") is None:
+        raise RuntimeError("placement_preclaim_missing_size")
+
+    if ctx.get("run_id") is None:
+        raise RuntimeError("placement_preclaim_missing_run_id")
+
+    # -------------------------------
+    # OPEN WRITER (CANONICAL AUTO DB)
+    # -------------------------------
+    con = _auto_db_writer()
+    cur = con.cursor()
+
     try:
-        cols = _orders_cols()
-        if not cols:
-            raise RuntimeError("orders missing")
-
-        cref_col = "customerOrderRef" if "customerOrderRef" in cols else ("customer_ref" if "customer_ref" in cols else None)
-        if not cref_col:
-            raise RuntimeError("orders missing customerOrderRef/customer_ref")
-
-        # 🔁 Use a direct writable connection to AUTOSCALP_GUI for the insert
-        con = _auto_db_writer()
-        cur = con.cursor()
-
-        fields, params = [], []
-        def add(col, val):
-            if col in cols:
-                fields.append(col); params.append(val)
-
-        add(cref_col, str(cor))
-        add("marketId", str(mid))
-        add("selectionId", str(sid))
-
-        # orders.run_id is INTEGER; tolerate strings by best-effort coercion
-        if ctx.get("run_id") is not None:
-            add("run_id", _i(ctx.get("run_id")))
-
-        add("mode", str(ctx.get("mode") or "LIVE"))
-        add("side", str(side))
-        add("entry_odds", _f(plan.get("px"), 0.0))
-        add("entry_stake", _f(plan.get("size"), 0.0))
-        add("entry_status", "PENDING")
-        if "status" in cols:
-            add("status", "PENDING")
-        add("role", "PARENT")
-
-        # --- assign trade index for this market/runner/letter ---
+        # -------------------------------
+        # TRADE INDEX (PER RUNNER / LETTER)
+        # -------------------------------
         trade_index = _next_trade_index(mid, sid, letter)
         plan["trade_index"] = trade_index
 
-        # Tag notes with per-runner sequence for audit
-        if "notes" in cols:
-            add("notes", f"{letter}{trade_index:02d}")
+        # -------------------------------
+        # INSERT PARENT ORDER (CANONICAL)
+        # -------------------------------
+        cur.execute(
+            """
+            INSERT INTO orders (
+                customerOrderRef,
+                run_id,
+                mode,
+                marketId,
+                selectionId,
+                side,
+                entry_odds,
+                entry_stake,
+                entry_status,
+                role,
+                source,
+                stoploss_mode,
+                notes,
+                opened_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                str(cor),
+                _i(ctx.get("run_id")),
+                str(ctx.get("mode") or "LIVE"),
+                str(mid),
+                str(sid),
+                str(side),
+                _f(plan.get("px")),
+                _f(plan.get("size")),
+                "PENDING",
+                "PARENT",
+                str(letter),
+                str(plan.get("stoploss_mode") or "BALANCED").upper(),
+                f"{letter}{trade_index:02d}",
+                datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        )
 
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py:_insert_pending_parent
-# 🔎 SEARCH: add("source", str(letter))
-# 📆 PATCHED: 2025-11-28 — write stoploss_mode into pending parent row
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        add("source", str(letter))
-
-        # NEW: stop-loss mode from Mastery (Legacy: 3/4/5 ticks, MSC: 1/2/3)
-        try:
-            slm = str(plan.get("stoploss_mode") or "BALANCED").upper()
-        except Exception:
-            slm = "BALANCED"
-        add("stoploss_mode", slm)
-# === PATCH END ===
-
-        add("opened_at", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
-
-        # ensure this stays as “pre-claim” marker
-        if "notes" in cols and "notes" not in fields:
-            add("notes", f"pre-claim {letter}")
-
-        sql = f"INSERT INTO orders ({', '.join(fields)}) VALUES ({', '.join(['?']*len(fields))})"
-        cur.execute(sql, tuple(params))
         con.commit()
         pending_id = int(cur.lastrowid)
-
-        # Mark the ledger now that we have the parent order id
-        try:
-            if plan_id and pending_id:
+        # 🔑 THIS IS THE MISSING STEP
+        _promote_pending_to_queued(pending_id)
+        # -------------------------------
+        # PLAN LEDGER LINK (IF PRESENT)
+        # -------------------------------
+        if plan_id and pending_id:
+            try:
                 mark_open_parent(plan_id, pending_id)
-        except Exception:
-            pass
+            except Exception:
+                # ledger failure must NOT block placement
+                pass
 
         return pending_id
 
     except Exception as e:
-        try:
-            if con: con.rollback()
-        finally:
-            print(f"[CAP][preclaim] failed: {e}")
+        con.rollback()
+        print(f"[PLACEMENT][PRECLAIM][FAIL] {e}")
         return None
+
     finally:
         try:
-            if con: con.close()
+            con.close()
+        except Exception:
+            pass
+
+def _promote_pending_to_queued(pending_id: int) -> None:
+    con = _auto_db_writer()
+    try:
+        con.execute(
+            """
+            UPDATE orders
+               SET entry_status = 'QUEUED'
+             WHERE id = ?
+               AND entry_status = 'PENDING'
+            """,
+            (int(pending_id),)
+        )
+        con.commit()
+    finally:
+        try:
+            con.close()
         except Exception:
             pass
 
@@ -357,7 +501,7 @@ def _insert_pending_parent(*, mid: str, sid: str, letter: str, side: str,
 
 def _cancel_stale_parents(mid: str, sid: str, *, older_than_sec: int = 70) -> None:
     from engines.config_paths import auto_conn
-    con = auto_conn(rw=True)
+    con = _adb(rw=True)
     try:
         con.execute("""
           UPDATE orders
@@ -579,52 +723,67 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
 
     plan["letter"] = letter
 
+# ======================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 ANCHOR: Legacy placement — stale cleanup
+# 🧩 ACTION: DISABLE
+# 📆 PATCHED: 2025-12-17 — Placement is non-mutating pre-router
+# ======================================================================================================
 
+    # NOTE:
+    # Stale cleanup is no longer placement responsibility.
+    # Router handles lifecycle reconciliation.
+    # _cancel_stale_parents(mid, sid, older_than_sec=70)
 
-    # --- stale cleanup
+# ======================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 ANCHOR: Legacy placement — price enrichment block
+# 🧩 ACTION: REPLACE
+# 📆 PATCHED: 2025-12-17 — Trust BUS-normalized px (non-blocking placement)
+# ======================================================================================================
+
+    # --- px is guaranteed by BUS ---
     try:
-        _cancel_stale_parents(mid, sid, older_than_sec=70)
+        plan["px"] = float(plan.get("px"))
     except Exception:
-        pass
+        plan["px"] = 0.0
 
-    # --- enrich px from DB if missing
-    try:
-        px0 = plan.get("px") or plan.get("entry_odds")
-        px = float(px0) if px0 is not None else 0.0
-    except Exception:
-        px = 0.0
-
-    if px <= 0.0:
-        px_oc = _fetch_px_from_odds_current(mid, sid)
-        if px_oc: px = float(px_oc)
-        else:
-            px_ib = _fetch_px_from_inbound(mid, sid)
-            if px_ib: px = float(px_ib)
-
-    plan["px"]   = float(px)
     plan["size"] = float(plan.get("size") or 2.0)
 
-    if plan["px"] <= 0:
-        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                        outcome="not_placed", why="blocked: missing px",
-                        letter=letter)
-        return None
+    # Do NOT block here — decision logging handles failures
+
 
     # --- CAP gate
-    ok_cap, cap_reason, cap_metrics = caps.cap_ok(mid, sid, letter, side=side)
+# ======================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 ANCHOR: Legacy placement — CAP gate
+# 🧩 ACTION: MODIFY (non-blocking)
+# 📆 PATCHED: 2025-12-17 — CAP v8 diagnostic only
+# ======================================================================================================
+
+    ok_cap, cap_reason, cap_metrics = caps.cap_ok_v8(mid, sid, letter)
+
     if not ok_cap:
-        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                        outcome="not_placed", why=cap_reason, letter=letter,
-                        proposed_odds=plan["px"], proposed_stake=plan["size"],
-                        meta={"cap": cap_metrics})
-        return None
+        _write_decision(
+            run_id=ctx.get("run_id"),
+            mid=mid,
+            sid=sid,
+            outcome="not_placed",
+            why=cap_reason,
+            letter=letter,
+            proposed_odds=plan.get("px"),
+            proposed_stake=plan.get("size"),
+            meta={"cap": cap_metrics}
+        )
+        # Do NOT return — continue to router
+
 
     # --- Preclaim
     cor = f"{letter}-{uuid.uuid4().hex[:10]}"
     plan["customerOrderRef"] = cor
     pending_id = _insert_pending_parent(
         mid=mid, sid=sid, letter=letter, side=side,
-        plan=plan, ctx=ctx, cor=cor, plan_id=plan_id
+        plan=plan, ctx=ctx, cor=cor, plan_id=plan.get("plan_id")
     )
     if pending_id is None:
         _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,

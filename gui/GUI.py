@@ -3491,6 +3491,11 @@ class PhaseGUI(tk.Tk):
             from datetime import datetime, timezone
             run_id_prefix = "LIVE" if mode_now == "live" else "LEARN"
             run_id = f"{run_id_prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+            from engines.bus.bus import BUS
+
+            BUS.set_live_run_id(run_id)
+
+
 
 
 
