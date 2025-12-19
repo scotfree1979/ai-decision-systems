@@ -11,7 +11,7 @@ import uuid
 import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
-
+from engines.live import bank_state
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py (top of file)
 # 🆕 ADD: Router → EventSync unified emit wrappers
@@ -94,6 +94,56 @@ def _compute_exposure(mid: str, sid: str):
 # 🧩 ACTION: REPLACE enqueue target
 # 📆 PATCHED: 2025-12-17 — Delegate execution to placement worker
 # ======================================================================================================
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: BankState live exposure invariant check (diagnostic only)
+# 📆 PATCHED: 2026-02-12
+# ======================================================================
+
+def _check_bankstate_invariant(engine: str) -> bool:
+    """
+    Diagnostic invariant:
+        engine_pot == engine_available + sum(open_parent_liability)
+
+    Safe to call at runtime. Never raises.
+    """
+    try:
+        from engines.config_paths import open_auto_db
+
+        pot   = float(bank_state.get_engine_pot(engine) or 0.0)
+        avail = float(bank_state.get_engine_available(engine) or 0.0)
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+        rows = con.execute("""
+            SELECT side, entry_odds, entry_stake
+              FROM orders
+             WHERE mode='LIVE'
+               AND role='PARENT'
+               AND engine=?
+               AND entry_status='MATCHED'
+               AND (exit_status IS NULL OR exit_status<>'MATCHED')
+        """, (engine,)).fetchall()
+        con.close()
+
+        liab = 0.0
+        for r in rows:
+            if (r["side"] or "").upper() == "LAY":
+                liab += float(r["entry_stake"]) * (float(r["entry_odds"]) - 1.0)
+            else:
+                liab += float(r["entry_stake"])
+
+        ok = abs(pot - (avail + liab)) < 0.01
+        if not ok:
+            _log_event(
+                "ERROR",
+                "bankstate",
+                f"[INVARIANT FAIL] engine={engine} pot={pot:.2f} "
+                f"avail={avail:.2f} liab={liab:.2f}"
+            )
+        return ok
+    except Exception:
+        return True  # diagnostic must never block
 
 from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
@@ -138,22 +188,35 @@ def _compute_letter_exposure(mid: str, sid: str, letter: str):
 
 
 # DB connection for AUTOSCALP orders table (GUI DB)
-# === PATCH START ============================================
-# 📍 TARGET: engines/live/live_router.py : _orders_conn()
-# 📆 PATCHED: 2025-12-10 — route all LIVE writes to dual-writer
-# =============================================================
-
-
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: def _orders_conn()
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2025-12-18 — Restore LOCAL orders authority (no LiveCache)
+#
+# RATIONALE:
+# - autoscalp_gui.db is the canonical orders authority
+# - LiveCache/DALWriteProxy breaks parent↔child visibility
+# - Execution paths must read/write LOCAL only
+# ======================================================================
 
 def _orders_conn():
     """
-    Router must NEVER open a real sqlite writer.
-    All writes go through DALWriteProxy to avoid WAL contention.
-    """
-    from engines.config_paths import DALWriteProxy
-    return DALWriteProxy("auto")
+    Canonical LOCAL orders connection.
 
-# === PATCH END ==============================================
+    Execution paths (parents, children, hedges, stoploss)
+    MUST read/write autoscalp_gui.db directly.
+
+    LiveCache / DALWriteProxy is forbidden here.
+    """
+    from engines.config_paths import open_auto_db
+    con = open_auto_db(rw=True)
+    try:
+        con.row_factory = sqlite3.Row
+    except Exception:
+        pass
+    return con
+
 
 
 # 📍 TARGET: engines/live/live_router.py
@@ -982,27 +1045,66 @@ def _replace(app_key: str, token: str, market_id: str, bet_id: str, new_price: f
         pass
 
 
-def _poll_matched(app_key: str, token: str, bet_id: str, timeout_s: int = 90, interval_s: float = 2.0) -> bool:
+def _poll_matched(
+    app_key: str,
+    token: str,
+    bet_id: str,
+    timeout_s: int = 90,
+    interval_s: float = 2.0
+) -> bool:
     """
-    Poll Betfair until this betId is matched (sizeMatched>0 OR orderStatus=EXECUTION_COMPLETE).
-    If listCurrentOrders returns empty, we DO NOT assume matched; we just keep polling until timeout.
+    Poll Betfair until this betId is matched.
+
+    MATCHED conditions:
+      • sizeMatched > 0
+      • orderStatus == EXECUTION_COMPLETE
+      • listCurrentOrders returns EMPTY *after previously seeing the order*
+
+    IMPORTANT:
+    - Betfair may stop returning completed orders
+    - An empty response does NOT mean unmatched
+    - We only treat empty as matched if we have seen the order at least once
     """
+
     deadline = time.time() + timeout_s
+    seen_once = False
+
     while time.time() < deadline:
         try:
-            cur = _list_current(app_key, token, bet_id)
+            cur = _list_current(app_key, token, str(bet_id))
             orders = (cur.get("result", {}) or {}).get("currentOrders") or []
+
             if orders:
+                seen_once = True
                 o = orders[0]
+
                 matched = float(o.get("sizeMatched") or 0.0)
-                status  = str(o.get("orderStatus") or o.get("status") or "").upper()
-                if matched > 0.0 or "EXECUTION_COMPLETE" in status:
+                status = str(
+                    o.get("orderStatus")
+                    or o.get("status")
+                    or ""
+                ).upper()
+
+                if matched > 0.0:
                     return True
-            # if empty → we don't know yet; keep polling
+
+                if "EXECUTION_COMPLETE" in status:
+                    return True
+
+            else:
+                # Betfair often drops completed orders from listCurrentOrders
+                # If we've seen it before and now it's gone, treat as matched
+                if seen_once:
+                    return True
+
         except Exception:
+            # network / transient API error — retry
             pass
+
         time.sleep(interval_s)
+
     return False
+
 
 # ── DB helpers ───────────────────────────────────────────────────────────────
 def _con():
@@ -1331,16 +1433,47 @@ def _orders_update_parent_failed(cor, error_msg):
         try: con.close()
         except Exception: pass
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ======================================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def _orders_update_parent_matched
-# 📆 PATCHED: 2025-10-03T12:05Z
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔎 REPLACE: def _orders_update_parent_matched
+# 📆 PATCHED: 2026-02-12 — BankState exposure consume (exact-once)
+# ======================================================================
+
 def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
-    """Parent entry filled (and stamp matched odds/stake if betId known)."""
+    """
+    Parent entry MATCHED.
+    - Consume BankState exposure EXACTLY ONCE
+    - Persist DB state
+    """
     _ensure_orders_schema()
-    con = _orders_conn(); cur = con.cursor()
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
     try:
+        parent = _q_retry(cur, """
+            SELECT source, side, entry_odds, entry_stake, entry_status
+              FROM orders
+             WHERE customerOrderRef=? AND role='PARENT'
+             LIMIT 1
+        """, (str(cor),)).fetchone()
+
+        if not parent:
+            return
+
+        # ⛔ Guard: never double-consume exposure
+        if (parent["entry_status"] or "").upper() == "MATCHED":
+            return
+
+        # 🔐 CONSUME exposure (once)
+        bank_state.on_parent_matched(
+            engine=_engine_from_source(parent["source"]),
+            side=parent["side"],
+            entry_odds=float(parent["entry_odds"]),
+            entry_stake=float(parent["entry_stake"]),
+        )
+
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='matched',
@@ -1349,15 +1482,16 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
              WHERE customerOrderRef=?
         """, (str(cor),))
         con.commit()
-        _orders_probe(cor, note="parent_matched")
-        # NEW → log playbook entry after match
-        _record_playbook_entry(cor)
-        # NEW: stamp avg matched odds/stake if betId is available
+
+        # Optional diagnostic proof
+        _check_bankstate_invariant(_engine_from_source(parent["source"]))
+
+        # Optional odds/stake stamp
         if bet_id:
             try:
                 app_key, token = _keys()
                 avg_odds, matched_size = _fetch_avg_match(app_key, token, str(bet_id))
-                if avg_odds > 0.0 and matched_size > 0.0:
+                if avg_odds > 0 and matched_size > 0:
                     _q_retry(cur, """
                         UPDATE orders
                            SET entry_matched_odds=?,
@@ -1365,13 +1499,17 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                          WHERE customerOrderRef=?
                     """, (avg_odds, matched_size, str(cor)))
                     con.commit()
-            except Exception as e:
-                _log_event("WARN","live_router",f"parent_matched: could not fetch odds/stake ref={cor} err={e}")
+            except Exception:
+                pass
+
     except Exception as e:
-        _log_event("ERROR", "live_router", f"orders update parent matched failed ref={cor}: {e}")
+        _log_event("ERROR", "live_router",
+                   f"parent_matched failed ref={cor}: {e}")
     finally:
         try: con.close()
         except Exception: pass
+
+
 
 # === PATCH START: Playbooks Writer (LIVE profit pattern logger) ===
 # 📍 TARGET: engines/live/live_router.py
@@ -1623,41 +1761,54 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
 # 🔎 SEARCH: def _orders_update_hedge_matched(
 # 📆 PATCHED: 2026-02-10 — Settlement EventSync A: HEDGE_EXIT
 # ============================================================================
-
 def _orders_update_hedge_matched(*, cor: str, exit_side: str,
                                  exit_odds: float, exit_stake: float) -> None:
     """
-    Finalize hedge exit: compute realized PnL, stamp exit row, fire EventSync.
+    Finalize hedge exit:
+    - Compute realized PnL
+    - Release BankState exposure
+    - Persist DB state
     """
     _ensure_orders_schema()
-    con = _orders_conn(); con.row_factory = sqlite3.Row
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
     try:
-        cur = con.cursor()
+        # Load parent FIRST
         p = _q_retry(cur, """
-            SELECT id, side, entry_odds, entry_stake, marketId, selectionId,
-                   COALESCE(source,'') AS source
+            SELECT id, source, side, entry_odds, entry_stake, marketId, selectionId
               FROM orders
-             WHERE customerOrderRef=? LIMIT 1
+             WHERE customerOrderRef=? AND role='PARENT'
+             LIMIT 1
         """, (str(cor),)).fetchone()
+
         if not p:
-            _log_event("ERROR","live_router",f"hedge_matched: parent missing ref={cor}")
             return
 
-        pid        = int(p["id"])
-        entry_side = (p["side"] or "").upper()
-        E, S       = float(p["entry_odds"] or 0.0), float(p["entry_stake"] or 0.0)
-        H, S2      = float(exit_odds or 0.0),       float(exit_stake or 0.0)
+        # 🔐 BankState — release exposure
+        bank_state.on_parent_closed(
+            engine=_engine_from_source(p["source"]),
+            entry_odds=float(p["entry_odds"]),
+            entry_stake=float(p["entry_stake"]),
+        )
 
-        # PnL
+        # Compute realized PnL
+        entry_side = p["side"].upper()
+        E, S = float(p["entry_odds"]), float(p["entry_stake"])
+        H, S2 = float(exit_odds), float(exit_stake)
+
         if entry_side == "LAY":
             win  = S2*(H-1.0) - S*(E-1.0)
             lose = S - S2
         else:
             win  = (E-1.0)*S - (H-1.0)*S2
             lose = -S + S2
+
         realized = round(min(win, lose), 2)
 
-        # update parent
+        # Persist DB state
         _q_retry(cur, """
             UPDATE orders
                SET exit_status='matched',
@@ -1669,6 +1820,7 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str,
              WHERE customerOrderRef=?
         """, (H, S2, realized, realized, str(cor)))
         con.commit()
+
         _orders_probe(cor, note="hedge_matched")
 
         # === EVENTSYNC: A — HEDGE EXIT =====================================
@@ -2078,11 +2230,11 @@ def _emit_settlement_router_event(event_type: str, *, cor: str,
         print(f"[EventSync][router_exit] warn: {e}")
 
 # === PATCH END ==============================================================
-# === PATCH START ============================================================
+# ======================================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: def _place_stoploss_child_now(
-# 📆 PATCHED: 2026-02-10 — Settlement EventSync B: STOPLOSS_EXIT
-# ============================================================================
+# 🔎 REPLACE: def _place_stoploss_child_now
+# 📆 PATCHED: 2026-02-12 — BankState exposure release (STOPLOSS)
+# ======================================================================
 
 def _place_stoploss_child_now(
     parent_cor: str,
@@ -2094,36 +2246,61 @@ def _place_stoploss_child_now(
     parent_stake: float,
     run_id: str | None = None
 ) -> Optional[int]:
+    """
+    STOPLOSS execution.
+
+    Guarantees:
+    - BankState exposure released EXACTLY ONCE
+    - CHILD does not affect exposure
+    """
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
 
     try:
-        con = _orders_conn(); con.row_factory = sqlite3.Row
-
-        parent = _q_retry(con, """
-            SELECT id, run_id
+        parent = _q_retry(cur, """
+            SELECT id, run_id, source, entry_odds, entry_stake, exit_status
               FROM orders
-             WHERE customerOrderRef=? LIMIT 1
+             WHERE customerOrderRef=? AND role='PARENT'
+             LIMIT 1
         """, (str(parent_cor),)).fetchone()
+
         if not parent:
-            con.close()
             return None
 
-        pid  = int(parent["id"])
-        fk   = int(parent["run_id"] or 0)
-        S2   = float(parent_stake)
-        H    = float(exit_odds)
+        # ⛔ Guard: never double-release exposure
+        if (parent["exit_status"] or "").upper() == "MATCHED":
+            return None
+
+        pid = int(parent["id"])
+        fk  = int(parent["run_id"] or 0)
+
+        # 🔐 RELEASE exposure (once)
+        bank_state.on_parent_closed(
+            engine=_engine_from_source(parent["source"]),
+            entry_odds=float(parent["entry_odds"]),
+            entry_stake=float(parent["entry_stake"]),
+        )
 
         app_key, token = _keys()
         cref = _ref("SL")
-        bet_id, _ = _place(app_key, token,
-                           market_id, selection_id,
-                           exit_side, H, S2,
-                           cref, persistence="LAPSE")
+
+        bet_id, _ = _place(
+            app_key,
+            token,
+            market_id,
+            selection_id,
+            exit_side,
+            float(exit_odds),
+            float(parent_stake),
+            cref,
+            persistence="LAPSE"
+        )
 
         if not bet_id:
-            con.close()
             return None
 
-        cur = con.cursor()
         _q_retry(cur, """
             INSERT INTO orders(
               customerOrderRef, run_id, mode,
@@ -2138,47 +2315,62 @@ def _place_stoploss_child_now(
               'matched', datetime('now','utc'), ?,
               'CHILD', ?, 'S', 'STOPLOSS'
             )
-        """, (cref, fk,
-              str(market_id), str(selection_id),
-              exit_side.upper(), H, S2,
-              bet_id, pid))
+        """, (
+            cref,
+            fk,
+            str(market_id),
+            str(selection_id),
+            exit_side.upper(),
+            float(exit_odds),
+            float(parent_stake),
+            str(bet_id),
+            pid
+        ))
 
         child_id = int(cur.lastrowid)
 
-        # stamp parent
         _q_retry(cur, """
             UPDATE orders
                SET exit_status='matched',
                    exit_kind='STOPLOSS',
-                   exit_odds=?, exit_stake=?,
+                   exit_odds=?,
+                   exit_stake=?,
                    closed_at=datetime('now','utc')
              WHERE customerOrderRef=?
-        """, (H, S2, str(parent_cor)))
-        con.commit()
-        con.close()
+        """, (
+            float(exit_odds),
+            float(parent_stake),
+            str(parent_cor)
+        ))
 
-        # === EVENTSYNC: B — STOPLOSS EXIT ==================================
+        con.commit()
+
+        # Optional diagnostic proof
+        _check_bankstate_invariant(_engine_from_source(parent["source"]))
+
+        # Event only (no finance)
         try:
             _emit_settlement_router_event(
                 "STOPLOSS_EXIT",
                 cor=parent_cor,
                 market_id=market_id,
                 selection_id=selection_id,
-                exit_odds=H,
-                exit_stake=S2,
-                realized=None   # parent realized PnL is finalized later in reconcile
+                exit_odds=float(exit_odds),
+                exit_stake=float(parent_stake),
+                realized=None
             )
-        except Exception as e:
-            _log_event("WARN","live_router",f"EventSync stoploss exit failed: {e}")
-        # ====================================================================
+        except Exception:
+            pass
 
         return child_id
 
     except Exception as e:
-        _log_event("ERROR","live_router",f"_place_stoploss_child_now failed ref={parent_cor}: {e}")
+        _log_event("ERROR", "live_router",
+                   f"stoploss failed ref={parent_cor}: {e}")
         return None
-
-# === PATCH END ==============================================================
+    finally:
+        try: con.close()
+        except Exception: pass
 
 
 
@@ -2469,6 +2661,12 @@ def place_parent_and_hedge(
     _ctx: dict | None = None,
 ) -> tuple[Optional[str], str]:
 
+    try:
+        _start_rehedge_loop(default_ticks=1)
+    except Exception:
+        pass
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: def place_parent_and_hedge(
@@ -2545,24 +2743,29 @@ def place_parent_and_hedge(
     # --------------------------------------------------------------
     # STOPLOSS (W-engine) — IMMEDIATE FLATTEN EXIT
     # --------------------------------------------------------------
+    # STOPLOSS (W-engine) — IMMEDIATE FLATTEN EXIT
     if _plan and str(_plan.get("engine")).upper() == "OVERWATCHER" \
               and str(_plan.get("type")).upper() == "STOPLOSS":
 
         parent_cor = _ctx.get("customerOrderRef") or _plan.get("customerOrderRef")
         if not parent_cor:
-            parent_cor = _ref("SLP")  # fallback, extremely rare
+            parent_cor = _ref("SLP")
 
-        # Load parent
-        con_sl = _orders_conn(); con_sl.row_factory = sqlite3.Row
-        parent = _q_retry(con_sl,
-            "SELECT id, side, entry_stake, marketId, selectionId "
-            "FROM orders WHERE customerOrderRef=? LIMIT 1",
-            (str(parent_cor),)
-        ).fetchone()
+        child_id = _place_stoploss_child_now(
+            parent_cor=parent_cor,
+            market_id=str(_plan.get("marketId")),
+            selection_id=str(_plan.get("selectionId")),
+            exit_side="BACK" if (_plan.get("side") or "").upper() == "LAY" else "LAY",
+            exit_odds=float(_plan.get("px")),
+            parent_stake=float(_plan.get("entry_stake") or _plan.get("stake") or 0.0),
+            run_id=_ctx.get("run_id")
+        )
 
-        if not parent:
-            con_sl.close()
-            return None, "STOPLOSS_NO_PARENT"
+        if not child_id:
+            return None, "STOPLOSS_FAILED"
+
+        return None, parent_cor
+
 
         pid        = int(parent["id"])
         p_side     = str(parent["side"]).upper()

@@ -32,6 +32,49 @@ from engines.mastery import posteriors
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os, sqlite3
 
+# ============================================================
+# TRAINING FEATURE CONTRACT (AUTHORITATIVE)
+# ============================================================
+
+CORE_FEATURES = [
+    # outcome / execution
+    "pnl",
+    "target_ticks",
+    "realized_ticks",
+
+    # timing / dynamics
+    "drift_speed",
+    "inplay_progress",
+    "expected_race_mins",
+
+    # volumes
+    "pre_vol",
+    "inplay_vol",
+    "post_vol",
+
+    # form
+    "form_win_rate",
+    "form_avg_pnl",
+
+    # favourite / ordinal context
+    "fav_rank",
+    "fav_percentile",
+    "is_favourite",
+    "is_top_3",
+    "is_longshot",
+    "fav_bucket_enc",
+]
+
+OPTIONAL_FEATURES = [
+    # legacy / future (may not exist yet)
+    "matched_ratio",
+    "open_liab",
+    "liab_error",
+    "blueprint_key",
+    "surface_key",
+    "trade_type",
+]
+
 
 def _local_db():
     """Return local mastery_v7.db path for assimilation."""
@@ -611,7 +654,7 @@ def build_training_snapshot(days: int = 7):
     cur.execute(f"""
         CREATE TABLE mastery_v7_training AS
         SELECT *
-          FROM live.v_mastery_v7
+          FROM v_mastery_v7_context
          WHERE date(day) >= date('now','-{days} day');
     """)
 
@@ -627,27 +670,50 @@ def load_training_data() -> pd.DataFrame:
     con = _connect()
     df = pd.read_sql("SELECT * FROM mastery_v7_training", con)
     con.close()
+
+
+    # Ensure favourite ordinal columns exist (safe defaults)
+    ordinal_cols = [
+        "fav_rank",
+        "field_size",
+        "fav_percentile",
+        "is_favourite",
+        "is_top_3",
+        "is_longshot",
+    ]
+
+    for c in ordinal_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    if "fav_bucket" in df.columns:
+        df["fav_bucket"] = df["fav_bucket"].fillna("UNK").astype(str)
+
+        try:
+            from sklearn.preprocessing import LabelEncoder
+            fav_enc = LabelEncoder()
+            df["fav_bucket_enc"] = fav_enc.fit_transform(df["fav_bucket"])
+        except Exception:
+            df["fav_bucket_enc"] = 0
+    else:
+        df["fav_bucket_enc"] = 0
+
+    # --- ENGINE FAMILY FEATURES (FIXED LOCATION) ---
+    if "engine" in df.columns:
+        df["engine_family"] = df["engine"].fillna("LEGACY").astype(str)
+    else:
+        df["engine_family"] = "LEGACY"
+
+    try:
+        from sklearn.preprocessing import LabelEncoder
+        eng_enc = LabelEncoder()
+        df["engine_family_enc"] = eng_enc.fit_transform(df["engine_family"])
+    except Exception:
+        df["engine_family_enc"] = 0
+
     return df
 
-# === PATCH START ============================================================
-# 📍 Add engine-family classifier as training feature
-# ===========================================================================
 
-if "engine" in df.columns:
-    df["engine_family"] = df["engine"].fillna("LEGACY").astype(str)
-else:
-    df["engine_family"] = "LEGACY"
-
-# Label-encode engine types
-try:
-    from sklearn.preprocessing import LabelEncoder
-    eng_enc = LabelEncoder()
-    df["engine_family_enc"] = eng_enc.fit_transform(df["engine_family"])
-except Exception as e:
-    print(f"[train] warn: engine_family encoding failed: {e}")
-    df["engine_family_enc"] = 0
-
-# === PATCH END ==============================================================
 
 
 # === PATCH START ===
@@ -676,17 +742,31 @@ def _evaluate_epoch_metrics(df: pd.DataFrame) -> dict:
 
 def _run_forest_river_hybrid(df: pd.DataFrame) -> pd.DataFrame:
     """Attach hybrid confidence column combining forest and river phases."""
-    context_feats = [c for c in [
-        "pnl","target_ticks","realized_ticks","pre_vol","inplay_vol","post_vol",
-        "drift_speed","inplay_progress","expected_race_mins",
-        "form_win_rate","form_avg_pnl","matched_ratio","open_liab","liab_error",
-        "blueprint_key","surface_key","trade_type"
-    ] if c in df.columns]
 
-    forest_conf = _forest_phase(df, context_feats)
+    used_features = []
+
+    for c in CORE_FEATURES:
+        if c in df.columns:
+            used_features.append(c)
+        else:
+            # hard default for missing core features
+            df[c] = 0.0
+            used_features.append(c)
+
+    # optional features are best-effort only
+    for c in OPTIONAL_FEATURES:
+        if c in df.columns:
+            used_features.append(c)
+
+    forest_conf = _forest_phase(df, used_features)
     river_conf = _river_phase(df)
-    df["hybrid_conf"] = 0.6*forest_conf + 0.4*river_conf
+
+    df["hybrid_conf"] = 0.6 * forest_conf + 0.4 * river_conf
+
+    print(f"[v7-train] 🧬 features used ({len(used_features)}): {used_features}")
+
     return df
+
 # === PATCH END ===
 # === PATCH START ===
 # 📍 TARGET: engines/mastery/train_mastery_v7.py:train_and_update_posteriors
@@ -1071,48 +1151,6 @@ def train_and_update_posteriors(df: pd.DataFrame, epochs: int = 25):
 
     # model and question weighting (existing)
     model = RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42)
-    con = _connect()
-    bucket_strengths = _load_bucket_strengths(con)
-    con.close()
-
-    if not bucket_strengths:
-        print("[v7-train] ℹ️ no recent question metrics — proceeding with baseline fit.")
-
-    df["bucket_name"] = df["letter"].map(_bucket_for_letter)
-    df["bucket_score"] = df["bucket_name"].map(bucket_strengths).fillna(0)
-
-    print(f"[v7-train] 🎯 question-driven training — {epochs} epochs, 8 buckets active")
-    for e in range(epochs):
-        mean_strength = np.mean(list(bucket_strengths.values()) or [0])
-        df["adaptive_weight"] = df["sample_weight"] * (
-            1.0 + 0.2 * (df["bucket_score"] - mean_strength)
-        )
-        model.fit(X, y_enc, sample_weight=df["adaptive_weight"])
-        score = model.score(X, y_enc)
-        print(f"[epoch {e+1:02d}] score={score:.4f} mean_bucket={mean_strength:.4f}")
-
-    # --- write back hybrid confidence per bin_key (simplified) ---
-    try:
-        con = sqlite3.connect(autoscalp_db())
-        cur = con.cursor()
-        for _, r in df.iterrows():
-            cur.execute("""
-                UPDATE mastery_posteriors
-                   SET bucket_confidence = ?
-                 WHERE bin_key = ?;
-            """, (float(r["hybrid_conf"]), f"{r['marketId']}|{r['selectionId']}"))
-        con.commit()
-        con.close()
-        print(f"[v7-train] ✅ updated bucket_confidence for {len(df)} bins")
-    except Exception as e:
-        print(f"[v7-train] warn: could not update bucket_confidence ({e})")
-
-
-    # 🧩 NEW: safe return of trained artefacts
-    print(f"[v7-train] ✅ training complete — epochs={epochs}, samples={len(df)}")
-    return model, le
-# === PATCH END ===
-
 # ──────────────────────────────────────────────────────────────────────
 # Insert this inside train_and_update_posteriors() before model.fit()
 # ──────────────────────────────────────────────────────────────────────
@@ -1144,12 +1182,28 @@ def train_and_update_posteriors(df: pd.DataFrame, epochs: int = 25):
         if (e + 1) % 10 == 0 or e == epochs - 1:
             mean_strength = np.mean(list(bucket_strengths.values()) or [0])
             print(f"[epoch {e+1:02d}] updated bucket mean={mean_strength:.4f}")
+
+    # --- write back hybrid confidence per bin_key (simplified) ---
+    try:
+        con = sqlite3.connect(autoscalp_db())
+        cur = con.cursor()
+        for _, r in df.iterrows():
+            cur.execute("""
+                UPDATE mastery_posteriors
+                   SET bucket_confidence = ?
+                 WHERE bin_key = ?;
+            """, (float(r["hybrid_conf"]), f"{r['marketId']}|{r['selectionId']}"))
+        con.commit()
+        con.close()
+        print(f"[v7-train] ✅ updated bucket_confidence for {len(df)} bins")
+    except Exception as e:
+        print(f"[v7-train] warn: could not update bucket_confidence ({e})")
+
+
+    # 🧩 NEW: safe return of trained artefacts
+    print(f"[v7-train] ✅ training complete — epochs={epochs}, samples={len(df)}")
+    return model, le
 # === PATCH END ===
-
-
-# ──────────────────────────────────────────────────────────────────────
-
-
 
 # ──────────────────────────────────────────────────────────────────────
 # 3️⃣  DIAGNOSTIC  — safe letter guard (None → UNK)
@@ -1482,17 +1536,9 @@ def _fold_in_live_state(df: pd.DataFrame):
         return df
 # ========================================================================
 
-from engines.config_paths import _CLOUD_AUTO_PATH, _LOCAL_AUTO_PATH
 import shutil, os
 
-def _sync_cloud_before_training():
-    """Force flush local→cloud before new training cycle."""
-    if os.path.exists(_LOCAL_AUTO_PATH):
-        try:
-            shutil.copy2(_LOCAL_AUTO_PATH, _CLOUD_AUTO_PATH)
-            print(f"[config_paths] ☁️  pre-training sync → {_CLOUD_AUTO_PATH}")
-        except Exception as e:
-            print(f"[config_paths] warn pre-training sync: {e}")
+
 
 # === PATCH START ===
 # 📍 TARGET: engines/mastery/train_mastery_v7.py : main()
@@ -1502,7 +1548,7 @@ def _sync_cloud_before_training():
 def main(days:int=7, epochs:int=25):
     global sqlite3
     import sqlite3
-    _sync_cloud_before_training()
+ 
     print(f"\n[Mastery v7 Trainer] starting run — days={days}, epochs={epochs}")
     _run_cognitive_pretraining()
 
@@ -1530,7 +1576,7 @@ def main(days:int=7, epochs:int=25):
     # Stage 1 — Intel View
     import time
     print("\n[stage 1/6] Ensuring unified intelligence view...")
-    _ensure_intel_view()
+    print("[v7-intel] ⏭️ skipped — cache_mastery_day is training authority")
     for i in range(0, 100, 5):
         tracker.stage_progress("Intel View", i/6)
         time.sleep(0.02)

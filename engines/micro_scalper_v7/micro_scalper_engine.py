@@ -17,11 +17,8 @@ from engines.mastery.live_event_api import emit_msc_plan
 # 📆 PATCHED: 2025-12-01 — Consume Brain Pulse from Overwatcher
 # ----------------------------------------------------------------------------
 # We safely import the pulse container from Overwatcher. It always exists because
-# Overwatcher defines `_last_brain_pulse = [None]` in the previous patch.
-try:
-    from engines.live.overwatcher import _last_brain_pulse
-except Exception:
-    _last_brain_pulse = [None]
+from engines.mastery.intelligence_read_api import get_intelligence_snapshot
+
 
 def _stamp_msc_source(plan, letter):
     if plan is None:
@@ -142,6 +139,37 @@ def _apply_multiplier(plan: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, An
         return plan
 
     mult = calculate_msc_multiplier(ctx)
+    # === PHASE 6C — Intelligence modulation ==========================
+    hybrid_conf = ctx.get("hybrid_conf")
+    fav_rank    = ctx.get("fav_rank")
+    is_top_3    = ctx.get("is_top_3")
+    is_fav      = ctx.get("is_favourite")
+    band        = ctx.get("band")
+    brain_coh   = ctx.get("brain_coherence")
+
+    # Hard exclusion safety (should normally be gated earlier)
+    if band == "IGNORED":
+        return None
+
+    # Confidence floor
+    if hybrid_conf is not None and hybrid_conf < 0.45:
+        return None
+
+    # Stake shaping
+    if hybrid_conf is not None:
+        mult *= max(0.5, min(1.5, 0.5 + hybrid_conf))
+
+    if is_top_3 is False:
+        mult *= 0.7
+
+    if is_fav:
+        mult *= 0.85
+
+    # Global regime caution
+    if brain_coh is not None and brain_coh < 0.6:
+        mult *= 0.75
+    # ================================================================
+
     plan["size"] = round(base_size * mult, 2)
     plan["msc_multiplier"] = mult   # optional for telemetry
     return plan
@@ -269,17 +297,20 @@ class MicroScalperEngine:
             - stoploss_triggered_for_parent (optional)
             - v7-intel enriched fields
         """
+        intel = get_intelligence_snapshot(
+            marketId=ctx.get("marketId"),
+            selectionId=ctx.get("selectionId")
+        )
+        if intel:
+            ctx.update(intel)
+
         # === PATCH START (wrap tick in error catcher) ================================
         try:
             oc_phase = ctx.get("oc_phase", 0)
         # === PATCH END ===============================================================
 
 
-        # === PATCH START (BrainPulse → MSC injection) =========================
-        try:
-            _consume_brain_pulse(ctx)
-        except Exception:
-            pass
+
         # === PATCH END ========================================================
 
         # === PATCH START ============================================================
@@ -289,12 +320,6 @@ class MicroScalperEngine:
         # MSC no longer time-gates execution.
         # Scope + banding + engine logic determine eligibility.
         # ----------------------------------------------------------------------------
-
-        # Inject Brain Pulse if present
-        try:
-            _consume_brain_pulse(ctx)
-        except Exception:
-            pass
 
         # 1) STOPLOSS / RISK / EXPLORATORY (always evaluated)
         plan = self._tick_preoff(ctx)

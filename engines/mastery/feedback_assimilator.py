@@ -37,13 +37,35 @@ def assimilate_feedback(limit_minutes: int = 10) -> int:
 
     # 1️⃣ Gather recent events (binding-safe, f-string for LIMIT window)
     try:
+        # ======================================================================================================
+        # 📍 TARGET: engines/mastery/feedback_assimilator.py
+        # 🔎 ANCHOR: assimilate_feedback() — mastery_cache event_type filter
+        # 🧩 ACTION: INCLUDE MSC outcome events in River input
+        # 📆 PATCHED: 2025-12-19 — Minimal MSC → River inclusion
+        #
+        # RATIONALE:
+        # • River already handles generic runner-level outcomes
+        # • MSC emits outcomes under different event names
+        # • We alias MSC outcomes into the same River pipeline
+        # • No change to aggregation, weighting, or training
+        # ======================================================================================================
+
         rows = con.execute(f"""
             SELECT event_type, json_payload
               FROM mastery_cache
-             WHERE event_type IN ('feedback_tick','cashout_tick')
+             WHERE event_type IN (
+                   'feedback_tick',
+                   'cashout_tick',
+
+                   -- NEW: MSC outcome equivalents
+                   'msc_outcome',
+                   'msc_cashout',
+                   'msc_settlement'
+             )
                AND ts >= datetime('now','-{int(limit_minutes)} minute','utc')
           ORDER BY ts DESC
         """).fetchall()
+
     except Exception as e:
         print(f"[feedback_assimilator] query warn: {e}")
         con.close()

@@ -56,10 +56,51 @@ from engines.live.live_router import _keys
 
 # overwatcher.py (patched)
 
-
+# GLOBAL STOPLOSS QUEUE (routed into Lanes / Placement)
+STOPLOSS_QUEUE = {}
 
 def _process_stoploss_now(ev):
-    BUS.push_stoploss(ev)
+    """
+    STOPLOSS emitter (NO BUS INVOLVEMENT)
+
+    Overwatcher detects stop-loss and emits a child-only STOPLOSS plan.
+    Placement / Lanes is the execution owner.
+    """
+    try:
+        mid  = str(ev.get("marketId"))
+        sid  = str(ev.get("selectionId"))
+
+        entry_side   = str(ev.get("entry_side")).upper()
+        entry_stake  = float(ev.get("entry_stake") or 0)
+        current_odds = float(ev.get("current_odds") or ev.get("px") or 0)
+        sl_px        = float(ev.get("stop_loss_px") or 0)
+
+        exit_side = "BACK" if entry_side == "LAY" else "LAY"
+
+        plan = {
+            "enter": True,
+            "engine": "OVERWATCHER",
+            "type": "STOPLOSS",
+            "family": "STOPLOSS",
+
+            "marketId": mid,
+            "selectionId": sid,
+            "direction": exit_side,
+            "size": entry_stake,
+            "px": current_odds,
+
+            "stop_loss_px": sl_px,
+            "why": "overwatcher_stoploss",
+            "ts": ev.get("ts"),
+        }
+
+        STOPLOSS_QUEUE[(mid, sid)] = plan
+
+        print(f"[W-SL][ENQUEUE] mid={mid} sid={sid} px={current_odds} sl_px={sl_px}")
+
+    except Exception as e:
+        print(f"[W-SL][ERR] stoploss emit failed: {e}")
+
 
 
 # === PATCH START ===
@@ -70,45 +111,64 @@ def _process_stoploss_now(ev):
 from engines.live.stoploss_engine import StopLossEngine, ParentState
 MSC_STOPLOSS = StopLossEngine()
 # === PATCH END ===
-
-
-from engines.price_math import walk_ticks, calculate_tick_distance as _tick_distance  # ✅ FIX
-
-from engines.mastery import event_sink
-
-# === PATCH START ============================================================
+# ======================================================================
 # 📍 TARGET: engines/live/overwatcher.py
-# 🛠 ACTION: Add stop-loss-per-parent executor using stored stop_loss_px
-# 📆 PATCHED: 2025-12-07
-# ============================================================================
+# 🔁 REPLACE: all trailing / mixed stop-loss executors
+# 📆 PATCHED: 2025-12-18 — Single-source MSC stop-loss with SLEQ scaling
+# ======================================================================
 
-def enforce_parent_stoploss_px():
+from engines.price_math import walk_ticks
+from engines.live.stoploss_engine import StopLossEngine, ParentState
+
+MSC_STOPLOSS = StopLossEngine()  # provides SLEQ + baseline
+
+def _compute_msc_stop_px(entry_odds: float, side: str, sleq: float) -> float:
     """
-    Fires STOPLOSS when current odds cross stored stop_loss_px.
-    Applies ONLY to:
-        • MSC Exploratory parents
-        • MSC Risk parents
+    Compute stop-loss price using:
+      - baseline tick distance
+      - expanded / contracted by SLEQ
     """
-    # 1) Load all open parents with stop_loss_px
+    BASE_TICKS = 4          # baseline (configurable)
+    MIN_TICKS  = 2
+    MAX_TICKS  = 10
+
+    # SLEQ expected ~0.5–1.5 (example)
+    ticks = int(round(BASE_TICKS * sleq))
+    ticks = max(MIN_TICKS, min(MAX_TICKS, ticks))
+
+    if side.upper() == "LAY":
+        return walk_ticks(entry_odds, +ticks)
+    else:
+        return walk_ticks(entry_odds, -ticks)
+
+
+def enforce_msc_exploratory_stoploss():
+    """
+    MSC_EXPLORATORY STOPLOSS — ONLY EXECUTOR
+    ---------------------------------------
+    - No trailing execution
+    - No legacy execution
+    - No bus
+    - Emits STOPLOSS plans only
+    """
+
     con = _orders_conn(); con.row_factory = sqlite3.Row
-    rows = _q_retry(con, """
-        SELECT id, customerOrderRef, marketId, selectionId, side,
-               entry_odds, entry_stake, stop_loss_px, source
+    parents = _q_retry(con, """
+        SELECT id, customerOrderRef, marketId, selectionId,
+               side, entry_odds, entry_stake, source
           FROM orders
          WHERE role='PARENT'
            AND entry_status='matched'
-           AND (exit_status IS NULL OR exit_status <> 'matched')
-           AND stop_loss_px IS NOT NULL
-           AND UPPER(source) LIKE 'MSC%'
+           AND exit_status IS NULL
+           AND UPPER(source)='MSC_EXPLORATORY'
     """).fetchall()
     con.close()
 
-    if not rows:
+    if not parents:
         return
 
-    # 2) Preload current LTP prices
     con = _orders_conn(); con.row_factory = sqlite3.Row
-    px_map = {
+    prices = {
         (str(r["marketId"]), str(r["selectionId"])): float(r["ltp"])
         for r in _q_retry(con, """
             SELECT marketId, selectionId, ltp
@@ -118,54 +178,110 @@ def enforce_parent_stoploss_px():
     }
     con.close()
 
-    # 3) Evaluate stop-loss per parent
-    for p in rows:
+    for p in parents:
         mid = str(p["marketId"])
         sid = str(p["selectionId"])
-        px  = px_map.get((mid, sid))
-        sl  = float(p["stop_loss_px"])
-
+        px  = prices.get((mid, sid))
         if px is None:
             continue
 
-        side = p["side"].upper()
+        # Build parent state for SLEQ
+        parent_state = ParentState(
+            parent_id=int(p["id"]),
+            entry_side=p["side"],
+            entry_odds=float(p["entry_odds"]),
+            entry_stake=float(p["entry_stake"]),
+        )
 
-        # Stop-loss condition:
-        # LAY → stop when odds rise to sl
-        # BACK → stop when odds fall to sl
+        sleq = MSC_STOPLOSS.get_sleq(parent_state)
+
+        stop_px = _compute_msc_stop_px(
+            entry_odds=float(p["entry_odds"]),
+            side=p["side"],
+            sleq=sleq
+        )
+
         hit = (
-            (side == "LAY"  and px >= sl) or
-            (side == "BACK" and px <= sl)
+            p["side"].upper() == "LAY"  and px >= stop_px or
+            p["side"].upper() == "BACK" and px <= stop_px
         )
 
         if not hit:
             continue
 
-        # --- FIRE STOPLOSS ------------------------------------------------
-        event = {
-            "type": "stop_loss_triggered",
-            "parent_id": int(p["id"]),
-            "parent_ref": p["customerOrderRef"],
+        _process_stoploss_now({
+            "marketId": mid,
+            "selectionId": sid,
+            "entry_side": p["side"],
+            "entry_stake": float(p["entry_stake"]),
+            "current_odds": px,
+            "stop_loss_px": stop_px,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+
+from engines.price_math import walk_ticks, calculate_tick_distance as _tick_distance  # ✅ FIX
+
+from engines.mastery import event_sink
+
+def enforce_parent_stoploss_px():
+    """
+    Detect stop-loss for MSC_EXPLORATORY parents only.
+    Emits STOPLOSS plans; never executes.
+    """
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    parents = _q_retry(con, """
+        SELECT id, customerOrderRef, marketId, selectionId,
+               side, entry_odds, entry_stake, stop_loss_px, source
+          FROM orders
+         WHERE role='PARENT'
+           AND entry_status='matched'
+           AND exit_status IS NULL
+           AND stop_loss_px IS NOT NULL
+    """).fetchall()
+    con.close()
+
+    if not parents:
+        return
+
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    prices = {
+        (str(r["marketId"]), str(r["selectionId"])): float(r["ltp"])
+        for r in _q_retry(con, """
+            SELECT marketId, selectionId, ltp
+              FROM odds_current
+             WHERE ltp IS NOT NULL
+        """).fetchall()
+    }
+    con.close()
+
+    for p in parents:
+        if (p["source"] or "").upper() != "MSC_EXPLORATORY":
+            continue
+
+        mid = str(p["marketId"])
+        sid = str(p["selectionId"])
+        px = prices.get((mid, sid))
+        if px is None:
+            continue
+
+        side = p["side"].upper()
+        sl = float(p["stop_loss_px"])
+
+        hit = (side == "LAY" and px >= sl) or (side == "BACK" and px <= sl)
+        if not hit:
+            continue
+
+        _process_stoploss_now({
             "marketId": mid,
             "selectionId": sid,
             "entry_side": side,
-            "entry_odds": float(p["entry_odds"]),
             "entry_stake": float(p["entry_stake"]),
             "current_odds": px,
             "stop_loss_px": sl,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+        })
 
-        print(f"[STOPLOSS][PX] fired mid={mid} sid={sid} px={px} sl_px={sl}")
-
-        # 1️⃣ EXECUTION PATH (BUS-controlled)
-        _process_stoploss_now(event)
-
-        # 2️⃣ TELEMETRY PATH (Mastery-only, NO execution)
-        event_sink.emit("stoploss_event", event)
-
-
-# === PATCH END ================================================================
 
 
 
@@ -184,31 +300,12 @@ _last_brain_note = [0]       # module-level mutable container (existing)
 _last_brain_pulse = [None]   # NEW: stores last full valid pulse (same style)
 
 def _on_brain_pulse(payload):
-    try:
-        mid = str(payload.get("marketId") or "")
-        sid = str(payload.get("selectionId") or "")
-        if not mid or not sid:
-            return
+    """
+    Disabled execution path.
+    Brain is now observer-only and must not route or execute.
+    """
+    return
 
-        plan = {
-            "type": "brain_plan",
-            "marketId": mid,
-            "selectionId": sid,
-            "side": "LAY" if payload.get("adjustment", 0) >= 0 else "BACK",
-            "odds": float(payload.get("odds") or 0),
-            "stake": float(payload.get("stake") or 2.0),
-            "target_ticks": int(payload.get("target_ticks") or 1),
-            "confidence": float(payload.get("coherence") or 0),
-            "adjustment": float(payload.get("adjustment") or 0),
-            "ts": payload.get("ts"),
-        }
-
-        print(f"[OVERWATCHER][BRAIN] → router mid={mid} sid={sid}")
-
-        event_sink.on_decision(plan)
-
-    except Exception as e:
-        print(f"[OVERWATCHER][BRAIN] warn: {e}")
 
 
 # =====================================================================
@@ -247,84 +344,7 @@ def _on_tsl_event(payload):
 # Safe early export of TSL bridge context before any imports use it
 _TSL_LAST_PARENT = None
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/overwatcher.py
-# 🛠 ACTION: When stop-loss fires → place S child + cancel H child
-# 📆 PATCHED: 2025-12-06
 
-from engines.live.live_router import _orders_conn
-
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/overwatcher.py:_process_stoploss_now
-# 🛠 ACTION: Convert STOPLOSS executor into STOPLOSS → Lanes plan emitter
-# 📆 PATCHED: 2026-01-19
-# ============================================================================
-
-# GLOBAL STOPLOSS QUEUE (routed into Lanes)
-STOPLOSS_QUEUE = {}
-
-def _process_stoploss_now(ev):
-    """
-    v7 STOPLOSS → Lanes Plan Emitter
-    --------------------------------
-    Overwatcher NO LONGER places STOPLOSS children directly.
-    Instead, it emits a STOPLOSS plan into STOPLOSS_QUEUE.
-
-    Lanes merges:
-        • STOPLOSS (OVERWATCHER)
-        • MSC_RISK
-        • MSC_EXPLORATORY
-        • MSC_INPLAY
-        • LEGACY
-    And routes exactly ONE final plan to Router.
-    """
-
-    try:
-        mid  = str(ev.get("marketId"))
-        sid  = str(ev.get("selectionId"))
-
-        entry_side   = str(ev.get("entry_side")).upper()
-        entry_stake  = float(ev.get("entry_stake") or 0)
-        current_odds = float(ev.get("current_odds") or ev.get("px") or 0)
-        sl_px        = float(ev.get("stop_loss_px") or 0)
-
-        # Determine STOPLOSS exit direction
-        exit_side = "BACK" if entry_side == "LAY" else "LAY"
-
-        # Build STOPLOSS plan for Lanes
-        plan = {
-            "enter": True,
-            "engine": "OVERWATCHER",
-            "strategy": None,
-            "letter": "W",
-
-            "type": "STOPLOSS",
-            "family": "STOPLOSS",
-
-            "marketId": mid,
-            "selectionId": sid,
-
-            "direction": exit_side,
-            "size": entry_stake,
-            "px": current_odds,
-
-            "stop_loss_px": sl_px,
-
-            "why": "overwatcher_stoploss",
-            "ts": ev.get("ts"),
-        }
-
-        # Insert plan into global STOPLOSS_QUEUE
-        # (Lanes pulls this per runner)
-        STOPLOSS_QUEUE[(mid, sid)] = plan
-
-        print(f"[W-SL][ENQUEUE] mid={mid} sid={sid} px={current_odds} sl_px={sl_px}")
-
-    except Exception as e:
-        print(f"[W-SL][ERR] STOPLOSS emit fail: {e}")
-
-# === PATCH END ================================================================
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
 # 🔎 SEARCH: STOPLOSS_QUEUE =
@@ -334,13 +354,9 @@ def _process_stoploss_now(ev):
 
 def pull_stoploss_for(mid: str, sid: str):
     """
-    Bus-safe STOPLOSS fetch.
-    Returns STOPLOSS plan if present; removes it from queue.
+    Placement-safe STOPLOSS fetch.
     """
-    key = (mid, sid)
-    if key in STOPLOSS_QUEUE:
-        return STOPLOSS_QUEUE.pop(key)
-    return None
+    return STOPLOSS_QUEUE.pop((mid, sid), None)
 
 # === PATCH END ================================================================
 
@@ -416,7 +432,6 @@ from engines.live.stoploss_engine import StopLossEngine, ParentState
 # Instantiate a singleton TSL engine (persists SLEQ across ticks)
 _TSL_ENGINE = StopLossEngine()
 
-
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
 # 🔎 SEARCH: def enforce_stop_losses_trailing(
@@ -429,8 +444,7 @@ def enforce_stop_losses_trailing():
     -----------------------------
     Applies trailing SL ONLY to:
         • MSC-EXPLORATORY children
-        • MSC-RISK children
-
+     
     Legacy parents:
         ❌ NEVER receive stop-loss
         ✔ Use boundaries (1.5 / 12.0)
@@ -451,10 +465,10 @@ def enforce_stop_losses_trailing():
     if not parents:
         return
 
-    # === MSC-ONLY FILTER ====================================================
+    # === MSC_EXPLORATORY ONLY FILTER ===
     msc_parents = [
         p for p in parents
-        if str(p["source"] or "").upper().startswith("MSC")
+        if str(p["source"] or "").upper() == "MSC_EXPLORATORY"
     ]
 
     if not msc_parents:
@@ -484,6 +498,12 @@ def enforce_stop_losses_trailing():
         if px is None:
             continue
 
+        exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
+        entry_stake = float(p["entry_stake"])
+        current_odds = px
+        parent_ref = p["customerOrderRef"]
+
+
         parent_state = ParentState(
             parent_id=int(p["id"]),
             entry_side=str(p["side"]),
@@ -503,14 +523,29 @@ def enforce_stop_losses_trailing():
             continue
 
         # Forward to RiskEngine + router
-        try:
-            event_sink.on_decision(ev)
-        except Exception:
-            pass
+        from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-        print(f"[TSL] MSC STOP mid={mid} sid={sid} px={px} reason={ev.get('reason')} class={ev.get('classification')}")
+        enqueue_for_placement(
+            "OVERWATCHER",
+            {
+                "enter": True,
+                "engine": "OVERWATCHER",
+                "type": "STOPLOSS",
+                "family": "STOPLOSS",
+                "marketId": mid,
+                "selectionId": sid,
+                "direction": exit_side,
+                "size": entry_stake,
+                "px": current_odds,
+                "parent_ref": p["customerOrderRef"],
+                "why": "overwatcher_stoploss",
+                "ts": ev.get("ts"),
+            },
+            None,  # CTX intentionally minimal — child-only execution
+        )
 
-# === PATCH END ==============================================================
+
+        # === PATCH END ==============================================================
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
@@ -541,7 +576,7 @@ def enforce_legacy_boundaries_and_trailing():
 
     legacy = [
         p for p in parents
-        if not str(p["source"] or "").upper().startswith("MSC")
+        if str(p["source"] or "").upper() == "LEGACY"
     ]
 
     if not legacy:
@@ -814,6 +849,9 @@ def enforce_stop_losses():
 
     # 3) Evaluate trailing SL per parent
     for r in rows:
+        source = str(r.get("source") or "").upper()
+        if source != "MSC_EXPLORATORY":
+            continue
         mid = str(r["marketId"])
         sid = str(r["selectionId"])
         px = px_map.get((mid, sid))
@@ -842,15 +880,29 @@ def enforce_stop_losses():
             continue
 
         # 4) emit decision event (router will place STOPLOSS child)
-        try:
-            from engines.mastery import event_sink
-            event_sink.on_decision(ev)
-        except Exception:
-            pass
+        from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-        print(f"[SL] stop fired mid={mid} sid={sid} reason={ev.get('reason')} {ev.get('classification')}")
+        enqueue_for_placement(
+            "OVERWATCHER",
+            {
+                "enter": True,
+                "engine": "OVERWATCHER",
+                "type": "STOPLOSS",
+                "family": "STOPLOSS",
+                "marketId": mid,
+                "selectionId": sid,
+                "direction": exit_side,
+                "size": entry_stake,
+                "px": current_odds,
+                "parent_ref": p["customerOrderRef"],
+                "why": "overwatcher_stoploss",
+                "ts": ev.get("ts"),
+            },
+            None,  # CTX intentionally minimal — child-only execution
+        )
 
-# === PATCH END ===
+
+        # === PATCH END ===
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1483,18 +1535,15 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
                 conn = open_auto_db(rw=False)
 
                 # Core guardian / liability / micro-scalper diagnostics
-                _evaluate_market_guardian(conn)
-                _evaluate_liability_cap(conn)
-                _evaluate_liability_alerts(conn)
-                _evaluate_probability_risk(conn)
-                _evaluate_micro_scalper_balance(conn)
 
-                # MSC-only trailing stop-loss
-                enforce_stop_losses_trailing()
+
+                # MSC-Exploratory only trailing stop-loss
+                enforce_msc_exploratory_stoploss()
+
 
                 # Legacy boundary exits
                 enforce_legacy_boundaries_and_trailing()
-                enforce_parent_stoploss_px()   # NEW LINE
+                
 
             except Exception as e:
                 print("[OVERWATCHER] loop error", e)

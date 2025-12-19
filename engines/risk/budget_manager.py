@@ -285,7 +285,25 @@ def _rebalance_allocations():
     # Lazy import avoids daily_config → bank_state → budget_manager loop
     try:
         from engines.daily_config import fetch_available_budget
-        live_bank = float(fetch_available_budget())
+
+        raw_bank = float(fetch_available_budget())
+
+        # ============================================================
+        # RISK BANK FLOOR
+        # ------------------------------------------------------------
+        # The trading system operates on a fixed risk envelope.
+        # If cash balance drops below this floor, risk bank remains.
+        # ============================================================
+
+        RISK_BANK_FLOOR = 300.0
+
+        live_bank = max(raw_bank, RISK_BANK_FLOOR)
+
+        if raw_bank < RISK_BANK_FLOOR:
+            print(
+                f"[BUDGET] risk floor applied: raw_bank={raw_bank:.2f} → risk_bank={live_bank:.2f}"
+            )
+
     except Exception as e:
         print(f"[BUDGET] warn: could not fetch live bank ({e}) — using fallback 0.0")
         live_bank = 0.0
@@ -293,6 +311,60 @@ def _rebalance_allocations():
 
 
     final_pct = allocate_with_performance(perf, avg_ticks, live_bank)
+
+    # === PATCH START =====================================================
+    # 📍 TARGET: engines/risk/budget_manager.py:_rebalance_allocations
+    # 📆 PATCHED: 2026-02-12 — Persist daily engine allocations
+    # PURPOSE:
+    #   • Make BudgetManager output durable
+    #   • Single source of truth for BankState
+    # ===============================================================
+
+    try:
+        from engines.config_paths import open_auto_db
+
+        con = open_auto_db(rw=True)
+        cur = con.cursor()
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS budget_allocations (
+                day TEXT NOT NULL,
+                engine TEXT NOT NULL,
+                pct REAL NOT NULL,
+                bank REAL NOT NULL,
+                pot REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (day, engine)
+            )
+        """)
+
+        day = today
+
+        for engine, pct in final_pct.items():
+            pot = float(live_bank) * float(pct)
+
+            cur.execute("""
+                INSERT INTO budget_allocations (
+                    day, engine, pct, bank, pot, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, datetime('now','utc'))
+                ON CONFLICT(day, engine) DO UPDATE SET
+                    pct = excluded.pct,
+                    bank = excluded.bank,
+                    pot = excluded.pot,
+                    created_at = excluded.created_at
+            """, (day, engine, float(pct), float(live_bank), float(pot)))
+
+        con.commit()
+        con.close()
+
+        print("[BUDGET] allocations persisted to budget_allocations")
+
+    except Exception as e:
+        print(f"[BUDGET] ERROR persisting allocations: {e}")
+
+    # === PATCH END =======================================================
+
 
     print("[BUDGET] Rebalanced allocations (V7):",
           json.dumps(final_pct, indent=2))

@@ -3685,6 +3685,27 @@ def start_live_loop(*args, **kwargs):
     from engines.brain.brain_listener import start_brain_listener
     start_brain_listener()
 
+    # --------------------------------------------------------------
+    # 6E) START CONTEXT OBSERVER
+    # --------------------------------------------------------------
+    from engines.mastery.context_observer_v7 import start_context_observer
+    start_context_observer()
+
+    # --------------------------------------------------------------
+    # 6F) START CHILD PROCESS
+    # --------------------------------------------------------------
+    from engines.live.live_router import init_live_router, _start_rehedge_loop
+
+    init_live_router()
+    _start_rehedge_loop(default_ticks=1)
+
+    # --------------------------------------------------------------
+    # 6G) LIVE ROUTER BUDGET ALLOCATIONS
+    # --------------------------------------------------------------
+    from engines.live import bank_state
+
+    bank_state.init_from_budget_allocations()
+
     # ------------------------------------------------------------------
     # 7) START BUS LOOP (BUS-OWNED LOOP)
     # ------------------------------------------------------------------

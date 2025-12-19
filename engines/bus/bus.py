@@ -4,7 +4,7 @@
 # ======================================================================================================
 
 from engines.live.bank_state import get_engine_available
-from engines.live.overwatcher import pull_stoploss_for
+
 from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
 from engines.micro_scalper_v7.inplay_engine import InPlayEngine
 from engines.micro_scalper_v7.risk_engine import RiskEngine
@@ -117,7 +117,7 @@ class DecisionBus:
 
             # enrichment
             "plans_enriched": [],
-            "plans_rejected": [],    # (plan, reason)
+            "plans_annotated": [],    # (plan, reason)
 
             # routing
             "plans_routed": [],
@@ -296,7 +296,7 @@ class DecisionBus:
                         "MSC_EXPLORATORY",
                         evaluated=True,
                         fired=False,
-                        why=p.get("reason") or p.get("why") or "blocked",
+                        why=p.get("reason") or p.get("why") or "note",
                     )
         except Exception as e:
             _record("MSC_EXPLORATORY", evaluated=False, fired=False, why=str(e))
@@ -320,7 +320,7 @@ class DecisionBus:
                         "MSC_INPLAY",
                         evaluated=True,
                         fired=False,
-                        why=p.get("reason") or p.get("why") or "blocked",
+                        why=p.get("reason") or p.get("why") or "note",
                     )
         except Exception as e:
             _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
@@ -344,7 +344,7 @@ class DecisionBus:
                     "LEGACY",
                     evaluated=True,
                     fired=False,
-                    why=lp.get("reason") or lp.get("why") or "blocked",
+                    why=lp.get("reason") or lp.get("why") or "note",
                 )
         except Exception as e:
             _record("LEGACY", evaluated=False, fired=False, why=str(e))
@@ -371,7 +371,7 @@ class DecisionBus:
                         "LEGACY",
                         evaluated=True,
                         fired=False,
-                        why=sp.get("reason") or sp.get("why") or "blocked",
+                        why=sp.get("reason") or sp.get("why") or "note",
                     )
         except Exception as e:
             _record("LEGACY", evaluated=False, fired=False, why=str(e))
@@ -467,11 +467,11 @@ class DecisionBus:
             # PER-TICK ENGINE REPORT (RESET EACH TICK)
             # ------------------------------------
             engine_report = {
-                "LEGACY":          {"fired": 0, "blocked": None},
-                "MSC_EXPLORATORY": {"fired": 0, "blocked": None},
-                "MSC_INPLAY":      {"fired": 0, "blocked": None},
-                "MSC_RISK":        {"fired": 0, "blocked": None},
-                "OVERWATCHER":     {"fired": 0, "blocked": None},
+                "LEGACY":          {"fired": 0, "note": None},
+                "MSC_EXPLORATORY": {"fired": 0, "note": None},
+                "MSC_INPLAY":      {"fired": 0, "note": None},
+                "MSC_RISK":        {"fired": 0, "note": None},
+             
             }
 
 
@@ -731,21 +731,22 @@ class DecisionBus:
                 # --- BUS MUST NEVER BLOCK EXECUTION ---
                 # Annotate only, router decides.
 
-                # Direction drift annotation
+                # Direction drift annotation (diagnostic only)
                 if plan_dir and exec_dir and plan_dir != exec_dir:
                     plan["_bus_note"] = "direction_changed"
-                    engine_report[plan["engine"]]["blocked"] = "direction_changed"
-                    tick_ctx["plans_rejected"].append((plan, "direction_changed"))
+                    engine_report[plan["engine"]]["note"] = "direction_changed"
+                    tick_ctx["plans_annotated"].append((plan, "direction_changed"))
 
-                # Budget annotation (informational only)
+                # Budget annotation (diagnostic only — router decides)
                 if not self._has_budget(plan, ctx):
                     plan["_bus_note"] = "insufficient_budget_at_plan_time"
-                    engine_report[plan["engine"]]["blocked"] = "insufficient_budget"
-                    tick_ctx["plans_rejected"].append((plan, "insufficient_budget"))
+                    engine_report[plan["engine"]]["note"] = "insufficient_budget"
+                    tick_ctx["plans_annotated"].append((plan, "insufficient_budget"))
 
-                # ALWAYS forward
+                # ALWAYS forward (BUS never blocks execution)
                 final_plans.append((eng, plan, ctx))
                 tick_ctx["plans_enriched"].append(plan)
+
 
 
             # --------------------------------------------------
@@ -760,16 +761,16 @@ class DecisionBus:
 
             print("\nENRICHMENT")
             print(f"  enriched       : {len(tick_ctx['plans_enriched'])}")
-            print(f"  rejected       : {len(tick_ctx['plans_rejected'])}")
+            print(f"  annotated       : {len(tick_ctx['plans_annotated'])}")
 
             # --------------------------------------------------
             # Rejection reason breakdown (diagnostic)
             # --------------------------------------------------
             reasons = {}
-            for _plan, reason in tick_ctx["plans_rejected"]:
+            for _plan, reason in tick_ctx["plans_annotated"]:
                 reasons[reason] = reasons.get(reason, 0) + 1
 
-            print("\nREJECTIONS")
+            print("\nANNOTATIONS")
             if reasons:
                 for reason, count in reasons.items():
                     print(f"  {reason:<22} : {count}")
@@ -781,11 +782,6 @@ class DecisionBus:
             # ==================================================
             # PHASE 3 — ROUTING (BEGINS)
             # ==================================================
-            from engines.live.overwatcher import pull_stoploss_for
-
-            sl_plan = pull_stoploss_for(mid, sid)
-            if sl_plan:
-                plans.append(sl_plan)
 
 
             # Routing
@@ -830,7 +826,7 @@ class DecisionBus:
             plans_not_delegated = max(plans_generated - plans_delegated, 0)
 
             tick_ctx["plans_routed"] = plans_delegated
-            tick_ctx["plans_route_failed"] = tick_ctx["plans_rejected"]
+            tick_ctx["plans_route_failed"] = tick_ctx["plans_annotated"]
 
             print("────────────────────────────────────────────────────────")
             print(f"[BUS][PHASE 3][ROUTING] tick=#{self.tick_id}")
@@ -841,10 +837,10 @@ class DecisionBus:
             print(f"  plans_delegated : {plans_delegated}")
             print(f"  not_delegated   : {plans_not_delegated}")
 
-            if tick_ctx["plans_rejected"]:
+            if tick_ctx["plans_annotated"]:
                 print("\nBUS ANNOTATIONS")
                 reasons = {}
-                for _plan, reason in tick_ctx["plans_rejected"]:
+                for _plan, reason in tick_ctx["plans_annotated"]:
                     reasons[reason] = reasons.get(reason, 0) + 1
                 for reason, count in reasons.items():
                     print(f"  {reason:<22} : {count}")
@@ -876,7 +872,7 @@ class DecisionBus:
                 if r["fired"] > 0:
                     print(f"{eng:<16}: FIRED    ({r['fired']} plans)")
                 else:
-                    print(f"{eng:<16}: BLOCKED  reason={r['blocked']}")
+                    print(f"{eng:<16}: NOTE  reason={r['note']}")
 
             print("\nEXECUTION")
             print("────────────────────────────────────────────────────────")
@@ -932,7 +928,7 @@ class DecisionBus:
                 print("\nPLANS")
                 print(f"  raw           : {len(tick_ctx['plans_raw'])}")
                 print(f"  enriched      : {len(tick_ctx['plans_enriched'])}")
-                print(f"  rejected      : {len(tick_ctx['plans_rejected'])}")
+                print(f"  annotated      : {len(tick_ctx['plans_annotated'])}")
                 print(f"  routed        : {tick_ctx['plans_routed']}")
 
                 print(f"  route_failed  : {len(tick_ctx['plans_route_failed'])}")

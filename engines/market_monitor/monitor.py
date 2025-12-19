@@ -269,10 +269,10 @@ def refresh(mids: list[str], *, max_runners: int = 12) -> None:
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/market_monitor/monitor.py
-# 🔎 SEARCH: "fallback to inbound_oc_cache latest snapshot"
-# 🎯 PURPOSE: deterministic fallback px for offline/test mode
-# 📆 PATCHED: 2026-02-21
-# -----------------------------------------------------------------------
+# 🔎 ANCHOR: fallback to inbound_oc_cache latest snapshot
+# 🎯 PURPOSE: REMOVE synthetic price fallback that forces runners ACTIVE
+# 📆 PATCHED: 2025-12-18
+# ===========================================================================
 
             if not rows:
                 # fallback to inbound_oc_cache latest snapshot if any
@@ -286,27 +286,14 @@ def refresh(mids: list[str], *, max_runners: int = 12) -> None:
                     LIMIT ?
                 """, (str(mid), int(max_runners))).fetchall() or []
 
-                # --- HARD FALLBACK FOR OFFLINE TESTS / NO LTP ---------------
-                # If inbound px is missing or bogus, use deterministic 5.0
-                fixed_rows = []
-                for r in rows:
-                    sid = str(r["sid"])
-                    raw_px = r["px"]
-                    try:
-                        px = float(raw_px) if raw_px is not None else None
-                    except Exception:
-                        px = None
+                # ❌ REMOVED:
+                # Any synthetic / hard-coded px fallback (e.g. px = 5.0)
+                # Rationale:
+                # - If px is missing or extreme, runner must be IGNORED
+                # - Forcing px ACTIVE corrupts scope + execution integrity
 
-                    # Only override WHEN reaching fallback. LIVE never uses this.
-                    if px is None or px > 50.0:
-                        px = 5.0   # guarantees ACTIVE band for testing
-
-                    fixed_rows.append(
-                        {"sid": sid, "px": px, "ts": r["ts"]}
-                    )
-
-                rows = fixed_rows
 # === PATCH END ==============================================================
+
 
 
             runners: Dict[str, dict] = {}
