@@ -28,6 +28,25 @@ MENU = {
     "7": {"title": "System Tools [planned]", "subs": {}},
 }
 
+#not used yet but can upgrade to the below
+def launch(cmd: str):
+    full = (
+        f"cd {PROJECT_DIR} && "
+        "export PYTHONPATH=$(pwd):$PYTHONPATH && "
+        f"{cmd} ; exec bash"
+    )
+    osa = f'''
+    tell application "Terminal"
+        activate
+        do script "{full}"
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", osa])
+
+#launch("python3 engines/live/settlements.py fetch --since-days 2 && python3 engines/live/settlements.py reconcile")
+#launch("python3 engines/mastery/train_mastery_v7.py --days 90 --epochs 25")
+
+
 
 def show_menu():
     RESET = "\033[0m"
@@ -303,29 +322,30 @@ def handle_choice(choice: str):
 # 📍 TARGET: TradingHub.py:handle_choice("2e")
 # 📆 PATCHED: 2025-10-15Z — interactive Fetch & Reconcile settlements (days prompt)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    elif choice == "2e":  # Fetch & Reconcile
+    elif choice == "2e":
         print("[launch] Learning → Fetch & Reconcile Settlements")
-        try:
-            days = input("Enter number of days to fetch & reconcile (e.g. 2): ").strip()
-            if not days or not days.isdigit():
-                print("[input] Please enter a valid number of days.")
-                return
-            print(f"[settlements] Fetching and reconciling last {days} day(s)…")
 
-            cmd = (
-                f"cd {PROJECT_DIR} && "
-                f"python3 engines/live/settlements.py fetch --since-days {days} && "
-                f"python3 engines/live/settlements.py reconcile ; exec bash"
-            )
-            osa = f'''
-            tell application "Terminal"
-                activate
-                do script "{cmd}"
-            end tell
-            '''
-            subprocess.run(["osascript", "-e", osa])
-        except KeyboardInterrupt:
-            print("\n[abort] User cancelled.")
+        days = input("Enter number of days to fetch & reconcile (e.g. 2): ").strip()
+        if not days.isdigit():
+            print("[input] Invalid number of days.")
+            return
+
+        cmd = (
+            f"cd {PROJECT_DIR} && "
+            "export PYTHONPATH=$(pwd):$PYTHONPATH && "
+            f"python3 engines/live/settlements.py fetch --since-days {days} && "
+            "python3 engines/live/settlements.py reconcile ; exec bash"
+        )
+
+        osa = f'''
+        tell application "Terminal"
+            activate
+            do script "{cmd}"
+        end tell
+        '''
+        subprocess.run(["osascript", "-e", osa])
+
+  
 # === PATCH END ===
 # === PATCH START: Learning + Execution Monitor Integration ====================
 # 📍 TARGET: engines/control_center.py
@@ -378,29 +398,18 @@ def handle_choice(choice: str):
 # 📆 PATCHED: 2025-10-30Z — Interactive Smart Mastery Training (days/epochs/start-balance)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     elif choice == "2i":
-        print("[launch] Learning → 2I Smart Mastery Training (v7 Simulation Loop)")
+        print("[launch] Learning → Smart Mastery Training (v7)")
 
-        # Ask for interactive parameters
-        days = input("Enter number of replay days (e.g. 7): ").strip() or "7"
-        epochs = input("Enter number of epochs per day (e.g. 20): ").strip() or "20"
-        start_balance = input("Enter starting balance (e.g. 600): ").strip() or "600"
+        # Hard-coded per your instruction
+        days = 90
+        epochs = 25
 
-        # Build composite shell command (same pattern as 2a)
         cmd = (
             f"cd {PROJECT_DIR} && "
             "export PYTHONPATH=$(pwd):$PYTHONPATH && "
-            "echo '\\n=== Step 1: Consolidate → v_mastery_training View ===' && "
-            "python3 engines/consolidate_posteriors.py && "
-            "echo '\\n=== Step 2: Train Mastery Policy (Random Forest) ===' && "
-            "python3 engines/mastery/train_mastery.py && "
-            "echo '\\n=== Step 3: Run Simulation Training Loop (Active Practice) ===' && "
-            f"python3 engines/mastery/train_mastery_simulator.py --days {days} --epochs {epochs} --start-balance {start_balance} && "
-            "echo '\\n=== Step 4: Consolidate Posteriors (Apply Simulated Updates) ===' && "
-            "python3 engines/consolidate_posteriors.py && "
-            "echo '\\n=== Smart Mastery Training Complete ✅ ===' ; exec bash"
+            f"python3 engines/mastery/train_mastery_v7.py --days {days} --epochs {epochs} ; exec bash"
         )
 
-        # Open new Terminal tab and execute
         osa = f'''
         tell application "Terminal"
             activate
@@ -408,7 +417,7 @@ def handle_choice(choice: str):
         end tell
         '''
         subprocess.run(["osascript", "-e", osa])
-# === PATCH END ===
+
 
 
     # --- Execution Monitor (Learning execution) --------------------------------
@@ -510,7 +519,7 @@ def handle_choice(choice: str):
     elif choice == "7a":    # System Tools → DB Repair
         print("[system] Running full DB repair (AutoScalp DB Doctor)…")
 
-        import subprocess, datetime
+        import datetime
         from pathlib import Path
 
         root = Path(__file__).resolve().parent

@@ -97,6 +97,43 @@ def start_placement_worker():
 # ------------------------------------------------------------------------------
 # Public enqueue API (used by BUS / router adapters)
 # ------------------------------------------------------------------------------
+def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
+    from engines.live import bank_state
+
+    engine = ctx.get("engine")
+    if not engine:
+        return False, "missing_engine"
+
+    size = float(plan.get("size") or 0.0)
+    px   = float(plan.get("px") or 0.0)
+    direction = str(plan.get("direction") or "").upper()
+
+    if size <= 0.0 or px <= 0.0:
+        return False, "invalid_size_or_price"
+
+    # Conservative FULL lifecycle reservation
+    if direction.startswith("LAY"):
+        parent_liab = size * max(px - 1.0, 0.0)
+        child_liab  = size
+    else:
+        parent_liab = size
+        child_liab  = size * max(px - 1.0, 0.0)
+
+    required = round(parent_liab + child_liab, 2)
+
+    # 🔴 THIS IS THE GATE 🔴
+    available = bank_state.get_engine_available(engine)
+
+    if available < required:
+        return False, (
+            f"insufficient_engine_budget "
+            f"engine={engine} "
+            f"required={required:.2f} "
+            f"available={available:.2f}"
+        )
+
+    return True, "ok"
+
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
 # 🔎 ANCHOR: def enqueue_for_placement(name: str, plan: dict, ctx: dict)
@@ -551,7 +588,29 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     from engines.live.live_router import place_parent_and_hedge
     from engines.decision_engine.decide_once import caps
     from engines.config_paths import auto_conn
- 
+
+    # ======================================================================
+    # PLACEMENT GATE — DELEGATED (NO LIFECYCLE LOGIC HERE)
+    # ======================================================================
+
+    ok, reason = placement_affordable(plan, ctx)
+
+    if not ok:
+        _write_decision(
+            run_id=ctx.get("run_id"),
+            mid=mid,
+            sid=sid,
+            outcome="not_placed",
+            why=reason,
+            letter=str(plan.get("letter") or "?")[:1],
+            proposed_odds=plan.get("px"),
+            proposed_stake=plan.get("size"),
+        )
+        return None
+
+    # ======================================================================
+    # END PLACEMENT GATE
+    # ======================================================================
 
     # Normalise objects
     plan = dict(plan or {})

@@ -5,6 +5,13 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict
 
+# --- Scope integration (read-only) ---
+try:
+    from engines.decision_engine.decide_once.scope import _SCOPE_STATE
+except Exception:
+    _SCOPE_STATE = {}
+
+
 # -------------------------------------------------------------------
 # BankState — Live Exposure Ledger (v7)
 # -------------------------------------------------------------------
@@ -104,6 +111,54 @@ def _clamp(x: float) -> float:
     return round(max(0.0, float(x)), 2)
 
 # -------------------------------------------------------------------
+# Scope-aware capital divisor
+# -------------------------------------------------------------------
+
+_MAX_CONCURRENT_MARKETS = 8   # ← your chosen cap
+
+def _effective_market_count() -> int:
+    """
+    Return the number of EFFECTIVELY tradable markets right now.
+
+    Rules:
+      • Use scope buckets (not raw schedule count)
+      • Buckets DO NOT compound
+      • next5 + near60 are the same liquidity horizon
+      • Cap at _MAX_CONCURRENT_MARKETS
+      • Minimum = 1
+    """
+
+    try:
+        # Scope state is maintained elsewhere (read-only here)
+        in_play = _SCOPE_STATE.get("in_play", []) or []
+        near20  = _SCOPE_STATE.get("near20", []) or []
+        near60  = _SCOPE_STATE.get("near60", []) or []
+        next5   = _SCOPE_STATE.get("next5", []) or []
+
+        # Effective concurrency logic:
+        # - In-play markets always count
+        # - near20 markets always count
+        # - near60 + next5 represent future liquidity, count ONCE
+        count = 0
+
+        count += len(in_play)
+        count += len(near20)
+
+        if near60 or next5:
+            count += max(len(near60), len(next5))
+
+        # Clamp
+        if count <= 0:
+            return 1
+
+        return min(count, _MAX_CONCURRENT_MARKETS)
+
+    except Exception:
+        # Fail-safe: never block trading
+        return 1
+
+
+# -------------------------------------------------------------------
 # INITIALISATION (ONCE PER UTC DAY)
 # -------------------------------------------------------------------
 
@@ -162,15 +217,30 @@ def get_available_balance() -> float:
         return _clamp(_CURRENT_BALANCE - _OPEN_EXPOSURE)
 
 def get_engine_pot(engine: str) -> float:
+    """
+    Engine pot AFTER scope-aware concurrency scaling.
+    """
     with _LOCK:
         pct = _ENGINE_ALLOC_PCT.get(engine, 0.0)
-        return _clamp(pct * get_available_balance())
+        base_pot = pct * get_available_balance()
+
+        divisor = _effective_market_count()
+        scaled_pot = base_pot / float(divisor)
+
+        return _clamp(scaled_pot)
+
 
 def get_engine_available(engine: str) -> float:
+    """
+    Available capital for this engine RIGHT NOW,
+    respecting scope-aware market concurrency.
+    """
     with _LOCK:
-        pot = get_engine_pot(engine)
+        pot  = get_engine_pot(engine)
         used = _ENGINE_USED.get(engine, 0.0)
+
         return _clamp(pot - used)
+
 
 def can_place(engine: str, required: float) -> bool:
     with _LOCK:

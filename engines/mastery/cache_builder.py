@@ -2,23 +2,21 @@
 """
 engines/mastery/cache_day_builder.py
 ─────────────────────────────────────────────
-Phase 3A — Chronological Day Cache Builder
-Builds `cache_mastery_day` in mastery_v7.db
-from live OC progression, anchors, and orders.
+Phase 3A — Chronological Day Cache Builder (LOCAL ONLY)
 
-Data sources:
-  - bets.db              → anchor + race/runner metadata
-  - autoscalp_gui.db     → inbound_oc_cache, orders, timing
-  - settlements.db       → runner_form_canonical
-Then mirrors result into iCloud mastery_cache.db for River runtime.
+Builds `cache_mastery_day` inside:
+  data/mastery_v7.db
 
-Run standalone:
-    python3 -m engines.mastery.cache_day_builder --days 90
+There is NO cloud / iCloud mirror.
+This DB is the single source of truth for:
+  - training
+  - River
+  - Forest
 """
 
 import os, sqlite3
 from datetime import datetime, timezone
-from engines.config_paths import mastery_v7_cache_db
+
 
 
 # ───────────────────────────────────────────────
@@ -39,7 +37,7 @@ def build_mastery_cache(days: int = 90):
     print(f"         GUI      → {GUI_LOCAL}")
     print(f"         FORM     → {SETTLE_LOCAL}")
     print(f"         LOCAL    → {MASTERY_LOCAL}")
-    print(f"         MIRROR   → {mastery_v7_cache_db()}")
+
 
     # sanity checks
     for path in (BETS_LOCAL, GUI_LOCAL, SETTLE_LOCAL):
@@ -122,36 +120,7 @@ def build_mastery_cache(days: int = 90):
     con.commit()
     print(f"[cache-day] ✅ built cache_mastery_day — {rows:,} rows.")
 
-    # ───────────────────────────────
-    # Mirror to iCloud (for River)
-    # ───────────────────────────────
-    cloud_path = mastery_v7_cache_db()
-    try:
-        os.makedirs(os.path.dirname(cloud_path), exist_ok=True)
-        cloud_con = sqlite3.connect(cloud_path, timeout=20, isolation_level=None)
-        cloud_cur = cloud_con.cursor()
-        cloud_cur.executescript("""
-            DROP TABLE IF EXISTS cache_mastery_day;
-        """)
-        cloud_cur.execute(f"ATTACH DATABASE '{MASTERY_LOCAL}' AS local;")
-        cloud_cur.executescript("""
-            CREATE TABLE cache_mastery_day AS
-            SELECT * FROM local.cache_mastery_day;
-        """)
-        cloud_cur.execute("DETACH DATABASE local;")
-        cloud_con.commit()
-        cloud_con.close()
-        print(f"[cache-day] ☁️ mirrored cache_mastery_day to iCloud copy ({cloud_path})")
-    except Exception as e:
-        print(f"[cache-day] ⚠️ mirror failed: {e}")
 
-    # detach DBs
-    cur.execute("DETACH DATABASE bets;")
-    cur.execute("DETACH DATABASE gui;")
-    cur.execute("DETACH DATABASE form;")
-    con.close()
-
-    print("[cache-day] 🧠 ready for outcome summary and model training.")
 
 
 # --- keep this at the bottom ---
