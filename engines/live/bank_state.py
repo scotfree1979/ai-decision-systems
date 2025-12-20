@@ -130,24 +130,28 @@ def _effective_market_count() -> int:
         return 3
 
 
+from engines.config_paths import autoscalp_db
+import sqlite3
+
+def _open_auto_strict():
+    return sqlite3.connect(
+        autoscalp_db(),
+        timeout=10,
+        check_same_thread=False
+    )
 
 # -------------------------------------------------------------------
 # INITIALISATION (ONCE PER UTC DAY)
 # -------------------------------------------------------------------
 
-def init_from_budget_allocations(day: str | None = None) -> None:
-    """
-    Initialise engine pots from BudgetManager output.
-    """
+def init_from_budget_allocations(day: str | None = None):
     global _ENGINE_POTS, _ENGINE_AVAILABLE
 
-    from engines.config_paths import open_auto_db
-    from datetime import datetime
-
     if not day:
+        from datetime import datetime
         day = datetime.utcnow().strftime("%Y-%m-%d")
 
-    con = open_auto_db(rw=False)
+    con = _open_auto_strict()
     cur = con.cursor()
 
     rows = cur.execute("""
@@ -169,6 +173,7 @@ def init_from_budget_allocations(day: str | None = None) -> None:
     print(f"[BANKSTATE] pots loaded from budget_allocations ({day})")
 
 
+
 # -------------------------------------------------------------------
 # READ API (USED BY ROUTER)
 # -------------------------------------------------------------------
@@ -188,20 +193,22 @@ def get_open_exposure() -> float:
     with _LOCK:
         return _clamp(_OPEN_EXPOSURE)
 
-
-
-
-
 def get_engine_available(engine: str) -> float:
     """
     Available capital for this engine RIGHT NOW,
     respecting scope-aware market concurrency.
     """
     with _LOCK:
-        pot  = get_engine_pot(engine)
+        base_pot = _ENGINE_POTS.get(engine, 0.0)
+
+        # scope-aware divisor
+        divisor = _effective_market_count()
+        pot = _clamp(base_pot / float(divisor))
+
         used = _ENGINE_USED.get(engine, 0.0)
 
         return _clamp(pot - used)
+
 
 
 def can_place(engine: str, required: float) -> bool:

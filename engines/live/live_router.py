@@ -2899,7 +2899,7 @@ def mark_parent_exit_kind_by_cor(parent_cor: str, kind: str) -> None:
 
 from engines.mastery import event_sink
 
-ODDS_CAP_LIMIT = 25.0  # hard ceiling for any placement
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
@@ -2954,6 +2954,16 @@ def place_parent_and_hedge(
         p = dict(_plan)
         c = dict(_ctx or {})
         engine = (_plan or {}).get("engine") or _name or "LEGACY"
+
+        # --------------------------------------------------
+        # Canonical parent_ref (MUST exist for all paths)
+        # --------------------------------------------------
+        parent_ref = (
+            (_plan or {}).get("customerOrderRef")
+            or (_ctx  or {}).get("customerOrderRef")
+            or _ref((side or "A").upper())
+        )
+
 
         # ids
         market_id     = market_id     or str(p.get("marketId") or c.get("marketId") or "")
@@ -3035,120 +3045,6 @@ def place_parent_and_hedge(
         return None, parent_cor
 
 
-    # --- dynamic stake logic ---------------------------------------------------
-    letter = _letter_from_source(source)
-    phase  = (locals().get("phase") or _infer_phase_from_schedule(str(market_id))).upper()
-    dyn_stake, dyn_why = calc_dynamic_stake(letter, phase=phase)
-    use_dynamic = (
-        USE_ROUTER_DYNAMIC_STAKE
-        or (letter in USE_ROUTER_DYNAMIC_STAKE_LETTERS)
-        or (stake is None or (isinstance(stake, (int,float)) and float(stake) <= 0.0))
-    )
-    try:
-        stake = float(dyn_stake if use_dynamic else float(stake))
-    except Exception:
-        stake = float(dyn_stake)
-
-    if (letter == "A" and USE_ROUTER_DYNAMIC_STAKE_A) or (stake <= 0.0):
-        stake = dyn_stake
-
-        # === BANKSTATE GATING ============================================
-        try:
-            from engines.live import bank_state
-
-            # resolve engine bucket
-            eng = engine
-
-            # static pot (used for dynamic stake sizing)
-            live_bank = bank_state.get_engine_pot(eng)
-
-            # required stake for this order (dyn or plan)
-            stake_required = float(stake)
-
-            # is there enough AVAILABLE pot right now?
-            if not bank_state.can_place(eng, stake_required):
-                msg = (f"[BUDGET] block: engine={eng} "
-                       f"need={stake_required:.2f} "
-                       f"avail={bank_state.get_engine_available(eng):.2f}")
-                _log_event("WARN", "live_router", msg)
-                return None, msg
-
-        except Exception as e:
-            _log_event("ERROR", "live_router",
-                       f"budget_gate_error src={source} err={e}")
-        # ==================================================================
-
-
-    try:
-        _log_event("INFO","live_router",
-                   f"stake_resolve letter={letter} phase={phase} stake={stake:.2f} "
-                   f"{'dyn' if use_dynamic else 'plan'} | "+dyn_why)
-
-    except Exception:
-        pass
-
-    try:
-        # Show letter numbering for debug clarity
-        idx = _active_parents_count_per_letter(market_id, selection_id, letter) + 1
-        _log_event("INFO","live_router",f"[CAP] next slot mid={market_id} sid={selection_id} letter={letter}{idx}")
-    except Exception:
-        pass
-
-
-    # Log stake decision for Mastery
-    _mastery_log("stake_decision", {
-        "letter": letter, "phase": phase, "market": str(market_id), "runner": str(selection_id),
-        "entry_odds": float(entry_odds), "stake": float(stake), "why": dyn_why, "source": str(source),
-    })
-
-
-    # --- CAP gate --------------------------------------------------------------
-    try:
-        from engines.caps import cap_ok_v8
-        ok_cap, why, metrics = cap_ok_v8(market_id, selection_id, letter)
-        if not ok_cap:
-            msg = f"[LIVE CAP] mid={market_id} sid={selection_id} blocked letter={letter} reason={why} metrics={metrics}"
-            _log_event("WARN", "live_router", msg)
-            return None, msg
-    except Exception as e:
-        _log_event("WARN", "live_router", f"cap check error fallback: {e}")
-
-
-    app_key, token = _keys()
-    try:
-        parent_ref = (
-            (_plan or {}).get("customerOrderRef")
-            or (_ctx or {}).get("customerOrderRef")
-            or _ref(side.upper())
-        )
-    except Exception:
-        parent_ref = _ref(side.upper())
-
-    # --- ODDS CAP GUARD -------------------------------------------------------
-    if entry_odds is None or float(entry_odds) > ODDS_CAP_LIMIT:
-        try:
-            # emit structured learning event so Mastery can record it
-            event_sink.on_decision({
-                "type": "ignored_zone",
-                "reason": f"odds>{ODDS_CAP_LIMIT}",
-                "marketId": str(market_id),
-                "selectionId": str(selection_id),
-                "odds": float(entry_odds or 0.0),
-                "stake": float(stake or 0.0),
-                "source": str(source),
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
-            _log_event(
-                "WARN", "live_router",
-                f"[ODDS_CAP] blocked placement mid={market_id} sid={selection_id} "
-                f"odds={entry_odds} src={source}"
-            )
-        except Exception as e:
-            _log_event("ERROR", "live_router", f"odds_cap emit failed: {e}")
-        # skip placing this trade entirely
-        return None, f"ODDS>{ODDS_CAP_LIMIT}"
-# === PATCH END ===
-
     # 1) queue parent -----------------------------------------------------------
     try:
         _orders_insert_parent_queued(run_id, market_id, selection_id, side, float(entry_odds), float(stake),
@@ -3157,7 +3053,10 @@ def place_parent_and_hedge(
     except Exception as e:
         _log_event("ERROR", "live_router", f"PARENT queue error ref={parent_ref}: {e}")
 
-    # 2) place parent -----------------------------------------------------------
+    # 2) resolve Betfair creds
+    app_key, token = _keys()
+
+    # 3) place parent -----------------------------------------------------------
     bf_parent_id, detail = None, {}
     try:
         bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
@@ -3189,7 +3088,12 @@ def place_parent_and_hedge(
         try: on_parent_result(bf_parent_id, parent_ref)
         except Exception: pass
     if not bf_parent_id:
-        return None, parent_ref
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"[BETFAIR] placeOrders failed mid={market_id} sid={selection_id} "
+            f"odds={entry_odds} stake={stake} detail={detail}"
+        )
 
     # 3) background follow-up ---------------------------------------------------
     def _bg():

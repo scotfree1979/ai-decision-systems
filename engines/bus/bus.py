@@ -705,6 +705,20 @@ class DecisionBus:
             for eng, plan, ctx in plans:
 
                 # --------------------------------------------------
+                # HARD BLOCK: Odds cap (BUS authority)
+                # --------------------------------------------------
+                px = float(plan.get("px") or 0.0)
+
+                if px > 15.0:
+                    plan["_bus_block"] = "odds_cap_exceeded"
+                    tick_ctx["plans_route_failed"].append(
+                        (plan, "odds_cap_exceeded")
+                    )
+                    engine_report[plan["engine"]]["note"] = "odds_cap_exceeded"
+                    continue  # 🔴 DO NOT ROUTE
+
+
+                # --------------------------------------------------
                 # Execution enrichment (ONLY missing execution fields)
                 # --------------------------------------------------
                 plan.setdefault("marketId", ctx.get("marketId"))
@@ -777,6 +791,15 @@ class DecisionBus:
             else:
                 print("  none")
 
+            blocked = {}
+            for _plan, reason in tick_ctx["plans_route_failed"]:
+                blocked[reason] = blocked.get(reason, 0) + 1
+
+            if blocked:
+                print("\nBLOCKED (BUS)")
+                for reason, count in blocked.items():
+                    print(f"  {reason:<22} : {count}")
+
             print("────────────────────────────────────────────────────────\n")
 
             # ==================================================
@@ -826,7 +849,7 @@ class DecisionBus:
             plans_not_delegated = max(plans_generated - plans_delegated, 0)
 
             tick_ctx["plans_routed"] = plans_delegated
-            tick_ctx["plans_route_failed"] = tick_ctx["plans_annotated"]
+            
 
             print("────────────────────────────────────────────────────────")
             print(f"[BUS][PHASE 3][ROUTING] tick=#{self.tick_id}")

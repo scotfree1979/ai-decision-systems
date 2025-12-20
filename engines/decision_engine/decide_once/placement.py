@@ -110,63 +110,27 @@ def _canon_ids(d):
 def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
     from engines.live import bank_state
 
-    # --------------------------------------------------
-    # 1) Engine identity (authoritative)
-    # --------------------------------------------------
     engine = ctx.get("engine")
     if not engine:
         return False, "missing_engine"
 
-    # --------------------------------------------------
-    # 2) Basic sanity
-    # --------------------------------------------------
-    try:
-        size = float(plan.get("size") or 0.0)
-        px   = float(plan.get("px") or 0.0)
-    except Exception:
-        return False, "invalid_size_or_price"
+    stake = float(plan.get("size") or 0.0)
+    if stake <= 0.0:
+        return False, "invalid_stake"
 
-    if size <= 0.0 or px <= 0.0:
-        return False, "invalid_size_or_price"
+    available = bank_state.get_engine_available(engine)
 
-    # --------------------------------------------------
-    # 3) Direction-aware lifecycle liability
-    #    (THIS WAS THE BUG)
-    # --------------------------------------------------
-    direction = (plan.get("direction") or "").upper()
-
-    if direction == "LAY->BACK":
-        # LAY parent, BACK child
-        parent_liab = size * max(px - 1.0, 0.0)
-        child_liab  = size
-
-    elif direction == "BACK->LAY":
-        # BACK parent, LAY child
-        parent_liab = size
-        child_liab  = size * max(px - 1.0, 0.0)
-
-    else:
-        return False, f"unknown_direction:{direction}"
-
-    required = round(parent_liab + child_liab, 2)
-
-    # --------------------------------------------------
-    # 4) 🔴 AUTHORITATIVE BUDGET GATE 🔴
-    # --------------------------------------------------
-    available = float(bank_state.get_engine_available(engine) or 0.0)
-
-    if available < required:
+    if available < stake:
         return False, (
             f"insufficient_engine_budget "
             f"engine={engine} "
-            f"required={required:.2f} "
+            f"required={stake:.2f} "
             f"available={available:.2f}"
         )
 
-    # --------------------------------------------------
-    # 5) Pass
-    # --------------------------------------------------
     return True, "ok"
+
+
 
 
 # ======================================================================================================
@@ -646,29 +610,6 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         )
         return None
 
-    # ======================================================================
-    # PLACEMENT GATE — DELEGATED (NO LIFECYCLE LOGIC HERE)
-    # ======================================================================
-
-    ok, reason = placement_affordable(plan, ctx)
-
-    if not ok:
-        _write_decision(
-            run_id=ctx.get("run_id"),
-            mid=mid,
-            sid=sid,
-            outcome="not_placed",
-            why=reason,
-            letter=str(plan.get("letter") or "?")[:1],
-            proposed_odds=plan.get("px"),
-            proposed_stake=plan.get("size"),
-        )
-        return None
-
-    # ======================================================================
-    # END PLACEMENT GATE
-    # ======================================================================
-
     # Normalise objects
     plan = dict(plan or {})
     ctx  = dict(ctx or {})
@@ -845,7 +786,28 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
 
     # Do NOT block here — decision logging handles failures
 
+    # ======================================================================
+    # PLACEMENT GATE — DELEGATED (NO LIFECYCLE LOGIC HERE)
+    # ======================================================================
 
+    ok, reason = placement_affordable(plan, ctx)
+
+    if not ok:
+        _write_decision(
+            run_id=ctx.get("run_id"),
+            mid=mid,
+            sid=sid,
+            outcome="not_placed",
+            why=reason,
+            letter=str(plan.get("letter") or "?")[:1],
+            proposed_odds=plan.get("px"),
+            proposed_stake=plan.get("size"),
+        )
+        return None
+
+    # ======================================================================
+    # END PLACEMENT GATE
+    # ======================================================================
     # --- CAP gate
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
