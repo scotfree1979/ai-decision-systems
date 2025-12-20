@@ -11,6 +11,48 @@ try:
 except Exception:
     _SCOPE_STATE = {}
 
+# ---- Engine pots (persisted, BudgetManager-owned) ----------------
+_ENGINE_POTS: Dict[str, float] = {}
+_ENGINE_AVAILABLE: Dict[str, float] = {}
+
+# -------------------------------------------------------------------
+# COMPATIBILITY SHIMS (required by BUS / reports)
+# -------------------------------------------------------------------
+
+def get_engine_pots() -> dict:
+    """
+    Return declared engine pots for TODAY.
+    Source of truth: budget_allocations table.
+    """
+    with _LOCK:
+        return dict(_ENGINE_POTS)
+
+
+def get_engine_available_map() -> dict:
+    """
+    Convenience helper for dashboards.
+    """
+    with _LOCK:
+        return dict(_ENGINE_AVAILABLE)
+
+def get_engine_used_map() -> dict:
+    with _LOCK:
+        return dict(_ENGINE_USED)
+
+def init_bank_state():
+    """
+    Compatibility init called by orchestrator / GUI.
+
+    BudgetManager is the source of truth.
+    BankState initialises itself from persisted budget_allocations.
+    """
+    try:
+        init_from_budget_allocations()
+        print("[BankState] initialised from budget_allocations")
+    except Exception as e:
+        print(f"[BankState][WARN] init failed: {e}")
+
+
 
 # -------------------------------------------------------------------
 # BankState — Live Exposure Ledger (v7)
@@ -28,19 +70,6 @@ except Exception:
 
 _LOCK = threading.RLock()
 
-# ---- Global state --------------------------------------------------
-_STARTING_BALANCE: float = 0.0
-_CURRENT_BALANCE: float = 0.0
-_OPEN_EXPOSURE: float = 0.0
-_LAST_INIT_DAY: str | None = None
-
-# ---- Engine allocations -------------------------------------------
-_ENGINE_ALLOC_PCT: Dict[str, float] = {
-    "LEGACY": 0.37,
-    "MSC_EXPLORATORY": 0.25,
-    "MSC_RISK": 0.20,
-    "MSC_INPLAY": 0.18,
-}
 
 _ENGINE_USED: Dict[str, float] = {
     "LEGACY": 0.0,
@@ -49,56 +78,7 @@ _ENGINE_USED: Dict[str, float] = {
     "MSC_INPLAY": 0.0,
 }
 
-# === PATCH START =========================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 📆 PATCHED: 2026-02-12 — Initialize BankState from budget_allocations
-# ================================================================
-
-_ENGINE_POTS = {}
-_ENGINE_AVAILABLE = {}
-
-def init_from_budget_allocations(day: str | None = None) -> None:
-    """
-    Initialize engine pots and available balances from persisted allocations.
-
-    Invariant:
-        pot == available + open_liability
-
-    This function MUST be called once at startup.
-    """
-
-    global _ENGINE_POTS, _ENGINE_AVAILABLE
-
-    from engines.config_paths import open_auto_db
-    from datetime import datetime
-
-    if not day:
-        day = datetime.utcnow().strftime("%Y-%m-%d")
-
-    con = open_auto_db(rw=False)
-    con.row_factory = None
-    cur = con.cursor()
-
-    rows = cur.execute("""
-        SELECT engine, pot
-          FROM budget_allocations
-         WHERE day = ?
-    """, (day,)).fetchall()
-
-    con.close()
-
-    _ENGINE_POTS.clear()
-    _ENGINE_AVAILABLE.clear()
-
-    for engine, pot in rows:
-        pot = float(pot)
-        _ENGINE_POTS[engine] = pot
-        _ENGINE_AVAILABLE[engine] = pot
-
-    print(f"[BANKSTATE] initialized from budget_allocations ({day})")
-
-# === PATCH END =========================================================
-
+_OPEN_EXPOSURE: float = 0.0
 
 # -------------------------------------------------------------------
 # Helpers
@@ -118,116 +98,98 @@ _MAX_CONCURRENT_MARKETS = 8   # ← your chosen cap
 
 def _effective_market_count() -> int:
     """
-    Return the number of EFFECTIVELY tradable markets right now.
+    Compute effective market concurrency using weighted liquidity pressure.
 
-    Rules:
-      • Use scope buckets (not raw schedule count)
-      • Buckets DO NOT compound
-      • next5 + near60 are the same liquidity horizon
-      • Cap at _MAX_CONCURRENT_MARKETS
-      • Minimum = 1
+    Each market contributes fractional pressure based on how tradable it is.
+    This works consistently for early, peak, and late trading periods.
     """
 
     try:
-        # Scope state is maintained elsewhere (read-only here)
-        in_play = _SCOPE_STATE.get("in_play", []) or []
-        near20  = _SCOPE_STATE.get("near20", []) or []
-        near60  = _SCOPE_STATE.get("near60", []) or []
-        next5   = _SCOPE_STATE.get("next5", []) or []
+        buckets = {
+            "in_play":  (_SCOPE_STATE.get("in_play", []) or [], 1.0),
+            "near20":   (_SCOPE_STATE.get("near20", []) or [], 0.7),
+            "near60":   (_SCOPE_STATE.get("near60", []) or [], 0.4),
+            "next5":    (_SCOPE_STATE.get("next5", []) or [], 0.2),
+        }
 
-        # Effective concurrency logic:
-        # - In-play markets always count
-        # - near20 markets always count
-        # - near60 + next5 represent future liquidity, count ONCE
-        count = 0
+        weighted_sum = 0.0
 
-        count += len(in_play)
-        count += len(near20)
+        for markets, weight in buckets.values():
+            weighted_sum += len(markets) * weight
 
-        if near60 or next5:
-            count += max(len(near60), len(next5))
+        # Floor + cap
+        effective = int(round(weighted_sum))
 
-        # Clamp
-        if count <= 0:
-            return 1
+        if effective < 3:
+            return 3
 
-        return min(count, _MAX_CONCURRENT_MARKETS)
+        return min(effective, _MAX_CONCURRENT_MARKETS)
 
     except Exception:
         # Fail-safe: never block trading
-        return 1
+        return 3
+
 
 
 # -------------------------------------------------------------------
 # INITIALISATION (ONCE PER UTC DAY)
 # -------------------------------------------------------------------
 
-def init_bank_state():
+def init_from_budget_allocations(day: str | None = None) -> None:
     """
-    Initialise BankState once per UTC day.
-    Called by orchestrator at startup.
+    Initialise engine pots from BudgetManager output.
     """
-    global _STARTING_BALANCE, _CURRENT_BALANCE, _OPEN_EXPOSURE, _LAST_INIT_DAY
+    global _ENGINE_POTS, _ENGINE_AVAILABLE
 
-    with _LOCK:
-        today = _utc_day()
-        if _LAST_INIT_DAY == today:
-            return
+    from engines.config_paths import open_auto_db
+    from datetime import datetime
 
-        # Fetch live available balance ONCE
-        try:
-            from engines.daily_config import fetch_available_budget
-            fetched = float(fetch_available_budget() or 0.0)
-        except Exception:
-            fetched = 0.0
+    if not day:
+        day = datetime.utcnow().strftime("%Y-%m-%d")
 
-        # Never allow downward correction
-        if _STARTING_BALANCE > 0.0:
-            _STARTING_BALANCE = max(_STARTING_BALANCE, fetched)
-        else:
-            _STARTING_BALANCE = fetched
+    con = open_auto_db(rw=False)
+    cur = con.cursor()
 
-        _CURRENT_BALANCE = _STARTING_BALANCE
-        _OPEN_EXPOSURE = 0.0
+    rows = cur.execute("""
+        SELECT engine, pot
+          FROM budget_allocations
+         WHERE day = ?
+    """, (day,)).fetchall()
 
-        for k in _ENGINE_USED:
-            _ENGINE_USED[k] = 0.0
+    con.close()
 
-        _LAST_INIT_DAY = today
+    _ENGINE_POTS.clear()
+    _ENGINE_AVAILABLE.clear()
 
-        print(
-            f"[BankState] init day={today} "
-            f"starting_balance={_STARTING_BALANCE:.2f}"
-        )
+    for engine, pot in rows:
+        pot = float(pot)
+        _ENGINE_POTS[engine] = pot
+        _ENGINE_AVAILABLE[engine] = pot
+
+    print(f"[BANKSTATE] pots loaded from budget_allocations ({day})")
+
 
 # -------------------------------------------------------------------
 # READ API (USED BY ROUTER)
 # -------------------------------------------------------------------
 
-def get_balance() -> float:
+def get_engine_pot(engine: str) -> float:
+    """
+    Engine pot AFTER scope-aware concurrency scaling.
+    Source: BudgetManager allocations.
+    """
     with _LOCK:
-        return _clamp(_CURRENT_BALANCE)
+        base_pot = _ENGINE_POTS.get(engine, 0.0)
+        divisor = _effective_market_count()
+        return _clamp(base_pot / float(divisor))
+
 
 def get_open_exposure() -> float:
     with _LOCK:
         return _clamp(_OPEN_EXPOSURE)
 
-def get_available_balance() -> float:
-    with _LOCK:
-        return _clamp(_CURRENT_BALANCE - _OPEN_EXPOSURE)
 
-def get_engine_pot(engine: str) -> float:
-    """
-    Engine pot AFTER scope-aware concurrency scaling.
-    """
-    with _LOCK:
-        pct = _ENGINE_ALLOC_PCT.get(engine, 0.0)
-        base_pot = pct * get_available_balance()
 
-        divisor = _effective_market_count()
-        scaled_pot = base_pot / float(divisor)
-
-        return _clamp(scaled_pot)
 
 
 def get_engine_available(engine: str) -> float:
@@ -310,17 +272,64 @@ def on_parent_closed(*, engine: str,
             f"open={_OPEN_EXPOSURE:.2f}"
         )
 
-def apply_settlement(pnl: float) -> None:
+def reconcile_realized_pnl_from_orders() -> None:
     """
-    Apply realised P&L after market settlement.
+    Return realized P&L (orders.realized_pnl) back to engine pots.
+
+    • Reads authoritative DB state
+    • Uses realized_pnl ONLY (no stake)
+    • Idempotent via bank_reconciled flag
     """
-    global _CURRENT_BALANCE
+
+    from engines.config_paths import open_auto_db
 
     with _LOCK:
-        pnl = float(pnl or 0.0)
-        _CURRENT_BALANCE += pnl
+        con = open_auto_db(rw=True)
+        con.row_factory = None
+        cur = con.cursor()
 
-        print(
-            f"[BankState] SETTLEMENT pnl={pnl:+.2f} "
-            f"balance={_CURRENT_BALANCE:.2f}"
-        )
+        rows = cur.execute("""
+            SELECT engine,
+                   SUM(COALESCE(realized_pnl, 0)) AS pnl
+              FROM orders
+             WHERE role = 'PARENT'
+               AND exit_status IN ('SETTLED','MATCHED','EXPIRED')
+               AND bank_reconciled = 0
+               AND realized_pnl IS NOT NULL
+               AND date(closed_at) = date('now','utc')
+             GROUP BY engine
+        """).fetchall()
+
+        if not rows:
+            con.close()
+            return
+
+        for engine, pnl in rows:
+            if engine not in _ENGINE_POTS:
+                continue
+
+            pnl = _clamp(pnl or 0.0)
+
+            _ENGINE_POTS[engine] += pnl
+            _ENGINE_AVAILABLE[engine] += pnl
+
+            print(
+                f"[BankState] +REALIZED_PNL engine={engine} "
+                f"pnl={pnl:+.2f} "
+                f"pot={_ENGINE_POTS[engine]:.2f}"
+            )
+
+        # mark as reconciled (CRITICAL)
+        cur.execute("""
+            UPDATE orders
+               SET bank_reconciled = 1
+             WHERE role = 'PARENT'
+               AND bank_reconciled = 0
+               AND realized_pnl IS NOT NULL
+               AND date(closed_at) = date('now','utc')
+        """)
+
+        con.commit()
+        con.close()
+
+

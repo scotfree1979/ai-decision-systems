@@ -955,26 +955,36 @@ class DecisionBus:
     # ======================================================================
     def _route(self, plan, ctx):
         """
-        Phase 3 routing + reporting anchor.
-        Execution is delegated to Placement (authoritative owner).
+        Phase 3 routing — authoritative engine stamping.
+
+        BUS is the sole authority on execution identity.
+        Placement and BankState must see identical engine names.
         """
 
         try:
             from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-            # name is used for legacy letter / audit only
-            name = plan.get("engine") or "UNKNOWN"
+            # ------------------------------------------------------------------
+            # AUTHORITATIVE ENGINE STAMP (NO EXCEPTIONS)
+            # ------------------------------------------------------------------
+            engine = plan.get("engine")
+            if not engine:
+                raise RuntimeError("BUS routing error: plan missing engine")
 
-            enqueue_for_placement(name, plan, ctx)
+            # HARD OVERWRITE — DO NOT MERGE, DO NOT INFER
+            ctx["engine"] = engine
+
+            # Name passed to placement is audit-only
+            enqueue_for_placement(engine, plan, ctx)
 
         except Exception as e:
-            # Routing errors must never stop the tick
             try:
                 self._tick_ctx["plans_route_failed"].append(
                     (plan, f"placement_enqueue_error:{e}")
                 )
             except Exception:
                 pass
+ 
 
 # ======================================================================
 # END OF def tick(self)

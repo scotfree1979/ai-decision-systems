@@ -93,6 +93,16 @@ def start_placement_worker():
 
     print("[PLACEMENT] execution worker started")
 
+# ------------------------------------------------------------
+# 0) Canonical MID/SID resolution (EARLY — required by gates)
+# ------------------------------------------------------------
+def _canon_ids(d):
+    if not isinstance(d, dict):
+        return None, None
+    mid = d.get("marketId") or d.get("market_id") or d.get("mid")
+    sid = d.get("selectionId") or d.get("selection_id") or d.get("sid")
+    return (str(mid) if mid is not None else None,
+            str(sid) if sid is not None else None)
 
 # ------------------------------------------------------------------------------
 # Public enqueue API (used by BUS / router adapters)
@@ -100,29 +110,50 @@ def start_placement_worker():
 def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
     from engines.live import bank_state
 
+    # --------------------------------------------------
+    # 1) Engine identity (authoritative)
+    # --------------------------------------------------
     engine = ctx.get("engine")
     if not engine:
         return False, "missing_engine"
 
-    size = float(plan.get("size") or 0.0)
-    px   = float(plan.get("px") or 0.0)
-    direction = str(plan.get("direction") or "").upper()
+    # --------------------------------------------------
+    # 2) Basic sanity
+    # --------------------------------------------------
+    try:
+        size = float(plan.get("size") or 0.0)
+        px   = float(plan.get("px") or 0.0)
+    except Exception:
+        return False, "invalid_size_or_price"
 
     if size <= 0.0 or px <= 0.0:
         return False, "invalid_size_or_price"
 
-    # Conservative FULL lifecycle reservation
-    if direction.startswith("LAY"):
+    # --------------------------------------------------
+    # 3) Direction-aware lifecycle liability
+    #    (THIS WAS THE BUG)
+    # --------------------------------------------------
+    direction = (plan.get("direction") or "").upper()
+
+    if direction == "LAY->BACK":
+        # LAY parent, BACK child
         parent_liab = size * max(px - 1.0, 0.0)
         child_liab  = size
-    else:
+
+    elif direction == "BACK->LAY":
+        # BACK parent, LAY child
         parent_liab = size
         child_liab  = size * max(px - 1.0, 0.0)
 
+    else:
+        return False, f"unknown_direction:{direction}"
+
     required = round(parent_liab + child_liab, 2)
 
-    # 🔴 THIS IS THE GATE 🔴
-    available = bank_state.get_engine_available(engine)
+    # --------------------------------------------------
+    # 4) 🔴 AUTHORITATIVE BUDGET GATE 🔴
+    # --------------------------------------------------
+    available = float(bank_state.get_engine_available(engine) or 0.0)
 
     if available < required:
         return False, (
@@ -132,7 +163,11 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
             f"available={available:.2f}"
         )
 
+    # --------------------------------------------------
+    # 5) Pass
+    # --------------------------------------------------
     return True, "ok"
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
@@ -589,6 +624,28 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     from engines.decision_engine.decide_once import caps
     from engines.config_paths import auto_conn
 
+    # ------------------------------------------------------------
+    # 0) Canonical MID / SID resolution (MUST be first)
+    # ------------------------------------------------------------
+    mid, sid = _canon_ids(plan)
+    if not mid or not sid:
+        cm, cs = _canon_ids(ctx)
+        mid = mid or cm
+        sid = sid or cs
+
+    if not mid or not sid:
+        _write_decision(
+            run_id=ctx.get("run_id"),
+            mid=mid,
+            sid=sid,
+            outcome="not_placed",
+            why="blocked: missing marketId/selectionId",
+            letter=str(plan.get("letter") or "?")[:1],
+            proposed_odds=plan.get("px"),
+            proposed_stake=plan.get("size"),
+        )
+        return None
+
     # ======================================================================
     # PLACEMENT GATE — DELEGATED (NO LIFECYCLE LOGIC HERE)
     # ======================================================================
@@ -618,29 +675,6 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
 
     engine = (ctx.get("engine") or "").upper()
     is_msc = engine.startswith("MSC_")
-
-    # ------------------------------------------------------------
-    # 1) Canonical MID/SID resolution
-    # ------------------------------------------------------------
-    def _canon_ids(d):
-        if not isinstance(d, dict): return None, None
-        mid = d.get("marketId") or d.get("market_id") or d.get("mid")
-        sid = d.get("selectionId") or d.get("selection_id") or d.get("sid")
-        return (str(mid) if mid is not None else None,
-                str(sid) if sid is not None else None)
-
-    mid, sid = _canon_ids(plan)
-    if not mid or not sid:
-        cm, cs = _canon_ids(ctx)
-        mid = mid or cm; sid = sid or cs
-
-    if not mid or not sid:
-        _write_decision(
-            run_id=ctx.get("run_id"), mid=mid, sid=sid,
-            outcome="not_placed", why="blocked: missing marketId/selectionId",
-            letter=str(plan.get("letter") or "?")[:1]
-        )
-        return None
 
     # MSC always supplies correct px / size / direction
     # Legacy may not — determine early

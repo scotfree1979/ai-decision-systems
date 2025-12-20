@@ -417,25 +417,14 @@ def allowed_stake_for_engine(engine: str, live_bank: float) -> float:
 
 def exposure_snapshot() -> Dict[str, float]:
     """
-    Return total active stake per engine.
+    V7 exposure snapshot — runtime truth.
     """
-    con = _auto_conn(rw=False)
-    con.row_factory = sqlite3.Row
-    rows = con.execute("""
-        SELECT engine, SUM(entry_stake) AS st
-          FROM orders
-         WHERE entry_status='MATCHED'
-           AND (exit_status IS NULL OR exit_status<>'MATCHED')
-         GROUP BY engine
-    """).fetchall()
-    con.close()
+    try:
+        from engines.live import bank_state
+        return bank_state.get_engine_used_map()
+    except Exception:
+        return {}
 
-    out = {e: 0.0 for e in ENGINES}
-    for r in rows:
-        e = (r["engine"] or "").upper()
-        if e in out:
-            out[e] = float(r["st"] or 0.0)
-    return out
 
 
 def signal_if_over_budget(live_bank: float):

@@ -1579,23 +1579,6 @@ def reconcile_orders() -> Tuple[int,int]:
                 if o.total_changes:
                     updated += 1
 
-                    # --- NEW: update BankState with realized profit/loss ---
-                    try:
-                        from engines.live import bank_state
-                        delta = float(profit or 0.0)
-                        if abs(delta) > 1e-9:
-                            bank_state.apply_settlement(delta)
-                            print(f"[Settlements] BankState applied delta {delta} for betId={betId}")
-                    except Exception as e:
-                        print(f"[Settlements] BankState update failed for betId={betId}: {e}")
-
-                    # --- NEW: update internal bank + mastery feedback ---
-                    try:
-                        from engines.live import bank_state
-                        bank_state.apply_settlement(float(profit or 0.0))
-                    except Exception as e:
-                        print(f"[SETTLE] bank_state warn: {e}")
-
                     try:
                         from engines.mastery import mastery_policy as mp
                         mp.record_outcome(
@@ -2196,6 +2179,11 @@ def _run_single_settlement_cycle():
             print(f"[settlements] reconciled={updated}")
         except Exception as e:
             print(f"[settlements] reconcile failed: {e}")
+
+    # --- Update Bank State ---
+    from engines.live import bank_state
+    bank_state.reconcile_realized_pnl_from_orders()
+
 
     # --- expire closed markets ---
     try:
