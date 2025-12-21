@@ -114,23 +114,37 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
     if not engine:
         return False, "missing_engine"
 
-    stake = float(plan.get("size") or 0.0)
-    if stake <= 0.0:
-        return False, "invalid_stake"
+    try:
+        stake = float(plan.get("size") or 0.0)
+        odds  = float(plan.get("px") or 0.0)
+        side  = str(plan.get("side") or "").upper()
 
-    available = bank_state.get_engine_available(engine)
+        if stake <= 0 or odds <= 0:
+            return False, "invalid_stake_or_odds"
 
-    if available < stake:
-        return False, (
-            f"insufficient_engine_budget "
-            f"engine={engine} "
-            f"required={stake:.2f} "
-            f"available={available:.2f}"
-        )
+        # FULL lifecycle exposure
+        if side == "LAY":
+            parent_liab = stake * max(odds - 1.0, 0.0)
+            child_liab  = stake
+        else:
+            parent_liab = stake
+            child_liab  = stake * max(odds - 1.0, 0.0)
 
-    return True, "ok"
+        required = parent_liab + child_liab
+        available = bank_state.get_engine_available(engine)
 
+        if available < required:
+            return False, (
+                f"insufficient_engine_budget "
+                f"engine={engine} "
+                f"required={required:.2f} "
+                f"available={available:.2f}"
+            )
 
+        return True, "ok"
+
+    except Exception as e:
+        return False, f"gate_error:{e}"
 
 
 # ======================================================================================================

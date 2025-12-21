@@ -1659,16 +1659,6 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         engine = parent["engine"] or _engine_from_source(parent["source"])
 
         # --------------------------------------------------
-        # 🔐 BankState — consume exposure ONCE
-        # --------------------------------------------------
-        bank_state.on_parent_matched(
-            engine=engine,
-            side=parent["side"],
-            entry_odds=float(parent["entry_odds"]),
-            entry_stake=float(parent["entry_stake"]),
-        )
-
-        # --------------------------------------------------
         # UPDATE parent state
         # --------------------------------------------------
         _q_retry(cur, """
@@ -3046,12 +3036,51 @@ def place_parent_and_hedge(
 
 
     # 1) queue parent -----------------------------------------------------------
+    # 1) verify parent (PLACEMENT-OWNED) -----------------------------------------
     try:
-        _orders_insert_parent_queued(run_id, market_id, selection_id, side, float(entry_odds), float(stake),
-                                     parent_ref, source=source)
-        _orders_probe(parent_ref, note="queued")
+        # Confirm parent row already exists (Placement pre-claim)
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        row = _q_retry(
+            con,
+            """
+            SELECT id, entry_status, engine, run_id, marketId, selectionId
+              FROM orders
+             WHERE customerOrderRef=?
+               AND role='PARENT'
+             LIMIT 1
+            """,
+            (parent_ref,)
+        ).fetchone()
+        con.close()
+
+        if not row:
+            # This should NEVER happen — hard invariant breach
+            _log_event(
+                "ERROR",
+                "live_router",
+                f"[PARENT VERIFY FAIL] missing parent_ref={parent_ref} "
+                f"mid={market_id} sid={selection_id}"
+            )
+            return None, parent_ref
+
+        # Diagnostic confirmation (non-mutating)
+        _log_event(
+            "INFO",
+            "live_router",
+            f"[PARENT VERIFIED] ref={parent_ref} "
+            f"id={row['id']} status={row['entry_status']} "
+            f"engine={row['engine']} run_id={row['run_id']}"
+        )
+
     except Exception as e:
-        _log_event("ERROR", "live_router", f"PARENT queue error ref={parent_ref}: {e}")
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"[PARENT VERIFY ERROR] ref={parent_ref} err={e}"
+        )
+        return None, parent_ref
+
 
     # 2) resolve Betfair creds
     app_key, token = _keys()
@@ -3064,6 +3093,31 @@ def place_parent_and_hedge(
                                       persistence=parent_persistence)
         if bf_parent_id:
             _orders_update_parent_placed(parent_ref, bf_parent_id)
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: BankState exposure reservation — PARENT PLACED
+# 🧩 ACTION: FIX INDENTATION (syntax error)
+# 📆 PATCHED: 2025-12-21 — fix invalid except alignment blocking module import
+# ======================================================================================================
+
+        # ======================================================================
+        # 📍 BankState exposure reservation — PARENT PLACED
+        # ======================================================================
+        try:
+            bank_state.on_parent_placed(
+                engine=engine,
+                side=side,
+                entry_odds=float(entry_odds),
+                entry_stake=float(stake),
+            )
+        except Exception as e:
+            _log_event(
+                "ERROR",
+                "bankstate",
+                f"on_parent_placed failed ref={parent_ref}: {e}"
+            )
+
+
             _orders_probe(parent_ref, note="placed", bet_id=bf_parent_id)
             try:
                 _sp_log_enter_live(run_id=run_id, strategy=source, mid=market_id, sid=selection_id,
@@ -3170,49 +3224,38 @@ def place_parent_and_hedge(
                     )
                     return
 
-                # 3️⃣ Place child via SAME Betfair path as parent
-                last_error = None
-                for attempt in range(1, 6):
-                    try:
-                        app_key, token = _keys()
-                        child_ref = _ref("CHILD")
+                # 3️⃣ Hand off CHILD execution to Placement (authoritative lifecycle owner)
+                try:
+                    from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-                        bf_child_id, detail = _place(
-                            app_key,
-                            token,
-                            market_id,
-                            selection_id,
-                            hedge_side,
-                            hedge_odds,
-                            hedge_stake,
-                            child_ref,
-                            persistence=child_persistence,
-                        )
+                    enqueue_for_placement(
+                        name="CHILD",
+                        plan={
+                            "role": "CHILD",
+                            "child_id": child_id,
+                            "marketId": market_id,
+                            "selectionId": selection_id,
+                            "side": hedge_side,
+                            "px": hedge_odds,
+                            "size": hedge_stake,
+                            "parent_cor": parent_ref,
+                            "exit_kind": "HEDGE",
+                        },
+                        ctx={
+                            "run_id": run_id,
+                            "engine": engine,
+                            "mode": "LIVE",
+                        }
+                    )
 
-                        if bf_child_id:
-                            _orders_update_child_placed(child_id, bf_child_id)
-                            _ledger_link_child_by_parent_cor(parent_ref, child_id)
+                    _log_event_safe(
+                        "INFO",
+                        "live_router",
+                        f"[CHILD→PLACEMENT] enqueued parent_ref={parent_ref} child_id={child_id}"
+                    )
 
-                            _log_event_safe(
-                                "INFO",
-                                "live_router",
-                                f"[BG] child placed parent_ref={parent_ref} "
-                                f"child_id={child_id} betId={bf_child_id}"
-                            )
-                            break
-
-                        last_error = (
-                            (detail.get("instructionReports") or [{}])[0]
-                            .get("errorCode", "UNKNOWN")
-                        )
-
-                    except Exception as e:
-                        last_error = str(e)
-
-                    time.sleep(2)
-
-                else:
-                    # 4️⃣ Exhausted retries → explicit failure
+                except Exception as e:
+                    # 4️⃣ Explicit failure path (formerly invalid else:)
                     con = _orders_conn()
                     _q_retry(
                         con,
@@ -3222,7 +3265,7 @@ def place_parent_and_hedge(
                                error=?
                          WHERE id=?
                         """,
-                        (str(last_error or "RETRY_EXHAUSTED")[:240], int(child_id)),
+                        (str(e)[:240], int(child_id)),
                     )
                     con.commit()
                     con.close()
@@ -3230,8 +3273,8 @@ def place_parent_and_hedge(
                     _log_event_safe(
                         "ERROR",
                         "live_router",
-                        f"[BG] child placement failed parent_ref={parent_ref} "
-                        f"child_id={child_id} error={last_error}"
+                        f"[BG] child placement enqueue failed parent_ref={parent_ref} "
+                        f"child_id={child_id} err={e}"
                     )
 
             except Exception as e:

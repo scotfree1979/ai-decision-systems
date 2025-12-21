@@ -209,6 +209,45 @@ def get_engine_available(engine: str) -> float:
 
         return _clamp(pot - used)
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: EVENT API SECTION
+# 🧩 ACTION: ADD NEW EVENT HANDLER
+# 📆 PATCHED: 2025-12-21 — reserve full lifecycle exposure on parent placed
+# ======================================================================================================
+
+def on_parent_placed(*, engine: str, side: str,
+                     entry_odds: float, entry_stake: float) -> None:
+    """
+    Reserve FULL lifecycle exposure at placement time.
+
+    Exposure model:
+      LAY  → parent liability + child stake
+      BACK → parent stake + child liability
+
+    This is a RESERVATION, not a match.
+    """
+
+    global _OPEN_EXPOSURE
+
+    with _LOCK:
+        if side.upper() == "LAY":
+            parent_liab = entry_stake * max(entry_odds - 1.0, 0.0)
+            child_liab  = entry_stake
+        else:
+            parent_liab = entry_stake
+            child_liab  = entry_stake * max(entry_odds - 1.0, 0.0)
+
+        total = _clamp(parent_liab + child_liab)
+
+        _OPEN_EXPOSURE += total
+        _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + total
+
+        print(
+            f"[BankState] +RESERVE engine={engine} "
+            f"total={total:.2f} "
+            f"open={_OPEN_EXPOSURE:.2f}"
+        )
 
 
 def can_place(engine: str, required: float) -> bool:
@@ -219,29 +258,64 @@ def can_place(engine: str, required: float) -> bool:
 # EVENT API (CALLED BY ROUTER / SETTLEMENTS)
 # -------------------------------------------------------------------
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: def on_parent_matched
+# 🧩 ACTION: REMOVE EXPOSURE MUTATION
+# 📆 PATCHED: 2025-12-21 — parent match no longer affects exposure
+# ======================================================================================================
+
 def on_parent_matched(*, engine: str, side: str,
                       entry_odds: float, entry_stake: float) -> None:
     """
-    Apply exposure when a parent becomes MATCHED.
+    Parent MATCHED event.
+
+    FIX:
+    - Exposure is already reserved at PLACED
+    - DO NOT mutate exposure here
     """
+
+    print(
+        f"[BankState] parent matched (no exposure change) "
+        f"engine={engine}"
+    )
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: EVENT API SECTION
+# 🧩 ACTION: ADD RELEASE HANDLER
+# 📆 PATCHED: 2025-12-21 — release exposure on child exit
+# ======================================================================================================
+
+def on_child_matched(*, engine: str, side: str,
+                     entry_odds: float, entry_stake: float) -> None:
+    """
+    Release FULL lifecycle exposure when hedge / stoploss completes.
+    """
+
     global _OPEN_EXPOSURE
 
     with _LOCK:
         if side.upper() == "LAY":
-            liability = entry_stake * (entry_odds - 1.0)
+            parent_liab = entry_stake * max(entry_odds - 1.0, 0.0)
+            child_liab  = entry_stake
         else:
-            liability = entry_stake
+            parent_liab = entry_stake
+            child_liab  = entry_stake * max(entry_odds - 1.0, 0.0)
 
-        liability = _clamp(liability)
+        total = _clamp(parent_liab + child_liab)
 
-        _OPEN_EXPOSURE += liability
-        _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + liability
+        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - total)
+        _ENGINE_USED[engine] = max(
+            0.0, _ENGINE_USED.get(engine, 0.0) - total
+        )
 
         print(
-            f"[BankState] +EXPOSURE engine={engine} "
-            f"liab={liability:.2f} "
+            f"[BankState] -RELEASE engine={engine} "
+            f"total={total:.2f} "
             f"open={_OPEN_EXPOSURE:.2f}"
         )
+
 
 def on_parent_closed(*, engine: str,
                      entry_odds: float, entry_stake: float) -> None:
