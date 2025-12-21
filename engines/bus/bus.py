@@ -201,6 +201,48 @@ class DecisionBus:
         ctx["selectionId"] = sid
 
         # --------------------------------------------------
+        # RUNNER ORDERS SNAPSHOT (for lifecycle engines)
+        # --------------------------------------------------
+        try:
+            from engines.config_paths import open_auto_db
+            con = open_auto_db(rw=False)
+            con.row_factory = None
+
+            rows = con.execute("""
+                SELECT
+                    id,
+                    family,
+                    role,
+                    entry_status,
+                    exit_status,
+                    hedge_of,
+                    marketId,
+                    selectionId
+                FROM orders
+                WHERE marketId = ?
+                  AND selectionId = ?
+            """, (mid, sid)).fetchall()
+
+            ctx["orders_by_runner"] = [
+                {
+                    "id": r[0],
+                    "family": r[1],
+                    "role": r[2],
+                    "entry_status": r[3],
+                    "exit_status": r[4],
+                    "hedge_of": r[5],
+                    "marketId": r[6],
+                    "selectionId": r[7],
+                }
+                for r in rows
+            ]
+
+        except Exception:
+            # Fail-safe: lifecycle engines will no-op
+            ctx["orders_by_runner"] = []
+
+
+        # --------------------------------------------------
         # MARKET MONITOR — SINGLE SOURCE OF RUNNER TRUTH
         # --------------------------------------------------
         st = get_market_state(mid) or {}

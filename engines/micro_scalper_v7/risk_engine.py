@@ -43,6 +43,11 @@ class RiskEngine:
         self.mode = "MODERATE"
 
 # === PATCH END ==============================================================
+        # --------------------------------------------------
+        # RISC lifecycle tracking (one-at-a-time)
+        # --------------------------------------------------
+        self.risc_parent_id = None
+        self.risc_cycle_active = False
 
 
 # === PATCH START ============================================================
@@ -56,27 +61,51 @@ class RiskEngine:
     ENABLE_FOR_LEGACY = True
     ENABLE_FOR_EXPLORATORY = False  # phase 1 constraint
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 SEARCH: def tick(self, ctx:
-# 📆 PATCHED: 2025-12-12 — no silent None, risk observability
-# ======================================================================================================
+    # --------------------------------------------------
+    # ORDER SNAPSHOT HELPERS (DB-truth via ctx)
+    # --------------------------------------------------
+    def _orders(self, ctx):
+        return ctx.get("orders_by_runner") or []
 
-    def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    def _legacy_parent_matched(self, ctx):
+        return any(
+            o.get("family") == "LEGACY"
+            and o.get("role") == "PARENT"
+            and o.get("entry_status") == "MATCHED"
+            for o in self._orders(ctx)
+        )
 
-        if not ctx.get("open_position"):
-            return self._no_signal(ctx, reason="no_open_position")
+    def _legacy_child_matched(self, ctx):
+        return any(
+            o.get("family") == "LEGACY"
+            and o.get("role") == "CHILD"
+            and o.get("exit_status") == "MATCHED"
+            for o in self._orders(ctx)
+        )
 
-        try:
-            plan = self._build_risk_plan(ctx)
-            if plan:
-                plan["enter"] = True
-                plan["engine"] = "MSC_RISK"
-                return plan
-        except Exception:
-            pass
+    def _risc_parent_and_child_matched(self, ctx):
+        if not self.risc_parent_id:
+            return False
 
-        return self._no_signal(ctx, reason="risk_conditions_not_met")
+        parent_matched = any(
+            o.get("family") == "MSC_RISK"
+            and o.get("role") == "PARENT"
+            and o.get("id") == self.risc_parent_id
+            and o.get("entry_status") == "MATCHED"
+            for o in self._orders(ctx)
+        )
+
+        child_matched = any(
+            o.get("family") == "MSC_RISK"
+            and o.get("role") == "CHILD"
+            and o.get("hedge_of") == self.risc_parent_id
+            and o.get("exit_status") == "MATCHED"
+            for o in self._orders(ctx)
+        )
+
+        return parent_matched and child_matched
+
+
 
     def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
         from engines.mastery.event_sink import emit
@@ -181,19 +210,55 @@ class RiskEngine:
     # ----------------------------------------------------------------------
     def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
-        # If context is for a different parent → ignore
-        if ctx.get("legacy_parent_id") != self.parent_id:
-            return None
+        # ----------------------------------------------
+        # STOP CONDITION — legacy lifecycle complete
+        # ----------------------------------------------
+        if self._legacy_child_matched(ctx):
+            self.risc_parent_id = None
+            self.risc_cycle_active = False
+            self.attached = False
+            self.active_plan = None
+            self.last_px = None
+            return self._no_signal(ctx, reason="legacy_child_matched")
+
+        # ----------------------------------------------
+        # START CONDITION — legacy parent must be matched
+        # ----------------------------------------------
+        if not self._legacy_parent_matched(ctx):
+            return self._no_signal(ctx, reason="legacy_parent_not_matched")
+
+        # ----------------------------------------------
+        # ONE-AT-A-TIME — wait for own cycle to finish
+        # ----------------------------------------------
+        if self.risc_cycle_active:
+            if not self._risc_parent_and_child_matched(ctx):
+                return self._no_signal(ctx, reason="risc_cycle_active")
+            else:
+                # previous RISC cycle completed
+                self.risc_parent_id = None
+                self.risc_cycle_active = False
+                self.attached = False
+                self.active_plan = None
+                self.last_px = None
+
+        # ----------------------------------------------
+        # EXISTING LOGIC CONTINUES BELOW
+        # ----------------------------------------------
+
 
         px = float(ctx.get("current_price") or 0)
         if px <= 0:
             return None
 
         # direction-engine decision (already built)
-        de = ctx.get("msc_decision") or {}
+        de = ctx.get("msc_decision")
+        if not de:
+            return self._no_signal(ctx, reason="no_msc_decision")
+
         entry_ticks = int(de.get("entry_ticks", 2))
-        stop_ticks = int(de.get("stop_ticks", 4))
-        self.mode  = de.get("mode", "MODERATE")
+        stop_ticks  = int(de.get("stop_ticks", 4))
+        self.mode   = de.get("mode", "MODERATE")
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
@@ -275,7 +340,8 @@ class RiskEngine:
             "role": "PARENT",
             "family": "MSC_RISK",
             "parent_id": self.parent_id,
-            "direction": direction,
+            # expose existing parent execution direction
+            "direction": "BACK->LAY" if direction == "BACK" else "LAY->BACK",
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
             "size": size,
@@ -287,6 +353,11 @@ class RiskEngine:
             "stop_loss_px": float(stop_loss_px),
         }
         # === PATCH END ========================================================
+
+        # mark RISC cycle active
+        self.risc_parent_id = self.parent_id
+        self.risc_cycle_active = True
+
 
         self.last_px = px
         self.active_plan = plan
@@ -380,7 +451,7 @@ class RiskEngine:
             "source": "J",                     # ← HARD-CODED FOR MSC-RISK
             "engine": "MSC_RISK",              # ← DB bucket
             "parent_id": self.parent_id,
-            "direction": direction,
+            "direction": "BACK->LAY" if direction == "BACK" else "LAY->BACK",
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
             "size": size,
@@ -392,6 +463,10 @@ class RiskEngine:
             "stop_loss_px": float(stop_loss_px),
         }
         # === PATCH END ========================================================
+        # mark RISC cycle active
+        self.risc_parent_id = self.parent_id
+        self.risc_cycle_active = True
+
 
         self.active_plan = plan
         self.last_px = px

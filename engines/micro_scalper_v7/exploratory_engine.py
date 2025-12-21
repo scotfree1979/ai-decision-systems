@@ -93,7 +93,7 @@ class ExploratoryEngine:
         # Existing conversion logic
         # --------------------------------------------------
         direction_label = msc_decision["direction"]
-        order_side = "LAY" if direction_label == "LAY->BACK" else "BACK"
+       
 
         # --------------------------------------------------
         # Enrich ctx (unchanged)
@@ -112,10 +112,11 @@ class ExploratoryEngine:
             plan = {
                 "enter": True,
                 "engine": "MSC_EXPLORATORY",
-                "side": order_side,
                 "entry_ticks": msc_decision["entry_ticks"],
                 "stop_ticks": msc_decision["stop_ticks"],
                 "px": ctx.get("px"),
+                # expose already-computed execution direction
+                "direction": msc_decision["direction"],  # ← canonical
             }
             return plan
 

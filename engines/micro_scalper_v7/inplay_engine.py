@@ -151,7 +151,8 @@ class InPlayEngine:
                 "source": "V",                     # ← HARD-CODED FOR MSC-INPLAY
                 "engine": "MSC_INPLAY",            # ← DB bucket
                 "subtype": "LAYDOWN",
-                "direction": "LAY",
+                # expose implied execution direction
+                "direction": "LAY->BACK",
                 "target_ticks": ticks_to_hedge,
                 "size": stake,
                 "px": current,
