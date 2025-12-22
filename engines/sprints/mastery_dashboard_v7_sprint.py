@@ -10,9 +10,9 @@ and wiring of live/replay Playbooks into the training + dashboard ecosystem.
 """
 
 SPRINT = {
-    "version": "7.8",
-    "current_phase": "Phase 7.8 – Dashboard Intelligence & Brain Integration",
-    "phases": {
+    "version": "7.9.9.2",
+    "current_phase": "Phase 7.9.9.2 – Dashboard Intelligence & GUI Sync",
+
 
         "Phase 0 – Foundation": {"status": "✅"},
         "Phase 1 – Wireframes": {"status": "✅"},
@@ -283,7 +283,8 @@ SPRINT = {
         # PHASE 7.9.9.1 — POST-LIVE VALIDATION & CONTINUATION (v7.2 GATE)
         # ───────────────────────────────────────────────────────────────
         "Phase 7.9.9.1 – Post-Live Validation & Continuation (v7.2 Gate)": {
-            "status": "🔜",
+            "status": "✅",
+
             "tasks": [
 
                 # ================================================================
@@ -422,6 +423,26 @@ SPRINT = {
                 "✅ Ensured end-to-end LIVE execution path is clean",
                 "    → anchors → OC timeline → CTX v7 → Overwatcher → MSC → Lanes → Router → Orders",
                 "    → ZERO API fallback calls anywhere in execution path",
+
+                "✅ Fixed MSC direction contract (root-cause execution blocker)",
+                "    → Identified missing / invalid direction as cause of zero MSC exposure",
+                "    → Enforced direction_engine as single source of truth",
+                "    → EX / RISK / INPLAY plans now emit valid BACK->LAY / LAY->BACK",
+
+                "✅ Repaired Placement execution ownership",
+                "    → Relocated execution worker to placement.py",
+                "    → Enforced non-blocking BUS enqueue",
+                "    → Stabilised execution thread lifecycle",
+
+                "✅ Added definitive live execution pipeline verifier",
+                "    → scripts/verify_live_execution_pipeline.py",
+                "    → Hard PASS/FAIL validation of BUS → Placement → Router → Orders",
+                "    → Direction contract validated against live schema",
+
+                "✅ Verified end-to-end MSC execution path",
+                "    → MSC plans fire, route, and preclaim correctly",
+                "    → Zero exposure confirmed as budget-gated, not logic failure",
+
 
                 # ================================================================
                 # NEXT-STAGE REQUIREMENTS BEFORE v7.2
