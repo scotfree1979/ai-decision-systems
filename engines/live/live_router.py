@@ -12,6 +12,44 @@ import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
 from engines.live import bank_state
+
+# --- Router child execution queue ---
+# live_router.py (top-level)
+
+import queue
+import threading
+import traceback
+
+_ROUTER_CHILD_QUEUE: "queue.Queue[tuple[dict, dict]]" = queue.Queue()
+_ROUTER_CHILD_WORKER = None
+
+
+def enqueue_router_child(plan: dict, ctx: dict):
+    _ROUTER_CHILD_QUEUE.put_nowait((plan, ctx))
+
+
+def _router_child_worker_loop():
+    from engines.live.live_router import _attempt_place_child_with_retry
+
+    while True:
+        try:
+            plan, ctx = _ROUTER_CHILD_QUEUE.get()
+
+            child_id = plan.get("child_id")
+            if not child_id:
+                raise RuntimeError("router child worker: missing child_id")
+
+            ok = _attempt_place_child_with_retry(int(child_id))
+            if not ok:
+                raise RuntimeError(f"router child placement failed id={child_id}")
+
+        except Exception:
+            print("[ROUTER][CHILD][ERR]")
+            traceback.print_exc()
+        finally:
+            _ROUTER_CHILD_QUEUE.task_done()
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py (top of file)
 # 🆕 ADD: Router → EventSync unified emit wrappers
@@ -32,6 +70,7 @@ def _emit_router_event(event_type: str, payload: dict):
     except Exception as e:
         print(f"[Router→EventSync] WARN {event_type}: {e}")
 
+
 # === EXPOSURE HELPERS (B3 MODEL) ============================================
 def _compute_exposure(mid: str, sid: str):
     """
@@ -43,8 +82,8 @@ def _compute_exposure(mid: str, sid: str):
         con = _orders_conn(); con.row_factory = sqlite3.Row
         row = _q_retry(con, """
             SELECT 
-              SUM(CASE WHEN role='PARENT' AND entry_status='matched' 
-                       AND (exit_status IS NULL OR exit_status<>'matched')
+              SUM(CASE WHEN role='PARENT' AND entry_status='MATCHED' 
+                       AND (exit_status IS NULL OR exit_status<>'MATCHED')
                        THEN 
                            CASE WHEN side='LAY'
                                 THEN entry_stake*(entry_odds-1)
@@ -171,8 +210,8 @@ def _compute_letter_exposure(mid: str, sid: str, letter: str):
         con = _orders_conn(); con.row_factory = sqlite3.Row
         row = _q_retry(con, """
             SELECT 
-              SUM(CASE WHEN role='PARENT' AND entry_status='matched'
-                       AND (exit_status IS NULL OR exit_status<>'matched')
+              SUM(CASE WHEN role='PARENT' AND entry_status='MATCHED'
+                       AND (exit_status IS NULL OR exit_status<>'MATCHED')
                        AND UPPER(SUBSTR(source,1,1))=UPPER(?)
                        THEN 
                            CASE WHEN side='LAY'
@@ -1234,6 +1273,41 @@ def _orders_probe(cor: str | None = None, *, note: str, bet_id: str | None = Non
         except Exception:
             pass
 
+def _rescue_queued_children(limit: int = 50) -> int:
+    """
+    Force execution of any CHILD orders stuck in QUEUED.
+    Router owns CHILD execution.
+    """
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    try:
+        rows = _q_retry(con, """
+            SELECT id
+              FROM orders
+             WHERE role='CHILD'
+               AND entry_status='QUEUED'
+             ORDER BY opened_at ASC
+             LIMIT ?
+        """, (int(limit),)).fetchall()
+    finally:
+        con.close()
+
+    PLACED = 0
+    for r in rows:
+        try:
+            if _attempt_place_child_with_retry(int(r["id"])):
+                PLACED += 1
+        except Exception as e:
+            _log_event(
+                "ERROR",
+                "live_router",
+                f"child rescue failed id={r['id']}: {e}"
+            )
+
+    return PLACED
+
+
+
 # Re-hedge background loop (singleton)
 _REHEDGE_THREAD = None
 
@@ -1244,13 +1318,19 @@ def _rehedge_loop(period_s: float = 10.0, default_ticks: int = 1):
         except Exception as e:
             _log_event("ERROR", "live_router", f"rehedge loop error: {e}")
 
+        # 🔑 NEW: rescue queued children
+        try:
+            _rescue_queued_children(limit=50)
+        except Exception as e:
+            _log_event("ERROR", "live_router", f"child rescue error: {e}")
+
         try:
             _sync_parent_matches(limit=50)
         except Exception as e:
             _log_event("ERROR", "live_router", f"sync_parent_matches error: {e}")
 
         try:
-            _sync_all_matches(limit=100)   # ← NEW: sweep stuck 'placed' to 'matched'
+            _sync_all_matches(limit=100)   # ← NEW: sweep stuck 'PLACED' to 'MATCHED'
         except Exception as e:
             _log_event("ERROR", "live_router", f"sync_all_matches error: {e}")
 
@@ -1317,14 +1397,21 @@ def _start_reconcile_loop(period_s: int = 30):
 # --- PATCH START: replace function ------------------------------------
 def _orders_insert_parent_queued(
     run_id, market_id, selection_id, side, entry_odds, entry_stake, cor,
-    *, source="LEGACY_STRATEGY", stop_loss_px=None):
+    *, source="LEGACY_STRATEGY", engine: str | None = None, stop_loss_px=None):
     """
-    Upsert LIVE parent row as 'queued'.
+    Upsert LIVE parent row as 'QUEUED'.
     Stores stop_loss_px for Overwatcher STOPLOSS engine.
     """
 
-    # --- canonical engine resolution (ONE TIME ONLY) ---
-    eng = _engine_from_source(source)
+    # --- canonical engine resolution (LIVE invariant) ---
+    # In MSC fast-path, parent row may not exist yet.
+    # Engine must be supplied by placement/BUS.
+    eng = engine if 'engine' in locals() else None
+
+    if not eng:
+        raise RuntimeError(
+            f"router invariant violated: missing engine during parent preclaim cor={cor}"
+        )
 
 
 
@@ -1374,7 +1461,7 @@ def _orders_insert_parent_queued(
                 role, source, engine, stop_loss_px
             )
             VALUES (
-                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'queued', ?,
+                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED', ?,
                 'PARENT', ?, ?, ?
             )
             ON CONFLICT(customerOrderRef) DO UPDATE SET
@@ -1385,7 +1472,7 @@ def _orders_insert_parent_queued(
                 side          = excluded.side,
                 entry_odds    = excluded.entry_odds,
                 entry_stake   = excluded.entry_stake,
-                entry_status  = COALESCE(orders.entry_status, 'queued'),
+                entry_status  = COALESCE(orders.entry_status, 'QUEUED'),
                 opened_at     = COALESCE(orders.opened_at, excluded.opened_at),
                 role          = 'PARENT',
                 source        = COALESCE(orders.source, excluded.source),
@@ -1423,10 +1510,10 @@ def _orders_insert_parent_queued(
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def _orders_update_parent_placed\(
+# 🔎 SEARCH: ^def _orders_update_parent_PLACED\(
 # --- PATCH START: replace function ------------------------------------
 def _orders_update_parent_placed(cor, bet_id):
-    """Mark parent placed and record entry_bet_id (create skeleton row if missing)."""
+    """Mark parent PLACED and record entry_bet_id (create skeleton row if missing)."""
     _ensure_orders_schema()
     con = _orders_conn(); cur = con.cursor()
     try:
@@ -1437,13 +1524,13 @@ def _orders_update_parent_placed(cor, bet_id):
         # skeleton WITH run_id to satisfy NOT NULL + FK
         _q_retry(cur, """
             INSERT INTO orders (customerOrderRef, run_id, mode, entry_status, opened_at, role)
-            VALUES (?, ?, 'LIVE', 'queued', ?, 'PARENT')
+            VALUES (?, ?, 'LIVE', 'QUEUED', ?, 'PARENT')
             ON CONFLICT(customerOrderRef) DO NOTHING
         """, (str(cor), int(fk), _utcnow_str()))
 
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='placed',
+               SET entry_status='PLACED',
                    entry_bet_id=?,
                    mode='LIVE',
                    role='PARENT',
@@ -1451,7 +1538,7 @@ def _orders_update_parent_placed(cor, bet_id):
              WHERE customerOrderRef=? 
         """, (str(bet_id or ""), int(fk), str(cor)))
         con.commit()
-        _orders_probe(cor, note="placed")
+        _orders_probe(cor, note="PLACED")
         # === PATCH START: assign sequential letter number ===
         try:
             # resolve context
@@ -1467,7 +1554,7 @@ def _orders_update_parent_placed(cor, bet_id):
         # === PATCH END ===
 
     except Exception as e:
-        _log_event("ERROR", "live_router", f"orders update placed failed ref={cor}: {e}")
+        _log_event("ERROR", "live_router", f"orders update PLACED failed ref={cor}: {e}")
     finally:
         try: con.close()
         except Exception: pass
@@ -1481,8 +1568,10 @@ def _orders_update_parent_failed(cor, error_msg):
     try:
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='failed', error=?
-             WHERE customerOrderRef=? AND mode='LIVE'
+               SET entry_status='FAILED', error=?
+             WHERE customerOrderRef=? 
+               AND mode='LIVE'
+               AND entry_bet_id IS NULL
         """, (str(error_msg)[:240], cor))
         con.commit()
     except Exception:
@@ -1507,7 +1596,10 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 5) -> 
     - Explicit failure stamping
     - Never blocks caller
     """
-
+    if threading.current_thread().name != "RouterChildWorker":
+        raise RuntimeError(
+            "Child placement attempted outside RouterChildWorker"
+        )
     con = _orders_conn()
     con.row_factory = sqlite3.Row
     cur = con.cursor()
@@ -1563,7 +1655,7 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 5) -> 
                          WHERE id=?
                     """, (str(bet_id), str(cref), int(child_id)))
                     con.commit()
-                    _orders_probe(None, note="child_placed", bet_id=bet_id)
+                    _orders_probe(None, note="child_PLACED", bet_id=bet_id)
                     return True
 
                 # Betfair explicit rejection
@@ -1591,6 +1683,7 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 5) -> 
                    SET entry_status='FAILED',
                        error=?
                  WHERE id=?
+                   AND entry_bet_id IS NULL
             """, (str(error_code)[:240], int(child_id)))
             con.commit()
             return False
@@ -1601,6 +1694,7 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 5) -> 
                SET entry_status='FAILED',
                    error='RETRY_EXHAUSTED'
              WHERE id=?
+               AND entry_bet_id IS NULL
         """, (int(child_id),))
         con.commit()
         return False
@@ -1897,7 +1991,7 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
 
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='matched',
+               SET entry_status='MATCHED',
                    closed_at=COALESCE(closed_at, datetime('now','utc')),
                    role='CHILD',
                    realized_pnl=?,
@@ -2062,7 +2156,7 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str,
         # Persist DB state
         _q_retry(cur, """
             UPDATE orders
-               SET exit_status='matched',
+               SET exit_status='MATCHED',
                    exit_kind='HEDGE',
                    exit_odds=?, exit_stake=?,
                    realized_pnl=?, net_pl=COALESCE(net_pl,0)+?,
@@ -2311,7 +2405,7 @@ def _open_parents_count_live(market_id: str, selection_id: str) -> int:
         con.row_factory = sqlite3.Row
         row = _q_retry(con, "SELECT COUNT(*) AS n FROM orders "
             "WHERE mode='LIVE' AND marketId=? AND selectionId=? "
-            "AND entry_status='matched' AND (exit_status IS NULL OR exit_status <> 'matched')",
+            "AND entry_status='MATCHED' AND (exit_status IS NULL OR exit_status <> 'MATCHED')",
             (str(market_id), str(selection_id))
         ).fetchone()
         return int(row["n"] if row else 0)
@@ -2376,7 +2470,7 @@ def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> Non
     try:
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='cancelled',
+               SET entry_status='CANCELLED',
                    closed_at=COALESCE(closed_at, ?),
                    error=COALESCE(error, ?),
                    mode='LIVE'
@@ -2394,7 +2488,7 @@ def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> Non
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _orders_insert_child_live(parent_cor: str, *, market_id: str, selection_id: str,
                               side: str, odds: float, stake: float,
-                              bet_id: str, source: str = "LEGACY_STRATEGY",
+                              bet_id: str, engine, source: str = "LEGACY_STRATEGY",
                               exit_kind: str = "HEDGE") -> Optional[int]:
                              
     """
@@ -2409,6 +2503,9 @@ def _orders_insert_child_live(parent_cor: str, *, market_id: str, selection_id: 
     try:
         parent = _q_retry(con, "SELECT id, run_id FROM orders WHERE customerOrderRef=? LIMIT 1",
                           (str(parent_cor),)).fetchone()
+
+        engine = parent["engine"] if parent else None
+
         if not parent:
             _log_event("ERROR", "live_router", f"insert_child: parent not found ref={parent_cor}")
             return None
@@ -2421,7 +2518,7 @@ def _orders_insert_child_live(parent_cor: str, *, market_id: str, selection_id: 
               customerOrderRef, run_id, mode, marketId, selectionId,
               side, entry_odds, entry_stake, entry_status, opened_at,
               entry_bet_id, role, hedge_of, source, exit_kind, engine
-            ) VALUES (?, ?, 'LIVE', ?, ?, ?, ?, ?, 'live', datetime('now','utc'),
+            ) VALUES (?, ?, 'LIVE', ?, ?, ?, ?, ?, engine, datetime('now','utc'),
                       ?, 'CHILD', ?, ?, ?)
         """, (_ref("CHILD"), int(fk), str(market_id), str(selection_id),
               side.upper(), float(odds), float(stake), str(bet_id or ""), pid, str(source), str(exit_kind).upper()))
@@ -2568,7 +2665,7 @@ def _place_stoploss_child_now(
               ?, ?, 'LIVE',
               ?, ?,
               ?, ?, ?,
-              'matched', datetime('now','utc'), ?,
+              'MATCHED', datetime('now','utc'), ?,
               'CHILD', ?, 'S', 'STOPLOSS'
             )
         """, (
@@ -2587,7 +2684,7 @@ def _place_stoploss_child_now(
 
         _q_retry(cur, """
             UPDATE orders
-               SET exit_status='matched',
+               SET exit_status='MATCHED',
                    exit_kind='STOPLOSS',
                    exit_odds=?,
                    exit_stake=?,
@@ -2661,7 +2758,7 @@ def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
         # 2) CANCEL QUEUED/PLACED
         n_cancel = _q_retry(con, f"""
             UPDATE orders SET
-                entry_status='cancelled',
+                entry_status='CANCELLED',
                 closed_at=COALESCE(closed_at, datetime('now','utc')),
                 mode='LIVE'
             WHERE mode='LIVE'
@@ -2672,7 +2769,7 @@ def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
         # 3) SETTLE OPEN PARENTS
         n_settle = _q_retry(con, f"""
             UPDATE orders SET
-                exit_status='settled',
+                exit_status='SETTLED',
                 closed_at=COALESCE(closed_at, datetime('now','utc')),
                 mode='LIVE'
             WHERE mode='LIVE'
@@ -2807,6 +2904,9 @@ def _orders_insert_child_queued(parent_cor: str, *,
     try:
         parent = _q_retry(cur, "SELECT id, run_id FROM orders WHERE customerOrderRef=? LIMIT 1",
                           (str(parent_cor),)).fetchone()
+
+        engine = parent["engine"] if parent and parent["engine"] else None
+
         if not parent:
             _log_event("ERROR", "live_router", f"insert_child: parent not found ref={parent_cor}")
             return None
@@ -2817,8 +2917,8 @@ def _orders_insert_child_queued(parent_cor: str, *,
             INSERT INTO orders(
               customerOrderRef, run_id, mode, marketId, selectionId,
               side, entry_odds, entry_stake, entry_status, opened_at,
-              role, hedge_of, source, exit_kind
-            ) VALUES (?, ?, 'LIVE', ?, ?, ?, ?, ?, 'queued', datetime('now','utc'),
+              role, hedge_of, source, exit_kind, engine
+            ) VALUES (?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED', datetime('now','utc'),
                       'CHILD', ?, ?, ?)
         """, (cref, fk, str(market_id), str(selection_id),
               side.upper(), float(odds), float(stake), pid, str(source), str(exit_kind).upper()))
@@ -2835,13 +2935,13 @@ def _orders_insert_child_queued(parent_cor: str, *,
 
 
 def _orders_update_child_placed(child_id: int, bet_id: str) -> None:
-    """Mark child as placed with entry_bet_id."""
+    """Mark child as PLACED with entry_bet_id."""
     _ensure_orders_schema()
     con = _orders_conn(); cur = con.cursor()
     try:
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='placed',
+               SET entry_status='PLACED',
                    entry_bet_id=?,
                    mode='LIVE',
                    role='CHILD'
@@ -2849,14 +2949,14 @@ def _orders_update_child_placed(child_id: int, bet_id: str) -> None:
         """, (str(bet_id), int(child_id)))
         con.commit()
     except Exception as e:
-        _log_event("ERROR", "live_router", f"child update placed failed id={child_id}: {e}")
+        _log_event("ERROR", "live_router", f"child update PLACED failed id={child_id}: {e}")
     finally:
         try: con.close()
         except Exception: pass
 # --- PATCH END ----------------------------------------------------
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def _orders_update_child_placed\(child_id: int, bet_id: str\) -> None:
+# 🔎 SEARCH: ^def _orders_update_child_PLACED\(child_id: int, bet_id: str\) -> None:
 #    INSERT the following helpers **below** that function
 # 📆 PATCHED: 2025-09-29T14:25Z
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3088,11 +3188,28 @@ def place_parent_and_hedge(
     # 3) place parent -----------------------------------------------------------
     bf_parent_id, detail = None, {}
     try:
+        # 1️⃣ Reserve FIRST
+        bank_state.on_parent_placed(
+            engine=engine,
+            side=side,
+            entry_odds=float(entry_odds),
+            entry_stake=float(stake),
+        )
         bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
                                       float(entry_odds), float(stake), parent_ref,
                                       persistence=parent_persistence)
         if bf_parent_id:
             _orders_update_parent_placed(parent_ref, bf_parent_id)
+
+        # 3️⃣ If Betfair failed → rollback reservation
+        if not bf_parent_id:
+            bank_state.on_parent_closed(
+                engine=engine,
+                entry_odds=float(entry_odds),
+                entry_stake=float(stake),
+            )
+            _orders_update_parent_failed(...)
+            return None, parent_ref
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 ANCHOR: BankState exposure reservation — PARENT PLACED
@@ -3104,12 +3221,7 @@ def place_parent_and_hedge(
         # 📍 BankState exposure reservation — PARENT PLACED
         # ======================================================================
         try:
-            bank_state.on_parent_placed(
-                engine=engine,
-                side=side,
-                entry_odds=float(entry_odds),
-                entry_stake=float(stake),
-            )
+            pass
         except Exception as e:
             _log_event(
                 "ERROR",
@@ -3118,7 +3230,7 @@ def place_parent_and_hedge(
             )
 
 
-            _orders_probe(parent_ref, note="placed", bet_id=bf_parent_id)
+            _orders_probe(parent_ref, note="PLACED", bet_id=bf_parent_id)
             try:
                 _sp_log_enter_live(run_id=run_id, strategy=source, mid=market_id, sid=selection_id,
                                    side=side, price=entry_odds, stake=stake)
@@ -3160,9 +3272,9 @@ def place_parent_and_hedge(
                         con = _orders_conn()
                         _q_retry(con, """
                             UPDATE orders
-                               SET entry_status='cancelled',
+                               SET entry_status='CANCELLED',
                                    closed_at=COALESCE(closed_at, datetime('now','utc'))
-                             WHERE customerOrderRef=? AND COALESCE(entry_status,'')<>'matched'
+                             WHERE customerOrderRef=? AND COALESCE(entry_status,'')<>'MATCHED'
                         """, (parent_ref,))
                         con.commit(); con.close()
                     except Exception: pass
@@ -3178,19 +3290,21 @@ def place_parent_and_hedge(
                                 f"[BG] could not mark parent matched ref={parent_ref}: {e}")
 
             # --------------------------------------------------
-            # CHILD lifecycle: QUEUE → PLACE (single canonical path)
+            # CHILD lifecycle: QUEUE → ROUTER WORKER HANDOFF
             # --------------------------------------------------
             try:
                 # 1️⃣ Compute hedge parameters (already correct)
                 ticks = max(1, abs(int(hedge_ticks)))
                 from engines.price_math import odds_plus_ticks as _odds_plus_ticks
+                parent_side = side.upper()
 
-                if side.upper() == "LAY":
+                if parent_side == "LAY":
                     hedge_side = "BACK"
-                    hedge_odds = _odds_plus_ticks(float(entry_odds), -ticks)
+                    hedge_odds = odds_plus_ticks(entry_odds, +ticks)   # ✔ HIGHER
                 else:
                     hedge_side = "LAY"
-                    hedge_odds = _odds_plus_ticks(float(entry_odds), +ticks)
+                    hedge_odds = odds_plus_ticks(entry_odds, -ticks)   # ✔ LOWER
+
 
                 hedge_odds = _round_odds(float(hedge_odds))
                 hedge_stake = (
@@ -3204,7 +3318,7 @@ def place_parent_and_hedge(
                     )
                 )
 
-                # 2️⃣ Insert CHILD row in QUEUED state (DB-first guarantee)
+                # 2️⃣ Insert CHILD row in QUEUED state (DB-first, minimal)
                 child_id = _orders_insert_child_queued(
                     parent_cor=parent_ref,
                     market_id=market_id,
@@ -3224,65 +3338,45 @@ def place_parent_and_hedge(
                     )
                     return
 
-                # 3️⃣ Hand off CHILD execution to Placement (authoritative lifecycle owner)
-                try:
-                    from engines.decision_engine.decide_once.placement import enqueue_for_placement
+                # 3️⃣ Hand off CHILD execution to ROUTER WORKER (authoritative)
+              
+                direction = "LAY->BACK" if side.upper() == "LAY" else "BACK->LAY"
 
-                    enqueue_for_placement(
-                        name="CHILD",
-                        plan={
-                            "role": "CHILD",
-                            "child_id": child_id,
-                            "marketId": market_id,
-                            "selectionId": selection_id,
-                            "side": hedge_side,
-                            "px": hedge_odds,
-                            "size": hedge_stake,
-                            "parent_cor": parent_ref,
-                            "exit_kind": "HEDGE",
-                        },
-                        ctx={
-                            "run_id": run_id,
-                            "engine": engine,
-                            "mode": "LIVE",
-                        }
-                    )
+                enqueue_router_child(
+                    plan={
+                        "role": "CHILD",
+                        "child_id": child_id,
+                        "parent_cor": parent_ref,
+                        "marketId": market_id,
+                        "selectionId": selection_id,
+                        "side": hedge_side,
+                        "px": hedge_odds,
+                        "size": hedge_stake,
+                        "direction": direction,
+                        "engine": engine,
+                        "source": source,
+                        "exit_kind": "HEDGE",
+                    },
+                    ctx={
+                        "run_id": run_id,
+                        "engine": engine,
+                        "mode": "LIVE",
+                    }
+                )
 
-                    _log_event_safe(
-                        "INFO",
-                        "live_router",
-                        f"[CHILD→PLACEMENT] enqueued parent_ref={parent_ref} child_id={child_id}"
-                    )
-
-                except Exception as e:
-                    # 4️⃣ Explicit failure path (formerly invalid else:)
-                    con = _orders_conn()
-                    _q_retry(
-                        con,
-                        """
-                        UPDATE orders
-                           SET entry_status='FAILED',
-                               error=?
-                         WHERE id=?
-                        """,
-                        (str(e)[:240], int(child_id)),
-                    )
-                    con.commit()
-                    con.close()
-
-                    _log_event_safe(
-                        "ERROR",
-                        "live_router",
-                        f"[BG] child placement enqueue failed parent_ref={parent_ref} "
-                        f"child_id={child_id} err={e}"
-                    )
+                _log_event_safe(
+                    "INFO",
+                    "live_router",
+                    f"[CHILD→ROUTER] queued child_id={child_id} parent_ref={parent_ref}"
+                )
 
             except Exception as e:
                 _log_event_safe(
                     "ERROR",
                     "live_router",
-                    f"[BG] child lifecycle error parent_ref={parent_ref}: {e}"
+                    f"[BG] child handoff failed parent_ref={parent_ref}: {e}"
                 )
+
         except Exception as e:
             _log_event_safe("ERROR", "live_router", f"bg hedge error ref={parent_ref}: {e}")
 
@@ -3386,98 +3480,117 @@ def _record_trade_metrics(*,
     except Exception as e:
         _log_event("ERROR", "live_router", f"metrics insert failed: {e}")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def ensure_hedges_for_open_parents\(
-# --- PATCH START: replace function ------------------------------------
 def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int = 1) -> int:
     """
-    For every matched PARENT without a matched/live CHILD, place CHILD and link it.
+    BACKUP / SAFETY NET ONLY.
+
+    For every MATCHED PARENT with NO CHILD row at all:
+      • create a CHILD row in QUEUED state (DB-only)
+      • NEVER call Betfair
+      • execution is deferred to RouterChildWorker
+
+    This function MUST remain execution-free.
     """
+
     fixed = 0
     _ensure_orders_schema()
-    con = _orders_conn(); con.row_factory = sqlite3.Row
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
     try:
         rows = _q_retry(con, """
-            SELECT id, customerOrderRef AS cor, marketId, selectionId, side, entry_odds, entry_stake,
-                   COALESCE(source,'LEGACY_STRATEGY') AS source
-              FROM orders
-             WHERE mode='LIVE'
-               AND role='PARENT'
-               AND entry_status='matched'
-               AND (exit_status IS NULL OR UPPER(exit_status) <> 'MATCHED')
+            SELECT
+                p.id,
+                p.customerOrderRef AS cor,
+                p.marketId,
+                p.selectionId,
+                p.side,
+                p.entry_odds,
+                p.entry_stake,
+                COALESCE(p.source,'LEGACY_STRATEGY') AS source
+              FROM orders p
+             WHERE p.mode='LIVE'
+               AND p.role='PARENT'
+               AND UPPER(p.entry_status)='MATCHED'
+               AND (p.exit_status IS NULL OR UPPER(p.exit_status)<>'MATCHED')
                AND NOT EXISTS (
-                   SELECT 1 FROM orders c
-                    WHERE c.role='CHILD' AND c.hedge_of=orders.id
-                      AND UPPER(COALESCE(c.entry_status,'')) IN ('LIVE','MATCHED')
+                     SELECT 1
+                       FROM orders c
+                      WHERE c.role='CHILD'
+                        AND c.hedge_of=p.id
                )
-             ORDER BY opened_at DESC
+             ORDER BY p.opened_at DESC
              LIMIT ?
         """, (int(max_to_fix),)).fetchall()
     except Exception as e:
         _log_event("ERROR", "live_router", f"rehedge scan failed: {e}")
-        try: con.close()
-        except Exception: pass
         return 0
     finally:
-        try: con.close()
-        except Exception: pass
+        try:
+            con.close()
+        except Exception:
+            pass
 
     if not rows:
         return 0
 
-    try:
-        app_key, token = _keys()
-    except Exception as e:
-        _log_event("ERROR", "live_router", f"rehedge auth error: {e}")
-        return 0
-
     for r in rows:
         try:
-            mid, sid = str(r["marketId"]), str(r["selectionId"])
-            side_p = (r["side"] or "").upper()
-            eo, st = float(r["entry_odds"] or 0.0), float(r["entry_stake"] or 0.0)
-            src    = str(r["source"] or "LEGACY_STRATEGY")
-            tks    = max(1, int(default_ticks))
-            hedge_side = "BACK" if side_p == "LAY" else "LAY"
-            hedge_odds = pm.walk_ticks(eo, tks, direction=("up" if side_p == "LAY" else "down"))
+            mid = str(r["marketId"])
+            sid = str(r["selectionId"])
+
+            parent_side  = (r["side"] or "").upper()
+            entry_odds   = float(r["entry_odds"] or 0.0)
+            entry_stake  = float(r["entry_stake"] or 0.0)
+            source       = str(r["source"] or "H")
+
+            # --- hedge intent (purely deterministic) ---
+            hedge_side = "BACK" if parent_side == "LAY" else "LAY"
+
+            ticks = max(1, int(default_ticks))
+            try:
+                from engines.price_math import odds_plus_ticks
+                hedge_odds = odds_plus_ticks(
+                    entry_odds,
+                    ticks if hedge_side == "LAY" else -ticks
+                )
+            except Exception:
+                hedge_odds = entry_odds
+
             hedge_odds = _round_odds(float(hedge_odds))
-            hedge_stake = calc_greenup_stake(side_p, eo, st, hedge_odds)
 
-            href = _ref(hedge_side)
-            h_bet_id, _ = _place(app_key, token, mid, sid, hedge_side, hedge_odds, hedge_stake, href, persistence="LAPSE")
+            hedge_stake = calc_greenup_stake(
+                parent_side,
+                entry_odds,
+                entry_stake,
+                hedge_odds
+            )
 
-            if not h_bet_id:
+            # --- DB-FIRST INSERT ONLY (NO EXECUTION) ---
+            child_id = _orders_insert_child_queued(
+                parent_cor=str(r["cor"]),
+                market_id=mid,
+                selection_id=sid,
+                side=hedge_side,
+                odds=float(hedge_odds),
+                stake=float(hedge_stake),
+                source=source,
+                exit_kind="HEDGE",
+            )
+
+            if not child_id:
                 continue
 
-            _orders_insert_child_live(parent_cor=str(r["cor"]), market_id=mid, selection_id=sid,
-                                      side=hedge_side, odds=hedge_odds, stake=hedge_stake,
-                                      bet_id=h_bet_id, source=src)
-            # 🔗 Link plan_ledger.child_order_id (second line of defense)
-            try:
-                # We need the child id we just inserted; requery by (role='CHILD', hedge_of=parent.id)
-                con2 = _orders_conn(); con2.row_factory = sqlite3.Row
-                rowc = _q_retry(con2, """
-                    SELECT c.id
-                      FROM orders p
-                      JOIN orders c ON c.hedge_of = p.id AND c.role='CHILD'
-                     WHERE p.customerOrderRef=? 
-                     ORDER BY c.id DESC LIMIT 1
-                """, (str(r["cor"]),)).fetchone()
-                con2.close()
-                if rowc:
-                    _ledger_link_child_by_parent_cor(str(r["cor"]), int(rowc["id"]))
-            except Exception:
-                pass
-
             fixed += 1
-            # 📊 update vSERF/BookState
-            try:
-                _update_book_state(run_id="LIVE")
-            except Exception: pass
+
+            _log_event(
+                "INFO",
+                "live_router",
+                f"[REHEDGE-BACKUP] queued child_id={child_id} parent_ref={r['cor']}"
+            )
 
         except Exception as e:
-            _log_event("ERROR", "live_router", f"rehedge error: {e}")
+            _log_event("ERROR", "live_router", f"rehedge backup error: {e}")
 
     return fixed
 
@@ -3539,7 +3652,7 @@ def _sync_hedge_matches(limit: int = 50) -> int:
               FROM orders
              WHERE mode='LIVE'
                AND role='PARENT'
-               AND entry_status='matched'
+               AND entry_status='MATCHED'
                AND exit_bet_id IS NOT NULL
                AND (exit_status IS NULL OR UPPER(exit_status) <> 'MATCHED')
              ORDER BY opened_at DESC
@@ -3607,7 +3720,7 @@ def analyze_market_pnl(con, market_id: str) -> dict:
     """
     pnl = {}  # {selectionId: amount_if_this_runner_wins}
     rows = _q_retry(con, "SELECT selectionId, side, entry_odds, entry_stake FROM orders "
-                       "WHERE marketId=? AND entry_status='matched' AND (closed_at IS NULL OR closed_at='')",
+                       "WHERE marketId=? AND entry_status='MATCHED' AND (closed_at IS NULL OR closed_at='')",
                        (market_id,)).fetchall()
     sids = {str(r["selectionId"]) for r in rows}
     for j in sids:
@@ -3665,7 +3778,7 @@ def cleanup_orphan_parents() -> int:
         for r in rows:
             _q_retry(cur, """
                 UPDATE orders
-                   SET entry_status='cancelled',
+                   SET entry_status='CANCELLED',
                        closed_at=COALESCE(closed_at, datetime('now','utc')),
                        error=COALESCE(error, 'cleanup_orphan'),
                        mode='LIVE'
@@ -3704,5 +3817,24 @@ def init_live_router():
     Called by GUI or orchestrator after full system startup.
     """
     _repair_orphan_run_ids_on_startup()
+
+_ROUTER_CHILD_THREAD = None
+
+def start_router_child_worker():
+    global _ROUTER_CHILD_THREAD
+    if _ROUTER_CHILD_THREAD and _ROUTER_CHILD_THREAD.is_alive():
+        return
+
+    t = threading.Thread(
+        target=_router_child_worker_loop,
+        name="RouterChildWorker",
+        daemon=True,
+    )
+    t.start()
+    _ROUTER_CHILD_THREAD = t
+
+
+    print("[ROUTER] child execution worker started")
+
 
 

@@ -3596,18 +3596,6 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[DAL-SCHEMA] fatal: {e}")
 
-    # --------------------------------------------------------------
-    # **CLOUDKEEPER STARTUP PURGE (ONCE-PER-DAY RETENTION)**
-    # --------------------------------------------------------------
-    try:
-        _cloud_retention_once()
-        print("[CloudKeeper] LiveCache retention done (5-day window)")
-    except Exception as e:
-        print(f"[CloudKeeper] warn: {e}")
-    # === END OF PATCH INSERT =========================================
-
- 
-
 
     # ------------------------------------------------------------------
     # 6) BLUEPRINT LOAD + SETTLEMENT LOOP + MASTERY
@@ -3677,7 +3665,12 @@ def start_live_loop(*args, **kwargs):
 
     # NEW
     from engines.decision_engine.decide_once.placement import start_placement_worker
+    from engines.live.live_router import start_router_child_worker
+
+    
     start_placement_worker()
+    start_router_child_worker()
+
 
     # --------------------------------------------------------------
     # 6D) START BRAIN LISTENER
@@ -3694,10 +3687,7 @@ def start_live_loop(*args, **kwargs):
     # --------------------------------------------------------------
     # 6F) START CHILD PROCESS
     # --------------------------------------------------------------
-    from engines.live.live_router import init_live_router, _start_rehedge_loop
-
-    init_live_router()
-    _start_rehedge_loop(default_ticks=1)
+ 
 
     # --------------------------------------------------------------
     # 6G) LIVE ROUTER BUDGET ALLOCATIONS

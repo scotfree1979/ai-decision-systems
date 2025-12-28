@@ -12,8 +12,9 @@ from engines.mastery.mastery_policy import plan_for_strategy
 from engines.mastery.context_builder import build_context
 from engines.live.live_router import place_from_bus
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
-from engines.math.dynamic_stake_v7 import compute_dynamic_stake
+from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
 from engines.market_monitor.phase_clock import MarketPhaseClock
+
 
 import time
 
@@ -241,6 +242,27 @@ class DecisionBus:
             # Fail-safe: lifecycle engines will no-op
             ctx["orders_by_runner"] = []
 
+        # ------------------------------------------------------------------
+        # RISC CONTRACT INJECTION (AUTHORITATIVE — BUS RESPONSIBILITY)
+        # ------------------------------------------------------------------
+        ctx["legacy_parent_id"] = None
+        ctx["legacy_entry_side"] = None
+        ctx["legacy_entry_odds"] = None
+        ctx["legacy_entry_stake"] = None
+
+        for o in ctx.get("orders_by_runner", []):
+            if (
+                o.get("family") == "LEGACY"
+                and o.get("role") == "PARENT"
+                and o.get("entry_status") == "MATCHED"
+            ):
+                ctx["legacy_parent_id"] = o["id"]
+                ctx["legacy_entry_side"] = o.get("side")
+                ctx["legacy_entry_odds"] = o.get("entry_odds")
+                ctx["legacy_entry_stake"] = o.get("entry_stake")
+                break
+
+
 
         # --------------------------------------------------
         # MARKET MONITOR — SINGLE SOURCE OF RUNNER TRUTH
@@ -443,7 +465,7 @@ class DecisionBus:
     def analytics_report(self):
         from engines.live.live_router import fetch_router_stats
         from engines.live.bank_state import get_engine_pots
-        from engines.analytics.snapshot import bus_snapshot
+      
 
         snap = bus_snapshot()
         pots = get_engine_pots()
@@ -768,11 +790,43 @@ class DecisionBus:
                 plan.setdefault("px", ctx.get("px"))
 
                 # --------------------------------------------------
+                # Dynamic Stake (BUS authority)
+                # --------------------------------------------------
+                if not plan.get("size") or float(plan.get("size") or 0) <= 0:
+                    try:
+                        letter = (
+                            plan.get("letter")
+                            or plan.get("source")
+                            or ctx.get("letter")
+                            or "A"
+                        )[:1].upper()
+
+                        # Phase resolution (BUS truth)
+                        phase = "IP" if ctx.get("in_play") else "PRE"
+
+                        stake, stake_reason = calc_dynamic_stake(
+                            letter=letter,
+                            phase=phase
+                        )
+
+                        plan["size"] = float(stake)
+                        plan["_bus_stake_reason"] = stake_reason
+
+                    except Exception as e:
+                        plan["_bus_block"] = f"dynamic_stake_error:{e}"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, f"dynamic_stake_error:{e}")
+                        )
+                        engine_report[plan["engine"]]["note"] = "dynamic_stake_error"
+                        continue  # ❌ do NOT route
+
+                # --------------------------------------------------
                 # Direction check (execution truth)
                 # --------------------------------------------------
                 dec = None
                 try:
                     dec = compute_msc_decision(ctx)
+                    ctx["msc_decision"] = dec
                 except Exception:
                     dec = None
 
@@ -783,6 +837,59 @@ class DecisionBus:
                 if not plan_dir and exec_dir:
                     plan["direction"] = exec_dir
                     plan_dir = exec_dir
+
+                # ------------------------------------------------------------------
+                # DYNAMIC STAKE ENRICHMENT (AUTHORITATIVE — BUS RESPONSIBILITY)
+                # ------------------------------------------------------------------
+                from engines.live.bank_state import get_engine_available
+                from engines.math.dynamic_stake_v7 import compute_dynamic_stake
+
+                # Only compute stake if not already provided
+                if "size" not in plan or plan.get("size") in (None, 0):
+
+                    engine = plan.get("engine")
+                    px = float(plan.get("px") or 0.0)
+
+                    # Guard: cannot compute stake without these
+                    if not engine or px <= 0:
+                        plan["_bus_block"] = "dynamic_stake_missing_inputs"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "dynamic_stake_missing_inputs")
+                        )
+                        engine_report[engine]["note"] = "dynamic_stake_missing_inputs"
+                        continue  # 🔴 DO NOT ROUTE
+
+                    try:
+                        pot = get_engine_available(engine)
+
+                        stake, stake_meta = compute_dynamic_stake(
+                            engine=engine,
+                            px=px,
+                            pot=pot,
+                            ctx=ctx,
+                        )
+
+                        # Hard guarantee — size must be valid
+                        if not stake or stake <= 0:
+                            plan["_bus_block"] = "dynamic_stake_zero"
+                            tick_ctx["plans_route_failed"].append(
+                                (plan, "dynamic_stake_zero")
+                            )
+                            engine_report[engine]["note"] = "dynamic_stake_zero"
+                            continue  # 🔴 DO NOT ROUTE
+
+                        plan["size"] = float(stake)
+                        plan["_stake_source"] = "dynamic"
+                        plan["_stake_meta"] = stake_meta
+
+                    except Exception as e:
+                        plan["_bus_block"] = "dynamic_stake_error"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, f"dynamic_stake_error:{e}")
+                        )
+                        engine_report[engine]["note"] = "dynamic_stake_error"
+                        continue  # 🔴 DO NOT ROUTE
+
 
                 # --- BUS MUST NEVER BLOCK EXECUTION ---
                 # Annotate only, router decides.
@@ -943,13 +1050,6 @@ class DecisionBus:
             print("────────────────────────────────────────────────────────")
             print(f"plans_generated : {len(plan_queue)}")
             print(f"plans_routed    : {len(final_plans)}")
-
-            try:
-                from engines.analytics.snapshot import bus_snapshot
-                snap = bus_snapshot()
-                print(f"exposure        : {snap['exposure']:.2f}")
-            except Exception:
-                print("exposure        : unavailable")
 
             print("────────────────────────────────────────────────────────")
 

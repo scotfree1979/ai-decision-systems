@@ -48,11 +48,41 @@ def init_bank_state():
     """
     try:
         init_from_budget_allocations()
-        print("[BankState] initialised from budget_allocations")
+        if _is_simulation():
+            print("[BankState] initialised from budget_allocations")
     except Exception as e:
         print(f"[BankState][WARN] init failed: {e}")
 
 
+# -------------------------------------------------------------------
+# SIMULATION MODE (OFF BY DEFAULT)
+# -------------------------------------------------------------------
+
+_SIMULATION_MODE = False
+_SIMULATION_LOCK = threading.RLock()
+_SIMULATION_DIVISOR = None
+
+def _enable_simulation_mode(*, divisor: int | None = None):
+    global _SIMULATION_MODE, _SIMULATION_DIVISOR
+    with _SIMULATION_LOCK:
+        _SIMULATION_MODE = True
+        _SIMULATION_DIVISOR = int(divisor) if divisor else None
+        print(
+            f"[BankState][SIM] ENABLED"
+            f"{' divisor='+str(_SIMULATION_DIVISOR) if _SIMULATION_DIVISOR else ''}"
+        )
+
+
+def _disable_simulation_mode():
+    global _SIMULATION_MODE, _SIMULATION_DIVISOR
+    with _SIMULATION_LOCK:
+        _SIMULATION_MODE = False
+        _SIMULATION_DIVISOR = None
+        print("[BankState][SIM] DISABLED")
+
+
+def _is_simulation():
+    return _SIMULATION_MODE
 
 # -------------------------------------------------------------------
 # BankState — Live Exposure Ledger (v7)
@@ -103,6 +133,8 @@ def _effective_market_count() -> int:
     Each market contributes fractional pressure based on how tradable it is.
     This works consistently for early, peak, and late trading periods.
     """
+    if _SIMULATION_MODE:
+        return _SIMULATION_DIVISOR
 
     try:
         buckets = {
@@ -169,8 +201,9 @@ def init_from_budget_allocations(day: str | None = None):
         pot = float(pot)
         _ENGINE_POTS[engine] = pot
         _ENGINE_AVAILABLE[engine] = pot
-
-    print(f"[BANKSTATE] pots loaded from budget_allocations ({day})")
+   
+    if _is_simulation():
+        print(f"[BANKSTATE] pots loaded from budget_allocations ({day})")
 
 
 
@@ -243,6 +276,7 @@ def on_parent_placed(*, engine: str, side: str,
         _OPEN_EXPOSURE += total
         _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + total
 
+
         print(
             f"[BankState] +RESERVE engine={engine} "
             f"total={total:.2f} "
@@ -274,11 +308,11 @@ def on_parent_matched(*, engine: str, side: str,
     - Exposure is already reserved at PLACED
     - DO NOT mutate exposure here
     """
-
-    print(
-        f"[BankState] parent matched (no exposure change) "
-        f"engine={engine}"
-    )
+    if _is_simulation():
+        print(
+            f"[BankState] parent matched (no exposure change) "
+            f"engine={engine}"
+        )
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
@@ -309,6 +343,8 @@ def on_child_matched(*, engine: str, side: str,
         _ENGINE_USED[engine] = max(
             0.0, _ENGINE_USED.get(engine, 0.0) - total
         )
+
+
 
         print(
             f"[BankState] -RELEASE engine={engine} "
@@ -394,11 +430,13 @@ def reconcile_realized_pnl_from_orders() -> None:
             _ENGINE_POTS[engine] += pnl
             _ENGINE_AVAILABLE[engine] += pnl
 
-            print(
-                f"[BankState] +REALIZED_PNL engine={engine} "
-                f"pnl={pnl:+.2f} "
-                f"pot={_ENGINE_POTS[engine]:.2f}"
-            )
+            if _is_simulation():
+
+                print(
+                    f"[BankState] +REALIZED_PNL engine={engine} "
+                    f"pnl={pnl:+.2f} "
+                    f"pot={_ENGINE_POTS[engine]:.2f}"
+                )
 
         # mark as reconciled (CRITICAL)
         cur.execute("""

@@ -115,8 +115,8 @@ class InPlayEngine:
             win_prob = dec["win_prob"]
             direction = dec["direction"]   # BACK->LAY or LAY->BACK
 
-            # In-play collapse = strong loser → direction must be BACK->LAY
-            if direction != "BACK->LAY":
+            # In-play collapse = strong loser → direction must be LAY->BACK
+            if direction != "LAY->BACK":
                 return None
 
             # Confidence threshold

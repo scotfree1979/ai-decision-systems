@@ -10,7 +10,7 @@ from engines.decision_engine.decide_once.helpers import (
 
 # --- authoritative DB opener for execution paths ---
 from engines.config_paths import open_auto_db as _adb
-
+from engines.live.live_router import _orders_insert_parent_queued, place_parent_and_hedge
 
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
@@ -403,7 +403,7 @@ def _write_decision(*, run_id, mid, sid, outcome, why, letter,
 
 def log_decision_skip(*, run_id, marketId, selectionId, letter, why, order_id: int | None = None):
     _write_decision(run_id=run_id, mid=marketId, sid=selectionId,
-                    outcome="not_placed", why=why, letter=letter,
+                    outcome="not_PLACED", why=why, letter=letter,
                     order_id=order_id)
 
 # ======================================================================================================
@@ -412,15 +412,25 @@ def log_decision_skip(*, run_id, marketId, selectionId, letter, why, order_id: i
 # 🧩 ACTION: REPLACE ENTIRE FUNCTION
 # 📆 PATCHED: 2025-12-17 — Canonical-schema, non-blocking parent preclaim
 # ======================================================================================================
-def _insert_pending_parent(*,
-                           mid: str,
-                           sid: str,
-                           letter: str,
-                           side: str,
-                           plan: dict,
-                           ctx: dict,
-                           cor: str,
-                           plan_id: Optional[str] = None) -> int | None:
+def _insert_pending_parent(
+    *,
+    run_id: int,
+    market_id: str,
+    selection_id: str,
+    side: str,
+    entry_odds: float,
+    entry_stake: float,
+    cor: str,
+    engine: str,
+    source: str,
+    mode: str = "LIVE",
+    stoploss_mode: str = "BALANCED",
+    plan_id: str | None = None,
+    ctx: dict | None = None,
+    plan: dict | None = None,
+) -> int | None:
+
+
     """
     Insert a PENDING PARENT row into orders.
 
@@ -433,17 +443,13 @@ def _insert_pending_parent(*,
     # -------------------------------
     # REQUIRED FIELDS (FAIL FAST)
     # -------------------------------
-    if not mid or not sid or not cor:
-        raise RuntimeError("placement_preclaim_missing_identity")
+    # --- normalize inputs (CRITICAL) ---
+    plan = plan or {}
+    ctx  = ctx or {}
 
-    if plan.get("px") is None:
-        raise RuntimeError("placement_preclaim_missing_px")
-
-    if plan.get("size") is None:
-        raise RuntimeError("placement_preclaim_missing_size")
-
-    if ctx.get("run_id") is None:
-        raise RuntimeError("placement_preclaim_missing_run_id")
+    mid    = str(market_id)
+    sid    = str(selection_id)
+    letter = str(source)[:1].upper()
 
     # -------------------------------
     # OPEN WRITER (CANONICAL AUTO DB)
@@ -475,12 +481,13 @@ def _insert_pending_parent(*,
                 entry_status,
                 role,
                 source,
+                engine,
                 stoploss_mode,
                 notes,
                 opened_at
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -492,13 +499,16 @@ def _insert_pending_parent(*,
                 str(side),
                 _f(plan.get("px")),
                 _f(plan.get("size")),
-                "PENDING",
+                "QUEUED",
                 "PARENT",
                 str(letter),
+                str(plan.get("engine")),   # ← REQUIRED
                 str(plan.get("stoploss_mode") or "BALANCED").upper(),
                 f"{letter}{trade_index:02d}",
                 datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             )
+
+
         )
 
         con.commit()
@@ -561,6 +571,7 @@ def _cancel_stale_parents(mid: str, sid: str, *, older_than_sec: int = 70) -> No
              AND role IN ('PARENT','parent')   -- be tolerant on value
              AND hedge_of IS NULL
              AND entry_status='PENDING'
+             AND entry_bet_id IS NULL
              AND datetime(opened_at) <= datetime('now','utc', ?)
         """, (str(mid), str(sid), f"-{int(max(15, older_than_sec))} seconds"))
         con.commit()
@@ -597,6 +608,9 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         → Keep full legacy flow (caps, px enrichment, budget, stale cleanup)
         → Direction already upgraded in lanes (MSC-direction-bridge)
     """
+    # 🔑 CRITICAL FIX:
+    # Bind once at function scope to avoid UnboundLocalError
+
 
     from engines.live.live_router import place_parent_and_hedge
     from engines.decision_engine.decide_once import caps
@@ -616,7 +630,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
             run_id=ctx.get("run_id"),
             mid=mid,
             sid=sid,
-            outcome="not_placed",
+            outcome="not_PLACED",
             why="blocked: missing marketId/selectionId",
             letter=str(plan.get("letter") or "?")[:1],
             proposed_odds=plan.get("px"),
@@ -628,7 +642,54 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     plan = dict(plan or {})
     ctx  = dict(ctx or {})
 
-    engine = (ctx.get("engine") or "").upper()
+    # ------------------------------------------------------------------
+    # CHILD EXECUTION FAST-PATH
+    # ------------------------------------------------------------------
+    if plan.get("role") == "CHILD":
+        from engines.live.live_router import _attempt_place_child_with_retry
+        from engines.config_paths import open_auto_db
+
+        child_id = plan.get("child_id")
+        if not child_id:
+            raise RuntimeError("child placement invariant violated: missing child_id")
+
+        # 🔑 ENGINE INHERITANCE (AUTHORITATIVE)
+        if not plan.get("engine"):
+            con = open_auto_db(rw=False)
+            try:
+                row = con.execute("""
+                    SELECT p.engine
+                      FROM orders c
+                      JOIN orders p ON p.id = c.hedge_of
+                     WHERE c.id = ?
+                       AND p.role = 'PARENT'
+                     LIMIT 1
+                """, (int(child_id),)).fetchone()
+            finally:
+                con.close()
+
+            if not row or not row[0]:
+                raise RuntimeError(
+                    f"child placement invariant violated: cannot resolve engine for child_id={child_id}"
+                )
+
+            plan["engine"] = str(row[0])
+
+        ok = _attempt_place_child_with_retry(int(child_id))
+        if not ok:
+            raise RuntimeError(f"child placement failed id={child_id}")
+
+        return child_id
+
+
+
+    engine = plan.get("engine")
+    if not engine:
+        raise RuntimeError("placement invariant violated: missing plan.engine")
+
+    engine = str(engine).upper()
+
+
     is_msc = engine.startswith("MSC_")
 
     # MSC always supplies correct px / size / direction
@@ -651,8 +712,15 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         plan["letter"] = letter
         plan["customerOrderRef"] = f"{letter}-{uuid.uuid4().hex[:10]}"
 
+        # --- DEFINE cor ONCE (CRITICAL) ---
+        cor = plan["customerOrderRef"]
+
+
         # Preclaim a parent row so Router can upgrade it
-        from engines.live.live_router import _orders_insert_parent_queued
+      
+        engine = plan.get("engine")
+        if not engine:
+            raise RuntimeError("placement invariant violated: missing plan.engine")
 
         pending_id = _orders_insert_parent_queued(
             run_id=ctx.get("run_id"),
@@ -661,20 +729,39 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
             side=side,
             entry_odds=plan.get("px"),
             entry_stake=plan.get("size"),
-            cor=plan["customerOrderRef"],
+            cor=cor,
+            engine=plan.get("engine"),
             source=letter,
+            stop_loss_px=plan.get("stop_loss_px"),
+      
         )
+
         if pending_id is None:
             _write_decision(
                 run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                outcome="not_placed", why="msc_preclaim_fail",
+                outcome="not_PLACED", why="msc_preclaim_fail",
                 letter=letter
             )
             return None
 
         # Route directly through LiveRouter exactly as MSC intended
-        result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
-        bet_id, cref, child_id = None, None, None
+        #result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
+        
+        # --- EXECUTE PARENT (EXPLICIT, CANONICAL) --------------------
+        bet_id, parent_ref = place_parent_and_hedge(
+            market_id=mid,
+            selection_id=sid,
+            side=side,
+            entry_odds=float(plan["px"]),
+            stake=float(plan["size"]),
+            engine=plan["engine"],
+            source=letter,
+            run_id=ctx.get("run_id"),
+            parent_persistence="LAPSE",
+            _name=name,
+            _plan=plan,
+            _ctx=ctx,
+        )
 
         try:
             if isinstance(result, (list, tuple)):
@@ -718,7 +805,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
 
                 _write_decision(
                     run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                    outcome="placed", why="ok(msc)", letter=letter,
+                    outcome="PLACED", why="ok(msc)", letter=letter,
                     proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
                     order_id=pending_id, meta={"cref": cref, "bet_id": bet_id}
                 )
@@ -731,21 +818,23 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                        SET entry_status='FAILED', status='FAILED',
                            closed_at=datetime('now','utc'),
                            notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                     WHERE customerOrderRef=?""",
-                    (str(plan["customerOrderRef"]),))
+                     WHERE customerOrderRef=?
+                       AND entry_bet_id IS NULL
+                """, (str(plan["customerOrderRef"]),))
             else:
                 con.execute("""
                     UPDATE orders
                        SET entry_status='FAILED',
                            closed_at=datetime('now','utc'),
                            notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                     WHERE customerOrderRef=?""",
-                    (str(plan["customerOrderRef"]),))
+                     WHERE customerOrderRef=?
+                       AND entry_bet_id IS NULL
+                """, (str(plan["customerOrderRef"]),))
             con.commit()
 
             _write_decision(
                 run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                outcome="not_placed", why="router_fail", letter=letter,
+                outcome="not_PLACED", why="router_fail", letter=letter,
                 proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
                 order_id=pending_id, meta={"cref": cref}
             )
@@ -811,7 +900,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
             run_id=ctx.get("run_id"),
             mid=mid,
             sid=sid,
-            outcome="not_placed",
+            outcome="not_PLACED",
             why=reason,
             letter=str(plan.get("letter") or "?")[:1],
             proposed_odds=plan.get("px"),
@@ -837,7 +926,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
             run_id=ctx.get("run_id"),
             mid=mid,
             sid=sid,
-            outcome="not_placed",
+            outcome="not_PLACED",
             why=cap_reason,
             letter=letter,
             proposed_odds=plan.get("px"),
@@ -850,13 +939,25 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     # --- Preclaim
     cor = f"{letter}-{uuid.uuid4().hex[:10]}"
     plan["customerOrderRef"] = cor
-    pending_id = _insert_pending_parent(
-        mid=mid, sid=sid, letter=letter, side=side,
-        plan=plan, ctx=ctx, cor=cor, plan_id=plan.get("plan_id")
+
+    pending_id = _orders_insert_parent_queued(
+        run_id=ctx.get("run_id"),
+        market_id=mid,
+        selection_id=sid,
+        side=side,
+        entry_odds=plan.get("px"),
+        entry_stake=plan.get("size"),
+        cor=cor,
+        engine=plan.get("engine"),
+        source=letter,
+        stop_loss_px=plan.get("stop_loss_px"),
+
     )
+
+
     if pending_id is None:
         _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                        outcome="not_placed", why="cap_preclaim_failed",
+                        outcome="not_PLACED", why="cap_preclaim_failed",
                         letter=letter)
         return None
 
@@ -882,25 +983,27 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     try:
         con = _auto_db_writer()
         if bet_id:
-            # placed
+            # PLACED
             if _orders_has_status():
                 con.execute("""
                   UPDATE orders
                      SET entry_bet_id=?, entry_status='PLACED', status='PLACED',
                          customer_ref=COALESCE(?, customer_ref)
-                   WHERE customerOrderRef=?""",
-                   (str(bet_id), str(cref), str(cor)))
+                   WHERE customerOrderRef=?
+                     AND entry_bet_id IS NOT NULL
+                """, (str(bet_id), str(cref), str(cor)))
             else:
                 con.execute("""
                   UPDATE orders
                      SET entry_bet_id=?, entry_status='PLACED',
                          customer_ref=COALESCE(?, customer_ref)
-                   WHERE customerOrderRef=?""",
-                   (str(bet_id), str(cref), str(cor)))
+                   WHERE customerOrderRef=?
+                     AND entry_bet_id IS NOT NULL
+                """, (str(bet_id), str(cref), str(cor)))
             con.commit()
 
             _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                            outcome="placed", why="ok", letter=letter,
+                            outcome="PLACED", why="ok", letter=letter,
                             proposed_odds=plan["px"], proposed_stake=plan["size"],
                             order_id=pending_id)
             return bet_id
@@ -913,18 +1016,22 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                      SET entry_status='FAILED', status='FAILED',
                          closed_at=datetime('now','utc'),
                          notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                   WHERE customerOrderRef=?""", (str(cor),))
+                   WHERE customerOrderRef=? 
+                     AND entry_bet_id IS NULL 
+                """, (str(cor),))
             else:
                 con.execute("""
                   UPDATE orders
                      SET entry_status='FAILED',
                          closed_at=datetime('now','utc'),
                          notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                   WHERE customerOrderRef=?""", (str(cor),))
+                   WHERE customerOrderRef=? 
+                     AND entry_bet_id IS NULL
+                """, (str(cor),))
             con.commit()
 
             _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                            outcome="not_placed", why="router_fail", letter=letter,
+                            outcome="not_PLACED", why="router_fail", letter=letter,
                             proposed_odds=plan["px"], proposed_stake=plan["size"],
                             order_id=pending_id)
             return None
