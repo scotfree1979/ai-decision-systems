@@ -2998,6 +2998,7 @@ from engines.mastery import event_sink
 # --- REPLACE the function header with this (note the extra params) ---
 def place_parent_and_hedge(
     *,
+    parent_ref = None,   # ✅ MUST exist before try
     market_id: str | None = None,
     selection_id: str | None = None,
     side: str | None = None,
@@ -3159,7 +3160,7 @@ def place_parent_and_hedge(
             _log_event(
                 "ERROR",
                 "live_router",
-                f"[PARENT VERIFY FAIL] missing parent_ref={parent_ref} "
+                f"[PARENT VERIFY ERROR] ref={parent_ref or 'UNKNOWN'} err={e}"
                 f"mid={market_id} sid={selection_id}"
             )
             return None, parent_ref

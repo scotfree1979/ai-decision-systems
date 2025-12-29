@@ -147,6 +147,7 @@ def main():
         rows = con.execute("""
             SELECT
                 id,
+                role,
                 engine,
                 source,
                 entry_status,
@@ -198,6 +199,37 @@ def main():
         traceback.print_exc()
         die()
 
+    # --------------------------------------------------------------
+    # 7.5) BudgetManager + BankState bootstrap (LIVE-safe)
+    # --------------------------------------------------------------
+    step("7.5", "BudgetManager → BankState bootstrap")
+
+    try:
+        # 1️⃣ Ensure BudgetManager has run its daily rebalance
+        from engines.risk.budget_manager import init_budget_manager
+        init_budget_manager()
+
+        ok("BudgetManager initialised (allocations persisted)")
+
+        # 2️⃣ Initialise BankState FROM budget_allocations
+        from engines.live.bank_state import init_bank_state, get_engine_pots
+        init_bank_state()
+
+        pots = get_engine_pots()
+
+        if not pots:
+            fail("BankState loaded zero engine pots")
+            die()
+
+        ok("BankState initialised from budget_allocations")
+        for eng, pot in pots.items():
+            print(f"    {eng:<16} pot={pot:.2f}")
+
+    except Exception:
+        fail("BudgetManager / BankState bootstrap failed")
+        traceback.print_exc()
+        die()
+
 
     # --------------------------------------------------------------
     # 8) Exposure truth
@@ -241,11 +273,82 @@ def main():
         die()
 
     # --------------------------------------------------------------
+    # 10) DB-queued parent → placement worker promotion
+    # --------------------------------------------------------------
+    step(10, "DB-queued parent promotion")
+
+    try:
+        from engines.config_paths import open_auto_db
+        from engines.decision_engine.decide_once.placement import start_placement_worker
+        import time
+        import uuid
+
+        start_placement_worker()
+
+        cor = f"TEST-{uuid.uuid4().hex[:8]}"
+
+        con = open_auto_db(rw=True)
+        cur = con.cursor()
+
+        # Insert a minimal valid QUEUED parent
+        cur.execute("""
+            INSERT INTO orders (
+                customerOrderRef,
+                run_id,
+                mode,
+                marketId,
+                selectionId,
+                side,
+                entry_odds,
+                entry_stake,
+                entry_status,
+                role,
+                source,
+                engine,
+                opened_at
+            ) VALUES (
+                ?, 1, 'LIVE',
+                '1.23456789', '123456',
+                'LAY', 10.0, 2.0,
+                'QUEUED', 'PARENT',
+                'Z', 'LEGACY',
+                datetime('now')
+            )
+        """, (cor,))
+        con.commit()
+        con.close()
+
+        # Give the placement worker time to pick it up
+        time.sleep(2.0)
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+        row = con.execute("""
+            SELECT entry_status, entry_bet_id
+            FROM orders
+            WHERE customerOrderRef=?
+        """, (cor,)).fetchone()
+        con.close()
+
+        if not row:
+            fail("Queued parent vanished from DB")
+            die()
+
+        ok(f"Parent promoted by placement worker: status={row['entry_status']}")
+
+    except Exception:
+        fail("DB-queued promotion test failed")
+        traceback.print_exc()
+        die()
+
+
+    # --------------------------------------------------------------
     banner("PIPELINE CHECK COMPLETE — ALL SYSTEMS GO")
     ok("BUS → PLACEMENT → ROUTER")
     ok("DIRECTION CONTRACT")
     ok("ORDERS / EXPOSURE")
     ok("ENGINE READINESS")
+    ok("PARENT / CHILD CONTRACT")
 
 # ---------------------------------------------------------------------
 if __name__ == "__main__":

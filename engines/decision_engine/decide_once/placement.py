@@ -10,7 +10,7 @@ from engines.decision_engine.decide_once.helpers import (
 
 # --- authoritative DB opener for execution paths ---
 from engines.config_paths import open_auto_db as _adb
-from engines.live.live_router import _orders_insert_parent_queued, place_parent_and_hedge
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
@@ -39,32 +39,46 @@ _PLACEMENT_EXEC_QUEUE: "queue.Queue[tuple[str, dict, dict]]" = queue.Queue()
 # Placement Execution Worker
 # ------------------------------------------------------------------------------
 def _placement_worker_loop():
-    """
-    Placement execution worker.
-
-    Dequeues (name, plan, ctx) tuples and executes them sequentially
-    using existing placement semantics.
-
-    BEHAVIOUR IS IDENTICAL to the previous LiveRouter worker.
-    Ownership only has moved.
-    """
-    from engines.decision_engine.decide_once.placement import place_from_plan
+    from engines.live.live_router import place_parent_and_hedge
+    from engines.config_paths import open_auto_db
 
     while True:
         try:
-            name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
+            # 🔑 NEW: promote exactly one DB-queued parent
+            con = open_auto_db(rw=True)
+            con.row_factory = sqlite3.Row
+            row = con.execute("""
+                SELECT customerOrderRef, marketId, selectionId, side,
+                       entry_odds, entry_stake, engine, source, run_id
+                  FROM orders
+                 WHERE entry_status='QUEUED'
+                   AND role='PARENT'
+                 ORDER BY opened_at ASC
+                 LIMIT 1
+            """).fetchone()
+            con.close()
 
-            try:
-                place_from_plan(name, plan, ctx)
-            except Exception:
-                print("[PLACEMENT][WORKER][ERR] execution failed")
-                traceback.print_exc()
+            if row:
+                # 🔥 EXECUTE ONCE
+                place_parent_and_hedge(
+                    market_id=row["marketId"],
+                    selection_id=row["selectionId"],
+                    side=row["side"],
+                    entry_odds=row["entry_odds"],
+                    stake=row["entry_stake"],
+                    source=row["source"],
+                    run_id=row["run_id"],
+                    _ctx={"customerOrderRef": row["customerOrderRef"]},
+                )
+                continue  # do NOT block yet
+
+            # fallback to normal queue
+            name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
+            place_from_plan(name, plan, ctx)
 
         except Exception:
-            print("[PLACEMENT][WORKER][ERR] worker loop error")
             traceback.print_exc()
             time.sleep(0.5)
-
 
 # ------------------------------------------------------------------------------
 # Worker bootstrap
@@ -722,6 +736,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         if not engine:
             raise RuntimeError("placement invariant violated: missing plan.engine")
 
+        from engines.live.live_router import _orders_insert_parent_queued
         pending_id = _orders_insert_parent_queued(
             run_id=ctx.get("run_id"),
             market_id=mid,
@@ -939,7 +954,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     # --- Preclaim
     cor = f"{letter}-{uuid.uuid4().hex[:10]}"
     plan["customerOrderRef"] = cor
-
+    from engines.live.live_router import _orders_insert_parent_queued
     pending_id = _orders_insert_parent_queued(
         run_id=ctx.get("run_id"),
         market_id=mid,
