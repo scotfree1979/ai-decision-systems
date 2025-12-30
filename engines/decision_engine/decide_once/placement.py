@@ -567,21 +567,18 @@ def _insert_pending_parent(
     ctx: dict | None = None,
     plan: dict | None = None,
 ) -> int | None:
-
-
     """
-    Insert a PENDING PARENT row into orders.
+    Insert a PARENT row into orders (idempotent).
 
     Contract (STRICT):
     - BUS guarantees all required fields.
     - Placement does NO recovery, NO probing, NO enrichment.
-    - Missing data → fail fast → BUS must be fixed.
+    - customerOrderRef is authoritative and MUST be idempotent.
     """
 
     # -------------------------------
-    # REQUIRED FIELDS (FAIL FAST)
+    # NORMALISE INPUTS (NO MUTATION)
     # -------------------------------
-    # --- normalize inputs (CRITICAL) ---
     plan = plan or {}
     ctx  = ctx or {}
 
@@ -603,67 +600,73 @@ def _insert_pending_parent(
         plan["trade_index"] = trade_index
 
         # -------------------------------
-        # INSERT PARENT ORDER (CANONICAL)
+        # INSERT PARENT (IDEMPOTENT)
         # -------------------------------
-        cur.execute(
-            """
-            INSERT INTO orders (
-                customerOrderRef,
-                run_id,
-                mode,
-                marketId,
-                selectionId,
-                side,
-                entry_odds,
-                entry_stake,
-                entry_status,
-                role,
-                source,
-                engine,
-                stoploss_mode,
-                notes,
-                opened_at
-            )
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
-            (
-                str(cor),
-                _i(ctx.get("run_id")),
-                str(ctx.get("mode") or "LIVE"),
-                str(mid),
-                str(sid),
-                str(side),
-                _f(plan.get("px")),
-                _f(plan.get("size")),
-                "QUEUED",
-                "PARENT",
-                str(letter),
-                str(plan.get("engine")),   # ← REQUIRED
-                str(plan.get("stoploss_mode") or "BALANCED").upper(),
-                f"{letter}{trade_index:02d}",
-                datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        try:
+            cur.execute(
+                """
+                INSERT INTO orders (
+                    customerOrderRef,
+                    run_id,
+                    mode,
+                    marketId,
+                    selectionId,
+                    side,
+                    entry_odds,
+                    entry_stake,
+                    entry_status,
+                    role,
+                    source,
+                    engine,
+                    stoploss_mode,
+                    notes,
+                    opened_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', 'PARENT',
+                    ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    str(cor),
+                    int(run_id),
+                    str(mode),
+                    str(mid),
+                    str(sid),
+                    str(side),
+                    float(entry_odds),
+                    float(entry_stake),
+                    str(letter),
+                    str(engine),
+                    str(stoploss_mode).upper(),
+                    f"{letter}{trade_index:02d}",
+                    datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                )
             )
 
+            pending_id = int(cur.lastrowid)
 
-        )
+        except sqlite3.IntegrityError:
+            # --------------------------------------------------
+            # 🔁 IDEMPOTENT REUSE (EXPECTED + CORRECT)
+            # --------------------------------------------------
+            row = cur.execute(
+                """
+                SELECT id
+                  FROM orders
+                 WHERE customerOrderRef = ?
+                   AND role = 'PARENT'
+                 LIMIT 1
+                """,
+                (str(cor),)
+            ).fetchone()
+
+            if not row:
+                raise  # true corruption — invariant violation
+
+            pending_id = int(row["id"])
 
         con.commit()
-        pending_id = int(cur.lastrowid)
-        # 🔑 THIS IS THE MISSING STEP
-        # NOTE: Parent is inserted directly as QUEUED (promotion no-op)
-        _promote_pending_to_queued(pending_id)
-        # -------------------------------
-        # PLAN LEDGER LINK (IF PRESENT)
-        # -------------------------------
-        if plan_id and pending_id:
-            try:
-                mark_open_parent(plan_id, pending_id)
-            except Exception:
-                # ledger failure must NOT block placement
-                pass
-
         return pending_id
 
     except Exception as e:
@@ -676,6 +679,7 @@ def _insert_pending_parent(
             con.close()
         except Exception:
             pass
+
 
 def _promote_pending_to_queued(pending_id: int) -> None:
     con = _auto_db_writer()

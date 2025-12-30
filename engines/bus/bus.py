@@ -950,11 +950,21 @@ class DecisionBus:
             # PHASE 3 — ROUTING (BEGINS)
             # ==================================================
 
+            import uuid
 
             # Routing
             from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
             for eng, p, ctx in final_plans:
+
+                # ------------------------------------------------------------------
+                # AUTHORITATIVE CUSTOMER ORDER REF (BUS OWNERSHIP)
+                # ------------------------------------------------------------------
+                if not p.get("customerOrderRef"):
+                    p["customerOrderRef"] = (
+                        f"{p['engine'][:1]}-{uuid.uuid4().hex[:10]}"
+                    )
+
                 ctx["engine"] = p["engine"]          # authoritative stamp
                 enqueue_for_placement(p["engine"], p, ctx)
 

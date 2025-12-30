@@ -1766,7 +1766,7 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         con.commit()
 
         # --------------------------------------------------
-        # 🧩 GUARANTEE CHILD QUEUED EXISTS (DB-FIRST)
+        # 🧩 GUARANTEE CHILD QUEUED EXISTS (DB-FIRST, NO LOGIC)
         # --------------------------------------------------
         child_exists = _q_retry(cur, """
             SELECT 1
@@ -1777,40 +1777,45 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         """, (int(parent["id"]),)).fetchone()
 
         if not child_exists:
-            # --------------------------------------------------
-            # CHILD MUST INHERIT FROM PARENT (NO RECOMPUTATION)
-            # --------------------------------------------------
-            parent_side   = (parent["side"] or "").upper()
-            entry_odds    = float(parent["entry_odds"])
-            entry_stake   = float(parent["entry_stake"])
-
-            # Inherit opposite side ONLY
-            hedge_side = "BACK" if parent_side == "LAY" else "LAY"
-
-            # Inherit odds anchor; ticks are applied later by router execution
-            hedge_odds = float(entry_odds)
-
-            # Stake is the ONLY derived value (green-up)
-            hedge_stake = calc_greenup_stake(
-                parent_side,
-                entry_odds,
-                entry_stake,
-                hedge_odds
-            )
-
-            # --------------------------------------------------
-            # INSERT CHILD AS QUEUED (DB-FIRST, NO BETFAIR)
-            # --------------------------------------------------
-            _orders_insert_child_queued(
-                parent_cor=str(cor),
-                market_id=str(parent["marketId"]),
-                selection_id=str(parent["selectionId"]),
-                side=hedge_side,
-                odds=float(hedge_odds),
-                stake=float(hedge_stake),
-                source=str(parent["source"]),
-                exit_kind="HEDGE",
-            )
+            # Child inherits EVERYTHING from parent
+            _q_retry(cur, """
+                INSERT INTO orders (
+                    customerOrderRef,
+                    run_id,
+                    mode,
+                    marketId,
+                    selectionId,
+                    side,
+                    entry_odds,
+                    entry_stake,
+                    entry_status,
+                    role,
+                    hedge_of,
+                    source,
+                    engine,
+                    opened_at
+                )
+                SELECT
+                    'CHILD-' || customerOrderRef,
+                    run_id,
+                    mode,
+                    marketId,
+                    selectionId,
+                    CASE
+                        WHEN UPPER(side)='LAY' THEN 'BACK'
+                        ELSE 'LAY'
+                    END,
+                    entry_odds,
+                    entry_stake,
+                    'QUEUED',
+                    'CHILD',
+                    id,
+                    source,
+                    engine,
+                    datetime('now','utc')
+                FROM orders
+                WHERE id=?
+            """, (int(parent["id"]),))
 
         # --------------------------------------------------
         # Diagnostic invariant (safe)
