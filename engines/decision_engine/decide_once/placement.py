@@ -163,6 +163,8 @@ def start_placement_worker():
 
     print("[PLACEMENT] execution worker started")
 
+
+
 # ------------------------------------------------------------
 # 0) Canonical MID/SID resolution (EARLY — required by gates)
 # ------------------------------------------------------------
@@ -749,40 +751,56 @@ def _cancel_stale_parents(mid: str, sid: str, *, older_than_sec: int = 70) -> No
 
 
 # ---------- main entry
-# === PATCH START ============================================================
+# ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
 # 🔎 SEARCH: ^def place_from_plan\(name: str, plan: dict, ctx: dict\)
-# 🛠 ACTION: Replace entire function with MSC-pass-through + legacy-safe placement
-# 📆 PATCHED: 2025-12-11Z — CTXv7 alignment, MSC pass-through, legacy preservation
-# ============================================================================
+# 🛠 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2025-12-30 — Unified placement boundary (MSC + Legacy)
+#
+# WHY THIS EXISTS
+# ---------------
+# This function is now a *pure boundary* between:
+#
+#   BUS / Decision Engines
+#        ↓
+#   Placement (this function)
+#        ↓
+#   DB-first enqueue (orders.role='PARENT', entry_status='QUEUED')
+#        ↓
+#   PlacementWorker → LiveRouter → Betfair
+#
+# What this function DOES:
+# ------------------------
+# • Validates minimum shape (marketId, selectionId, engine)
+# • Applies ONE shared affordability gate (BankState)
+# • Normalises minimal compatibility fields (letter, direction)
+# • Enqueues ALL engines (LEGACY + MSC_*) through the SAME path
+#
+# What this function DOES NOT DO:
+# -------------------------------
+# • Does NOT place bets
+# • Does NOT mutate orders to PLACED / MATCHED
+# • Does NOT create children
+# • Does NOT talk to Betfair
+# • Does NOT contain legacy inline execution logic
+#
+# All execution, retries, hedging, and lifecycle transitions now live
+# exclusively in LiveRouter + worker threads.
+#
+# This removes historical duplication, dead code, and split execution paths.
+# ======================================================================================================
 
 def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     """
-    Unified placement handler (MSC-aware)
-    -------------------------------------
+    Unified placement boundary (engine-agnostic).
 
-    • MSC engines (MSC_EXPLORATORY / MSC_RISK / MSC_INPLAY)
-        → DO NOT apply legacy placement logic
-        → DO NOT enrich px / size / direction
-        → DO NOT run caps or budget checks
-        → DO NOT stale-cancel
-        → They already contain full v7 intelligence and must pass straight
-          to LiveRouter untouched.
-
-    • Legacy engines
-        → Keep full legacy flow (caps, px enrichment, budget, stale cleanup)
-        → Direction already upgraded in lanes (MSC-direction-bridge)
+    • LEGACY and MSC engines are treated identically at placement time.
+    • All engines enqueue into the same DB-backed execution queue.
+    • Any future engine (POKER, MT4, etc.) plugs in here automatically.
     """
-    # 🔑 CRITICAL FIX:
-    # Bind once at function scope to avoid UnboundLocalError
-
-
-    from engines.live.live_router import place_parent_and_hedge
-    from engines.decision_engine.decide_once import caps
-    from engines.config_paths import auto_conn
 
     # ------------------------------------------------------------
-    # 0) Canonical MID / SID resolution (MUST be first)
+    # 0) Canonical MID / SID resolution (HARD REQUIREMENT)
     # ------------------------------------------------------------
     mid, sid = _canon_ids(plan)
     if not mid or not sid:
@@ -797,19 +815,21 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
             sid=sid,
             outcome="not_PLACED",
             why="blocked: missing marketId/selectionId",
-            letter=str(plan.get("letter") or "?")[:1],
-            proposed_odds=plan.get("px"),
-            proposed_stake=plan.get("size"),
+            letter=str((plan or {}).get("letter") or (ctx or {}).get("letter") or "?")[:1],
+            proposed_odds=(plan or {}).get("px"),
+            proposed_stake=(plan or {}).get("size"),
         )
         return None
 
-    # Normalise objects
+    # ------------------------------------------------------------
+    # Normalise inputs (NO LOGIC, SHAPE ONLY)
+    # ------------------------------------------------------------
     plan = dict(plan or {})
     ctx  = dict(ctx or {})
 
-    # ------------------------------------------------------------------
-    # CHILD EXECUTION FAST-PATH
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # CHILD EXECUTION FAST-PATH (ROUTER-OWNED)
+    # ------------------------------------------------------------
     if plan.get("role") == "CHILD":
         from engines.live.live_router import _attempt_place_child_with_retry
         from engines.config_paths import open_auto_db
@@ -818,7 +838,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         if not child_id:
             raise RuntimeError("child placement invariant violated: missing child_id")
 
-        # 🔑 ENGINE INHERITANCE (AUTHORITATIVE)
+        # Resolve engine from parent if missing (authoritative)
         if not plan.get("engine"):
             con = open_auto_db(rw=False)
             try:
@@ -846,193 +866,33 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
 
         return child_id
 
-
-
-    engine = plan.get("engine")
+    # ------------------------------------------------------------
+    # ENGINE IS REQUIRED BEYOND THIS POINT
+    # ------------------------------------------------------------
+    engine = plan.get("engine") or ctx.get("engine")
     if not engine:
-        raise RuntimeError("placement invariant violated: missing plan.engine")
+        raise RuntimeError("placement invariant violated: missing engine")
 
     engine = str(engine).upper()
+    ctx["engine"] = engine
+    plan["engine"] = engine
 
+    # ------------------------------------------------------------
+    # Legacy compatibility shims (NON-BEHAVIOURAL)
+    # ------------------------------------------------------------
+    # Letter fallback (older callers)
+    if "letter" not in plan:
+        plan["letter"] = (ctx.get("letter") or name or "A")[:1].upper()
 
-    is_msc = engine.startswith("MSC_")
-
-    # MSC always supplies correct px / size / direction
-    # Legacy may not — determine early
+    # Direction fallback (MSC safety)
     direction = str(plan.get("direction") or "LAY->BACK").upper()
-    side = "LAY" if direction.startswith("LAY") else "BACK"
+    plan["direction"] = direction
+    plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
 
     # ------------------------------------------------------------
-    # 2) MSC ENGINE FAST-PATH (NO LEGACY LOGIC)
+    # SHARED PLACEMENT GATE (ALL ENGINES)
     # ------------------------------------------------------------
-    if is_msc:
-
-        # --- MSC LETTER SELECTION -----------------------------------------
-        msc_mode = plan.get("msc_mode") or ctx.get("msc_mode")
-        if   msc_mode == "EXPLORATORY": letter = "D"
-        elif msc_mode == "RISK":        letter = "J"
-        elif msc_mode == "INPLAY":      letter = "V"
-        else:                           letter = "D"
-
-        plan["letter"] = letter
-        if not plan.get("customerOrderRef"):
-            plan["customerOrderRef"] = f"{letter}-{uuid.uuid4().hex[:10]}"
-
-        # --- DEFINE cor ONCE (CRITICAL) ---
-        cor = plan["customerOrderRef"]
-
-
-        # Preclaim a parent row so Router can upgrade it
-      
-        engine = plan.get("engine")
-        if not engine:
-            raise RuntimeError("placement invariant violated: missing plan.engine")
-
-
-        # Route directly through LiveRouter exactly as MSC intended
-        #result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
-        
-        # --- EXECUTE PARENT (EXPLICIT, CANONICAL) --------------------
-        bet_id, parent_ref = place_parent_and_hedge(
-            market_id=mid,
-            selection_id=sid,
-            side=side,
-            entry_odds=float(plan["px"]),
-            stake=float(plan["size"]),
-            engine=plan["engine"],
-            source=letter,
-            run_id=ctx.get("run_id"),
-            parent_persistence="LAPSE",
-            _name=name,
-            _plan=plan,
-            _ctx=ctx,
-        )
-
-        cref = plan["customerOrderRef"]
-        child_id = None
-
-
-        # Ledger: child
-        try:
-            if child_id:
-                mark_child(plan.get("plan_id"), child_id)
-        except Exception:
-            pass
-
-        # --- Upgrade order row --------------------------------------------
-        con = _auto_db_writer()
-        try:
-            if bet_id:
-                if _orders_has_status():
-                    con.execute("""
-                        UPDATE orders
-                           SET entry_bet_id=?,
-                               entry_status='PLACED', status='PLACED',
-                               customer_ref=COALESCE(?, customer_ref)
-                         WHERE customerOrderRef=?""",
-                        (str(bet_id), str(cref), str(plan["customerOrderRef"])))
-                else:
-                    con.execute("""
-                        UPDATE orders
-                           SET entry_bet_id=?,
-                               entry_status='PLACED',
-                               customer_ref=COALESCE(?, customer_ref)
-                         WHERE customerOrderRef=?""",
-                        (str(bet_id), str(cref), str(plan["customerOrderRef"])))
-                con.commit()
-
-                _write_decision(
-                    run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                    outcome="PLACED", why="ok(msc)", letter=letter,
-                    proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
-                    meta={"cref": cref, "bet_id": bet_id}
-                )
-                return bet_id
-
-            # Router failed
-            if _orders_has_status():
-                con.execute("""
-                    UPDATE orders
-                       SET entry_status='FAILED', status='FAILED',
-                           closed_at=datetime('now','utc'),
-                           notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                     WHERE customerOrderRef=?
-                       AND entry_bet_id IS NULL
-                """, (str(plan["customerOrderRef"]),))
-            else:
-                con.execute("""
-                    UPDATE orders
-                       SET entry_status='FAILED',
-                           closed_at=datetime('now','utc'),
-                           notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                     WHERE customerOrderRef=?
-                       AND entry_bet_id IS NULL
-                """, (str(plan["customerOrderRef"]),))
-            con.commit()
-
-            _write_decision(
-                run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                outcome="not_PLACED", why="router_fail", letter=letter,
-                proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
-                meta={"cref": cref}
-            )
-            return None
-
-        except Exception as e:
-            con.rollback()
-            print(f"[MSC][ERR] finalize failed mid={mid} sid={sid}: {e}")
-            return None
-        finally:
-            con.close()
-
-    # =====================================================================
-    # 3) LEGACY ENGINE PLACEMENT (FULL PIPELINE)
-    # =====================================================================
-
-    # --- Legacy letter resolution (required before any CAP or PX logic) ---
-    letter = (str(
-        plan.get("letter") or
-        ctx.get("letter") or
-        name or "A"
-    )[:1]).upper()
-
-    plan["letter"] = letter
-
-# ======================================================================================================
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 ANCHOR: Legacy placement — stale cleanup
-# 🧩 ACTION: DISABLE
-# 📆 PATCHED: 2025-12-17 — Placement is non-mutating pre-router
-# ======================================================================================================
-
-    # NOTE:
-    # Stale cleanup is no longer placement responsibility.
-    # Router handles lifecycle reconciliation.
-    # _cancel_stale_parents(mid, sid, older_than_sec=70)
-
-# ======================================================================================================
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 ANCHOR: Legacy placement — price enrichment block
-# 🧩 ACTION: REPLACE
-# 📆 PATCHED: 2025-12-17 — Trust BUS-normalized px (non-blocking placement)
-# ======================================================================================================
-
-    # --- px is guaranteed by BUS ---
-    try:
-        plan["px"] = float(plan.get("px"))
-    except Exception:
-        plan["px"] = 0.0
-
-    plan["size"] = float(plan.get("size") or 2.0)
-
-    # Do NOT block here — decision logging handles failures
-
-    # ======================================================================
-    # PLACEMENT GATE — DELEGATED (NO LIFECYCLE LOGIC HERE)
-    # ======================================================================
-
     ok, reason = placement_affordable(plan, ctx)
-
     if not ok:
         _write_decision(
             run_id=ctx.get("run_id"),
@@ -1046,35 +906,9 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         )
         return None
 
-    # ======================================================================
-    # END PLACEMENT GATE
-    # ======================================================================
-    # --- CAP gate
-# ======================================================================================================
-# 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 ANCHOR: Legacy placement — CAP gate
-# 🧩 ACTION: MODIFY (non-blocking)
-# 📆 PATCHED: 2025-12-17 — CAP v8 diagnostic only
-# ======================================================================================================
-
-    ok_cap, cap_reason, cap_metrics = caps.cap_ok_v8(mid, sid, letter)
-
-    if not ok_cap:
-        _write_decision(
-            run_id=ctx.get("run_id"),
-            mid=mid,
-            sid=sid,
-            outcome="not_PLACED",
-            why=cap_reason,
-            letter=letter,
-            proposed_odds=plan.get("px"),
-            proposed_stake=plan.get("size"),
-            meta={"cap": cap_metrics}
-        )
-        # Do NOT return — continue to router
-
-
-    # --- Router (legacy)
+    # ------------------------------------------------------------
+    # FINAL STEP: UNIFIED ENQUEUE (SINGLE EXECUTION PATH)
+    # ------------------------------------------------------------
     enqueue_for_placement(name, plan, ctx)
     return None
 

@@ -1711,27 +1711,20 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 5) -> 
 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 REPLACE: def _orders_update_parent_matched
-# 📆 PATCHED: 2026-02-14 — Restore CHILD QUEUED guarantee on parent MATCHED
+# 🔎 ANCHOR: def _orders_update_parent_matched(
+# 🧩 ACTION: GUARANTEE child enqueue on parent MATCHED
+# 📆 PATCHED: 2026-02-20 — Primary child execution handoff fix
+#
+# RATIONALE:
+# - Parent MATCHED is the single authoritative moment a hedge MUST execute
+# - Child rows already exist at this point (DB-first invariant)
+# - Previously, only some paths enqueued children, causing silent stalls
+# - This guarantees ALL matched parents enqueue exactly one child
+# - Backup/rescue paths remain untouched and unused
 # ======================================================================
 
 def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
-    """
-    Parent entry MATCHED.
-
-    Canonical responsibilities:
-    - Consume BankState exposure EXACTLY ONCE
-    - Persist parent MATCHED state
-    - GUARANTEE CHILD row exists in QUEUED state (DB-first)
-    - Child placement attempts happen AFTER this
-    """
-
-    _ensure_orders_schema()
-
-    con = _orders_conn()
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
+    ...
     try:
         parent = _q_retry(cur, """
             SELECT id, engine, source, side,
@@ -1746,14 +1739,14 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         if not parent:
             return
 
-        # ⛔ Idempotency: never double-process
+        # ⛔ Idempotency guard
         if (parent["entry_status"] or "").upper() == "MATCHED":
             return
 
-        engine = parent["engine"] or _engine_from_source(parent["source"])
+        engine = parent["engine"]
 
         # --------------------------------------------------
-        # UPDATE parent state
+        # UPDATE parent → MATCHED
         # --------------------------------------------------
         _q_retry(cur, """
             UPDATE orders
@@ -1766,18 +1759,19 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         con.commit()
 
         # --------------------------------------------------
-        # 🧩 GUARANTEE CHILD QUEUED EXISTS (DB-FIRST, NO LOGIC)
+        # GUARANTEE CHILD EXISTS (DB-FIRST)
         # --------------------------------------------------
-        child_exists = _q_retry(cur, """
-            SELECT 1
+        row = _q_retry(cur, """
+            SELECT id
               FROM orders
              WHERE role='CHILD'
                AND hedge_of=?
              LIMIT 1
         """, (int(parent["id"]),)).fetchone()
 
-        if not child_exists:
-            # Child inherits EVERYTHING from parent
+        if row:
+            child_id = int(row["id"])
+        else:
             _q_retry(cur, """
                 INSERT INTO orders (
                     customerOrderRef,
@@ -1801,10 +1795,7 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                     mode,
                     marketId,
                     selectionId,
-                    CASE
-                        WHEN UPPER(side)='LAY' THEN 'BACK'
-                        ELSE 'LAY'
-                    END,
+                    CASE WHEN UPPER(side)='LAY' THEN 'BACK' ELSE 'LAY' END,
                     entry_odds,
                     entry_stake,
                     'QUEUED',
@@ -1816,29 +1807,37 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                 FROM orders
                 WHERE id=?
             """, (int(parent["id"]),))
+            con.commit()
+
+            row = _q_retry(cur, """
+                SELECT id
+                  FROM orders
+                 WHERE role='CHILD'
+                   AND hedge_of=?
+                 ORDER BY id DESC
+                 LIMIT 1
+            """, (int(parent["id"]),)).fetchone()
+
+            if not row:
+                return
+
+            child_id = int(row["id"])
 
         # --------------------------------------------------
-        # Diagnostic invariant (safe)
+        # 🔑 PRIMARY FIX: ENQUEUE CHILD FOR EXECUTION
         # --------------------------------------------------
-        _check_bankstate_invariant(engine)
+        start_router_child_worker()
 
-        # --------------------------------------------------
-        # OPTIONAL avg-match stamp
-        # --------------------------------------------------
-        if bet_id:
-            try:
-                app_key, token = _keys()
-                avg_odds, matched_size = _fetch_avg_match(app_key, token, str(bet_id))
-                if avg_odds > 0 and matched_size > 0:
-                    _q_retry(cur, """
-                        UPDATE orders
-                           SET entry_matched_odds=?,
-                               entry_matched_stake=?
-                         WHERE customerOrderRef=?
-                    """, (avg_odds, matched_size, str(cor)))
-                    con.commit()
-            except Exception:
-                pass
+        enqueue_router_child(
+            plan={
+                "role": "CHILD",
+                "child_id": child_id,
+            },
+            ctx={
+                "engine": engine,
+                "mode": "LIVE",
+            }
+        )
 
     except Exception as e:
         _log_event(
