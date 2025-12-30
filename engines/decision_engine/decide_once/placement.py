@@ -160,38 +160,118 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
     except Exception as e:
         return False, f"gate_error:{e}"
 
-
-# ======================================================================================================
+# =====================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
-# 🔎 ANCHOR: def enqueue_for_placement(name: str, plan: dict, ctx: dict)
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2025-12-18 — Non-blocking enqueue + worker auto-bootstrap
-# ======================================================================================================
+# 🔎 SEARCH: def enqueue_for_placement(name: str, plan: dict, ctx: dict):
+# 📆 PATCHED: 2025-12-29 — Minimal canonicalization at placement boundary (DB-first)
+#
+# PURPOSE:
+# - Placement enqueue is the ownership boundary
+# - Canonicalize *shape only* (not logic)
+# - Immediately create PARENT / QUEUED row
+# - Eliminate downstream blockers permanently
+# =====================================================================================
 
 def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     """
-    Enqueue a plan for placement execution.
+    Placement enqueue (canonical boundary).
 
-    CRITICAL:
-    - MUST NOT block BUS
-    - Placement failure must never stall tick loop
+    CONTRACT:
+    - Shape-only canonicalization
+    - DB-first parent preclaim
+    - No enrichment, no gating, no decisions
     """
 
+    # ------------------------------------------------------------------
     # Ensure worker is running (idempotent)
+    # ------------------------------------------------------------------
     try:
         start_placement_worker()
     except Exception as e:
         print(f"[PLACEMENT][WARN] worker start failed: {e}")
 
+    # ------------------------------------------------------------------
+    # 🔑 MINIMAL CANONICALIZATION (SHAPE ONLY)
+    # ------------------------------------------------------------------
+    plan = dict(plan or {})
+    ctx  = dict(ctx or {})
+
+    # IDs
+    plan["marketId"]    = plan.get("marketId")    or ctx.get("marketId")
+    plan["selectionId"] = plan.get("selectionId") or ctx.get("selectionId")
+
+    if not plan["marketId"] or not plan["selectionId"]:
+        print("[PLACEMENT][DROP] missing marketId/selectionId")
+        return
+
+    # Engine (authoritative from BUS)
+    engine = plan.get("engine")
+    if not engine:
+        print("[PLACEMENT][DROP] missing engine")
+        return
+    plan["engine"] = str(engine)
+
+    # Letter / source (audit + DB)
+    letter = (
+        plan.get("letter")
+        or ctx.get("letter")
+        or plan["engine"][:1]
+    )
+    plan["letter"] = str(letter)[:1].upper()
+
+    # Direction → side
+    direction = str(plan.get("direction") or "LAY->BACK").upper()
+    plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
+
+    # px / size (shape only)
     try:
-        # Non-blocking enqueue — BUS must never wait
+        plan["px"] = float(plan.get("px"))
+        plan["size"] = float(plan.get("size"))
+    except Exception:
+        print("[PLACEMENT][DROP] invalid px/size")
+        return
+
+    # customerOrderRef (stable identity)
+    if not plan.get("customerOrderRef"):
+        plan["customerOrderRef"] = f"{plan['letter']}-{uuid.uuid4().hex[:10]}"
+
+
+    # ------------------------------------------------------------------
+    # 🔑 DB-FIRST PARENT PRECLAIM (AUTHORITATIVE)
+    # ------------------------------------------------------------------
+    try:
+        pending_id = _insert_pending_parent(
+            run_id=ctx.get("run_id"),
+            market_id=str(plan["marketId"]),
+            selection_id=str(plan["selectionId"]),
+            side=plan["side"],
+            entry_odds=plan["px"],
+            entry_stake=plan["size"],
+            cor=plan["customerOrderRef"],
+            engine=plan["engine"],
+            source=plan["letter"],
+            ctx=ctx,
+            plan=plan,
+        )
+
+
+        if pending_id is None:
+            print("[PLACEMENT][DROP] parent preclaim failed")
+            return
+
+        plan["parent_id"] = pending_id
+
+    except Exception as e:
+        print(f"[PLACEMENT][DROP] preclaim error: {e}")
+        return
+
+    # ------------------------------------------------------------------
+    # NON-BLOCKING EXECUTION QUEUE
+    # ------------------------------------------------------------------
+    try:
         _PLACEMENT_EXEC_QUEUE.put_nowait((name, plan, ctx))
     except Exception as e:
-        # Drop-on-failure is correct behaviour here
-        print(
-            "[PLACEMENT][DROP] enqueue failed — BUS continues | "
-            f"engine={name} run_id={ctx.get('run_id')} err={e}"
-        )
+        print(f"[PLACEMENT][DROP] enqueue failed after preclaim: {e}")
 
 
 def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
@@ -724,7 +804,8 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         else:                           letter = "D"
 
         plan["letter"] = letter
-        plan["customerOrderRef"] = f"{letter}-{uuid.uuid4().hex[:10]}"
+        if not plan.get("customerOrderRef"):
+            plan["customerOrderRef"] = f"{letter}-{uuid.uuid4().hex[:10]}"
 
         # --- DEFINE cor ONCE (CRITICAL) ---
         cor = plan["customerOrderRef"]
@@ -736,28 +817,6 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         if not engine:
             raise RuntimeError("placement invariant violated: missing plan.engine")
 
-        from engines.live.live_router import _orders_insert_parent_queued
-        pending_id = _orders_insert_parent_queued(
-            run_id=ctx.get("run_id"),
-            market_id=mid,
-            selection_id=sid,
-            side=side,
-            entry_odds=plan.get("px"),
-            entry_stake=plan.get("size"),
-            cor=cor,
-            engine=plan.get("engine"),
-            source=letter,
-            stop_loss_px=plan.get("stop_loss_px"),
-      
-        )
-
-        if pending_id is None:
-            _write_decision(
-                run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                outcome="not_PLACED", why="msc_preclaim_fail",
-                letter=letter
-            )
-            return None
 
         # Route directly through LiveRouter exactly as MSC intended
         #result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
@@ -822,7 +881,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                     run_id=ctx.get("run_id"), mid=mid, sid=sid,
                     outcome="PLACED", why="ok(msc)", letter=letter,
                     proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
-                    order_id=pending_id, meta={"cref": cref, "bet_id": bet_id}
+                    meta={"cref": cref, "bet_id": bet_id}
                 )
                 return bet_id
 
@@ -851,7 +910,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
                 run_id=ctx.get("run_id"), mid=mid, sid=sid,
                 outcome="not_PLACED", why="router_fail", letter=letter,
                 proposed_odds=plan.get("px"), proposed_stake=plan.get("size"),
-                order_id=pending_id, meta={"cref": cref}
+                meta={"cref": cref}
             )
             return None
 
@@ -951,117 +1010,9 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
         # Do NOT return — continue to router
 
 
-    # --- Preclaim
-    cor = f"{letter}-{uuid.uuid4().hex[:10]}"
-    plan["customerOrderRef"] = cor
-    from engines.live.live_router import _orders_insert_parent_queued
-    pending_id = _orders_insert_parent_queued(
-        run_id=ctx.get("run_id"),
-        market_id=mid,
-        selection_id=sid,
-        side=side,
-        entry_odds=plan.get("px"),
-        entry_stake=plan.get("size"),
-        cor=cor,
-        engine=plan.get("engine"),
-        source=letter,
-        stop_loss_px=plan.get("stop_loss_px"),
-
-    )
-
-
-    if pending_id is None:
-        _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                        outcome="not_PLACED", why="cap_preclaim_failed",
-                        letter=letter)
-        return None
-
     # --- Router (legacy)
-    result = place_parent_and_hedge(_name=name, _plan=plan, _ctx=ctx)
-    bet_id, cref, child_id = None, None, None
-    try:
-        if isinstance(result, (list, tuple)):
-            if len(result) >= 2: bet_id, cref = result[:2]
-            if len(result) >= 3: child_id = result[2]
-        else:
-            bet_id = result
-    except Exception:
-        pass
+    enqueue_for_placement(name, plan, ctx)
+    return None
 
-    cref = cref or cor
-    if child_id:
-        try: mark_child(plan_id, child_id)
-        except Exception: pass
-
-    # --- Finalise legacy
-    con = None
-    try:
-        con = _auto_db_writer()
-        if bet_id:
-            # PLACED
-            if _orders_has_status():
-                con.execute("""
-                  UPDATE orders
-                     SET entry_bet_id=?, entry_status='PLACED', status='PLACED',
-                         customer_ref=COALESCE(?, customer_ref)
-                   WHERE customerOrderRef=?
-                     AND entry_bet_id IS NOT NULL
-                """, (str(bet_id), str(cref), str(cor)))
-            else:
-                con.execute("""
-                  UPDATE orders
-                     SET entry_bet_id=?, entry_status='PLACED',
-                         customer_ref=COALESCE(?, customer_ref)
-                   WHERE customerOrderRef=?
-                     AND entry_bet_id IS NOT NULL
-                """, (str(bet_id), str(cref), str(cor)))
-            con.commit()
-
-            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                            outcome="PLACED", why="ok", letter=letter,
-                            proposed_odds=plan["px"], proposed_stake=plan["size"],
-                            order_id=pending_id)
-            return bet_id
-
-        else:
-            # failed
-            if _orders_has_status():
-                con.execute("""
-                  UPDATE orders
-                     SET entry_status='FAILED', status='FAILED',
-                         closed_at=datetime('now','utc'),
-                         notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                   WHERE customerOrderRef=? 
-                     AND entry_bet_id IS NULL 
-                """, (str(cor),))
-            else:
-                con.execute("""
-                  UPDATE orders
-                     SET entry_status='FAILED',
-                         closed_at=datetime('now','utc'),
-                         notes = TRIM(COALESCE(notes,'') || ' router_fail')
-                   WHERE customerOrderRef=? 
-                     AND entry_bet_id IS NULL
-                """, (str(cor),))
-            con.commit()
-
-            _write_decision(run_id=ctx.get("run_id"), mid=mid, sid=sid,
-                            outcome="not_PLACED", why="router_fail", letter=letter,
-                            proposed_odds=plan["px"], proposed_stake=plan["size"],
-                            order_id=pending_id)
-            return None
-
-    except Exception as e:
-        try:
-            if con: con.rollback()
-        finally:
-            print(f"[PLACE][ERR] finalize failed mid={mid} sid={sid}: {e}")
-        return None
-
-    finally:
-        try:
-            if con: con.close()
-        except Exception:
-            pass
 
 

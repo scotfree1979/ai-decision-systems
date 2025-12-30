@@ -790,35 +790,30 @@ class DecisionBus:
                 plan.setdefault("px", ctx.get("px"))
 
                 # --------------------------------------------------
-                # Dynamic Stake (BUS authority)
+                # Dynamic Stake (BUS authority — v7 correct)
                 # --------------------------------------------------
                 if not plan.get("size") or float(plan.get("size") or 0) <= 0:
+
                     try:
-                        letter = (
-                            plan.get("letter")
-                            or plan.get("source")
-                            or ctx.get("letter")
-                            or "A"
-                        )[:1].upper()
+                        engine = plan.get("engine")
+                        if not engine:
+                            raise RuntimeError("missing engine for dynamic stake")
 
-                        # Phase resolution (BUS truth)
-                        phase = "IP" if ctx.get("in_play") else "PRE"
+                        # 🔑 CORRECT API — engine-aware, BankState-backed
+                        stake = compute_dynamic_stake(ctx, engine)
 
-                        stake, stake_reason = calc_dynamic_stake(
-                            letter=letter,
-                            phase=phase
-                        )
+                        # Hard guarantee: stake must be numeric
+                        if stake is None or stake <= 0:
+                            raise RuntimeError(f"invalid dynamic stake {stake}")
 
                         plan["size"] = float(stake)
-                        plan["_bus_stake_reason"] = stake_reason
+                        plan["_stake_source"] = "dynamic_v7"
 
                     except Exception as e:
-                        plan["_bus_block"] = f"dynamic_stake_error:{e}"
-                        tick_ctx["plans_route_failed"].append(
-                            (plan, f"dynamic_stake_error:{e}")
-                        )
-                        engine_report[plan["engine"]]["note"] = "dynamic_stake_error"
-                        continue  # ❌ do NOT route
+                        # 🚨 This should NEVER happen once wired correctly
+                        plan["_bus_error"] = f"dynamic_stake_failed:{e}"
+                        tick_ctx["errors"].append(("dynamic_stake_failed", str(e)))
+                        continue  # block ONLY if compute_dynamic_stake itself explodes
 
                 # --------------------------------------------------
                 # Direction check (execution truth)
@@ -972,11 +967,6 @@ class DecisionBus:
                 # Route the plan
                 # --------------------------------------------------
                 self._route(p, ctx)
-
-
-
-
-
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: PHASE 3 — ROUTING REPORT
