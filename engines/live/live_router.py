@@ -1768,7 +1768,6 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         # --------------------------------------------------
         # 🧩 GUARANTEE CHILD QUEUED EXISTS (DB-FIRST)
         # --------------------------------------------------
-        # Only if no child already linked
         child_exists = _q_retry(cur, """
             SELECT 1
               FROM orders
@@ -1778,29 +1777,20 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         """, (int(parent["id"]),)).fetchone()
 
         if not child_exists:
-            # --- hedge intent (NO assumptions) ---
-            parent_side  = (parent["side"] or "").upper()
-            entry_odds   = float(parent["entry_odds"])
-            entry_stake  = float(parent["entry_stake"])
+            # --------------------------------------------------
+            # CHILD MUST INHERIT FROM PARENT (NO RECOMPUTATION)
+            # --------------------------------------------------
+            parent_side   = (parent["side"] or "").upper()
+            entry_odds    = float(parent["entry_odds"])
+            entry_stake   = float(parent["entry_stake"])
 
-            # Opposite side only (BACK↔LAY)
+            # Inherit opposite side ONLY
             hedge_side = "BACK" if parent_side == "LAY" else "LAY"
 
-            # Tick distance MUST come from plan/ctx later;
-            # fallback here is conservative = 1 tick
-            try:
-                hedge_ticks = 1
-                from engines.price_math import odds_plus_ticks
-                hedge_odds = odds_plus_ticks(
-                    entry_odds,
-                    hedge_ticks if hedge_side == "LAY" else -hedge_ticks
-                )
-            except Exception:
-                hedge_odds = entry_odds
+            # Inherit odds anchor; ticks are applied later by router execution
+            hedge_odds = float(entry_odds)
 
-            hedge_odds = _round_odds(float(hedge_odds))
-
-            # Hedge stake — canonical green-up calc
+            # Stake is the ONLY derived value (green-up)
             hedge_stake = calc_greenup_stake(
                 parent_side,
                 entry_odds,
@@ -1808,7 +1798,9 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                 hedge_odds
             )
 
-            # INSERT CHILD AS QUEUED (NO BETFAIR CALL)
+            # --------------------------------------------------
+            # INSERT CHILD AS QUEUED (DB-FIRST, NO BETFAIR)
+            # --------------------------------------------------
             _orders_insert_child_queued(
                 parent_cor=str(cor),
                 market_id=str(parent["marketId"]),
@@ -1816,7 +1808,7 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                 side=hedge_side,
                 odds=float(hedge_odds),
                 stake=float(hedge_stake),
-                source=str(parent["source"] or "H"),
+                source=str(parent["source"]),
                 exit_kind="HEDGE",
             )
 

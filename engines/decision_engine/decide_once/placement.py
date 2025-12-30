@@ -38,28 +38,65 @@ _PLACEMENT_EXEC_QUEUE: "queue.Queue[tuple[str, dict, dict]]" = queue.Queue()
 # ------------------------------------------------------------------------------
 # Placement Execution Worker
 # ------------------------------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/placement.py
+# 🔎 ANCHOR: def _placement_worker_loop():
+# 🧩 ACTION: ADD (DB-queue consumption before in-memory queue)
+# 📆 PATCHED: 2025-12-30 — Restore DB → Placement execution bridge
+#
+# RATIONALE:
+# Parents are correctly inserted as entry_status='QUEUED'.
+# The placement worker must consume DB-queued parents one-by-one.
+# Without this, execution never begins.
+# ======================================================================================================
+
 def _placement_worker_loop():
     from engines.live.live_router import place_parent_and_hedge
     from engines.config_paths import open_auto_db
+    import sqlite3, time, traceback
 
     while True:
         try:
-            # 🔑 NEW: promote exactly one DB-queued parent
+            # --------------------------------------------------
+            # 1️⃣ DB-FIRST: consume ONE queued parent
+            # --------------------------------------------------
             con = open_auto_db(rw=True)
             con.row_factory = sqlite3.Row
-            row = con.execute("""
-                SELECT customerOrderRef, marketId, selectionId, side,
-                       entry_odds, entry_stake, engine, source, run_id
-                  FROM orders
-                 WHERE entry_status='QUEUED'
-                   AND role='PARENT'
-                 ORDER BY opened_at ASC
-                 LIMIT 1
-            """).fetchone()
-            con.close()
+
+            row = con.execute(
+                """
+                SELECT
+                    customerOrderRef,
+                    marketId,
+                    selectionId,
+                    side,
+                    entry_odds,
+                    entry_stake,
+                    engine,
+                    source,
+                    run_id
+                FROM orders
+                WHERE role='PARENT'
+                  AND entry_status='QUEUED'
+                ORDER BY opened_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
 
             if row:
-                # 🔥 EXECUTE ONCE
+                # Mark as PLACING immediately to avoid double-pick
+                con.execute(
+                    """
+                    UPDATE orders
+                       SET entry_status='PLACING'
+                     WHERE customerOrderRef=?
+                    """,
+                    (row["customerOrderRef"],)
+                )
+                con.commit()
+                con.close()
+
+                # Execute parent
                 place_parent_and_hedge(
                     market_id=row["marketId"],
                     selection_id=row["selectionId"],
@@ -70,15 +107,22 @@ def _placement_worker_loop():
                     run_id=row["run_id"],
                     _ctx={"customerOrderRef": row["customerOrderRef"]},
                 )
-                continue  # do NOT block yet
 
-            # fallback to normal queue
+                # Loop immediately (one-by-one semantics)
+                continue
+
+            con.close()
+
+            # --------------------------------------------------
+            # 2️⃣ FALLBACK: in-memory queue (unchanged)
+            # --------------------------------------------------
             name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
             place_from_plan(name, plan, ctx)
 
         except Exception:
             traceback.print_exc()
             time.sleep(0.5)
+
 
 # ------------------------------------------------------------------------------
 # Worker bootstrap
