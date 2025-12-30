@@ -24,35 +24,76 @@ def _to_epoch(ts_iso: str) -> Optional[float]:
 def _today_utc() -> str:
     return _utc_now().date().isoformat()
 
+# ======================================================================================================
+# 📍 TARGET: engines/decision_engine/decide_once/schedule.py   (or equivalent schedule file)
+# 🔎 SEARCH: def boot_bet_schedule(
+# 🧩 ACTION: MODIFY (invalidate cache when no future markets remain)
+# 📆 PATCHED: 2025-12-30 — Fix stale "all_markets_finished" detection
+#
+# RATIONALE:
+# - Previously, if the tool booted early and markets_schedule was empty at that moment,
+#   _SCHED was cached as empty for the entire UTC day.
+# - This caused Scope to believe all markets were finished even while later meetings
+#   (e.g. Wolverhampton) were still upcoming.
+# - Correct definition of "today finished":
+#       there are ZERO markets today whose off_at_utc is still in the future.
+# - This patch preserves strict "today-only" behaviour while allowing late meetings
+#   to be discovered correctly.
+# ======================================================================================================
+
 def boot_bet_schedule(print_summary: bool = False) -> int:
     """Load today's markets from BETS DB markets_schedule into memory once per day."""
     global _BOOTED_DAY, _SCHED
-    day = _today_utc()
-    if _BOOTED_DAY == day and _SCHED:
-        return len(_SCHED)
 
-    _SCHED = {}
+    day = _today_utc()
+    now_epoch = _utc_now().timestamp()
+
+    # --------------------------------------------------
+    # ✅ Cache is valid ONLY if at least one future market exists
+    # --------------------------------------------------
+    if _BOOTED_DAY == day and _SCHED:
+        for off_iso in _SCHED.values():
+            off_epoch = _to_epoch(off_iso)
+            if off_epoch is not None and off_epoch > now_epoch:
+                return len(_SCHED)
+        # ❗ All cached markets are in the past → force reload
+        _SCHED = {}
+
     _BOOTED_DAY = day
+    _SCHED = {}
+
     try:
         with connect_db(ro=True) as con:
             con.row_factory = sqlite3.Row
             rows = con.execute(
-                "SELECT marketId, off_at_utc "
-                "FROM markets_schedule "
-                "WHERE date(off_at_utc)=date('now','utc')"
+                """
+                SELECT marketId, off_at_utc
+                  FROM markets_schedule
+                 WHERE date(off_at_utc) = date('now','utc')
+                """
             ).fetchall()
+
             for r in rows:
                 mid = str(r["marketId"])
                 off = r["off_at_utc"] or ""
                 _SCHED[mid] = off
+
     except Exception as e:
         if print_summary:
             print(f"[SCHED] load warn: {e}")
 
     if print_summary:
-        n = len(_SCHED)
-        print(f"[SCHED] loaded {n} markets for {day} (from BETS DB)")
+        future = sum(
+            1 for off in _SCHED.values()
+            if (_to_epoch(off) or 0) > now_epoch
+        )
+        print(
+            f"[SCHED] loaded {len(_SCHED)} markets for {day} "
+            f"({future} still upcoming)"
+        )
+
     return len(_SCHED)
+
 
 def minutes_to_off(market_id: str) -> Tuple[Optional[float], str, str]:
     """
