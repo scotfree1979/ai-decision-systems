@@ -547,66 +547,58 @@ class DecisionBus:
                 tick_ctx["errors"].append(("analysis", "no_markets_in_scope"))
 
             # ==================================================
-            # 🔴 BUS HARD GATE — FINISHED MARKETS (AUTHORITATIVE)
+            # 🟢 BUS FINISHED-MARKET FILTER — MONITOR / SCOPE TRUTH
             # ==================================================
-            from engines.config_paths import open_auto_db
-            from datetime import datetime, timezone
-            import sqlite3
+            #
+            # RATIONALE:
+            # - BUS must NOT consult markets_schedule for execution viability.
+            # - markets_schedule is calendar metadata, NOT execution truth.
+            # - MarketMonitor + Scope already determine when a market is finished:
+            #     • no runners
+            #     • no ACTIVE / PASSIVE bands
+            #     • no usable px
+            #
+            # This filter:
+            # - Keeps markets with at least ONE runnable runner
+            # - Excludes only markets that MarketMonitor itself considers dead
+            # - Preserves the 'all_markets_finished' diagnostic WITHOUT time coupling
+            #
+            # ARCHITECTURAL RULE:
+            # BUS trusts execution-facing state ONLY (Scope + MarketMonitor).
+            # ==================================================
 
-            now_utc = datetime.now(timezone.utc)
-
-            def _is_finished_market(mid: str) -> bool:
-                con = open_auto_db(rw=False)
-                con.row_factory = sqlite3.Row
-                try:
-                    row = con.execute(
-                        """
-                        SELECT off_at_utc
-                          FROM markets_schedule
-                         WHERE marketId=?
-                         LIMIT 1
-                        """,
-                        (str(mid),)
-                    ).fetchone()
-
-                    if not row or not row["off_at_utc"]:
-                        return True  # unknown = unsafe
-
-                    off = datetime.fromisoformat(
-                        str(row["off_at_utc"]).replace("Z", "+00:00")
-                    )
-
-                    # 15-minute in-play grace window
-                    return (now_utc - off).total_seconds() > (15 * 60)
-
-                except Exception:
-                    return True
-                finally:
-                    try:
-                        con.close()
-                    except Exception:
-                        pass
+            from engines.market_monitor.monitor import get_market_state
 
             valid_mids = []
             ignored_mids = []
 
             for mid in mids:
-                if _is_finished_market(mid):
-                    ignored_mids.append(mid)
-                else:
+                st = get_market_state(mid) or {}
+                runners = st.get("runners") or {}
+
+                # Market is runnable if ANY runner is ACTIVE or PASSIVE with a price
+                runnable = any(
+                    r.get("band") in ("ACTIVE", "PASSIVE") and r.get("px") is not None
+                    for r in runners.values()
+                )
+
+                if runnable:
                     valid_mids.append(mid)
+                else:
+                    ignored_mids.append(mid)
 
             mids = valid_mids
             tick_ctx["markets_seen"] = len(mids)
 
             if ignored_mids:
                 print(
-                    f"[BUS] excluded {len(ignored_mids)} finished markets:",
+                    f"[BUS] excluded {len(ignored_mids)} finished markets (monitor-driven):",
                     ", ".join(ignored_mids[:6]) + ("…" if len(ignored_mids) > 6 else "")
                 )
 
             if not mids:
                 tick_ctx["errors"].append(("analysis", "all_markets_finished"))
+
 
             # ------------------------------------
             # BASE CTX (MUST COME FIRST)
