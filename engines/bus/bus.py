@@ -535,20 +535,78 @@ class DecisionBus:
                 "MSC_EXPLORATORY": {"fired": 0, "note": None},
                 "MSC_INPLAY":      {"fired": 0, "note": None},
                 "MSC_RISK":        {"fired": 0, "note": None},
-             
             }
 
-
-            # SCOPE
-            
-            scope = build_and_maintain_scope()
-          
-
+            # ------------------------------------
+            # SCOPE (AUTHORITATIVE MARKET LIST)
+            # ------------------------------------
+            scope = build_and_maintain_scope() or {}
             mids = [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
+
             if not mids:
                 tick_ctx["errors"].append(("analysis", "no_markets_in_scope"))
 
+            # ==================================================
+            # 🔴 BUS HARD GATE — FINISHED MARKETS (AUTHORITATIVE)
+            # ==================================================
+            from engines.config_paths import open_auto_db
+            from datetime import datetime, timezone
+            import sqlite3
 
+            now_utc = datetime.now(timezone.utc)
+
+            def _is_finished_market(mid: str) -> bool:
+                con = open_auto_db(rw=False)
+                con.row_factory = sqlite3.Row
+                try:
+                    row = con.execute(
+                        """
+                        SELECT off_at_utc
+                          FROM markets_schedule
+                         WHERE marketId=?
+                         LIMIT 1
+                        """,
+                        (str(mid),)
+                    ).fetchone()
+
+                    if not row or not row["off_at_utc"]:
+                        return True  # unknown = unsafe
+
+                    off = datetime.fromisoformat(
+                        str(row["off_at_utc"]).replace("Z", "+00:00")
+                    )
+
+                    # 15-minute in-play grace window
+                    return (now_utc - off).total_seconds() > (15 * 60)
+
+                except Exception:
+                    return True
+                finally:
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
+
+            valid_mids = []
+            ignored_mids = []
+
+            for mid in mids:
+                if _is_finished_market(mid):
+                    ignored_mids.append(mid)
+                else:
+                    valid_mids.append(mid)
+
+            mids = valid_mids
+            tick_ctx["markets_seen"] = len(mids)
+
+            if ignored_mids:
+                print(
+                    f"[BUS] excluded {len(ignored_mids)} finished markets:",
+                    ", ".join(ignored_mids[:6]) + ("…" if len(ignored_mids) > 6 else "")
+                )
+
+            if not mids:
+                tick_ctx["errors"].append(("analysis", "all_markets_finished"))
 
             # ------------------------------------
             # BASE CTX (MUST COME FIRST)

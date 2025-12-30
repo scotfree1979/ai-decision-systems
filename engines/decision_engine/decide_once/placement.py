@@ -108,8 +108,15 @@ def _placement_worker_loop():
                     run_id=row["run_id"],
                     parent_persistence="LAPSE",
                     _name="PLACEMENT_WORKER",
-                    _plan={"customerOrderRef": row["customerOrderRef"]},
-                    _ctx={"customerOrderRef": row["customerOrderRef"]},
+                    _plan={
+                        "customerOrderRef": row["customerOrderRef"],
+                        "engine": row["engine"],
+                    },
+                    _ctx={
+                        "customerOrderRef": row["customerOrderRef"],
+                        "engine": row["engine"],
+                    },
+
                 )
 
 
@@ -175,7 +182,8 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
 
     engine = ctx.get("engine")
     if not engine:
-        return False, "missing_engine"
+        raise RuntimeError("PLACEMENT INVARIANT VIOLATION: engine missing")
+
 
     try:
         stake = float(plan.get("size") or 0.0)
@@ -283,6 +291,15 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     # customerOrderRef (stable identity)
     if not plan.get("customerOrderRef"):
         plan["customerOrderRef"] = f"{plan['letter']}-{uuid.uuid4().hex[:10]}"
+
+    engine = plan.get("engine") or ctx.get("engine")
+    if not engine:
+        print("[PLACEMENT][DROP] missing engine at placement boundary")
+        return
+
+    plan["engine"] = engine
+    ctx["engine"] = engine
+
 
 
     # ------------------------------------------------------------------
