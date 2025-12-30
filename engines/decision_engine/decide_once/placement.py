@@ -629,7 +629,7 @@ def _insert_pending_parent(
                 """,
                 (
                     str(cor),
-                    int(run_id),
+                    str(run_id),
                     str(mode),
                     str(mid),
                     str(sid),
