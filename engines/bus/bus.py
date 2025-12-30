@@ -952,21 +952,12 @@ class DecisionBus:
 
 
             # Routing
+            from engines.decision_engine.decide_once.placement import enqueue_for_placement
+
             for eng, p, ctx in final_plans:
+                ctx["engine"] = p["engine"]          # authoritative stamp
+                enqueue_for_placement(p["engine"], p, ctx)
 
-                # --------------------------------------------------
-                # 🔥 NORMALISE ROUTING IDENTITY (CRITICAL)
-                # --------------------------------------------------
-                if "marketId" not in p or p.get("marketId") is None:
-                    p["marketId"] = ctx.get("marketId")
-
-                if "selectionId" not in p or p.get("selectionId") is None:
-                    p["selectionId"] = ctx.get("selectionId")
-
-                # --------------------------------------------------
-                # Route the plan
-                # --------------------------------------------------
-                self._route(p, ctx)
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: PHASE 3 — ROUTING REPORT
