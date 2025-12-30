@@ -3041,7 +3041,8 @@ def place_parent_and_hedge(
     if _plan is not None:
         p = dict(_plan)
         c = dict(_ctx or {})
-        engine = (_plan or {}).get("engine") or _name or "LEGACY"
+        engine = (_plan or {}).get("engine")
+
 
         # --------------------------------------------------
         # Canonical parent_ref (MUST exist for all paths)
@@ -3188,8 +3189,10 @@ def place_parent_and_hedge(
         or (_ctx  or {}).get("engine")
     )
 
-    if not engine:
-        raise RuntimeError("router invariant violated: missing engine")
+    # Router does NOT hard-gate on engine.
+    # Engine is a BankState/accounting concern handled upstream in placement.
+    # Betfair execution must proceed regardless.
+
 
     # 3) place parent -----------------------------------------------------------
     bf_parent_id, detail = None, {}

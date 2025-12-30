@@ -103,10 +103,15 @@ def _placement_worker_loop():
                     side=row["side"],
                     entry_odds=row["entry_odds"],
                     stake=row["entry_stake"],
+                   
                     source=row["source"],
                     run_id=row["run_id"],
+                    parent_persistence="LAPSE",
+                    _name="PLACEMENT_WORKER",
+                    _plan={"customerOrderRef": row["customerOrderRef"]},
                     _ctx={"customerOrderRef": row["customerOrderRef"]},
                 )
+
 
                 # Loop immediately (one-by-one semantics)
                 continue
