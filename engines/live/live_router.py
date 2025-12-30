@@ -3186,6 +3186,14 @@ def place_parent_and_hedge(
     # 2) resolve Betfair creds
     app_key, token = _keys()
 
+    engine = (
+        (_plan or {}).get("engine")
+        or (_ctx  or {}).get("engine")
+    )
+
+    if not engine:
+        raise RuntimeError("router invariant violated: missing engine")
+
     # 3) place parent -----------------------------------------------------------
     bf_parent_id, detail = None, {}
     try:
@@ -3209,7 +3217,8 @@ def place_parent_and_hedge(
                 entry_odds=float(entry_odds),
                 entry_stake=float(stake),
             )
-            _orders_update_parent_failed(...)
+            _orders_update_parent_failed(parent_ref, "BETFAIR_PLACE_FAILED")
+
             return None, parent_ref
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py

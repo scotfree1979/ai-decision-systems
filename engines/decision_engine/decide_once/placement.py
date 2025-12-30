@@ -608,6 +608,7 @@ def _insert_pending_parent(
         con.commit()
         pending_id = int(cur.lastrowid)
         # 🔑 THIS IS THE MISSING STEP
+        # NOTE: Parent is inserted directly as QUEUED (promotion no-op)
         _promote_pending_to_queued(pending_id)
         # -------------------------------
         # PLAN LEDGER LINK (IF PRESENT)
@@ -837,16 +838,9 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
             _ctx=ctx,
         )
 
-        try:
-            if isinstance(result, (list, tuple)):
-                if len(result) >= 2: bet_id, cref = result[0], result[1]
-                if len(result) >= 3: child_id = result[2]
-            else:
-                bet_id = result
-        except Exception:
-            pass
+        cref = plan["customerOrderRef"]
+        child_id = None
 
-        cref = cref or plan["customerOrderRef"]
 
         # Ledger: child
         try:
