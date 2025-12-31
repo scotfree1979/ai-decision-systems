@@ -647,10 +647,14 @@ class DecisionBus:
                     "near20": [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
                 }
 
-            selected = None
+            RUNNERS_PER_TICK = 4
+            selected = []
 
             # Priority order (locked)
             for bucket_name in ("in_play", "near20", "near60", "next5"):
+
+                if len(selected) >= RUNNERS_PER_TICK:
+                    break
 
                 mids_in_bucket = bucketed.get(bucket_name) or []
                 if not mids_in_bucket:
@@ -664,8 +668,6 @@ class DecisionBus:
                             tick_ctx["runners_seen"] += 1
                             candidates.append((mid, sid))
 
-
-
                 if not candidates:
                     continue
 
@@ -676,43 +678,31 @@ class DecisionBus:
                     seen.clear()
 
                 for mid, sid in candidates:
-                    key = (mid, sid)
-                    if key not in seen:
-                        selected = (bucket_name, mid, sid)
-                        seen.add(key)
+                    if len(selected) >= RUNNERS_PER_TICK:
                         break
 
-                if selected:
-                    break
-
-    # ======================================================================================================
+                    key = (mid, sid)
+                    if key not in seen:
+                        selected.append((bucket_name, mid, sid))
+                        seen.add(key)
+   # ======================================================================================================
     # 📍 TARGET: engines/bus/bus.py
     # 🔎 ANCHOR: if not selected:
     # 🧩 ACTION: REPLACE ENTIRE BLOCK
     # 📆 PATCHED: 2025-12-15 — Prevent silent tick on no_runnable_runners
     # ======================================================================================================
-
             if not selected:
                 tick_ctx["errors"].append(("analysis", "no_runnable_runners"))
-                # do NOT return — allow final TICK report
 
+            for bucket_name, mid, sid in selected:
 
-            bucket_name, mid, sid = selected
+                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                if not ctx:
+                    tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
+                    continue
 
-            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-    # ======================================================================================================
-    # 📍 TARGET: engines/bus/bus.py
-    # 🔎 ANCHOR: if not ctx:
-    # 🧩 ACTION: REPLACE ENTIRE BLOCK
-    # 📆 PATCHED: 2025-12-15 — Prevent silent tick on ctx_build_failed
-    # ======================================================================================================
+                plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
 
-            if not ctx:
-                tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
-                # do NOT return — allow final TICK report
-
-
-            plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
