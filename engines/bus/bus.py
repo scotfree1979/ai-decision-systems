@@ -16,6 +16,7 @@ from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_st
 from engines.market_monitor.phase_clock import MarketPhaseClock
 
 
+
 import time
 
 def _market_ready(st: dict) -> bool:
@@ -32,7 +33,7 @@ def _market_ready(st: dict) -> bool:
 
 
 class DecisionBus:
-
+    ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F"}
     def __init__(self):
         self.tick_id = 0
         self.live_run_id: str | None = None
@@ -712,6 +713,34 @@ class DecisionBus:
 
 
             plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+# 🧩 ACTION: ADD (BUS execution contract enforcement)
+# 📆 PATCHED: 2025-12-31 — Legacy enter/letter hard filter
+# ======================================================================================================
+
+            
+
+            filtered_plans = []
+
+            for eng, plan, pctx in plans:
+
+                # 1️⃣ Hard enter gate (ALL engines)
+                if not plan.get("enter"):
+                    continue
+
+                # 2️⃣ Legacy-specific letter gate
+                if plan.get("engine") == "LEGACY":
+                    legacy_letter = plan.get("source") or plan.get("letter")
+                    if legacy_letter not in self.ALLOWED_LEGACY_LETTERS:
+                        continue
+
+                filtered_plans.append((eng, plan, pctx))
+
+            plans = filtered_plans
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
