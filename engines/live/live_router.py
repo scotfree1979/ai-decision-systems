@@ -29,16 +29,43 @@ def enqueue_router_child(plan: dict, ctx: dict):
 
 
 def _router_child_worker_loop():
-    from engines.live.live_router import _attempt_place_child_with_retry
+    from engines.live.live_router import (
+        _attempt_place_child_with_retry,
+        _orders_insert_child_queued,
+    )
 
     while True:
         try:
             plan, ctx = _ROUTER_CHILD_QUEUE.get()
 
+            # --------------------------------------------------
+            # STAGE 1: GUARANTEE CHILD ROW EXISTS (DB-FIRST)
+            # --------------------------------------------------
             child_id = plan.get("child_id")
-            if not child_id:
-                raise RuntimeError("router child worker: missing child_id")
 
+            if not child_id:
+                parent_cor = plan.get("parent_cor")
+                if not parent_cor:
+                    raise RuntimeError("router child worker: missing child_id and parent_cor")
+
+                # REQUIRED FIELDS (already present in plan by design)
+                child_id = _orders_insert_child_queued(
+                    parent_cor=parent_cor,
+                    market_id=plan["marketId"],
+                    selection_id=plan["selectionId"],
+                    side=plan["side"],
+                    odds=plan["px"],
+                    stake=plan["size"],
+                    source=plan.get("source", "LEGACY"),
+                    exit_kind=plan.get("exit_kind", "HEDGE"),
+                )
+
+                if not child_id:
+                    raise RuntimeError(f"failed to create child row for parent {parent_cor}")
+
+            # --------------------------------------------------
+            # STAGE 2: EXECUTE CHILD (PLACE + RETRY)
+            # --------------------------------------------------
             ok = _attempt_place_child_with_retry(int(child_id))
             if not ok:
                 raise RuntimeError(f"router child placement failed id={child_id}")
@@ -48,6 +75,7 @@ def _router_child_worker_loop():
             traceback.print_exc()
         finally:
             _ROUTER_CHILD_QUEUE.task_done()
+
 
 
 # === PATCH START ============================================================
