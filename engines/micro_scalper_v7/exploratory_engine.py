@@ -118,6 +118,19 @@ class ExploratoryEngine:
                 # expose already-computed execution direction
                 "direction": msc_decision["direction"],  # ← canonical
             }
+
+            # === MSC sizing (engine-complete) ===
+            stake = compute_dynamic_stake(
+                engine=plan.get("engine"),
+                letter=plan.get("letter"),  # MSC may omit; function tolerates None
+                ctx=ctx,
+            )
+
+            # guard: do not emit non-executable plans
+            if not stake or float(stake) <= 0:
+                return None
+
+            plan["size"] = float(stake)
             return plan
 
         except Exception:
