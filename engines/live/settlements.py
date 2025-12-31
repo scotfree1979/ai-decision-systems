@@ -33,6 +33,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import urllib.request, urllib.error
+from engines.live import bank_state
 
 
 
@@ -278,9 +279,10 @@ def close_settled_markets() -> int:
     closed = 0
 
     from engines.config_paths import auto_conn as _auto_conn
+    from engines.live import bank_state   # ← ADD
 
     with connect_db(set_db) as s:
-        o = _auto_conn(rw=True)  # MUST use DAL
+        o = _auto_conn(rw=True)
         o.row_factory = sqlite3.Row
 
         mids = [r["marketId"] for r in s.execute(
@@ -291,19 +293,46 @@ def close_settled_markets() -> int:
             return 0
 
         for mid in mids:
-            # mark everything in this market as expired
+
+            # 🔑 STEP 1: fetch open parents BEFORE expiring them
+            parents = o.execute("""
+                SELECT id, engine, entry_odds, entry_stake
+                  FROM orders
+                 WHERE marketId=?
+                   AND role='PARENT'
+                   AND (exit_status IS NULL OR exit_status='')
+            """, (mid,)).fetchall()
+
+            # 🔑 STEP 2: release exposure for each parent
+            for p in parents:
+                try:
+                    bank_state.on_parent_closed(
+                        engine=str(p["engine"]),
+                        entry_odds=float(p["entry_odds"] or 0.0),
+                        entry_stake=float(p["entry_stake"] or 0.0),
+                    )
+                except Exception as e:
+                    print(
+                        f"[settlements][WARN] exposure release failed "
+                        f"mid={mid} parent_id={p['id']} err={e}"
+                    )
+
+            # 🔑 STEP 3: mark orders terminal
             o.execute("""
               UPDATE orders
                  SET exit_status = 'EXPIRED',
                      closed_at   = COALESCE(closed_at, datetime('now','utc'))
-               WHERE marketId=? AND UPPER(exit_status) NOT IN ('SETTLED','CANCELLED');
+               WHERE marketId=?
+                 AND UPPER(exit_status) NOT IN ('SETTLED','CANCELLED');
             """, (mid,))
+
             closed += int(o.total_changes or 0)
 
-
         o.commit()
-        
+
     print(f"[settlements] expired all orders in {len(mids)} closed markets → {closed} rows updated")
+    return closed
+
     # ======================================================================
     # 📍 PATCH 4 — EventSync for market expiry settlement
     # 🔎 SEARCH: "expired all orders in"
@@ -321,6 +350,106 @@ def close_settled_markets() -> int:
     return closed
 # === PATCH END ===
 
+# ======================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🎯 ACTION: one-shot hard cleanup for settled markets
+# 📆 PATCHED: 2025-12-31 — force cancel + release exposure
+# ======================================================================
+
+from engines.live import bank_state
+from engines.config_paths import auto_conn as _auto_conn
+import sqlite3
+
+def force_cancel_all_for_settled_markets() -> int:
+    """
+    HARD SETTLEMENT CLEANUP
+
+    For every market that is CLOSED:
+      - cancel ALL parents
+      - cancel ALL children
+      - release ALL reserved exposure via BankState
+
+    This guarantees:
+      • zero open orders
+      • zero reserved exposure
+      • budget unblocked
+    """
+
+    released = 0
+    cancelled = 0
+
+    con = _auto_conn(rw=True)
+    con.row_factory = sqlite3.Row
+
+    try:
+        # Find settled markets
+        mids = [
+            r["marketId"]
+            for r in con.execute(
+                "SELECT DISTINCT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
+            ).fetchall()
+        ]
+
+        if not mids:
+            return 0
+
+        for mid in mids:
+
+            # --- PARENTS FIRST ---
+            parents = con.execute("""
+                SELECT id, engine, entry_odds, entry_stake
+                  FROM orders
+                 WHERE marketId=?
+                   AND role='PARENT'
+                   AND (exit_status IS NULL OR exit_status='')
+            """, (mid,)).fetchall()
+
+            for p in parents:
+                try:
+                    bank_state.on_parent_closed(
+                        engine=str(p["engine"]),
+                        entry_odds=float(p["entry_odds"] or 0.0),
+                        entry_stake=float(p["entry_stake"] or 0.0),
+                    )
+                    released += 1
+                except Exception as e:
+                    print(f"[settlements][WARN] BankState release failed parent={p['id']} err={e}")
+
+            # --- CHILDREN ---
+            con.execute("""
+                UPDATE orders
+                   SET exit_status='CANCELLED',
+                       closed_at=datetime('now','utc')
+                 WHERE marketId=?
+                   AND role='CHILD'
+                   AND (exit_status IS NULL OR exit_status='')
+            """, (mid,))
+
+            cancelled += con.total_changes or 0
+
+            # --- FINALISE PARENTS ---
+            con.execute("""
+                UPDATE orders
+                   SET exit_status='CANCELLED',
+                       closed_at=datetime('now','utc')
+                 WHERE marketId=?
+                   AND role='PARENT'
+                   AND (exit_status IS NULL OR exit_status='')
+            """, (mid,))
+
+            cancelled += con.total_changes or 0
+
+        con.commit()
+
+    finally:
+        con.close()
+
+    print(
+        f"[settlements] FORCE CLEANUP complete → "
+        f"released_exposure={released} cancelled_orders={cancelled}"
+    )
+
+    return cancelled
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/settlements.py:_detect_bucket
