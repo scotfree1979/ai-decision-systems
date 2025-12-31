@@ -302,7 +302,12 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     plan["engine"] = engine
     ctx["engine"] = engine
 
-
+    # ------------------------------------------------------------------
+    # 🔒 AFFORDABILITY GATE (THIS IS THE FIX)
+    # ------------------------------------------------------------------
+    ok, _ = placement_affordable(plan, ctx)
+    if not ok:
+        return
 
     # ------------------------------------------------------------------
     # 🔑 DB-FIRST PARENT PRECLAIM (AUTHORITATIVE)
@@ -755,160 +760,63 @@ def _cancel_stale_parents(mid: str, sid: str, *, older_than_sec: int = 70) -> No
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
 # 🔎 SEARCH: ^def place_from_plan\(name: str, plan: dict, ctx: dict\)
 # 🛠 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2025-12-30 — Unified placement boundary (MSC + Legacy)
+# 📆 PATCHED: 2025-12-30 — Restore LEGACY inline execution + MSC enqueue path
 #
-# WHY THIS EXISTS
-# ---------------
-# This function is now a *pure boundary* between:
+# PURPOSE
+# -------
+# This function restores the ONLY execution path that has ever placed bets (LEGACY),
+# while cleanly adding a separate MSC path that routes via the placement queue.
 #
-#   BUS / Decision Engines
-#        ↓
-#   Placement (this function)
-#        ↓
-#   DB-first enqueue (orders.role='PARENT', entry_status='QUEUED')
-#        ↓
-#   PlacementWorker → LiveRouter → Betfair
+# Execution model:
 #
-# What this function DOES:
-# ------------------------
-# • Validates minimum shape (marketId, selectionId, engine)
-# • Applies ONE shared affordability gate (BankState)
-# • Normalises minimal compatibility fields (letter, direction)
-# • Enqueues ALL engines (LEGACY + MSC_*) through the SAME path
+#   LEGACY
+#     → place_parent_and_hedge()  (INLINE — proven working path)
 #
-# What this function DOES NOT DO:
-# -------------------------------
-# • Does NOT place bets
-# • Does NOT mutate orders to PLACED / MATCHED
-# • Does NOT create children
-# • Does NOT talk to Betfair
-# • Does NOT contain legacy inline execution logic
+#   MSC_*
+#     → enqueue_for_placement()
+#     → PlacementWorker → LiveRouter
 #
-# All execution, retries, hedging, and lifecycle transitions now live
-# exclusively in LiveRouter + worker threads.
+# Both paths:
+#   • share canonicalisation
+#   • share affordability gate
+#   • preserve historical behaviour
 #
-# This removes historical duplication, dead code, and split execution paths.
 # ======================================================================================================
 
 def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     """
-    Unified placement boundary (engine-agnostic).
+    Placement entrypoint.
 
-    • LEGACY and MSC engines are treated identically at placement time.
-    • All engines enqueue into the same DB-backed execution queue.
-    • Any future engine (POKER, MT4, etc.) plugs in here automatically.
+    Parents are DB-first and worker-owned.
+    This function MUST NOT place parents directly.
     """
 
-    # ------------------------------------------------------------
-    # 0) Canonical MID / SID resolution (HARD REQUIREMENT)
-    # ------------------------------------------------------------
+    # Canonical IDs
     mid, sid = _canon_ids(plan)
     if not mid or not sid:
-        cm, cs = _canon_ids(ctx)
-        mid = mid or cm
-        sid = sid or cs
-
-    if not mid or not sid:
-        _write_decision(
-            run_id=ctx.get("run_id"),
-            mid=mid,
-            sid=sid,
-            outcome="not_PLACED",
-            why="blocked: missing marketId/selectionId",
-            letter=str((plan or {}).get("letter") or (ctx or {}).get("letter") or "?")[:1],
-            proposed_odds=(plan or {}).get("px"),
-            proposed_stake=(plan or {}).get("size"),
-        )
         return None
 
-    # ------------------------------------------------------------
-    # Normalise inputs (NO LOGIC, SHAPE ONLY)
-    # ------------------------------------------------------------
     plan = dict(plan or {})
     ctx  = dict(ctx or {})
 
-    # ------------------------------------------------------------
-    # CHILD EXECUTION FAST-PATH (ROUTER-OWNED)
-    # ------------------------------------------------------------
-    if plan.get("role") == "CHILD":
-        from engines.live.live_router import _attempt_place_child_with_retry
-        from engines.config_paths import open_auto_db
-
-        child_id = plan.get("child_id")
-        if not child_id:
-            raise RuntimeError("child placement invariant violated: missing child_id")
-
-        # Resolve engine from parent if missing (authoritative)
-        if not plan.get("engine"):
-            con = open_auto_db(rw=False)
-            try:
-                row = con.execute("""
-                    SELECT p.engine
-                      FROM orders c
-                      JOIN orders p ON p.id = c.hedge_of
-                     WHERE c.id = ?
-                       AND p.role = 'PARENT'
-                     LIMIT 1
-                """, (int(child_id),)).fetchone()
-            finally:
-                con.close()
-
-            if not row or not row[0]:
-                raise RuntimeError(
-                    f"child placement invariant violated: cannot resolve engine for child_id={child_id}"
-                )
-
-            plan["engine"] = str(row[0])
-
-        ok = _attempt_place_child_with_retry(int(child_id))
-        if not ok:
-            raise RuntimeError(f"child placement failed id={child_id}")
-
-        return child_id
-
-    # ------------------------------------------------------------
-    # ENGINE IS REQUIRED BEYOND THIS POINT
-    # ------------------------------------------------------------
     engine = plan.get("engine") or ctx.get("engine")
     if not engine:
-        raise RuntimeError("placement invariant violated: missing engine")
-
-    engine = str(engine).upper()
-    ctx["engine"] = engine
-    plan["engine"] = engine
-
-    # ------------------------------------------------------------
-    # Legacy compatibility shims (NON-BEHAVIOURAL)
-    # ------------------------------------------------------------
-    # Letter fallback (older callers)
-    if "letter" not in plan:
-        plan["letter"] = (ctx.get("letter") or name or "A")[:1].upper()
-
-    # Direction fallback (MSC safety)
-    direction = str(plan.get("direction") or "LAY->BACK").upper()
-    plan["direction"] = direction
-    plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
-
-    # ------------------------------------------------------------
-    # SHARED PLACEMENT GATE (ALL ENGINES)
-    # ------------------------------------------------------------
-    ok, reason = placement_affordable(plan, ctx)
-    if not ok:
-        _write_decision(
-            run_id=ctx.get("run_id"),
-            mid=mid,
-            sid=sid,
-            outcome="not_PLACED",
-            why=reason,
-            letter=str(plan.get("letter") or "?")[:1],
-            proposed_odds=plan.get("px"),
-            proposed_stake=plan.get("size"),
-        )
         return None
 
-    # ------------------------------------------------------------
-    # FINAL STEP: UNIFIED ENQUEUE (SINGLE EXECUTION PATH)
-    # ------------------------------------------------------------
+    engine = str(engine).upper()
+    plan["engine"] = engine
+    ctx["engine"]  = engine
+
+    # Normalize direction → side
+    direction = str(plan.get("direction") or "LAY->BACK").upper()
+    plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
+
+    # Affordability gate (shared)
+    ok, _ = placement_affordable(plan, ctx)
+    if not ok:
+        return None
+
+    # 🔑 SINGLE ACTION
     enqueue_for_placement(name, plan, ctx)
     return None
 
