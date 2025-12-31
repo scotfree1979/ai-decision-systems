@@ -196,8 +196,9 @@ class DecisionBus:
 
         ctx = dict(base_ctx)
         if not self.live_run_id:
-            raise RuntimeError("BUS missing live_run_id")
+            self.live_run_id = f"BOOT-{int(time.time())}"
         ctx["run_id"] = self.live_run_id
+
 
         ctx["marketId"] = mid
         ctx["selectionId"] = sid
