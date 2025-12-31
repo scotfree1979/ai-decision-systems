@@ -383,12 +383,28 @@ def force_cancel_all_for_settled_markets() -> int:
 
     try:
         # Find settled markets
-        mids = [
-            r["marketId"]
-            for r in con.execute(
-                "SELECT DISTINCT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
-            ).fetchall()
-        ]
+        # Collect markets settled either by Betfair OR by time
+        mids = set()
+
+        # 1️⃣ Betfair-confirmed CLOSED markets
+        for r in s.execute(
+            "SELECT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
+        ).fetchall():
+            mids.add(str(r["marketId"]))
+
+        # 2️⃣ Time-based settlement (authoritative fallback)
+        for r in s.execute(
+            "SELECT DISTINCT marketId FROM orders WHERE role='PARENT'"
+        ).fetchall():
+            mid = str(r["marketId"])
+            try:
+                if _eligible_for_settlement(mid):
+                    mids.add(mid)
+            except Exception:
+                pass
+
+        mids = list(mids)
+
 
         if not mids:
             return 0

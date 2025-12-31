@@ -1740,19 +1740,16 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 5) -> 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 ANCHOR: def _orders_update_parent_matched(
-# 🧩 ACTION: GUARANTEE child enqueue on parent MATCHED
-# 📆 PATCHED: 2026-02-20 — Primary child execution handoff fix
-#
-# RATIONALE:
-# - Parent MATCHED is the single authoritative moment a hedge MUST execute
-# - Child rows already exist at this point (DB-first invariant)
-# - Previously, only some paths enqueued children, causing silent stalls
-# - This guarantees ALL matched parents enqueue exactly one child
-# - Backup/rescue paths remain untouched and unused
+# 🧩 ACTION: GUARANTEE child creation on parent MATCHED
+# 📆 PATCHED: 2026-03-01 — hard guarantee child is queued on parent match
 # ======================================================================
 
 def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
-    ...
+    _ensure_orders_schema()
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
     try:
         parent = _q_retry(cur, """
             SELECT id, engine, source, side,
@@ -1767,15 +1764,13 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         if not parent:
             return
 
-        # ⛔ Idempotency guard
+        # ── Idempotency guard ──────────────────────────────────────────
         if (parent["entry_status"] or "").upper() == "MATCHED":
             return
 
         engine = parent["engine"]
 
-        # --------------------------------------------------
-        # UPDATE parent → MATCHED
-        # --------------------------------------------------
+        # ── 1️⃣ Mark parent MATCHED ───────────────────────────────────
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='MATCHED',
@@ -1786,98 +1781,66 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         """, (engine, str(cor)))
         con.commit()
 
-        # --------------------------------------------------
-        # GUARANTEE CHILD EXISTS (DB-FIRST)
-        # --------------------------------------------------
+        parent_id = int(parent["id"])
+
+        # ── 2️⃣ GUARANTEE child row exists (THIS IS THE FIX) ───────────
         row = _q_retry(cur, """
             SELECT id
               FROM orders
              WHERE role='CHILD'
                AND hedge_of=?
              LIMIT 1
-        """, (int(parent["id"]),)).fetchone()
+        """, (parent_id,)).fetchone()
 
-        if row:
-            child_id = int(row["id"])
-        else:
-            _q_retry(cur, """
-                INSERT INTO orders (
-                    customerOrderRef,
-                    run_id,
-                    mode,
-                    marketId,
-                    selectionId,
-                    side,
-                    entry_odds,
-                    entry_stake,
-                    entry_status,
-                    role,
-                    hedge_of,
-                    source,
-                    engine,
-                    opened_at
-                )
-                SELECT
-                    'CHILD-' || customerOrderRef,
-                    run_id,
-                    mode,
-                    marketId,
-                    selectionId,
-                    CASE WHEN UPPER(side)='LAY' THEN 'BACK' ELSE 'LAY' END,
-                    entry_odds,
-                    entry_stake,
-                    'QUEUED',
-                    'CHILD',
-                    id,
-                    source,
-                    engine,
-                    datetime('now','utc')
-                FROM orders
-                WHERE id=?
-            """, (int(parent["id"]),))
-            con.commit()
+        if not row:
+            # compute deterministic hedge intent
+            parent_side = (parent["side"] or "").upper()
+            hedge_side  = "BACK" if parent_side == "LAY" else "LAY"
 
-            row = _q_retry(cur, """
-                SELECT id
-                  FROM orders
-                 WHERE role='CHILD'
-                   AND hedge_of=?
-                 ORDER BY id DESC
-                 LIMIT 1
-            """, (int(parent["id"]),)).fetchone()
+            from engines.price_math import odds_plus_ticks
+            hedge_odds = odds_plus_ticks(
+                float(parent["entry_odds"]),
+                +1 if hedge_side == "BACK" else -1
+            )
 
-            if not row:
-                return
+            hedge_odds = _round_odds(float(hedge_odds))
 
-            child_id = int(row["id"])
+            hedge_stake = calc_greenup_stake(
+                parent_side,
+                float(parent["entry_odds"]),
+                float(parent["entry_stake"]),
+                hedge_odds
+            )
 
-        # --------------------------------------------------
-        # 🔑 PRIMARY FIX: ENQUEUE CHILD FOR EXECUTION
-        # --------------------------------------------------
-        start_router_child_worker()
+            _orders_insert_child_queued(
+                parent_cor=str(cor),
+                market_id=str(parent["marketId"]),
+                selection_id=str(parent["selectionId"]),
+                side=hedge_side,
+                odds=float(hedge_odds),
+                stake=float(hedge_stake),
+                source=str(parent["source"] or "H"),
+                exit_kind="HEDGE",
+            )
 
-        enqueue_router_child(
-            plan={
-                "role": "CHILD",
-                "child_id": child_id,
-            },
-            ctx={
-                "engine": engine,
-                "mode": "LIVE",
-            }
-        )
+            _log_event(
+                "INFO",
+                "live_router",
+                f"[CHILD-QUEUED] parent_ref={cor}"
+            )
 
     except Exception as e:
         _log_event(
             "ERROR",
             "live_router",
-            f"parent_matched lifecycle failed ref={cor}: {e}"
+            f"parent_matched → child queue failed ref={cor}: {e}"
         )
     finally:
         try:
             con.close()
         except Exception:
             pass
+
 
 # === PATCH START: Playbooks Writer (LIVE profit pattern logger) ===
 # 📍 TARGET: engines/live/live_router.py
