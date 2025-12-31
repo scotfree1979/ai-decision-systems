@@ -3,6 +3,7 @@
 import time, threading, sqlite3, json
 from datetime import datetime, timezone
 from engines.config_paths import open_auto_db
+from engines.live.live_router import _cancel, _keys, _orders_conn
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
@@ -55,52 +56,6 @@ from engines.live.live_router import analyze_market_pnl
 from engines.live.live_router import _keys
 
 # overwatcher.py (patched)
-
-# GLOBAL STOPLOSS QUEUE (routed into Lanes / Placement)
-STOPLOSS_QUEUE = {}
-
-def _process_stoploss_now(ev):
-    """
-    STOPLOSS emitter (NO BUS INVOLVEMENT)
-
-    Overwatcher detects stop-loss and emits a child-only STOPLOSS plan.
-    Placement / Lanes is the execution owner.
-    """
-    try:
-        mid  = str(ev.get("marketId"))
-        sid  = str(ev.get("selectionId"))
-
-        entry_side   = str(ev.get("entry_side")).upper()
-        entry_stake  = float(ev.get("entry_stake") or 0)
-        current_odds = float(ev.get("current_odds") or ev.get("px") or 0)
-        sl_px        = float(ev.get("stop_loss_px") or 0)
-
-        exit_side = "BACK" if entry_side == "LAY" else "LAY"
-
-        plan = {
-            "enter": True,
-            "engine": "OVERWATCHER",
-            "type": "STOPLOSS",
-            "family": "STOPLOSS",
-
-            "marketId": mid,
-            "selectionId": sid,
-            "direction": exit_side,
-            "size": entry_stake,
-            "px": current_odds,
-
-            "stop_loss_px": sl_px,
-            "why": "overwatcher_stoploss",
-            "ts": ev.get("ts"),
-        }
-
-        STOPLOSS_QUEUE[(mid, sid)] = plan
-
-        print(f"[W-SL][ENQUEUE] mid={mid} sid={sid} px={current_odds} sl_px={sl_px}")
-
-    except Exception as e:
-        print(f"[W-SL][ERR] stoploss emit failed: {e}")
-
 
 
 # === PATCH START ===
@@ -282,6 +237,57 @@ def enforce_parent_stoploss_px():
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         })
 
+from engines.live.live_router import _cancel, _keys, _orders_conn
+
+def _cancel_active_hedge_child(parent_id: int):
+    """
+    Cancel the active HEDGE (H) child on Betfair after STOPLOSS fires.
+    This is authoritative execution — DB updates are secondary.
+    """
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    row = cur.execute("""
+        SELECT id, entry_bet_id
+          FROM orders
+         WHERE role='CHILD'
+           AND hedge_of=?
+           AND UPPER(exit_kind)='HEDGE'
+           AND entry_status IN ('QUEUED','PLACED')
+           AND entry_bet_id IS NOT NULL
+         LIMIT 1
+    """, (int(parent_id),)).fetchone()
+
+    if not row:
+        con.close()
+        return False
+
+    child_id = int(row["id"])
+    bet_id   = str(row["entry_bet_id"])
+
+    try:
+        app_key, token = _keys()
+        _cancel(app_key, token, bet_id)   # 🔥 REAL cancellation
+    except Exception as e:
+        print(f"[OVERWATCHER] hedge cancel failed bet_id={bet_id}: {e}")
+
+    # Mirror Betfair reality in DB
+    try:
+        cur.execute("""
+            UPDATE orders
+               SET entry_status='CANCELLED',
+                   closed_at=datetime('now','utc'),
+                   exit_kind='CANCELLED_BY_STOPLOSS'
+             WHERE id=?
+        """, (child_id,))
+        con.commit()
+    except Exception:
+        pass
+
+    con.close()
+    print(f"[OVERWATCHER] hedge child cancelled child_id={child_id}")
+    return True
 
 
 
@@ -345,20 +351,6 @@ def _on_tsl_event(payload):
 _TSL_LAST_PARENT = None
 
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/overwatcher.py
-# 🔎 SEARCH: STOPLOSS_QUEUE =
-# 🆕 ADD: safe accessor
-# 📆 PATCHED: 2026-02-12
-# ============================================================================
-
-def pull_stoploss_for(mid: str, sid: str):
-    """
-    Placement-safe STOPLOSS fetch.
-    """
-    return STOPLOSS_QUEUE.pop((mid, sid), None)
-
-# === PATCH END ================================================================
 
 
 def get_tsl_parent():
@@ -523,27 +515,27 @@ def enforce_stop_losses_trailing():
             continue
 
         # Forward to RiskEngine + router
-        from engines.decision_engine.decide_once.placement import enqueue_for_placement
-
-        enqueue_for_placement(
-            "OVERWATCHER",
-            {
-                "enter": True,
+        from engines.live.live_router import enqueue_router_child
+        exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
+        enqueue_router_child(
+            plan={
+                # child_id intentionally omitted → router will INSERT QUEUED
+                "role": "CHILD",
                 "engine": "OVERWATCHER",
-                "type": "STOPLOSS",
-                "family": "STOPLOSS",
+                "exit_kind": "STOPLOSS",
+                "source": "S",                      # letter S
+                "parent_cor": p["customerOrderRef"],
                 "marketId": mid,
                 "selectionId": sid,
-                "direction": exit_side,
-                "size": entry_stake,
+                "side": exit_side,                  # BACK or LAY
                 "px": current_odds,
-                "parent_ref": p["customerOrderRef"],
-                "why": "overwatcher_stoploss",
-                "ts": ev.get("ts"),
+                "size": entry_stake,
             },
-            None,  # CTX intentionally minimal — child-only execution
+            ctx={
+                "engine": "OVERWATCHER",
+                "mode": "LIVE",
+            }
         )
-
 
         # === PATCH END ==============================================================
 
@@ -755,7 +747,7 @@ def enforce_trailing_stops(trail_ticks: int = 10, minimum_profit_ticks: int = 5)
 
         # If not hit → update trailing bands
         if not hit:
-            updates.append((floor, ceil, p["customerOrderRef"]))
+            updates.append((floor, ceil, r["customerOrderRef"]))
             continue
 
         # If hit → emit decision + close
@@ -778,7 +770,7 @@ def enforce_trailing_stops(trail_ticks: int = 10, minimum_profit_ticks: int = 5)
                    closed_at=datetime('now','utc'),
                    exit_odds=?, exit_stake=entry_stake
              WHERE customerOrderRef=?
-        """, (px, p["customerOrderRef"]))
+        """, (px, r["customerOrderRef"]))
 
     # apply updates
     for floor, ceil, cref in updates:
@@ -879,30 +871,103 @@ def enforce_stop_losses():
         if not ev:
             continue
 
-        # 4) emit decision event (router will place STOPLOSS child)
-        from engines.decision_engine.decide_once.placement import enqueue_for_placement
+        # 4) enqueue STOPLOSS child for ROUTER (DB-first, execution-owned)
+        from engines.live.live_router import enqueue_router_child
 
-        enqueue_for_placement(
-            "OVERWATCHER",
-            {
-                "enter": True,
+        exit_side = "BACK" if r["side"].upper() == "LAY" else "LAY"
+
+        enqueue_router_child(
+            plan={
+                # child_id intentionally omitted → router will INSERT QUEUED
+                "role": "CHILD",
                 "engine": "OVERWATCHER",
-                "type": "STOPLOSS",
-                "family": "STOPLOSS",
+                "exit_kind": "STOPLOSS",
+                "source": "S",                      # letter S
+                "parent_cor": r["customerOrderRef"],
                 "marketId": mid,
                 "selectionId": sid,
-                "direction": exit_side,
-                "size": entry_stake,
-                "px": current_odds,
-                "parent_ref": p["customerOrderRef"],
-                "why": "overwatcher_stoploss",
-                "ts": ev.get("ts"),
+                "side": exit_side,                  # BACK or LAY
+                "px": px,
+                "size": float(r["entry_stake"]),
             },
-            None,  # CTX intentionally minimal — child-only execution
+            ctx={
+                "engine": "OVERWATCHER",
+                "mode": "LIVE",
+            }
         )
 
+        # --------------------------------------------------------------
+        # STOPLOSS FOLLOW-UP:
+        # If STOPLOSS (S) child is MATCHED → cancel active HEDGE (H) child
+        # --------------------------------------------------------------
+        try:
+            con = _orders_conn()
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
 
-        # === PATCH END ===
+            sl_rows = cur.execute("""
+                SELECT
+                    s.id        AS s_id,
+                    s.hedge_of  AS parent_id
+                FROM orders s
+                WHERE s.role='CHILD'
+                  AND UPPER(s.exit_kind)='STOPLOSS'
+                  AND UPPER(s.entry_status)='MATCHED'
+                  AND NOT EXISTS (
+                        SELECT 1
+                          FROM orders h
+                         WHERE h.hedge_of = s.hedge_of
+                           AND UPPER(h.exit_status)='CANCELLED'
+                  )
+            """).fetchall()
+
+            if sl_rows:
+                app_key, token = _keys()
+
+                for sl in sl_rows:
+                    # find active HEDGE child
+                    h = cur.execute("""
+                        SELECT id, entry_bet_id
+                          FROM orders
+                         WHERE role='CHILD'
+                           AND hedge_of=?
+                           AND UPPER(exit_kind)='HEDGE'
+                           AND entry_status IN ('QUEUED','PLACED','MATCHED')
+                           AND exit_status IS NULL
+                         ORDER BY id DESC
+                         LIMIT 1
+                    """, (int(sl["parent_id"]),)).fetchone()
+
+                    if not h:
+                        continue
+
+                    bet_id = h["entry_bet_id"]
+                    if bet_id:
+                        try:
+                            _cancel(app_key, token, str(bet_id))  # 🔥 Betfair cancel
+                        except Exception:
+                            pass
+
+                    # mirror Betfair state in DB
+                    cur.execute("""
+                        UPDATE orders
+                           SET exit_status='CANCELLED',
+                               closed_at=datetime('now','utc'),
+                               error='cancelled_by_stoploss'
+                         WHERE id=?
+                    """, (int(h["id"]),))
+
+                con.commit()
+
+        except Exception as e:
+            print(f"[OVERWATCHER][STOPLOSS][CANCEL-H][ERR] {e}")
+
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
