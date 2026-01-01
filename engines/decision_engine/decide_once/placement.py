@@ -611,6 +611,21 @@ def _insert_pending_parent(
     plan = plan or {}
     ctx  = ctx or {}
 
+    # -------------------------------
+    # REQUIRED INVARIANT
+    # -------------------------------
+    if "target_ticks" not in plan:
+        raise RuntimeError(
+            f"[PLACEMENT] invariant violation: target_ticks missing for parent {cor}"
+        )
+
+    target_ticks = int(plan["target_ticks"])
+    if target_ticks <= 0:
+        raise RuntimeError(
+            f"[PLACEMENT] invariant violation: target_ticks <= 0 for parent {cor}"
+        )
+
+
     mid    = str(market_id)
     sid    = str(selection_id)
     letter = str(source)[:1].upper()
@@ -643,6 +658,7 @@ def _insert_pending_parent(
                     side,
                     entry_odds,
                     entry_stake,
+                    target_ticks,
                     entry_status,
                     role,
                     source,
@@ -652,7 +668,7 @@ def _insert_pending_parent(
                     opened_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', 'PARENT',
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', 'PARENT',
                     ?, ?, ?, ?, ?
                 )
                 """,
@@ -665,6 +681,7 @@ def _insert_pending_parent(
                     str(side),
                     float(entry_odds),
                     float(entry_stake),
+                    target_ticks,
                     str(letter),
                     str(engine),
                     str(stoploss_mode).upper(),

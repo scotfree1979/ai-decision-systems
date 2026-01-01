@@ -112,6 +112,7 @@ class ExploratoryEngine:
             plan = {
                 "enter": True,
                 "engine": "MSC_EXPLORATORY",
+                "target_ticks": int(msc_decision["entry_ticks"]),
                 "entry_ticks": msc_decision["entry_ticks"],
                 "stop_ticks": msc_decision["stop_ticks"],
                 "px": ctx.get("px"),

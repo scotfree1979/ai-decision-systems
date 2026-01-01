@@ -34,55 +34,196 @@ def _router_child_worker_loop():
         _orders_insert_child_queued,
     )
 
+    import time
+    import sqlite3
+
+
+    RESCUE_DELAY_SECONDS = 120  # 2 minutes
+
     while True:
         try:
-            plan, ctx = _ROUTER_CHILD_QUEUE.get()
+            # ==================================================
+            # PHASE 1 — NORMAL CHILD EXECUTION PATH
+            # ==================================================
+            try:
+                plan, ctx = _ROUTER_CHILD_QUEUE.get_nowait()
 
-            parent_cor = plan.get("parent_cor")
-            if parent_cor:
-                child_id = _ensure_child_queued_for_matched_parent(parent_cor)
-                if child_id:
-                    plan["child_id"] = child_id
-
-            # --------------------------------------------------
-            # STAGE 1: GUARANTEE CHILD ROW EXISTS (DB-FIRST)
-            # --------------------------------------------------
-            child_id = plan.get("child_id")
-
-            if not child_id:
                 parent_cor = plan.get("parent_cor")
-                if not parent_cor:
-                    raise RuntimeError("router child worker: missing child_id and parent_cor")
+                if parent_cor:
+                    child_id = _ensure_child_queued_for_matched_parent(parent_cor)
+                    if child_id:
+                        plan["child_id"] = child_id
 
-                # REQUIRED FIELDS (already present in plan by design)
-                child_id = _orders_insert_child_queued(
-                    parent_cor=parent_cor,
-                    market_id=plan["marketId"],
-                    selection_id=plan["selectionId"],
-                    side=plan["side"],
-                    odds=plan["px"],
-                    stake=plan["size"],
-                    source=plan.get("source", "LEGACY"),
-                    exit_kind=plan.get("exit_kind", "HEDGE"),
-                )
+                # --------------------------------------------------
+                # GUARANTEE CHILD ROW EXISTS (DB-FIRST)
+                # --------------------------------------------------
+                child_id = plan.get("child_id")
 
                 if not child_id:
-                    raise RuntimeError(f"failed to create child row for parent {parent_cor}")
+                    parent_cor = plan.get("parent_cor")
+                    if not parent_cor:
+                        raise RuntimeError("router child worker: missing child_id and parent_cor")
 
-            # --------------------------------------------------
-            # STAGE 2: EXECUTE CHILD (PLACE + RETRY)
-            # --------------------------------------------------
-            ok = _attempt_place_child_with_retry(int(child_id))
-            if not ok:
-                raise RuntimeError(f"router child placement failed id={child_id}")
+                    child_id = _orders_insert_child_queued(
+                        parent_cor=parent_cor,
+                        market_id=plan["marketId"],
+                        selection_id=plan["selectionId"],
+                        side=plan["side"],
+                        odds=plan["px"],
+                        stake=plan["size"],
+                        source=plan.get("source", "LEGACY"),
+                        exit_kind=plan.get("exit_kind", "HEDGE"),
+                    )
+
+                    if not child_id:
+                        raise RuntimeError(f"failed to create child row for parent {parent_cor}")
+
+                # --------------------------------------------------
+                # EXECUTE CHILD (PLACE + RETRY)
+                # --------------------------------------------------
+                ok = _attempt_place_child_with_retry(int(child_id))
+                if not ok:
+                    raise RuntimeError(f"router child placement failed id={child_id}")
+
+            except queue.Empty:
+                # No normal child work right now
+                pass
+
+
+            from engines.market_monitor.phase_clock import MarketPhaseClock
+
+            # ==================================================
+            # PHASE 2 — RESCUE HEDGING (DB + PHASE CLOCK)
+            # ==================================================
+            con = _orders_conn()
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+
+            rows = _q_retry(cur, """
+                SELECT customerOrderRef, marketId
+                  FROM orders p
+                 WHERE p.role='PARENT'
+                   AND UPPER(p.entry_status)='MATCHED'
+                   AND datetime(p.opened_at) <= datetime('now','utc', ?)
+                   AND NOT EXISTS (
+                         SELECT 1 FROM orders c
+                          WHERE c.hedge_of = p.id
+                   )
+                 ORDER BY p.opened_at ASC
+                 LIMIT 20
+            """, (f"-{RESCUE_DELAY_SECONDS} seconds",)).fetchall()
+
+            con.close()
+
+            for r in rows:
+                try:
+                    mid = str(r["marketId"])
+
+                    # 🔑 AUTHORITATIVE MARKET STATE
+                    phase, _ = MarketPhaseClock.get(mid)
+
+                    parent_cor = str(r["customerOrderRef"])
+
+                    # ❌ MARKET TOO LATE — RELEASE EXPOSURE
+                    secs_to_off = _secs_to_off(mid)
+
+                    if secs_to_off <= -(6 * 60):
+                        _release_matched_parent_exposure(parent_cor)
+                        continue
+
+                    # ✅ MARKET STILL HEDGEABLE — RESCUE
+                    _ensure_child_queued_for_matched_parent(parent_cor)
+
+
+                    # ✅ SAFE TO RESCUE
+                    _ensure_child_queued_for_matched_parent(
+                        str(r["customerOrderRef"])
+                    )
+
+                except Exception as e:
+                    _log_event(
+                        "ERROR",
+                        "live_router",
+                        f"rescue hedge failed parent_ref={r['customerOrderRef']}: {e}"
+                    )
+
 
         except Exception:
             print("[ROUTER][CHILD][ERR]")
             traceback.print_exc()
+
         finally:
-            _ROUTER_CHILD_QUEUE.task_done()
+            try:
+                _ROUTER_CHILD_QUEUE.task_done()
+            except Exception:
+                pass
+
+        # Prevent tight loop
+        time.sleep(1.0)
 
 
+def _release_matched_parent_exposure(parent_cor: str) -> None:
+    """
+    Final safety release.
+
+    If a parent is MATCHED, has no child, and the market is finished,
+    release BankState exposure and mark the parent terminal.
+    """
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        row = _q_retry(cur, """
+            SELECT id, engine, entry_odds, entry_stake, exit_status
+              FROM orders
+             WHERE customerOrderRef=?
+               AND role='PARENT'
+               AND entry_status='MATCHED'
+             LIMIT 1
+        """, (parent_cor,)).fetchone()
+
+        if not row:
+            return
+
+        # Idempotency guard
+        if (row["exit_status"] or "").upper() in ("SETTLED", "CANCELLED", "EXPIRED"):
+            return
+
+        # 🔓 RELEASE BANKSTATE EXPOSURE
+        bank_state.on_parent_closed(
+            engine=row["engine"],
+            entry_odds=float(row["entry_odds"]),
+            entry_stake=float(row["entry_stake"]),
+        )
+
+        # Mark terminal so we never touch it again
+        _q_retry(cur, """
+            UPDATE orders
+               SET exit_status='EXPIRED',
+                   closed_at=datetime('now','utc')
+             WHERE id=?
+        """, (int(row["id"]),))
+
+        con.commit()
+
+        _log_event(
+            "INFO",
+            "bankstate",
+            f"[EXPOSURE RELEASE] expired parent_ref={parent_cor}"
+        )
+
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "bankstate",
+            f"[EXPOSURE RELEASE FAILED] parent_ref={parent_cor}: {e}"
+        )
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py (top of file)
