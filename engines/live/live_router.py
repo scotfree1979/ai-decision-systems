@@ -38,6 +38,12 @@ def _router_child_worker_loop():
         try:
             plan, ctx = _ROUTER_CHILD_QUEUE.get()
 
+            parent_cor = plan.get("parent_cor")
+            if parent_cor:
+                child_id = _ensure_child_queued_for_matched_parent(parent_cor)
+                if child_id:
+                    plan["child_id"] = child_id
+
             # --------------------------------------------------
             # STAGE 1: GUARANTEE CHILD ROW EXISTS (DB-FIRST)
             # --------------------------------------------------
@@ -1588,7 +1594,82 @@ def _orders_update_parent_placed(cor, bet_id):
         except Exception: pass
 
 # --- PATCH END ----------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: PARENT CANCEL / FAIL / TIMEOUT PATHS
+# 🧩 ACTION: RELEASE BankState exposure for UNMATCHED parents
+# 📆 PATCHED: 2025-12-31 — fix unmatched parent exposure leak
+# ======================================================================================================
 
+def _release_unmatched_parent_exposure(parent_cor: str) -> None:
+    """
+    Release BankState exposure for a parent that NEVER MATCHED.
+
+    This must be called when a parent is:
+      • CANCELLED
+      • FAILED
+      • EXPIRED
+      • TIMED-OUT (poll_matched failure)
+      • AUTO-CLOSED before match
+
+    Idempotent:
+      • Safe to call multiple times
+      • Will not release matched parents
+    """
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        parent = _q_retry(cur, """
+            SELECT engine, entry_odds, entry_stake, entry_status
+              FROM orders
+             WHERE customerOrderRef=?
+               AND role='PARENT'
+             LIMIT 1
+        """, (str(parent_cor),)).fetchone()
+
+        con.close()
+
+        if not parent:
+            return
+
+        # 🔒 CRITICAL GUARD:
+        # Never release exposure for matched parents
+        if (parent["entry_status"] or "").upper() == "MATCHED":
+            return
+
+        engine = parent["engine"]
+        entry_odds = float(parent["entry_odds"] or 0.0)
+        entry_stake = float(parent["entry_stake"] or 0.0)
+
+        if entry_stake <= 0.0:
+            return
+
+        # 🔓 RELEASE RESERVED EXPOSURE
+        bank_state.on_parent_closed(
+            engine=engine,
+            entry_odds=entry_odds,
+            entry_stake=entry_stake,
+        )
+
+        _log_event(
+            "INFO",
+            "bankstate",
+            f"[EXPOSURE RELEASE] unmatched parent ref={parent_cor} engine={engine}"
+        )
+
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "bankstate",
+            f"[EXPOSURE RELEASE FAILED] ref={parent_cor}: {e}"
+        )
+
+
+# ======================================================================
+# 🔧 HOOK INTO EXISTING LIFECYCLE PATHS (NO BEHAVIOUR CHANGE)
+# ======================================================================
 
 
 def _orders_update_parent_failed(cor, error_msg):
@@ -1602,11 +1683,13 @@ def _orders_update_parent_failed(cor, error_msg):
                AND entry_bet_id IS NULL
         """, (str(error_msg)[:240], cor))
         con.commit()
-    except Exception:
-        pass
     finally:
         try: con.close()
         except Exception: pass
+
+    # 🔑 RELEASE UNMATCHED EXPOSURE
+    _release_unmatched_parent_exposure(cor)
+
 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -1841,6 +1924,130 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         except Exception:
             pass
 
+def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
+    """
+    Standalone invariant enforcer.
+
+    If a PARENT is MATCHED and no CHILD exists,
+    insert exactly one CHILD row with entry_status='QUEUED'.
+
+    Idempotent.
+    """
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        parent = _q_retry(cur, """
+            SELECT
+                id,
+                run_id,
+                marketId,
+                selectionId,
+                side,
+                entry_odds,
+                entry_stake,
+                source,
+                engine,
+                target_ticks
+            FROM orders
+            WHERE customerOrderRef=?
+              AND role='PARENT'
+              AND entry_status='MATCHED'
+            LIMIT 1
+        """, (str(parent_cor),)).fetchone()
+
+        if not parent:
+            return None
+
+        parent_id = int(parent["id"])
+
+        # Child already exists?
+        row = _q_retry(cur, """
+            SELECT id
+            FROM orders
+            WHERE role='CHILD'
+              AND hedge_of=?
+            LIMIT 1
+        """, (parent_id,)).fetchone()
+
+        if row:
+            return int(row["id"])
+
+        # Deterministic hedge parameters (reuse existing logic)
+        parent_side = parent["side"].upper()
+        child_side = "BACK" if parent_side == "LAY" else "LAY"
+
+        ticks = int(parent["target_ticks"] or 1)
+
+        from engines.price_math import odds_plus_ticks
+
+        hedge_odds = odds_plus_ticks(
+            float(parent["entry_odds"]),
+            +ticks if child_side == "BACK" else -ticks
+        )
+        hedge_odds = _round_odds(float(hedge_odds))
+
+        hedge_stake = calc_greenup_stake(
+            parent_side,
+            float(parent["entry_odds"]),
+            float(parent["entry_stake"]),
+            hedge_odds
+        )
+
+        # Insert CHILD (DB-first, QUEUED)
+        _q_retry(cur, """
+            INSERT INTO orders (
+                customerOrderRef,
+                run_id,
+                mode,
+                marketId,
+                selectionId,
+                side,
+                entry_odds,
+                entry_stake,
+                entry_status,
+                opened_at,
+                role,
+                hedge_of,
+                source,
+                exit_kind,
+                engine
+            )
+            VALUES (
+                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED',
+                datetime('now','utc'),
+                'CHILD', ?, ?, 'HEDGE', ?
+            )
+        """, (
+            f"CHILD-{uuid.uuid4().hex[:12]}",
+            parent["run_id"],
+            parent["marketId"],
+            parent["selectionId"],
+            child_side,
+            float(hedge_odds),
+            float(hedge_stake),
+            parent_id,
+            parent["source"],
+            parent["engine"],
+        ))
+
+        con.commit()
+        return int(cur.lastrowid)
+
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"ensure_child_queued failed parent_ref={parent_cor}: {e}"
+        )
+        return None
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 # === PATCH START: Playbooks Writer (LIVE profit pattern logger) ===
 # 📍 TARGET: engines/live/live_router.py
@@ -2466,6 +2673,10 @@ def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> Non
         con.commit()
     finally:
         con.close()
+
+    # 🔑 RELEASE UNMATCHED EXPOSURE
+    _release_unmatched_parent_exposure(cor)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
