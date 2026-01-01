@@ -2129,7 +2129,7 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
 
                 # Terminal market condition
                 if mto is not None and float(mto) <= -GRACE_MINUTES:
-                _release_matched_parent_exposure(parent_cor)
+                    _release_matched_parent_exposure(parent_cor)
 
                     _q_retry(cur, """
                         UPDATE orders
