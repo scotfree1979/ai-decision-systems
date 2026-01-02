@@ -1164,6 +1164,46 @@ class DecisionBus:
                 final_plans.append((eng, plan, ctx))
                 tick_ctx["plans_enriched"].append(plan)
 
+                # --------------------------------------------------
+                # BUS DE-DUPLICATION — ONE PLAN PER (MID, SID, PX, SOURCE)
+                # --------------------------------------------------
+
+                if "seen_plan_keys" not in tick_ctx:
+                    tick_ctx["seen_plan_keys"] = set()
+                    tick_ctx["dup_blocked_by_engine"] = {
+                        "LEGACY": 0,
+                        "MSC_EXPLORATORY": 0,
+                        "MSC_INPLAY": 0,
+                        "MSC_RISK": 0,
+                    }
+
+                mid = plan.get("marketId")
+                sid = plan.get("selectionId")
+                px  = float(plan.get("px") or 0.0)
+
+                # Source / strategy discriminator
+                source = (
+                    plan.get("source")
+                    or plan.get("letter")
+                    or plan.get("engine")
+                )
+
+                key = (mid, sid, px, source)
+
+                if key in tick_ctx["seen_plan_keys"]:
+                    eng_name = plan.get("engine")
+                    tick_ctx["dup_blocked_by_engine"][eng_name] += 1
+
+                    tick_ctx["plans_route_failed"].append(
+                        (plan, "duplicate_price_source")
+                    )
+
+                    engine_report[eng_name]["note"] = "duplicate_price_source"
+                    continue
+
+                tick_ctx["seen_plan_keys"].add(key)
+                
+
 
 
             # --------------------------------------------------
@@ -1263,6 +1303,11 @@ class DecisionBus:
             for eng, n in plans_by_engine.items():
                 print(f"  {eng:<16}: {n}")
 
+            if "dup_blocked_by_engine" in tick_ctx:
+                print("\nDUPLICATES BLOCKED")
+                for eng, n in tick_ctx["dup_blocked_by_engine"].items():
+                    if n > 0:
+                        print(f"  {eng:<16}: {n}")
 
             if tick_ctx["plans_annotated"]:
                 print("\nBUS ANNOTATIONS")
