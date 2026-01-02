@@ -2405,6 +2405,40 @@ def start_winners_daemon(interval_s: int = 5):
 # 🎯 ACTION: Replace function (ensure DB + creds are ready before daemons start)
 # 📆 PATCHED: 2026-02-10
 # =============================================================================
+def _wait_for_betfair_creds(max_wait_s: int = 30) -> bool:
+    """
+    Block until Betfair creds are visible in autoscalp_gui.db.app_kv.
+    Prevents startup race with GUI Step-1 token persistence.
+    """
+    import time, sqlite3
+    from engines.config_paths import autoscalp_db
+
+    deadline = time.time() + max_wait_s
+
+    while time.time() < deadline:
+        try:
+            con = sqlite3.connect(autoscalp_db(), timeout=3)
+            con.row_factory = sqlite3.Row
+
+            row = con.execute("""
+                SELECT
+                    MAX(CASE WHEN LOWER(key) LIKE '%app_key%' THEN value END) AS app_key,
+                    MAX(CASE WHEN LOWER(key) LIKE '%session%' THEN value END) AS session
+                FROM app_kv
+            """).fetchone()
+
+            con.close()
+
+            if row and row["app_key"] and row["session"]:
+                return True
+
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+    return False
+
 # === PATCH START =============================================================
 
 def start_all_settlement_services():
@@ -2413,17 +2447,22 @@ def start_all_settlement_services():
         from engines.config_paths import autoscalp_db
         db_path = autoscalp_db()
 
-        # delay until DB folder exists
         if not db_path or not os.path.exists(os.path.dirname(db_path)):
             print("[settlements] delay: AUTO DB not yet ready")
             return
 
+        # 🔑 NEW: credential gate
+        if not _wait_for_betfair_creds(max_wait_s=30):
+            print("[settlements] delay: Betfair creds not ready after 30s — skipping start")
+            return
+
         start_settlement_daemon(interval_s=300)
         start_winners_daemon(interval_s=5)
-        print("[settlements] services started AFTER DB+creds ready")
+        print("[settlements] services started AFTER DB + creds ready")
 
     except Exception as e:
         print(f"[settlements] failed to start services: {e}")
+
 
 # === PATCH END ===============================================================
 
