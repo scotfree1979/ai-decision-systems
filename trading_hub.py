@@ -43,7 +43,7 @@ def launch(cmd: str):
     '''
     subprocess.run(["osascript", "-e", osa])
 
-#launch("python3 engines/live/settlements.py fetch --since-days 2 && python3 engines/live/settlements.py reconcile")
+#launch("python3 engines/live/settlements.py fetch --since-days 2 --skip-meta \ && python3 engines/live/settlements.py reconcile")
 #launch("python3 engines/mastery/train_mastery_v7.py --days 90 --epochs 25")
 
 
@@ -333,9 +333,10 @@ def handle_choice(choice: str):
         cmd = (
             f"cd {PROJECT_DIR} && "
             "export PYTHONPATH=$(pwd):$PYTHONPATH && "
-            f"python3 engines/live/settlements.py fetch --since-days {days} && "
+            f"python3 engines/live/settlements.py fetch --since-days {days} --skip-meta && "
             "python3 engines/live/settlements.py reconcile ; exec bash"
         )
+
 
         osa = f'''
         tell application "Terminal"

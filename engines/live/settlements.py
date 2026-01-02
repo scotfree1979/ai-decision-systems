@@ -147,55 +147,48 @@ def _auto_local_conn(timeout: float = 8.0) -> sqlite3.Connection:
 # 🔎 SEARCH: SELECT key, value FROM app_kv WHERE key IN ('APP_KEY','SESSION_TOKEN')
 # 📆 PATCHED: 2025-12-03 — settlements must read SAME key names as GUI/live_router
 
-def _resolve_betfair_creds_localonly() -> tuple[str|None, str|None]:
+def _resolve_betfair_creds_localonly() -> tuple[str | None, str | None]:
     """
-    Settlements must read the SAME credential keys that GUI + live_router use.
-    Always read LOCAL autoscalp_gui.db directly.
+    Authoritative resolver for settlements.
+
+    APP_KEY: engines.daily_config.APP_KEY
+    SESSION : autoscalp_gui.db.app_kv (GUI Step-1)
     """
     app_key = None
     session = None
 
+    # APP KEY (static)
+    try:
+        from engines.daily_config import APP_KEY
+        app_key = APP_KEY.strip()
+    except Exception:
+        app_key = None
+
+    # SESSION TOKEN (GUI DB)
     try:
         import sqlite3
         from engines.config_paths import autoscalp_db
-        path = autoscalp_db()   # always LOCAL, never LiveCache
-        con = sqlite3.connect(path)
+
+        con = sqlite3.connect(autoscalp_db())
         con.row_factory = sqlite3.Row
-
-        # --- Unified key list (GUI + live_router + feeder) ---
-        app_keys = (
-            'app_key','APP_KEY','bf_app_key','betfair_app_key'
-        )
-        session_keys = (
-            'session','session_token','betfair_session','betfair_session_token','x-authentication'
-        )
-
-        # APP KEY
         row = con.execute(
-            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(app_keys))}) "
-            "ORDER BY updated_at DESC LIMIT 1",
-            tuple(k.lower() for k in app_keys)
+            """
+            SELECT value
+              FROM app_kv
+             WHERE LOWER(key) IN ('betfair_session_token','session_token','betfair_session')
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """
         ).fetchone()
-        if row and row["value"]:
-            app_key = row["value"]
-
-        # SESSION TOKEN
-        row = con.execute(
-            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(session_keys))}) "
-            "ORDER BY updated_at DESC LIMIT 1",
-            tuple(k.lower() for k in session_keys)
-        ).fetchone()
-        if row and row["value"]:
-            session = row["value"]
-
         con.close()
+
+        if row and row["value"]:
+            session = row["value"].strip()
     except Exception:
-        pass
+        session = None
 
-    # fallbacks unchanged...
+    return app_key, session
 
-    return (app_key.strip() if isinstance(app_key,str) else app_key,
-            session.strip() if isinstance(session,str) else session)
 # === PATCH END ===
 
 
@@ -1164,6 +1157,8 @@ def rebuild_runner_day_totals(day_utc: Optional[str] = None) -> int:
     return updated
 
 
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Betfair API client (minimal)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2019,6 +2014,14 @@ def parse_args(argv: Optional[List[str]]=None) -> argparse.Namespace:
     p_fetch.add_argument("--skip-meta", dest="skip_meta", action="store_true",
                          help="Skip market metadata (catalogue/book) calls.")
 
+    p_fetch.add_argument(
+        "--with-meta",
+        dest="with_meta",
+        action="store_true",
+        help="Explicitly enable market metadata fetch (slow, non-live)"
+    )
+
+
 
 
     sub.add_parser("reconcile", help="Reconcile settlements into autoscalp_gui.db.orders")
@@ -2027,14 +2030,7 @@ def parse_args(argv: Optional[List[str]]=None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     # ensure env creds present for the whole run (harmless if already set)
-    try:
-        ak, ss = _resolve_betfair_creds()
-        if ak and "BETFAIR_APP_KEY" not in os.environ:
-            os.environ["BETFAIR_APP_KEY"] = ak
-        if ss and "BETFAIR_SESSION" not in os.environ:
-            os.environ["BETFAIR_SESSION"] = ss
-    except Exception:
-        pass
+
 
     args = parse_args(argv)
 
@@ -2111,7 +2107,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 mkt_ids = []
 
         # Optionally skip metadata entirely
-        if getattr(args, "skip_meta", False) or not mkt_ids:
+        # Default: SKIP metadata unless explicitly requested
+        skip_meta = getattr(args, "skip_meta", False)
+
+        if skip_meta or not mkt_ids:
+
             if not mkt_ids:
                 print("[settlements] no markets to fetch metadata for")
             else:
@@ -2406,10 +2406,6 @@ def start_winners_daemon(interval_s: int = 5):
 # 📆 PATCHED: 2026-02-10
 # =============================================================================
 def _wait_for_betfair_creds(max_wait_s: int = 30) -> bool:
-    """
-    Block until Betfair creds are visible in autoscalp_gui.db.app_kv.
-    Prevents startup race with GUI Step-1 token persistence.
-    """
     import time, sqlite3
     from engines.config_paths import autoscalp_db
 
@@ -2420,16 +2416,19 @@ def _wait_for_betfair_creds(max_wait_s: int = 30) -> bool:
             con = sqlite3.connect(autoscalp_db(), timeout=3)
             con.row_factory = sqlite3.Row
 
-            row = con.execute("""
-                SELECT
-                    MAX(CASE WHEN LOWER(key) LIKE '%app_key%' THEN value END) AS app_key,
-                    MAX(CASE WHEN LOWER(key) LIKE '%session%' THEN value END) AS session
-                FROM app_kv
-            """).fetchone()
+            row = con.execute(
+                """
+                SELECT value
+                  FROM app_kv
+                 WHERE LOWER(key) IN ('betfair_session_token','session_token','betfair_session')
+                 ORDER BY updated_at DESC
+                 LIMIT 1
+                """
+            ).fetchone()
 
             con.close()
 
-            if row and row["app_key"] and row["session"]:
+            if row and row["value"]:
                 return True
 
         except Exception:
@@ -2438,6 +2437,7 @@ def _wait_for_betfair_creds(max_wait_s: int = 30) -> bool:
         time.sleep(0.5)
 
     return False
+
 
 # === PATCH START =============================================================
 
@@ -2475,7 +2475,8 @@ if __name__ == "__main__":
 # 📆 PATCHED: 2025-11-04Z — auto-start River + Winners daemons
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     try:
-        start_all_settlement_services(interval_s=300)
+        start_all_settlement_services()
+
         
     except Exception as e:
         print(f"[daemons] warn: failed to start background daemons — {e}")
