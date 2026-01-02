@@ -370,22 +370,24 @@ class DecisionBus:
         # ============================
         # MSC In-Play
         # ============================
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside _run_engines_for_tick → MSC In-Play section
+# 🧩 ACTION: REPLACE in_play gate logic
+# 📆 PATCHED: 2026-01-02 — fix MSC_INPLAY scope contract
+# ======================================================================================================
+
         try:
             eng = self.engines.get("MSC_INPLAY")
             if eng:
 
-                # BUS-authoritative gate:
-                # Only evaluate In-Play when Scope says market is in_play
-                in_play_mids = set(
-                    scope.get("buckets", {}).get("in_play", []) or []
-                )
-
-                if mid not in in_play_mids:
+                # Correct authority: MarketPhaseClock via ctx
+                if not ctx.get("in_play", False):
                     _record(
                         "MSC_INPLAY",
                         evaluated=True,
                         fired=False,
-                        why="not_in_play_scope",
+                        why="not_in_play",
                     )
                 else:
                     p = eng.tick(ctx)
@@ -399,11 +401,7 @@ class DecisionBus:
                         )
                     elif p.get("enter"):
                         p["engine"] = "MSC_INPLAY"
-                        _record(
-                            "MSC_INPLAY",
-                            evaluated=True,
-                            fired=True,
-                        )
+                        _record("MSC_INPLAY", evaluated=True, fired=True)
                         plans.append(("MSC_INPLAY", p, ctx))
                     else:
                         _record(
@@ -414,6 +412,7 @@ class DecisionBus:
                         )
         except Exception as e:
             _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
+
 
 
         # ============================
@@ -878,15 +877,23 @@ class DecisionBus:
                     con = open_auto_db(rw=False)
                     con.row_factory = None
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: MSC_RISK — parent-driven protection query
+# 🧩 ACTION: REPLACE SQL WHERE clause
+# 📆 PATCHED: 2026-01-02 — fix MSC_RISK orders schema
+# ======================================================================================================
+
                     rows = con.execute("""
                         SELECT DISTINCT
                             marketId,
                             selectionId
                         FROM orders
-                        WHERE family = 'LEGACY'
+                        WHERE engine = 'LEGACY'
                           AND role = 'PARENT'
                           AND entry_status = 'MATCHED'
                     """).fetchall()
+
 
                     risc_evaluated = False
 
@@ -1160,14 +1167,16 @@ class DecisionBus:
                     engine_report[plan["engine"]]["note"] = "insufficient_budget"
                     tick_ctx["plans_annotated"].append((plan, "insufficient_budget"))
 
-                # ALWAYS forward (BUS never blocks execution)
-                final_plans.append((eng, plan, ctx))
-                tick_ctx["plans_enriched"].append(plan)
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside enrichment loop, BEFORE final_plans.append
+# 🧩 ACTION: ADD de-duplication gate
+# 📆 PATCHED: 2026-01-02 — prevent duplicate parent plans
+# ======================================================================================================
 
                 # --------------------------------------------------
                 # BUS DE-DUPLICATION — ONE PLAN PER (MID, SID, PX, SOURCE)
                 # --------------------------------------------------
-
                 if "seen_plan_keys" not in tick_ctx:
                     tick_ctx["seen_plan_keys"] = set()
                     tick_ctx["dup_blocked_by_engine"] = {
@@ -1181,7 +1190,6 @@ class DecisionBus:
                 sid = plan.get("selectionId")
                 px  = float(plan.get("px") or 0.0)
 
-                # Source / strategy discriminator
                 source = (
                     plan.get("source")
                     or plan.get("letter")
@@ -1193,16 +1201,19 @@ class DecisionBus:
                 if key in tick_ctx["seen_plan_keys"]:
                     eng_name = plan.get("engine")
                     tick_ctx["dup_blocked_by_engine"][eng_name] += 1
-
                     tick_ctx["plans_route_failed"].append(
                         (plan, "duplicate_price_source")
                     )
-
                     engine_report[eng_name]["note"] = "duplicate_price_source"
                     continue
 
                 tick_ctx["seen_plan_keys"].add(key)
-                
+
+
+                # ALWAYS forward (BUS never blocks execution)
+                final_plans.append((eng, plan, ctx))
+                tick_ctx["plans_enriched"].append(plan)
+
 
 
 
