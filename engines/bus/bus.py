@@ -1209,6 +1209,24 @@ class DecisionBus:
 
                 tick_ctx["seen_plan_keys"].add(key)
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside enrichment loop, BEFORE final_plans.append
+# 🧩 ACTION: ADD hard execution identity guard
+# 📆 PATCHED: 2026-01-02 — enforce router contract (marketId invariant)
+# ======================================================================================================
+
+                # --------------------------------------------------
+                # HARD EXECUTION IDENTITY GUARD (BUS AUTHORITY)
+                # --------------------------------------------------
+                if not plan.get("marketId") or not plan.get("selectionId"):
+                    tick_ctx["plans_route_failed"].append(
+                        (plan, "missing_execution_identity")
+                    )
+                    engine_report[plan.get("engine", "UNKNOWN")]["note"] = "missing_marketId"
+                    continue
+
+
 
                 # ALWAYS forward (BUS never blocks execution)
                 final_plans.append((eng, plan, ctx))
