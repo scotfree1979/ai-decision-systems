@@ -284,23 +284,40 @@ class DecisionBus:
         ctx["band"] = rn.get("band")
         ctx["is_fav"] = rn.get("is_fav", False)
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: def _build_ctx_for_market(self, base_ctx, mid, sid):
+# 🧩 ACTION: FIX (unpack MarketPhaseClock.get return)
+# 📆 PATCHED: 2026-01-02 — Inject authoritative phase clock into MSC context
+#
+# RATIONALE:
+# MarketPhaseClock.get() returns (MarketPhase, tto_window).
+# MSC requires minutes_to_off BEFORE plan generation.
+# Fallback to 999.0 was masking a tuple-unpack error.
+# ======================================================================================================
+
         # --------------------------------------------------
         # AUTHORITATIVE CLOCK (TIME DIMENSION)
         # --------------------------------------------------
         try:
-            phase = MarketPhaseClock.get(mid)
+            phase_obj, tto_window = MarketPhaseClock.get(mid)
 
-            ctx["oc_phase"] = phase.oc_phase
-            ctx["minutes_to_off"] = phase.minutes_to_off
-            ctx["phase"] = phase.phase
-            ctx["in_play"] = phase.in_play
+            ctx["oc_phase"] = phase_obj.oc_phase
+            ctx["minutes_to_off"] = phase_obj.minutes_to_off
+            ctx["phase"] = phase_obj.phase
+            ctx["in_play"] = phase_obj.in_play
 
-        except Exception:
+            # Optional: expose tto_window explicitly (safe, read-only)
+            ctx["tto_window"] = tto_window
+
+        except Exception as e:
             # Safe fallback — should not normally occur
             ctx["oc_phase"] = 0.0
             ctx["minutes_to_off"] = 999.0
             ctx["phase"] = "PRE"
             ctx["in_play"] = False
+            ctx["_phase_clock_error"] = str(e)
+
 
         # --------------------------------------------------
         # DERIVE TTO WINDOW (BUS-LOCAL, NOT STORED)
@@ -1056,32 +1073,6 @@ class DecisionBus:
                 plan.setdefault("px", ctx.get("px"))
 
                 # --------------------------------------------------
-                # Dynamic Stake (BUS authority — v7 correct)
-                # --------------------------------------------------
-                if not plan.get("size") or float(plan.get("size") or 0) <= 0:
-
-                    try:
-                        engine = plan.get("engine")
-                        if not engine:
-                            raise RuntimeError("missing engine for dynamic stake")
-
-                        # 🔑 CORRECT API — engine-aware, BankState-backed
-                        stake = compute_dynamic_stake(ctx, engine)
-
-                        # Hard guarantee: stake must be numeric
-                        if stake is None or stake <= 0:
-                            raise RuntimeError(f"invalid dynamic stake {stake}")
-
-                        plan["size"] = float(stake)
-                        plan["_stake_source"] = "dynamic_v7"
-
-                    except Exception as e:
-                        # 🚨 This should NEVER happen once wired correctly
-                        plan["_bus_error"] = f"dynamic_stake_failed:{e}"
-                        tick_ctx["errors"].append(("dynamic_stake_failed", str(e)))
-                        continue  # block ONLY if compute_dynamic_stake itself explodes
-
-                # --------------------------------------------------
                 # Direction check (execution truth)
                 # --------------------------------------------------
                 dec = None
@@ -1100,56 +1091,75 @@ class DecisionBus:
                     plan_dir = exec_dir
 
                 # ------------------------------------------------------------------
-                # DYNAMIC STAKE ENRICHMENT (AUTHORITATIVE — BUS RESPONSIBILITY)
+                # STAKE ENRICHMENT (ENGINE-AWARE — SINGLE AUTHORITY)
+                #
+                # Rules:
+                # - MSC_RISK computes stake mechanically inside the engine
+                # - BUS must respect RISK stake and never override it
+                # - All other engines use dynamic stake
                 # ------------------------------------------------------------------
-                from engines.live.bank_state import get_engine_available
-                from engines.math.dynamic_stake_v7 import compute_dynamic_stake
+                engine = plan.get("engine")
 
-                # Only compute stake if not already provided
-                if "size" not in plan or plan.get("size") in (None, 0):
-
-                    engine = plan.get("engine")
-                    px = float(plan.get("px") or 0.0)
-
-                    # Guard: cannot compute stake without these
-                    if not engine or px <= 0:
-                        plan["_bus_block"] = "dynamic_stake_missing_inputs"
+                if engine == "MSC_RISK":
+                    # RISK owns stake calculation
+                    if not plan.get("size") or float(plan.get("size") or 0) <= 0:
+                        plan["_bus_block"] = "risk_plan_missing_size"
                         tick_ctx["plans_route_failed"].append(
-                            (plan, "dynamic_stake_missing_inputs")
+                            (plan, "risk_plan_missing_size")
                         )
-                        engine_report[engine]["note"] = "dynamic_stake_missing_inputs"
+                        engine_report[engine]["note"] = "risk_plan_missing_size"
                         continue  # 🔴 DO NOT ROUTE
+                    plan["_stake_source"] = "risk_engine"
 
-                    try:
-                        pot = get_engine_available(engine)
+                else:
+                    # All other engines use dynamic stake
+                    from engines.live.bank_state import get_engine_available
+                    from engines.math.dynamic_stake_v7 import compute_dynamic_stake
 
-                        stake, stake_meta = compute_dynamic_stake(
-                            engine=engine,
-                            px=px,
-                            pot=pot,
-                            ctx=ctx,
-                        )
+                    if "size" not in plan or plan.get("size") in (None, 0):
 
-                        # Hard guarantee — size must be valid
-                        if not stake or stake <= 0:
-                            plan["_bus_block"] = "dynamic_stake_zero"
+                        px = float(plan.get("px") or 0.0)
+
+                        # Guard: cannot compute stake without these
+                        if not engine or px <= 0:
+                            plan["_bus_block"] = "dynamic_stake_missing_inputs"
                             tick_ctx["plans_route_failed"].append(
-                                (plan, "dynamic_stake_zero")
+                                (plan, "dynamic_stake_missing_inputs")
                             )
-                            engine_report[engine]["note"] = "dynamic_stake_zero"
+                            engine_report[engine]["note"] = "dynamic_stake_missing_inputs"
                             continue  # 🔴 DO NOT ROUTE
 
-                        plan["size"] = float(stake)
-                        plan["_stake_source"] = "dynamic"
-                        plan["_stake_meta"] = stake_meta
+                        try:
+                            pot = get_engine_available(engine)
 
-                    except Exception as e:
-                        plan["_bus_block"] = "dynamic_stake_error"
-                        tick_ctx["plans_route_failed"].append(
-                            (plan, f"dynamic_stake_error:{e}")
-                        )
-                        engine_report[engine]["note"] = "dynamic_stake_error"
-                        continue  # 🔴 DO NOT ROUTE
+                            stake, stake_meta = compute_dynamic_stake(
+                                engine=engine,
+                                px=px,
+                                pot=pot,
+                                ctx=ctx,
+                            )
+
+                            # Hard guarantee — size must be valid
+                            if not stake or stake <= 0:
+                                plan["_bus_block"] = "dynamic_stake_zero"
+                                tick_ctx["plans_route_failed"].append(
+                                    (plan, "dynamic_stake_zero")
+                                )
+                                engine_report[engine]["note"] = "dynamic_stake_zero"
+                                continue  # 🔴 DO NOT ROUTE
+
+                            plan["size"] = float(stake)
+                            plan["_stake_source"] = "dynamic"
+                            plan["_stake_meta"] = stake_meta
+
+                        except Exception as e:
+                            plan["_bus_block"] = "dynamic_stake_error"
+                            tick_ctx["plans_route_failed"].append(
+                                (plan, f"dynamic_stake_error:{e}")
+                            )
+                            engine_report[engine]["note"] = "dynamic_stake_error"
+                            continue  # 🔴 DO NOT ROUTE
+
 
 
                 # --- BUS MUST NEVER BLOCK EXECUTION ---

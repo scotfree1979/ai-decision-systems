@@ -251,13 +251,13 @@ class RiskEngine:
             return None
 
         # direction-engine decision (already built)
-        de = ctx.get("msc_decision")
-        if not de:
-            return self._no_signal(ctx, reason="no_msc_decision")
+        # --------------------------------------------------
+        # MECHANICAL RISK PARAMETERS (PARENT-DRIVEN)
+        # --------------------------------------------------
+        entry_ticks = int(ctx.get("risk_entry_ticks", 2))
+        stop_ticks  = int(ctx.get("risk_stop_ticks", 4))
+        self.mode   = ctx.get("risk_mode", "MODERATE")
 
-        entry_ticks = int(de.get("entry_ticks", 2))
-        stop_ticks  = int(de.get("stop_ticks", 4))
-        self.mode   = de.get("mode", "MODERATE")
 
 
 # === PATCH START ============================================================
@@ -506,12 +506,30 @@ class RiskEngine:
         return crossed
 
     def _stake(self, ctx, stake_mult, entry_ticks):
-        base = ctx["dynamic_stake_fn"](
-            family="MSC_RISK",
-            confidence=ctx["msc_decision"].get("win_prob"),
-            vol_state=self.mode,
-            expected_ticks=entry_ticks,
-        )
+        """
+        Mechanical risk stake:
+        - Anchored to legacy parent exposure
+        - Independent of intelligence / confidence
+        """
+
+        parent_stake = float(ctx.get("legacy_entry_stake") or 0.0)
+        if parent_stake <= 0:
+            return 0.0
+
+        # Mode-based attenuation
+        if self.mode == "AGGRESSIVE":
+            frac = 0.5
+        elif self.mode == "CONSERVATIVE":
+            frac = 0.15
+        else:  # MODERATE
+            frac = 0.25
+
+        base = parent_stake * frac
+
+        # Optional tick scaling (keeps behaviour symmetric)
+        base *= max(1.0, float(entry_ticks))
+
         return round(float(base) * float(stake_mult), 2)
+
 
 # === PATCH END ================================================================
