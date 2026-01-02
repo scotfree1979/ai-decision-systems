@@ -8,8 +8,9 @@
 from typing import Dict, Any, Optional
 from .state_machine import InPlaySubState
 from .intel_adapter import build_micro_state
-from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+
 from engines.cashout_calc import cashout_calc
+from engines.market_monitor.monitor import get_market_state
 
 from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 
@@ -102,9 +103,16 @@ class InPlayEngine:
             Decide whether to open an in-play micro-LAY.
             """
 
-            current = ctx.get("current_price")
+            mid = ctx.get("marketId")
+            sid = str(ctx.get("selectionId"))
+
+            st = get_market_state(mid) or {}
+            rn = (st.get("runners") or {}).get(sid) or {}
+
+            current = rn.get("px") or ctx.get("px")
             if not current or current <= 0:
                 return None
+
 
             # Must be in sweetspot
             if current < self.SWEETSPOT_MIN_ODDS:
