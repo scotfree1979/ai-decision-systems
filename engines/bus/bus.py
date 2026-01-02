@@ -943,6 +943,75 @@ class DecisionBus:
                 engine_report["MSC_RISK"]["evaluated"] = False
                 engine_report["MSC_RISK"]["note"] = str(e)
 
+            # ==================================================
+            # MSC_EXPLORATORY — SCOPE-DRIVEN (PRE-INPLAY) ENGINE
+            # ==================================================
+            #
+            # Contract:
+            # - Evaluated EVERY tick
+            # - Scope-authoritative
+            # - Explicitly EXCLUDED once market enters in_play bucket
+            # - Independent of runner rotation
+            #
+            try:
+                exp = self.engines.get("MSC_EXPLORATORY")
+                if exp:
+
+                    in_play_mids = set(
+                        scope.get("buckets", {}).get("in_play", []) or []
+                    )
+
+                    exp_evaluated = False
+
+                    for mid in mids:
+
+                        # ----------------------------------------------
+                        # HARD GATE: Exploratory must NOT run in-play
+                        # ----------------------------------------------
+                        if mid in in_play_mids:
+                            continue
+
+                        st = get_market_state(mid) or {}
+                        runners = st.get("runners") or {}
+
+                        for sid, r in runners.items():
+                            if r.get("band") not in ("ACTIVE", "PASSIVE"):
+                                continue
+
+                            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                            if not ctx:
+                                continue
+
+                            exp_evaluated = True
+
+                            p = exp.tick(ctx)
+                            if p is None:
+                                continue
+
+                            if p.get("enter"):
+                                p = dict(p)
+                                p["engine"] = "MSC_EXPLORATORY"
+
+                                engine_report["MSC_EXPLORATORY"]["fired"] += 1
+                                engine_report["MSC_EXPLORATORY"]["evaluated"] = True
+
+                                plans.append(("MSC_EXPLORATORY", p, ctx))
+                                plans_by_engine["MSC_EXPLORATORY"] += 1
+
+                                print(
+                                    f"[BUS][MSC_EXP] mid={mid} sid={sid} "
+                                    f"px={ctx.get('px')} → PLAN {p.get('why')}"
+                                )
+                            else:
+                                engine_report["MSC_EXPLORATORY"]["evaluated"] = True
+
+                    if exp_evaluated and engine_report["MSC_EXPLORATORY"]["fired"] == 0:
+                        engine_report["MSC_EXPLORATORY"]["note"] = "no_plan"
+
+            except Exception as e:
+                engine_report["MSC_EXPLORATORY"]["evaluated"] = False
+                engine_report["MSC_EXPLORATORY"]["note"] = str(e)
+
 
             # Enrichment — unchanged
     # ======================================================================================================
