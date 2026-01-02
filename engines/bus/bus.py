@@ -373,23 +373,48 @@ class DecisionBus:
         try:
             eng = self.engines.get("MSC_INPLAY")
             if eng:
-                p = eng.tick(ctx)
 
-                if p is None:
-                    _record("MSC_INPLAY", evaluated=True, fired=False, why="no_plan")
-                elif p.get("enter"):
-                    p["engine"] = "MSC_INPLAY"
-                    _record("MSC_INPLAY", evaluated=True, fired=True)
-                    plans.append(("MSC_INPLAY", p, ctx))
-                else:
+                # BUS-authoritative gate:
+                # Only evaluate In-Play when Scope says market is in_play
+                in_play_mids = set(
+                    scope.get("buckets", {}).get("in_play", []) or []
+                )
+
+                if mid not in in_play_mids:
                     _record(
                         "MSC_INPLAY",
                         evaluated=True,
                         fired=False,
-                        why=p.get("reason") or p.get("why") or "note",
+                        why="not_in_play_scope",
                     )
+                else:
+                    p = eng.tick(ctx)
+
+                    if p is None:
+                        _record(
+                            "MSC_INPLAY",
+                            evaluated=True,
+                            fired=False,
+                            why="no_plan",
+                        )
+                    elif p.get("enter"):
+                        p["engine"] = "MSC_INPLAY"
+                        _record(
+                            "MSC_INPLAY",
+                            evaluated=True,
+                            fired=True,
+                        )
+                        plans.append(("MSC_INPLAY", p, ctx))
+                    else:
+                        _record(
+                            "MSC_INPLAY",
+                            evaluated=True,
+                            fired=False,
+                            why=p.get("reason") or p.get("why") or "note",
+                        )
         except Exception as e:
             _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
+
 
         # ============================
         # Legacy propose_trade
