@@ -540,6 +540,17 @@ class DecisionBus:
             }
 
             # ------------------------------------
+            # PER-ENGINE PLAN COUNTS (BUS-LOCAL)
+            # ------------------------------------
+            plans_by_engine = {
+                "LEGACY": 0,
+                "MSC_EXPLORATORY": 0,
+                "MSC_INPLAY": 0,
+                "MSC_RISK": 0,
+            }
+
+
+            # ------------------------------------
             # SCOPE (AUTHORITATIVE MARKET LIST)
             # ------------------------------------
             scope = build_and_maintain_scope() or {}
@@ -753,6 +764,7 @@ class DecisionBus:
 
             normalised_plans = []
             for eng, plan, ctx in plans:
+                plans_by_engine[plan["engine"]] += 1
                 plan = dict(plan)  # defensive copy
 
                 upstream_pid = plan.get("plan_id")
@@ -764,6 +776,7 @@ class DecisionBus:
                 normalised_plans.append((eng, plan, ctx))
 
             plans = normalised_plans
+            
 
             # --------------------------------------------------
             # PHASE 1 REPORT — ANALYSIS
@@ -886,6 +899,8 @@ class DecisionBus:
                             )
 
                             plans.append(("MSC_RISK", p, ctx))
+                            plans_by_engine["MSC_RISK"] += 1
+
                         else:
                             engine_report["MSC_RISK"]["evaluated"] = True
 
@@ -1134,7 +1149,7 @@ class DecisionBus:
             # PHASE 3 — ROUTING REPORT (BUS-LOCAL DIAGNOSTICS)
             # ==================================================
 
-            plans_generated = len(plan_queue)
+            plans_generated = sum(plans_by_engine.values())
             plans_delegated = len(final_plans)
             plans_not_delegated = max(plans_generated - plans_delegated, 0)
 
@@ -1149,6 +1164,11 @@ class DecisionBus:
             print(f"  plans_generated : {plans_generated}")
             print(f"  plans_delegated : {plans_delegated}")
             print(f"  not_delegated   : {plans_not_delegated}")
+
+            print("\nPLANS BY ENGINE")
+            for eng, n in plans_by_engine.items():
+                print(f"  {eng:<16}: {n}")
+
 
             if tick_ctx["plans_annotated"]:
                 print("\nBUS ANNOTATIONS")
