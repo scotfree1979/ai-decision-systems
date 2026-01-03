@@ -3530,8 +3530,8 @@ def place_parent_and_hedge(
     on_parent_result=None,
     run_id: str | None = None,
     source: str = "A",
-    parent_persistence: str = "LAPSE",
-    child_persistence: str  = "LAPSE",
+    parent_persistence: str = "PERSIST",
+    child_persistence: str  = "PERSIST",
     max_inplay_seconds: int = 0,
     hedge_stake_override: float | None = None,
     _name: str | None = None,
@@ -3731,7 +3731,7 @@ def place_parent_and_hedge(
         )
         bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
                                       float(entry_odds), float(stake), parent_ref,
-                                      parent_persistence: str = "PERSIST")
+                                      persistence=parent_persistence)
         if bf_parent_id:
             _orders_update_parent_placed(parent_ref, bf_parent_id)
 
