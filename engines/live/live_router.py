@@ -1905,7 +1905,7 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 1) -> 
             float(row["entry_odds"]),
             float(row["entry_stake"]),
             str(row["customerOrderRef"]),
-            persistence="LAPSE",
+            persistence="PERSIST"
         )
 
         # --------------------------------------------------
@@ -3731,7 +3731,7 @@ def place_parent_and_hedge(
         )
         bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
                                       float(entry_odds), float(stake), parent_ref,
-                                      persistence=parent_persistence)
+                                      parent_persistence: str = "PERSIST")
         if bf_parent_id:
             _orders_update_parent_placed(parent_ref, bf_parent_id)
 
