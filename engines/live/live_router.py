@@ -62,32 +62,39 @@ def _router_child_worker_loop():
 
                 # 🔒 ENSURE EXECUTION IDENTITY (router responsibility)
                 if "marketId" not in plan or "selectionId" not in plan:
-                    parent_id = plan.get("hedge_of") or plan.get("parent_id")
-                    if not parent_id:
+
+                    parent_cor = plan.get("parent_cor")
+                    if not parent_cor:
                         raise RuntimeError(
-                            "router child worker: missing marketId/selectionId and no parent_id"
+                            "router child worker: missing marketId/selectionId and no parent_cor"
                         )
 
                     con = _orders_conn()
                     con.row_factory = sqlite3.Row
+
                     row = con.execute(
                         """
-                        SELECT marketId, selectionId
+                        SELECT id, marketId, selectionId
                           FROM orders
-                         WHERE id = ?
+                         WHERE customerOrderRef = ?
+                           AND role = 'PARENT'
                          LIMIT 1
                         """,
-                        (int(parent_id),)
+                        (str(parent_cor),)
                     ).fetchone()
+
                     con.close()
 
                     if not row:
                         raise RuntimeError(
-                            f"router child worker: failed to hydrate identity from parent {parent_id}"
+                            f"router child worker: failed to hydrate identity from parent_cor={parent_cor}"
                         )
 
-                    plan["marketId"] = row["marketId"]
+                    # 🔑 Authoritative identity from DB
+                    plan["parent_id"]   = int(row["id"])
+                    plan["marketId"]    = row["marketId"]
                     plan["selectionId"] = row["selectionId"]
+
 
                 if not child_id:
                     parent_cor = plan.get("parent_cor")
@@ -103,7 +110,7 @@ def _router_child_worker_loop():
                         side=plan["side"],
                         odds=plan["px"],
                         stake=plan["size"],
-                        source=plan.get("source", "LEGACY"),
+                        source=plan["source"],      # ← inherited, not guessed
                         exit_kind=plan.get("exit_kind", "HEDGE"),
                     )
 
@@ -616,7 +623,8 @@ def _cap_numbers_summary(mid: str, sid: str, letter: str) -> None:
 def _router_child_recovery_sweep():
     """
     Ensure every MATCHED parent has a queued child.
-    This runs once at router startup.
+    Router-owned, DB-first, restart-safe.
+    Runs once at router startup.
     """
 
     con = _orders_conn()
@@ -624,16 +632,17 @@ def _router_child_recovery_sweep():
 
     rows = con.execute("""
         SELECT
-            p.customerOrderRef AS parent_cor,
-            p.marketId,
-            p.selectionId,
-            p.side,
-            p.entry_odds,
-            p.entry_stake,
-            p.source
+            p.id                AS parent_id,
+            p.customerOrderRef  AS parent_cor,
+            p.marketId          AS marketId,
+            p.selectionId       AS selectionId,
+            p.side              AS side,
+            p.entry_odds        AS entry_odds,
+            p.entry_stake       AS entry_stake,
+            p.source            AS source
         FROM orders p
-        WHERE p.role='PARENT'
-          AND p.entry_status='MATCHED'
+        WHERE p.role = 'PARENT'
+          AND p.entry_status = 'MATCHED'
           AND NOT EXISTS (
               SELECT 1 FROM orders c
               WHERE c.hedge_of = p.id
@@ -642,22 +651,27 @@ def _router_child_recovery_sweep():
 
     for r in rows:
         try:
+            # NOTE:
+            # _orders_insert_child_queued is POSITIONAL.
+            # Do not pass keyword args.
             _orders_insert_child_queued(
-                parent_cor=r["parent_cor"],
-                market_id=r["marketId"],
-                selection_id=r["selectionId"],
-                side="BACK" if r["side"].upper() == "LAY" else "LAY",
-                odds=r["entry_odds"],
-                stake=r["entry_stake"],
-                source="H",
-                exit_kind="HEDGE",
+                r["parent_id"],                                      # hedge_of
+                r["marketId"],                                       # marketId
+                r["selectionId"],                                    # selectionId
+                "BACK" if r["side"].upper() == "LAY" else "LAY",     # side
+                float(r["entry_odds"]),                               # odds
+                float(r["entry_stake"]),                              # stake
+                "H",                                                  # source
+                "HEDGE",                                              # exit_kind
             )
+
             print(f"[ROUTER][RECOVER] child rebuilt for {r['parent_cor']}")
 
         except Exception as e:
             print(f"[ROUTER][RECOVER][ERR] {r['parent_cor']}: {e}")
 
     con.close()
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2298,18 +2312,16 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
         if row:
             return int(row["id"])
 
-        # Deterministic hedge parameters (reuse existing logic)
+        # --- Hedge derivation (authoritative) ---
         parent_side = parent["side"].upper()
         child_side = "BACK" if parent_side == "LAY" else "LAY"
-
         ticks = int(parent["target_ticks"] or 1)
 
-        from engines.price_math import odds_plus_ticks
+        from engines.price_math import walk_ticks
+        from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
-        hedge_odds = odds_plus_ticks(
-            float(parent["entry_odds"]),
-            +ticks if child_side == "BACK" else -ticks
-        )
+        tick_dir = -ticks if parent_side == "LAY" else ticks
+        hedge_odds = walk_ticks(float(parent["entry_odds"]), tick_dir)
         hedge_odds = _round_odds(float(hedge_odds))
 
         hedge_stake = calc_greenup_stake(
@@ -2352,7 +2364,7 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
             float(hedge_odds),
             float(hedge_stake),
             parent_id,
-            parent["source"],
+            parent["source"],   # ← inherited (correct)
             parent["engine"],
         ))
 
