@@ -34,85 +34,6 @@ import traceback
 
 _PLACEMENT_EXEC_QUEUE: "queue.Queue[tuple[str, dict, dict]]" = queue.Queue()
 
-def _placement_recovery_sweep():
-    """
-    One-time recovery sweep executed on placement worker startup.
-
-    Purpose:
-    - Resume unfinished execution after crash / restart
-    - Enforce DB invariants (parent → child)
-    - Idempotent and safe to re-run
-    """
-
-    from engines.config_paths import open_auto_db
-    import sqlite3
-
-    con = open_auto_db(rw=True)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
-    try:
-        # --------------------------------------------------
-        # 1) Parents MATCHED but missing any child
-        # --------------------------------------------------
-        rows = cur.execute("""
-            SELECT p.id, p.customerOrderRef, p.marketId, p.selectionId,
-                   p.side, p.entry_odds, p.entry_stake, p.engine, p.source
-            FROM orders p
-            WHERE p.role='PARENT'
-              AND p.entry_status='MATCHED'
-              AND NOT EXISTS (
-                    SELECT 1 FROM orders c
-                    WHERE c.hedge_of = p.id
-              )
-        """).fetchall()
-
-        for r in rows:
-            _orders_insert_child_queued(
-                parent_cor=r["customerOrderRef"],
-                market_id=r["marketId"],
-                selection_id=r["selectionId"],
-                side="BACK" if r["side"] == "LAY" else "LAY",
-                odds=r["entry_odds"],
-                stake=r["entry_stake"],
-                source=r["source"],
-                exit_kind="HEDGE",
-            )
-
-        # --------------------------------------------------
-        # 2) Parents STOPLOSS but missing S-child
-        # --------------------------------------------------
-        rows = cur.execute("""
-            SELECT p.id, p.customerOrderRef, p.marketId, p.selectionId,
-                   p.side, p.entry_stake, p.engine, p.source
-            FROM orders p
-            WHERE p.exit_kind='STOPLOSS'
-              AND NOT EXISTS (
-                    SELECT 1 FROM orders c
-                    WHERE c.hedge_of = p.id
-                      AND c.exit_kind='STOPLOSS'
-              )
-        """).fetchall()
-
-        for r in rows:
-            _orders_insert_child_queued(
-                parent_cor=r["customerOrderRef"],
-                market_id=r["marketId"],
-                selection_id=r["selectionId"],
-                side="BACK" if r["side"] == "LAY" else "LAY",
-                odds=None,  # resolved later by router
-                stake=r["entry_stake"],
-                source=r["source"],
-                exit_kind="STOPLOSS",
-            )
-
-        con.commit()
-
-        if rows:
-            print(f"[PLACEMENT][RECOVERY] reconciled parents={len(rows)}")
-
-    finally:
-        con.close()
 
 # ------------------------------------------------------------------------------
 # Placement Execution Worker
@@ -133,9 +54,6 @@ def _placement_worker_loop():
     from engines.live.live_router import place_parent_and_hedge
     from engines.config_paths import open_auto_db
     import sqlite3, time, traceback
-
-    # 🔁 ONE-TIME RECOVERY
-    _placement_recovery_sweep()
 
     while True:
         try:

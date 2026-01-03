@@ -609,6 +609,57 @@ def _cap_numbers_summary(mid: str, sid: str, letter: str) -> None:
         print(f"[CAP] summary warn: {e}")
 # === PATCH END ===
 
+# ============================================================
+# CHILD RECOVERY SWEEP (DB-FIRST, ROUTER-OWNED)
+# ============================================================
+
+def _router_child_recovery_sweep():
+    """
+    Ensure every MATCHED parent has a queued child.
+    This runs once at router startup.
+    """
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+
+    rows = con.execute("""
+        SELECT
+            p.customerOrderRef AS parent_cor,
+            p.marketId,
+            p.selectionId,
+            p.side,
+            p.entry_odds,
+            p.entry_stake,
+            p.source
+        FROM orders p
+        WHERE p.role='PARENT'
+          AND p.entry_status='MATCHED'
+          AND NOT EXISTS (
+              SELECT 1 FROM orders c
+              WHERE c.hedge_of = p.id
+          )
+    """).fetchall()
+
+    for r in rows:
+        try:
+            _orders_insert_child_queued(
+                parent_cor=r["parent_cor"],
+                market_id=r["marketId"],
+                selection_id=r["selectionId"],
+                side="BACK" if r["side"].upper() == "LAY" else "LAY",
+                odds=r["entry_odds"],
+                stake=r["entry_stake"],
+                source="H",
+                exit_kind="HEDGE",
+            )
+            print(f"[ROUTER][RECOVER] child rebuilt for {r['parent_cor']}")
+
+        except Exception as e:
+            print(f"[ROUTER][RECOVER][ERR] {r['parent_cor']}: {e}")
+
+    con.close()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: ^def _sync_parent_matches
