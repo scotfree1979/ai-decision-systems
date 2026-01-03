@@ -896,16 +896,16 @@ class DecisionBus:
                 tick_ctx["plans_raw"].append(_plan)
 
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: MSC_RISK — PARENT-DRIVEN PROTECTION (BUS AUTHORITY)
+# 🧩 ACTION: REPLACE ENTIRE BLOCK
+# 📆 PATCHED: 2026-03-03 — DB-first per-parent RISC evaluation
+# ======================================================================================================
+
             # ==================================================
-            # MSC_RISK — PARENT-DRIVEN PROTECTION (BUS AUTHORITY)
+            # MSC_RISK — PARENT-DRIVEN PROTECTION (DB-FIRST)
             # ==================================================
-            #
-            # Contract:
-            # - Evaluated EVERY tick
-            # - DB-authoritative on matched LEGACY parents
-            # - Scope-authoritative on market liveness
-            # - Evaluation mandatory, emission conditional
-            #
             try:
                 risc = self.engines.get("MSC_RISK")
                 if risc:
@@ -914,31 +914,28 @@ class DecisionBus:
                     con = open_auto_db(rw=False)
                     con.row_factory = None
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: MSC_RISK — parent-driven protection query
-# 🧩 ACTION: REPLACE SQL WHERE clause
-# 📆 PATCHED: 2026-01-02 — fix MSC_RISK orders schema
-# ======================================================================================================
-
                     rows = con.execute("""
-                        SELECT DISTINCT
+                        SELECT
+                            id AS parent_id,
                             marketId,
-                            selectionId
+                            selectionId,
+                            side,
+                            entry_odds,
+                            entry_stake
                         FROM orders
                         WHERE engine = 'LEGACY'
                           AND role = 'PARENT'
                           AND entry_status = 'MATCHED'
+                          AND (exit_status IS NULL OR exit_status <> 'MATCHED')
                     """).fetchall()
 
+                    con.close()
 
                     risc_evaluated = False
 
-                    for mid, sid in rows:
+                    for parent_id, mid, sid, side, entry_odds, entry_stake in rows:
 
-                        # --------------------------------------------------
-                        # MARKET LIVENESS GATE (Scope is authoritative)
-                        # --------------------------------------------------
+                        # Scope is authoritative for liveness
                         if mid not in mids:
                             continue
 
@@ -946,42 +943,60 @@ class DecisionBus:
                         if not ctx:
                             continue
 
+                        # --------------------------------------------------
+                        # 🔑 AUTHORITATIVE PARENT CONTEXT (REQUIRED)
+                        # --------------------------------------------------
+                        ctx["legacy_parent_id"]    = parent_id
+                        ctx["legacy_entry_side"]  = side
+                        ctx["legacy_entry_odds"]  = entry_odds
+                        ctx["legacy_entry_stake"] = entry_stake
+
                         risc_evaluated = True
 
                         p = risc.tick(ctx)
 
                         if p is None:
+                            print(
+                                f"[BUS][RISC] mid={mid} sid={sid} "
+                                f"pid={parent_id} px={ctx.get('px')} → no_signal"
+                            )
                             continue
 
                         if p.get("enter"):
                             p = dict(p)
                             p["engine"] = "MSC_RISK"
 
-                            engine_report["MSC_RISK"]["fired"] += 1
-                            engine_report["MSC_RISK"]["evaluated"] = True
-
-                            # BUS-level per-parent trace (diagnostic)
-                            print(
-                                f"[BUS][RISC] mid={mid} sid={sid} "
-                                f"pid={ctx.get('legacy_parent_id')} "
-                                f"px={ctx.get('px')} → PLAN {p.get('why')}"
-                            )
+                            # ======================================================================================================
+                            # 📍 TARGET: engines/bus/bus.py
+                            # 🔎 SEARCH: engine_report["MSC_RISK"]
+                            # 🧩 ACTION: FIX reporting semantics (tick-level, truthful)
+                            # 📆 PATCHED: 2026-03-03
+                            # ======================================================================================================
 
                             plans.append(("MSC_RISK", p, ctx))
                             plans_by_engine["MSC_RISK"] += 1
 
-                        else:
                             engine_report["MSC_RISK"]["evaluated"] = True
+                            engine_report["MSC_RISK"]["fired"] += 1
 
-                            # BUS-level per-parent trace (diagnostic)
                             print(
                                 f"[BUS][RISC] mid={mid} sid={sid} "
-                                f"pid={ctx.get('legacy_parent_id')} "
-                                f"px={ctx.get('px')} → no_signal ({p.get('reason')})"
+                                f"pid={parent_id} px={ctx.get('px')} → PLAN {p.get('why')}"
+                            )
+                        else:
+                            engine_report["MSC_RISK"]["evaluated"] = True
+                            print(
+                                f"[BUS][RISC] mid={mid} sid={sid} "
+                                f"pid={parent_id} px={ctx.get('px')} → no_signal ({p.get('reason')})"
                             )
 
+                    # ------------------------------------------------------------------
+                    # FINAL TICK-LEVEL RISC NOTE (AFTER ALL PARENTS)
+                    # ------------------------------------------------------------------
                     if risc_evaluated and engine_report["MSC_RISK"]["fired"] == 0:
                         engine_report["MSC_RISK"]["note"] = "no_plan"
+                    elif not risc_evaluated:
+                        engine_report["MSC_RISK"]["note"] = "not_evaluated"
 
             except Exception as e:
                 engine_report["MSC_RISK"]["evaluated"] = False

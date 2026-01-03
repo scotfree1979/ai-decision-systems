@@ -26,21 +26,31 @@ class RiskEngine:
         7. Use SLEQ (from ctx) to widen/narrow child stake
     """
 
-# === PATCH START ============================================================
+# ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 SEARCH: def __init__(self, parent_id: int):
-# 📆 PATCHED: 2026-02-14 — BUS-Compatible RiskEngine Constructor
-# ============================================================================
+# 🔎 SEARCH: def __init__(self):
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-03 — per-parent RISC lifecycle
+# ======================================================================================================
 
     def __init__(self):
-        # parent_id now resolved dynamically from ctx["legacy_parent_id"]
+        # Active legacy parent this RISC instance is shadowing
         self.parent_id = None
-        self.attached = False
+
+        # Parent anchor
         self.entry_px = None
         self.entry_side = None
+
+        # Tick tracking
         self.last_px = None
+
+        # One-price-once PER PARENT
+        self.used_prices = set()
+
+        # Lifecycle flags
+        self.attached = False
         self.active_plan = None
-        self.mode = "MODERATE"
+
 
 # === PATCH END ==============================================================
         # --------------------------------------------------
@@ -213,13 +223,21 @@ class RiskEngine:
         # ----------------------------------------------
         # STOP CONDITION — legacy lifecycle complete
         # ----------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: STOP CONDITION — legacy lifecycle complete
+# 🧩 ACTION: REPLACE ENTIRE BLOCK
+# 📆 PATCHED: 2026-03-03 — correct RISC termination
+# ======================================================================================================
+
         if self._legacy_child_matched(ctx):
-            self.risc_parent_id = None
-            self.risc_cycle_active = False
+            self.parent_id = None
             self.attached = False
             self.active_plan = None
             self.last_px = None
+            self.used_prices.clear()
             return self._no_signal(ctx, reason="legacy_child_matched")
+
 
         # ----------------------------------------------
         # START CONDITION — legacy parent must be matched
@@ -241,16 +259,14 @@ class RiskEngine:
                 self.active_plan = None
                 self.last_px = None
 
-        # ----------------------------------------------
-        # EXISTING LOGIC CONTINUES BELOW
-        # ----------------------------------------------
-
-
-        px = float(ctx.get("current_price") or 0)
+        # direction-engine decision (already built)
+        # --------------------------------------------------
+        # LIVE PRICE (AUTHORITATIVE)
+        # --------------------------------------------------
+        px = float(ctx.get("current_price") or ctx.get("px") or 0.0)
         if px <= 0:
             return None
 
-        # direction-engine decision (already built)
         # --------------------------------------------------
         # MECHANICAL RISK PARAMETERS (PARENT-DRIVEN)
         # --------------------------------------------------
@@ -258,20 +274,19 @@ class RiskEngine:
         stop_ticks  = int(ctx.get("risk_stop_ticks", 4))
         self.mode   = ctx.get("risk_mode", "MODERATE")
 
-
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 SEARCH: def tick(self, ctx: Dict[str, Any]):
-# 📆 PATCHED: 2026-02-14 — Assign parent_id dynamically
-# ============================================================================
-
         pid = ctx.get("legacy_parent_id")
         if pid is None:
             return None
 
+        # NEW PARENT → reset per-parent state
+        if self.parent_id != pid:
+            self.used_prices.clear()
+            self.last_px = None
+
         # assign active parent_id
         self.parent_id = pid
+
+
 
 # === PATCH END ==============================================================
 
@@ -366,17 +381,34 @@ class RiskEngine:
     # ============================================================
 
 
-    # ----------------------------------------------------------------------
-    # TICK-BASED CONTINUOUS SCALPING
-    # ----------------------------------------------------------------------
-    # ============================================================
-    # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
-    # 🔎 SEARCH: def _scalp_tick(
-    # 🛠 ACTION: Replace entire function
-    # 📆 PATCHED: 2025-12-06
-    # ============================================================
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def _scalp_tick(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-03 — hybrid continuation + one-price-once invariant
+# ======================================================================================================
+
     def _scalp_tick(self, px, entry_ticks, stop_ticks, stake_mult, ctx):
         tick = ctx.get("tick_size_fn")(px)
+
+        # --------------------------------------------------
+        # HARD INVARIANTS
+        # --------------------------------------------------
+
+        # 1) Anchor price is NEVER tradable
+        if px == self.entry_px:
+            return None
+
+        # 2) One price once per parent (no repeat scalps)
+        if px in self.used_prices:
+            return self._no_signal(ctx, reason="price_already_traded")
+
+        # Mark price as consumed
+        self.used_prices.add(px)
+
+        # --------------------------------------------------
+        # EXISTING RISK SEMANTICS (UNCHANGED)
+        # --------------------------------------------------
 
         moving_favour = (
             self.entry_side == "LAY"  and px < self.entry_px
@@ -386,29 +418,50 @@ class RiskEngine:
 
         moving_against = not moving_favour
 
+        # --------------------------------------------------
         # FLIP direction if crossing anchor
+        # --------------------------------------------------
         if self._crossed_parent(px):
             direction = "LAY" if px > self.entry_px else "BACK"
             size = self._stake(ctx, stake_mult, entry_ticks)
             return self._open_new(
-                direction, px, entry_ticks, stop_ticks, size, reason="risk_cross"
+                direction,
+                px,
+                entry_ticks,
+                stop_ticks,
+                size,
+                reason="risk_cross"
             )
 
+        # --------------------------------------------------
         # STACK (move with trend)
+        # --------------------------------------------------
         if moving_favour:
             direction = "LAY" if self.entry_side == "LAY" else "BACK"
             size = self._stake(ctx, stake_mult, entry_ticks)
             return self._open_new(
-                direction, px, entry_ticks, stop_ticks, size, reason="risk_stack"
+                direction,
+                px,
+                entry_ticks,
+                stop_ticks,
+                size,
+                reason="risk_stack"
             )
 
+        # --------------------------------------------------
         # HEDGE (move against legacy)
+        # --------------------------------------------------
         direction = "BACK" if self.entry_side == "LAY" else "LAY"
         size = self._stake(ctx, stake_mult, entry_ticks)
         return self._open_new(
-            direction, px, entry_ticks, stop_ticks, size, reason="risk_hedge"
+            direction,
+            px,
+            entry_ticks,
+            stop_ticks,
+            size,
+            reason="risk_hedge"
         )
-    # ============================================================
+
 
 
     # ----------------------------------------------------------------------
