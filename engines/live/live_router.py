@@ -60,10 +60,41 @@ def _router_child_worker_loop():
                 # --------------------------------------------------
                 child_id = plan.get("child_id")
 
+                # 🔒 ENSURE EXECUTION IDENTITY (router responsibility)
+                if "marketId" not in plan or "selectionId" not in plan:
+                    parent_id = plan.get("hedge_of") or plan.get("parent_id")
+                    if not parent_id:
+                        raise RuntimeError(
+                            "router child worker: missing marketId/selectionId and no parent_id"
+                        )
+
+                    con = _orders_conn()
+                    con.row_factory = sqlite3.Row
+                    row = con.execute(
+                        """
+                        SELECT marketId, selectionId
+                          FROM orders
+                         WHERE id = ?
+                         LIMIT 1
+                        """,
+                        (int(parent_id),)
+                    ).fetchone()
+                    con.close()
+
+                    if not row:
+                        raise RuntimeError(
+                            f"router child worker: failed to hydrate identity from parent {parent_id}"
+                        )
+
+                    plan["marketId"] = row["marketId"]
+                    plan["selectionId"] = row["selectionId"]
+
                 if not child_id:
                     parent_cor = plan.get("parent_cor")
                     if not parent_cor:
-                        raise RuntimeError("router child worker: missing child_id and parent_cor")
+                        raise RuntimeError(
+                            "router child worker: missing child_id and parent_cor"
+                        )
 
                     child_id = _orders_insert_child_queued(
                         parent_cor=parent_cor,
@@ -77,7 +108,10 @@ def _router_child_worker_loop():
                     )
 
                     if not child_id:
-                        raise RuntimeError(f"failed to create child row for parent {parent_cor}")
+                        raise RuntimeError(
+                            f"failed to create child row for parent {parent_cor}"
+                        )
+
 
                 # --------------------------------------------------
                 # EXECUTE CHILD (PLACE + RETRY)
