@@ -96,6 +96,69 @@ def _compute_msc_stop_px(entry_odds: float, side: str, sleq: float) -> float:
     else:
         return walk_ticks(entry_odds, -ticks)
 
+def evaluate_redistribution(ctx: dict) -> dict:
+    """
+    Pure analysis function.
+    NO execution.
+    NO DB writes.
+    NO side effects.
+
+    Returns redistribution intent or empty dict.
+    """
+    try:
+        market_id = ctx.get("marketId")
+        if not market_id:
+            return {}
+
+        con = _orders_conn()
+        pnl_vec = analyze_market_pnl(con, market_id)
+        con.close()
+
+        if not pnl_vec:
+            return {}
+
+        values = list(pnl_vec.values())
+        p_min = min(values)
+        p_max = max(values)
+        dispersion = p_max - p_min
+
+        # pull core values
+        from engines.config_core_values import CORE_VALUES
+        target = CORE_VALUES["target_profit_per_race"]   # 16
+        max_loss = CORE_VALUES["max_loss_per_race"]      # -90
+
+        oc = ctx.get("oc_phase", 0)
+
+        # gating
+        if oc < 7:
+            return {}
+
+        if dispersion < 5:   # trivial imbalance
+            return {}
+
+        urgency = (
+            "HIGH"   if oc >= 10 else
+            "MEDIUM" if oc >= 8  else
+            "LOW"
+        )
+
+        return {
+            "type": "redistribution_intent",
+            "marketId": market_id,
+            "pnl_vector": pnl_vec,
+            "p_min": p_min,
+            "p_max": p_max,
+            "dispersion": dispersion,
+            "target_profit": target,
+            "max_loss": max_loss,
+            "urgency": urgency,
+            "oc_phase": oc,
+        }
+
+    except Exception:
+        return {}
+
+
 
 def enforce_msc_exploratory_stoploss():
     """

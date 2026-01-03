@@ -14,7 +14,7 @@ from engines.live.live_router import place_from_bus
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
 from engines.market_monitor.phase_clock import MarketPhaseClock
-
+from engines.live.overwatcher import evaluate_redistribution
 
 
 import time
@@ -750,6 +750,26 @@ class DecisionBus:
             for bucket_name, mid, sid in selected:
 
                 ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+
+                # ==================================================
+                # OVERWATCHER PHASE 2 — REDISTRIBUTION (ANALYSIS ONLY)
+                # ==================================================
+                try:
+                    redist = evaluate_redistribution(ctx)
+                    if redist:
+                        ctx["redistribution"] = redist
+                        tick_ctx["enrichment_ran"] = True
+
+                        print(
+                            f"[BUS][REDIST] mid={redist.get('marketId')} "
+                            f"oc={redist.get('oc_phase')} "
+                            f"disp={redist.get('dispersion'):.2f} "
+                            f"urgency={redist.get('urgency')}"
+                        )
+                except Exception as e:
+                    tick_ctx["errors"].append(("redistribution", str(e)))
+
+
                 if not ctx:
                     tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
                     continue
