@@ -233,6 +233,7 @@ SPRINT = {
 
         # ───────────────────────────────────────────────────────────────
         # PHASE 7.9.8 — DYNAMIC TRAILING STOP-LOSS ENGINE (TSL) v1.0
+        # (ANCHOR — UNCHANGED)
         # ───────────────────────────────────────────────────────────────
         "Phase 7.9.8 – Dynamic Trailing Stop-Loss (TSL) Engine v1.0": {
             "status": "✅",
@@ -250,250 +251,149 @@ SPRINT = {
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.8.1 — FOREST–RIVER LIVE SYNC & REINTEGRATION (ARCHIVED)
+        # PHASE 7.9.9.x — EXECUTION & LIFECYCLE HARDENING (COMPLETED)
+        # Evidence: tags v7.9.9.3 → v7.9.11.1
         # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.8.1 – Forest–River Live Sync & Reintegration": {
-            "status": "❌ ARCHIVED",
-            "tasks": [
-                "➡ Tasks migrated to Phase 7.9.9.1"
-            ]
-        },
-
-        # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.8.2 — LIVE MASTERY → CTX v7 INTEGRATION (ARCHIVED)
-        # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.8.2 – Live Mastery Integration Into CTX v7": {
-            "status": "❌ ARCHIVED",
-            "tasks": [
-                "➡ Tasks migrated to Phase 7.9.9.1"
-            ]
-        },
-
-        # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.8.3 — FULL MICROSTRUCTURE → MSC (RENAMED → 7.9.9) (ARCHIVED)
-        # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.9 – Full Microstructure Integration for MSC v7 (Renamed from 7.9.8.3)": {
-            "status": "❌ ARCHIVED",
-            "tasks": [
-                "➡ Tasks migrated to Phase 7.9.9.1"
-            ]
-        },
-
-        # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.9.1 — POST-LIVE VALIDATION & CONTINUATION (v7.2 GATE)
-        # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.9.1 – Post-Live Validation & Continuation (v7.2 Gate)": {
+        "Phase 7.9.9.x – Execution, Lifecycle & Exit Semantics Lock": {
             "status": "✅",
-
             "tasks": [
 
-                # ================================================================
-                # MIGRATED INCOMPLETE TASKS FROM 7.9.8.1 — FOREST–RIVER
-                # ================================================================
-                "⬜ Ensure River (LIVE) events persist cleanly from Overwatcher and MSC",
-                "    → Verify STOPLOSS events (S-child creation) appear in river_bucket_state",
-                "    → Validate Overwatcher → EventSink → River ingestion without dropped or duplicated rows",
-                "    → Confirm DAL Writer (dual-write) preserves row order deterministically",
+                # ── BUS / SCOPE / CTX FIXES ───────────────────────────────
+                "✅ Fixed BUS → Placement enqueue boundary (v7.9.9.3-runtime-enqueue-fix)",
+                "    → BUS delegates execution only; Placement owns lifecycle",
+                "    → Eliminated silent execution stalls",
 
-                "⬜ Fix Forest→River merge path for next-day training consistency",
-                "    → Validate mastery_outcomes_raw rolling windows after live ingestion",
-                "    → Confirm CTX v7 fields align with Forest feature expectations",
-                "    → Ensure nightly consolidation merges RIVER slices with historical data correctly",
+                "✅ Fixed BUS finished-market gating (v7.9.9.12)",
+                "    → Removed markets_schedule as execution authority",
+                "    → Scope + MarketMonitor are sole truth",
 
-                "⬜ Guarantee schema alignment across mastery_outcomes_raw, river_bucket_state, mastery_posteriors",
-                "    → Check column parity after STOPLOSS, H-child cancellation, and parent exit_kind stamping",
-                "    → Ensure schema guards detect drift between mastery DBs and cache DBs",
-                "    → Validate auto-heal logic handles Forest/River schema divergence",
+                "✅ Injected authoritative MarketPhaseClock into ctx (v7.9.9.22)",
+                "    → oc_phase, minutes_to_off, in_play now correct",
+                "    → Removed 999 fallback masking tuple unpack bug",
 
-                "⬜ Add live reinforcement (on_settlement_event) reliability checks",
-                "    → settlement_writer must fire consistently now DAL Writer is repaired",
-                "    → Validate that realized_pnl + net_pl flows into mastery_outcomes_raw",
-                "    → Confirm reinforcement deltas feed correctly into mastery_posteriors",
+                "✅ Scope-driven MSC_EXPLORATORY (pre-inplay only) (v7.9.9.23)",
+                "    → Exploratory never fires once market enters in-play",
 
-                "⬜ Ensure nightly Forest run combines River shifts with historical windows",
-                "    → Validate v7.1 training inputs after refactor",
-                "    → Ensure no missing slices due to cloud-writer corruption (now fixed)",
-                "    → Confirm stable consolidation of RIVER deltas into Forest epoch windows",
+                "✅ BUS hard execution identity guard (v7.9.9.27)",
+                "    → marketId / selectionId mandatory before routing",
 
-                "⬜ Add checksum validation for mid/sid/betId to prevent partial sync failures",
-                "    → Ensure LiveRouter now stamps bet_id for every parent and child",
-                "    → Add optional sync checksum before nightly Forest run",
-                "    → Detect partial STOPLOSS ingestion or broken River rows",
+                "✅ BUS parent de-duplication by (mid, sid, px, source) (v7.9.9.24)",
+                "    → Prevents duplicate parent spam per tick",
 
-                # ================================================================
-                # MIGRATED INCOMPLETE TASKS FROM 7.9.8.2 — MASTERY → CTX
-                # ================================================================
-                "⬜ Inject mastery-smoothed win_prob into ctx",
-                "    → CTXv7 now exposes win_prob placeholder field with numeric hardening",
-                "    → Inject smoothed mastery deltas after live tests",
+                # ── PLACEMENT / ROUTER LIFECYCLE ──────────────────────────
+                "✅ Placement single execution owner enforced (v7.9.13)",
+                "    → Parent preclaim before QUEUED insert",
+                "    → BankState reservation occurs before execution",
 
-                "⬜ Inject brain_global and macro bucket deltas into ctx",
-                "    → Validate MasteryState export for GLOBAL/MACRO coherence",
-                "    → Add mapping layer for ctx injection",
+                "✅ Router guarantees CHILD creation on parent MATCHED (v7.9.10 → v7.9.9.18)",
+                "    → Exactly one CHILD per parent",
+                "    → DB-first, idempotent",
 
-                "⬜ Derive cluster features from v_mastery_intel_v7 for MSC direction and mode",
-                "    → Validate intel stability after LiveCache fix",
-                "    → MSC engines must read intel consistently before versioning",
+                "✅ Router child execution mirrors parent semantics (v7.9.10)",
+                "    → QUEUED → PLACING → PLACED → MATCHED",
 
-                "⬜ Add mastery deltas into MSC multiplier (confidence & volatility balancing)",
-                "    → Confirm multiplier engine receives mastery-feedback deltas",
-                "    → Ensure deltas modulate aggression safely (not over-leveraging)",
+                "✅ Exposure release hardened (v7.9.9.15 → v7.9.9.20)",
+                "    → Unmatched parents release exposure",
+                "    → Matched parents without children released ≥6m post-off",
 
-                "⬜ Ensure ctx captures mastery feedback for training loops",
-                "    → Validate STOPLOSS updates modify ctx history",
-                "    → Confirm ctx → Mastery pipeline passes deltas unmodified",
+                "✅ Router persistence past OFF (v7.9.9.32)",
+                "    → Plans allowed to complete post-off if logically valid",
 
-                # ================================================================
-                # MIGRATED INCOMPLETE TASKS FROM 7.9.8.3 — MICROSTRUCTURE → MSC
-                # ================================================================
-                "⬜ Add full MarketMonitor microstructure fields into ctx",
-                "    → Integrate breakout, range, momentum-class, micro-variance fields",
-                "    → Confirm stable market monitor snapshots",
+                # ── MSC ENGINE MODEL (5-PART SYSTEM) ──────────────────────
+                "✅ MSC Exploratory (Engine A) stable + self-sized (v7.9.9.4)",
+                "    → Emits executable parent plans with size",
 
-                "⬜ Add volatility clusters, micro-zones, WOM-derived states, acceleration curves",
-                "    → Use Overwatcher diagnostic feed to populate advanced microstructure",
-                "    → Integrate into ctx for MSC direction decisions",
+                "✅ MSC Risk (Engine B / RISC) activated (v7.9.9.21)",
+                "    → Parent-driven, mechanical hedging",
+                "    → Replaces STOPLOSS for Legacy",
 
-                "⬜ Feed OC-timeline deltas into ctx",
-                "    → Validate oc_series correctness after DAL rewrite",
-                "    → Ensure no missing OC deltas from cloud corruption",
+                "✅ MSC In-Play (Engine C) scope-gated (v7.9.9.22)",
+                "    → Fires only when ctx.in_play == True",
 
-                "⬜ Integrate microstructure into direction_engine and multiplier logic",
-                "    → Confirm MSC direction stability under microstructure influence",
-                "    → Test EX/RISK/IP responses to micro-zones and volatility clusters",
+                "✅ MSC In-Play reads live odds from MarketMonitor (v7.9.9.31)",
+                "    → No DB lag; rapid odds response unlocked",
 
-                "⬜ Build MSC telemetry and diagnostics for tracking microstructure performance",
-                "    → Expand Overwatcher diagnostic engine output",
-                "    → Add visualization-friendly MSC telemetry hooks",
+                # ── EXIT SEMANTICS (LOCKED) ────────────────────────────────
+                "✅ Exit Semantics locked & tagged (v7.9.11.1)",
+                "    → Exploratory: fatal STOPLOSS → S-child",
+                "    → Legacy: non-fatal boundary/trailing exits",
+                "    → RISC replaces STOPLOSS for Legacy",
 
-                # ================================================================
-                # FULL DOCUMENTATION OF COMPLETED v7.1 ARCHITECTURE REBUILD
-                # (Moved here so Phase 7.9.9.1 becomes the canonical v7.1 record)
-                # ================================================================
-                "✅ Fixed LiveCache corruption (root cause of entire v7 system instability)",
-                "    → Identified cloud DB as single-point-of-failure",
-                "    → Rewrote DAL Writer to dual-write (local + cloud)",
-                "    → Ensured real-time WAL sync ordering and crash safety",
-                "    → Eliminated all silent write failures",
+                "✅ STOPLOSS → S-child path verified",
+                "    → Overwatcher detects",
+                "    → Emits STOPLOSS plan",
+                "    → Router inserts S-child",
+                "    → Cancels H-child, releases exposure",
 
-                "✅ Rebuilt LiveRouter with STOPLOSS-aware execution chain",
-                "    → Added S-child creation with immediate flattening",
-                "    → Added SL_Cancel_H to cancel hedge children on STOPLOSS",
-                "    → Added parent exit_kind propagation + pnl stamping",
-                "    → Ensured router no longer hits stale cloud paths",
+                # ── OVERWATCHER AUTHORITY ─────────────────────────────────
+                "✅ Overwatcher promoted to sole guardian layer (v7.9.11.0)",
+                "    → Boundary exits",
+                "    → Trailing stops",
+                "    → Volatility & range monitoring",
+                "    → No direct execution — router only",
 
-                "✅ Rebuilt Lanes routing (v7 canonical engine model)",
-                "    → Removed legacy ORDER loop entirely",
-                "    → Normalised plan schema (engine, strategy, direction, px, size)",
-                "    → Ensured Lanes never infers engine identity from letter",
-                "    → Added MSC EX/RISK/IP independence and correct routing",
-                "    → Ensured Overwatcher plans route via v7 plan normalisation",
+                # ── SYSTEM INVARIANTS ─────────────────────────────────────
+                "✅ Zero API fallback confirmed across execution path",
+                "    → DB-only odds resolution",
 
-                "✅ Rebuilt CTX v7 with authoritative, DB-only data",
-                "    → odds_current → inbound_oc_cache → oc_series → bets ordering",
-                "    → Hard numeric defaults + NaN protection",
-                "    → Added OC-phase model (OC0–OC7 pre-off, OC7+ in-play)",
-                "    → Added volatility_state, drift_speed, slope_ppm, bias metrics",
+                "✅ BankState invariants enforced",
+                "    → pot = available + open liability",
 
-                "✅ Rebuilt MicroScalper v7 (EX, RISK, INPLAY)",
-                "    → MSC Exploratory inherits Legacy letter",
-                "    → MSC Risk uses J, MSC InPlay uses V",
-                "    → Added unified multiplier (AGG/MOD/CON, SLEQ-aware)",
-                "    → Ensured RiskEngine detaches on STOPLOSS",
-                "    → Ensured EX/RISK/IP engines never collide or suppress each other",
-
-                "✅ Rebuilt Overwatcher v7 (guardian layer)",
-                "    → Live microstructure monitoring",
-                "    → Range tracking + WOM signals",
-                "    → cooling windows, volatility detection",
-                "    → Integrated TSL engine",
-                "    → Bridge: Overwatcher → LiveRouter STOPLOSS",
-
-                "✅ Repaired Settlements pipeline",
-                "    → SettlementWriter isolated from cloud corruption",
-                "    → DAL Writer integration ensures clean writes",
-                "    → PnL correctness restored",
-                "    → STOPLOSS exits now settle exactly once",
-
-                "✅ Repaired BankState + BudgetManager",
-                "    → Ensured pot mutation correctness post-STOPLOSS",
-                "    → Verified engine pots reflect live exposure",
-                "    → Ensured BankState no longer reads stale cloud DB rows",
-
-                "✅ Ensured end-to-end LIVE execution path is clean",
-                "    → anchors → OC timeline → CTX v7 → Overwatcher → MSC → Lanes → Router → Orders",
-                "    → ZERO API fallback calls anywhere in execution path",
-
-                "✅ Fixed MSC direction contract (root-cause execution blocker)",
-                "    → Identified missing / invalid direction as cause of zero MSC exposure",
-                "    → Enforced direction_engine as single source of truth",
-                "    → EX / RISK / INPLAY plans now emit valid BACK->LAY / LAY->BACK",
-
-                "✅ Repaired Placement execution ownership",
-                "    → Relocated execution worker to placement.py",
-                "    → Enforced non-blocking BUS enqueue",
-                "    → Stabilised execution thread lifecycle",
-
-                "✅ Added definitive live execution pipeline verifier",
-                "    → scripts/verify_live_execution_pipeline.py",
-                "    → Hard PASS/FAIL validation of BUS → Placement → Router → Orders",
-                "    → Direction contract validated against live schema",
-
-                "✅ Verified end-to-end MSC execution path",
-                "    → MSC plans fire, route, and preclaim correctly",
-                "    → Zero exposure confirmed as budget-gated, not logic failure",
-
-
-                # ================================================================
-                # NEXT-STAGE REQUIREMENTS BEFORE v7.2
-                # ================================================================
-                "⬜ Live STOPLOSS test suite (parent → S-child → settle → pot mutation)",
-                "⬜ End-to-end settlements replay test",
-                "⬜ River→Forest data consistency test",
-                "⬜ Mastery feedback-injection test (win_prob, deltas)",
-                "⬜ Microstructure-on executions stability test",
-                "⬜ Dashboard integration readiness check",
-
-                "🏁 Once all tasks above are complete → branch 7.9.9.1 closes and 7.9.9.2 becomes active"
+                "✅ End-to-end execution verified",
+                "    → BUS → Placement → Router → Orders → Settlement"
             ]
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.9.2 — DASHBOARD INTELLIGENCE & GUI SYNC (RENAMED FROM 7.9.9)
+        # PHASE 7.9.12 — RUNTIME SMOKE & TEN-TICK VALIDATION (CURRENT)
         # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.9.2 – Dashboard Intelligence & GUI Sync": {
-            "status": "🔜",
+        "Phase 7.9.12 – Runtime Smoke Validation": {
+            "status": "🔄 IN PROGRESS",
             "tasks": [
-                "🖥️ Wire dashboard data-sources to live brain/goal metrics (v_mastery_brain_input, v_mastery_brain_global)",
-                "🧠 Add Brain Summary panel (Global / Macro / Micro coherence + delta)",
-                "🧩 Add Good/Bad Trade metrics tile (% hedged / % stop-loss / unmatched)",
-                "📈 Add goal alignment index trend visualisation",
-                "🧩 Display model snapshot metadata (version, epochs, alignment index)",
-                "🧠 Add Training Health tab (brain_history_v7 time series)",
-                "⚙️ Add GUI Control Center automation (Playbooks rebuild, nightly training)",
-                "🧾 Auto-log training completion summaries to mastery_state",
-                "🧩 Dashboard health tests (KPI refresh, zero blank cards)",
-                "🏁 Prepare final matrix for Phase 7.9.10"
+                "⬜ Run live system for 10 ticks",
+                "⬜ Confirm zero runtime exceptions",
+                "⬜ Verify 5 markets in scope with real minutes_to_off",
+                "⬜ Confirm Exploratory / Risk / InPlay fire correctly",
+                "⬜ Shut down cleanly ready for next session"
             ]
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.10 — FINAL VALIDATION & RELEASE PREP (old 7.9.6)
+        # PHASE 7.9.13 — DASHBOARD INTELLIGENCE & GUI SYNC (RENAMED)
+        # (NOT STARTED — RENUMBRED CLEANLY)
         # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.10 – Final Validation & Release Prep": {
-            "status": "🔜",
+        "Phase 7.9.13 – Dashboard Intelligence & GUI Sync": {
+            "status": "⬜",
             "tasks": [
-                "📊 Full system regression (7.9.3 → 7.9.8 pipeline continuity)",
-                "📦 Freeze schemas (mastery_outcomes_raw / brain_state_v7 / cache_mastery_outcomes)",
-                "🧠 Coherence stability check vs brain_history_v7 (deltas < ±0.02)",
-                "🧾 Generate release report + dashboard screenshots",
-                "🏁 Tag v7.9.x ‘Stabilised Brain-Integrated AutoScalp’ and merge branch → main"
+                "⬜ Wire dashboard to live brain + goal metrics",
+                "⬜ Add Brain Summary (Global / Macro / Micro)",
+                "⬜ Add Good/Bad Trade tiles (hedged / stoploss / unmatched)",
+                "⬜ Add goal alignment trend",
+                "⬜ Display model snapshot metadata",
+                "⬜ Training Health tab (brain_history_v7)",
+                "⬜ GUI Control Center automation",
+                "⬜ Dashboard regression tests"
+            ]
+        },
+
+        # ───────────────────────────────────────────────────────────────
+        # PHASE 7.9.14 — FINAL VALIDATION & RELEASE PREP
+        # ───────────────────────────────────────────────────────────────
+        "Phase 7.9.14 – Final Validation & Release Prep": {
+            "status": "⬜",
+            "tasks": [
+                "⬜ Full regression suite",
+                "⬜ Schema freeze",
+                "⬜ Coherence stability validation",
+                "⬜ Release report",
+                "⬜ Tag stable branch"
             ]
         },
 
         # ───────────────────────────────────────────────────────────────
         # PHASE 8 – PUBLIC RELEASE
         # ───────────────────────────────────────────────────────────────
+
         "Phase 8 – Validation & Public Release": {
             "status": "🔜",
             "tasks": [
