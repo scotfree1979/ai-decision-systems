@@ -649,18 +649,37 @@ def _router_child_recovery_sweep():
 
     for r in rows:
         try:
+            parent_side = r["side"].upper()
+            child_side  = "BACK" if parent_side == "LAY" else "LAY"
+
+            # 🔑 FIX: price must move AWAY from entry
+            from engines.price_math import odds_plus_ticks
+
+            hedge_odds = odds_plus_ticks(
+                float(r["entry_odds"]),
+                +1 if child_side == "BACK" else -1
+            )
+
+            hedge_odds = _round_odds(float(hedge_odds))
+
+            hedge_stake = calc_greenup_stake(
+                parent_side,
+                float(r["entry_odds"]),
+                float(r["entry_stake"]),
+                hedge_odds
+            )
+
             # NOTE:
             # _orders_insert_child_queued is POSITIONAL.
-            # Do not pass keyword args.
             _orders_insert_child_queued(
-                r["parent_id"],                                      # hedge_of
-                r["marketId"],                                       # marketId
-                r["selectionId"],                                    # selectionId
-                "BACK" if r["side"].upper() == "LAY" else "LAY",     # side
-                float(r["entry_odds"]),                               # odds
-                float(r["entry_stake"]),                              # stake
-                "H",                                                  # source
-                "HEDGE",                                              # exit_kind
+                r["parent_id"],          # hedge_of
+                r["marketId"],
+                r["selectionId"],
+                child_side,
+                hedge_odds,
+                hedge_stake,
+                "H",
+                "HEDGE",
             )
 
             print(f"[ROUTER][RECOVER] child rebuilt for {r['parent_cor']}")
@@ -4157,6 +4176,12 @@ def _record_trade_metrics(*,
     except Exception as e:
         _log_event("ERROR", "live_router", f"metrics insert failed: {e}")
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def ensure_hedges_for_open_parents(
+# 🧩 ACTION: FIX hedge direction inversion (recovery path)
+# 📆 PATCHED: 2026-03-04 — align recovery hedges with live invariant
+# ======================================================================
 def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int = 1) -> int:
     """
     BACKUP / SAFETY NET ONLY.
@@ -4166,7 +4191,9 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
       • NEVER call Betfair
       • execution is deferred to RouterChildWorker
 
-    This function MUST remain execution-free.
+    Hedge invariant:
+      LAY  → BACK (higher odds)
+      BACK → LAY  (lower odds)
     """
 
     fixed = 0
@@ -4191,49 +4218,30 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
                AND UPPER(p.entry_status)='MATCHED'
                AND (p.exit_status IS NULL OR UPPER(p.exit_status)<>'MATCHED')
                AND NOT EXISTS (
-                     SELECT 1
-                       FROM orders c
+                     SELECT 1 FROM orders c
                       WHERE c.role='CHILD'
                         AND c.hedge_of=p.id
                )
              ORDER BY p.opened_at DESC
              LIMIT ?
         """, (int(max_to_fix),)).fetchall()
-    except Exception as e:
-        _log_event("ERROR", "live_router", f"rehedge scan failed: {e}")
-        return 0
     finally:
-        try:
-            con.close()
-        except Exception:
-            pass
-
-    if not rows:
-        return 0
+        con.close()
 
     for r in rows:
         try:
-            mid = str(r["marketId"])
-            sid = str(r["selectionId"])
+            parent_side = (r["side"] or "").upper()
+            entry_odds  = float(r["entry_odds"])
+            entry_stake = float(r["entry_stake"])
+            source      = str(r["source"] or "H")
 
-            parent_side  = (r["side"] or "").upper()
-            entry_odds   = float(r["entry_odds"] or 0.0)
-            entry_stake  = float(r["entry_stake"] or 0.0)
-            source       = str(r["source"] or "H")
-
-            # --- hedge intent (purely deterministic) ---
             hedge_side = "BACK" if parent_side == "LAY" else "LAY"
-
             ticks = max(1, int(default_ticks))
-            try:
-                from engines.price_math import odds_plus_ticks
-                hedge_odds = odds_plus_ticks(
-                    entry_odds,
-                    ticks if hedge_side == "LAY" else -ticks
-                )
-            except Exception:
-                hedge_odds = entry_odds
 
+            from engines.price_math import odds_plus_ticks
+
+            delta = +ticks if hedge_side == "BACK" else -ticks
+            hedge_odds = odds_plus_ticks(entry_odds, delta)
             hedge_odds = _round_odds(float(hedge_odds))
 
             hedge_stake = calc_greenup_stake(
@@ -4243,11 +4251,10 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
                 hedge_odds
             )
 
-            # --- DB-FIRST INSERT ONLY (NO EXECUTION) ---
             child_id = _orders_insert_child_queued(
                 parent_cor=str(r["cor"]),
-                market_id=mid,
-                selection_id=sid,
+                market_id=str(r["marketId"]),
+                selection_id=str(r["selectionId"]),
                 side=hedge_side,
                 odds=float(hedge_odds),
                 stake=float(hedge_stake),
@@ -4255,16 +4262,13 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
                 exit_kind="HEDGE",
             )
 
-            if not child_id:
-                continue
-
-            fixed += 1
-
-            _log_event(
-                "INFO",
-                "live_router",
-                f"[REHEDGE-BACKUP] queued child_id={child_id} parent_ref={r['cor']}"
-            )
+            if child_id:
+                fixed += 1
+                _log_event(
+                    "INFO",
+                    "live_router",
+                    f"[REHEDGE-BACKUP] queued child_id={child_id} parent_ref={r['cor']}"
+                )
 
         except Exception as e:
             _log_event("ERROR", "live_router", f"rehedge backup error: {e}")
