@@ -31,6 +31,128 @@ def _market_ready(st: dict) -> bool:
             return True
     return False
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: analytics_report
+# 🧩 ACTION: ADD helper (bus_snapshot) BEFORE analytics_report is called
+# 📆 PATCHED: 2026-03-03 — restore 10-tick snapshot (DB-truthful, read-only)
+#
+# PURPOSE:
+# - Fix NameError: bus_snapshot is not defined
+# - Provide stable, DB-first snapshot for 10-tick reporting
+# - NO execution logic
+# - NO router coupling
+# - NO side effects
+# ======================================================================================================
+
+def bus_snapshot():
+    """
+    DB-first system snapshot for BUS analytics reporting.
+
+    Read-only.
+    Safe to call every tick.
+    """
+
+    from engines.config_paths import open_auto_db
+
+    snap = {
+        "engines": {},
+        "parents_opened": 0,
+        "children_opened": 0,
+        "children_matched": 0,
+        "exposure": 0.0,
+        "realised": 0.0,
+        "unsettled": 0.0,
+        "stoploss_fired": 0,
+        "risk_hedges": 0,
+        "risk_stops": 0,
+    }
+
+    con = None
+    try:
+        con = open_auto_db(rw=False)
+        con.row_factory = None
+
+        # --------------------------------------------------
+        # Engine counts (parents opened today)
+        # --------------------------------------------------
+        rows = con.execute("""
+            SELECT engine, COUNT(*)
+              FROM orders
+             WHERE role='PARENT'
+               AND date(opened_at)=date('now','utc')
+             GROUP BY engine
+        """).fetchall()
+
+        for eng, n in rows:
+            snap["engines"][eng] = int(n)
+
+        # --------------------------------------------------
+        # Parent / child counts
+        # --------------------------------------------------
+        snap["parents_opened"] = con.execute("""
+            SELECT COUNT(*) FROM orders WHERE role='PARENT'
+        """).fetchone()[0]
+
+        snap["children_opened"] = con.execute("""
+            SELECT COUNT(*) FROM orders WHERE role='CHILD'
+        """).fetchone()[0]
+
+        snap["children_matched"] = con.execute("""
+            SELECT COUNT(*) FROM orders
+             WHERE role='CHILD'
+               AND exit_status='MATCHED'
+        """).fetchone()[0]
+
+        # --------------------------------------------------
+        # Exposure (open liability)
+        # --------------------------------------------------
+        row = con.execute("""
+            SELECT COALESCE(SUM(open_liability),0)
+              FROM orders
+             WHERE entry_status IN ('PLACED','MATCHED')
+               AND (exit_status IS NULL OR exit_status!='MATCHED')
+        """).fetchone()
+
+        snap["exposure"] = float(row[0] or 0.0)
+
+        # --------------------------------------------------
+        # PnL (best-effort; tolerate missing tables)
+        # --------------------------------------------------
+        try:
+            r = con.execute("""
+                SELECT COALESCE(SUM(pnl),0)
+                  FROM pnl
+                 WHERE realised=1
+            """).fetchone()
+            snap["realised"] = float(r[0] or 0.0)
+        except Exception:
+            pass
+
+        try:
+            r = con.execute("""
+                SELECT COALESCE(SUM(pnl),0)
+                  FROM pnl
+                 WHERE realised=0
+            """).fetchone()
+            snap["unsettled"] = float(r[0] or 0.0)
+        except Exception:
+            pass
+
+    except Exception as e:
+        # Snapshot must NEVER crash the BUS
+        snap["error"] = str(e)
+
+    finally:
+        try:
+            if con:
+                con.close()
+        except Exception:
+            pass
+
+    return snap
+
+
 
 class DecisionBus:
     ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F"}

@@ -103,16 +103,8 @@ def _router_child_worker_loop():
                             "router child worker: missing child_id and parent_cor"
                         )
 
-                    child_id = _orders_insert_child_queued(
-                        parent_cor=parent_cor,
-                        market_id=plan["marketId"],
-                        selection_id=plan["selectionId"],
-                        side=plan["side"],
-                        odds=plan["px"],
-                        stake=plan["size"],
-                        source=plan["source"],      # ← inherited, not guessed
-                        exit_kind=plan.get("exit_kind", "HEDGE"),
-                    )
+                    # Canonical DB-first child creation
+                    child_id = _orders_insert_child_queued(parent_cor)
 
                     if not child_id:
                         raise RuntimeError(
