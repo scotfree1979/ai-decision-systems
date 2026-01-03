@@ -323,7 +323,13 @@ class RiskEngine:
     # 📆 PATCHED: 2025-12-06
     # ============================================================
     def _initial_shadow(self, px, entry_ticks, stop_ticks, stake_mult, ctx):
-        tick = ctx.get("tick_size_fn")(px)
+        tick_fn = ctx.get("tick_size_fn")
+        if callable(tick_fn):
+            tick = tick_fn(px)
+        else:
+            from engines.price_math import get_tick_size
+            tick = get_tick_size(px)
+
 
         # Shadow in same DIRECTION as parent
         if self.entry_side == "LAY":
@@ -382,7 +388,12 @@ class RiskEngine:
 # ======================================================================================================
 
     def _scalp_tick(self, px, entry_ticks, stop_ticks, stake_mult, ctx):
-        tick = ctx.get("tick_size_fn")(px)
+        tick_fn = ctx.get("tick_size_fn")
+        if callable(tick_fn):
+            tick = tick_fn(px)
+        else:
+            from engines.price_math import get_tick_size
+            tick = get_tick_size(px)
 
         # --------------------------------------------------
         # HARD INVARIANTS
