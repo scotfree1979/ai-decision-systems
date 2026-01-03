@@ -161,9 +161,6 @@ def _router_child_worker_loop():
                     # ❌ MARKET TOO LATE — RELEASE EXPOSURE
                     secs_to_off = _secs_to_off(mid)
 
-                    if secs_to_off <= -(6 * 60):
-                        _release_matched_parent_exposure(parent_cor)
-                        continue
 
                     # ✅ MARKET STILL HEDGEABLE — RESCUE
                     _ensure_child_queued_for_matched_parent(parent_cor)
@@ -195,49 +192,58 @@ def _router_child_worker_loop():
         # Prevent tight loop
         time.sleep(1.0)
 
-
 def _release_matched_parent_exposure(parent_cor: str) -> None:
     """
     Final safety release.
 
-    If a parent is MATCHED, has no child, and the market is finished,
-    release BankState exposure and mark the parent terminal.
+    Exposure is released ONLY when:
+      • child is MATCHED
+      • OR market is FINISHED (checked by caller)
     """
     try:
         con = _orders_conn()
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
-        row = _q_retry(cur, """
+        parent = _q_retry(cur, """
             SELECT id, engine, entry_odds, entry_stake, exit_status
               FROM orders
              WHERE customerOrderRef=?
                AND role='PARENT'
                AND entry_status='MATCHED'
              LIMIT 1
-        """, (parent_cor,)).fetchone()
+        """, (str(parent_cor),)).fetchone()
 
-        if not row:
+        if not parent:
             return
 
-        # Idempotency guard
-        if (row["exit_status"] or "").upper() in ("SETTLED", "CANCELLED", "EXPIRED"):
+        # idempotency guard
+        if (parent["exit_status"] or "").upper() in ("SETTLED","CANCELLED","EXPIRED"):
             return
 
-        # 🔓 RELEASE BANKSTATE EXPOSURE
+        # child matched?
+        child = _q_retry(cur, """
+            SELECT 1
+              FROM orders
+             WHERE hedge_of=? AND entry_status='MATCHED'
+             LIMIT 1
+        """, (int(parent["id"]),)).fetchone()
+
+        # if no child, caller MUST be market-finished path
+        # (we trust caller here by design)
+
         bank_state.on_parent_closed(
-            engine=row["engine"],
-            entry_odds=float(row["entry_odds"]),
-            entry_stake=float(row["entry_stake"]),
+            engine=parent["engine"],
+            entry_odds=float(parent["entry_odds"]),
+            entry_stake=float(parent["entry_stake"]),
         )
 
-        # Mark terminal so we never touch it again
         _q_retry(cur, """
             UPDATE orders
                SET exit_status='EXPIRED',
                    closed_at=datetime('now','utc')
              WHERE id=?
-        """, (int(row["id"]),))
+        """, (int(parent["id"]),))
 
         con.commit()
 
@@ -1599,6 +1605,7 @@ def _rehedge_loop(period_s: float = 10.0, default_ticks: int = 1):
         try:
             _sync_all_matches(limit=100)   # ← NEW: sweep stuck 'PLACED' to 'MATCHED'
             _finalize_children_and_release_exposure(limit=100)
+            _sync_settlement_terminal_exposure(limit=200)
         except Exception as e:
             _log_event("ERROR", "live_router", f"sync_all_matches error: {e}")
 
@@ -2220,21 +2227,7 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
 
                 # Terminal market condition
                 if mto is not None and float(mto) <= -GRACE_MINUTES:
-                    _release_matched_parent_exposure(parent_cor)
-
-                    _q_retry(cur, """
-                        UPDATE orders
-                           SET entry_status='EXPIRED',
-                               closed_at=datetime('now','utc')
-                         WHERE id=?
-                    """, (child_id,))
-
-                    bank_state.on_parent_closed(
-                        engine=engine,
-                        entry_odds=float(r["entry_odds"]),
-                        entry_stake=float(r["entry_stake"]),
-                    )
-
+                    _release_matched_parent_exposure(parent_ref)
                     fixed += 1
 
             except Exception as e:
@@ -3543,6 +3536,66 @@ def _orders_insert_child_queued(parent_cor: str) -> int | None:
             pass
 
 
+def _sync_settlement_terminal_exposure(limit: int = 200) -> int:
+    """
+    Settlement alignment sweep.
+
+    If Settlement has flipped a PARENT to a terminal state
+知道 and exposure has not yet been released, release it here.
+
+    Idempotent.
+    Router owns exposure lifecycle.
+    """
+    fixed = 0
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        rows = _q_retry(cur, """
+            SELECT
+                customerOrderRef,
+                engine,
+                entry_odds,
+                entry_stake
+            FROM orders
+            WHERE role='PARENT'
+              AND UPPER(exit_status) IN ('SETTLED','EXPIRED','CANCELLED')
+              AND COALESCE(exposure_released, 0) = 0
+            LIMIT ?
+        """, (int(limit),)).fetchall()
+
+        for r in rows:
+            try:
+                bank_state.on_parent_closed(
+                    engine=r["engine"],
+                    entry_odds=float(r["entry_odds"]),
+                    entry_stake=float(r["entry_stake"]),
+                )
+
+                _q_retry(cur, """
+                    UPDATE orders
+                       SET exposure_released = 1
+                     WHERE customerOrderRef = ?
+                """, (str(r["customerOrderRef"]),))
+
+                fixed += 1
+
+            except Exception as e:
+                _log_event(
+                    "ERROR",
+                    "live_router",
+                    f"settlement exposure release failed ref={r['customerOrderRef']}: {e}"
+                )
+
+        con.commit()
+        return fixed
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def _orders_update_child_placed(child_id: int, bet_id: str) -> None:

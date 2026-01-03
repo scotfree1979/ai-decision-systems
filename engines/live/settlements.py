@@ -297,18 +297,10 @@ def close_settled_markets() -> int:
             """, (mid,)).fetchall()
 
             # 🔑 STEP 2: release exposure for each parent
-            for p in parents:
-                try:
-                    bank_state.on_parent_closed(
-                        engine=str(p["engine"]),
-                        entry_odds=float(p["entry_odds"] or 0.0),
-                        entry_stake=float(p["entry_stake"] or 0.0),
-                    )
-                except Exception as e:
-                    print(
-                        f"[settlements][WARN] exposure release failed "
-                        f"mid={mid} parent_id={p['id']} err={e}"
-                    )
+
+                    # LIVE invariant:
+                    # Exposure lifecycle is owned by live_router
+
 
             # 🔑 STEP 3: mark orders terminal
             o.execute("""
@@ -412,17 +404,6 @@ def force_cancel_all_for_settled_markets() -> int:
                    AND role='PARENT'
                    AND (exit_status IS NULL OR exit_status='')
             """, (mid,)).fetchall()
-
-            for p in parents:
-                try:
-                    bank_state.on_parent_closed(
-                        engine=str(p["engine"]),
-                        entry_odds=float(p["entry_odds"] or 0.0),
-                        entry_stake=float(p["entry_stake"] or 0.0),
-                    )
-                    released += 1
-                except Exception as e:
-                    print(f"[settlements][WARN] BankState release failed parent={p['id']} err={e}")
 
             # --- CHILDREN ---
             con.execute("""

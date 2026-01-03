@@ -238,13 +238,6 @@ class RiskEngine:
             self.used_prices.clear()
             return self._no_signal(ctx, reason="legacy_child_matched")
 
-
-        # ----------------------------------------------
-        # START CONDITION — legacy parent must be matched
-        # ----------------------------------------------
-        if not self._legacy_parent_matched(ctx):
-            return self._no_signal(ctx, reason="legacy_parent_not_matched")
-
         # ----------------------------------------------
         # ONE-AT-A-TIME — wait for own cycle to finish
         # ----------------------------------------------
