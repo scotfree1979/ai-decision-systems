@@ -372,54 +372,157 @@ def _matched_ratio_today():
     return ratio if ratio > 0 else 0.05
 
 # === PATCH END =========================================================
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py
+# 📆 PATCHED: 2026-01-04 — unified historical worldview (ALL / 90d / 30d / 7d / TODAY)
+#
+# PURPOSE:
+# - Align GoalAdapter worldview with Trade Outcome Summary
+# - Single source of truth: _trade_stats()
+# - Weighted multi-horizon learning signal
+# - Eliminate today-only noise dominance
+# - Expose raw vs effective metrics for auditability
+# =======================================================================
+
+def _weighted(value_map: dict[str, float], weights: dict[str, float]) -> float:
+    """
+    Compute weighted average from named windows.
+    Missing keys default to 0.0.
+    """
+    total = 0.0
+    wsum = 0.0
+    for k, w in weights.items():
+        total += float(value_map.get(k, 0.0)) * w
+        wsum += w
+    return total / wsum if wsum > 0 else 0.0
 
 
-# === PATCH START ===
+def compute_historical_performance():
+    """
+    Canonical performance snapshot across multiple horizons.
+    This is the ONLY performance worldview GoalAdapter should use.
+    """
+
+    # --- pull DB-truth stats -------------------------------------------
+    stats = {
+        "all": _trade_stats(None),
+        "d90": _trade_stats(90),
+        "d30": _trade_stats(30),
+        "d7":  _trade_stats(7),
+        "d0":  _trade_stats(0),
+    }
+
+    # --- extract raw ratios --------------------------------------------
+    win_rate_raw = {
+        k: float(v.get("win_rate", 0.0))
+        for k, v in stats.items()
+    }
+
+    matched_ratio_raw = {
+        k: float(v.get("matched_ratio", 0.0))
+        for k, v in stats.items()
+    }
+
+    # --- learning weights (locked) -------------------------------------
+    # Long-term bias, short-term sensitivity
+    weights = {
+        "d90": 0.40,
+        "d30": 0.30,
+        "d7":  0.20,
+        "d0":  0.10,
+    }
+
+    win_rate_eff = _weighted(win_rate_raw, weights)
+    matched_ratio_eff = _weighted(matched_ratio_raw, weights)
+
+    return {
+        # effective (learning signal)
+        "win_rate": win_rate_eff,
+        "matched_ratio": matched_ratio_eff,
+
+        # raw (audit / debug)
+        "raw": {
+            "win_rate": win_rate_raw,
+            "matched_ratio": matched_ratio_raw,
+        },
+
+        # full stats passthrough if needed later
+        "stats": stats,
+    }
+
+
+# === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:compute_live_goals
-# 📆 PATCHED: 2025-11-20 — correct PnL source and safe fallback
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-01-04 — historical-weighted learning signal
+# =======================================================================
+
 from gui.dashboard_data import _live_realized_today
 
 def compute_live_goals():
     """
-    Returns live metrics:
-      • PnL (settlement-verified)
-      • win_rate (market-level)
-      • matched_ratio (child hedges)
+    Returns learning-aligned metrics:
+      • live_pnl        → settlement-verified (today)
+      • win_rate        → weighted historical
+      • matched_ratio   → weighted historical
+
+    This removes today-only noise from learning.
     """
+
     try:
         live_pnl = float(_live_realized_today() or 0.0)
     except Exception:
         live_pnl = 0.0
 
-    win_rate      = _win_rate_today()
-    matched_ratio = _matched_ratio_today()
+    perf = compute_historical_performance()
 
-    return live_pnl, win_rate, matched_ratio
-# === PATCH END ===
+    return (
+        live_pnl,
+        perf["win_rate"],
+        perf["matched_ratio"],
+    )
 
 
+# === PATCH START =======================================================
+# 📍 TARGET: engines/mastery/goal_adapter.py:as_feedback_dict
+# 🧩 ACTION: AUGMENT (expose raw vs effective for logging)
+# 📆 PATCHED: 2026-01-04 — transparency + trend visibility
+# =======================================================================
 
-# MODIFY as_feedback_dict to pull correct values
 def as_feedback_dict(_: float = 0.0, __: float = 0.0, ___: float = 0.0):
     """
-    Pulls REAL sources for PnL/win/match ratio.
-    Ignores incoming args (kept for compatibility).
+    Pulls REAL sources for PnL / win / match ratio.
+    Exposes both effective and raw windowed metrics.
     """
+
     live_pnl, win_rate, matched_ratio = compute_live_goals()
+    perf = compute_historical_performance()
+
     score = evaluate_progress(live_pnl, win_rate, matched_ratio)
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "goal_profit": CORE_VALUES["target_profit_per_race"],
-        "goal_loss":   CORE_VALUES["max_loss_per_race"],
-        "goal_win":    CORE_VALUES["target_win_rate"],
-        "goal_matched":CORE_VALUES["target_matched_ratio"],
-        "live_pnl":    live_pnl,
-        "win_rate":    win_rate,
-        "matched_ratio": matched_ratio,
+
+        # goals
+        "goal_profit":  CORE_VALUES["target_profit_per_race"],
+        "goal_loss":    CORE_VALUES["max_loss_per_race"],
+        "goal_win":     CORE_VALUES["target_win_rate"],
+        "goal_matched": CORE_VALUES["target_matched_ratio"],
+
+        # effective learning signal
+        "live_pnl":       live_pnl,
+        "win_rate":       win_rate,
+        "matched_ratio":  matched_ratio,
         "goal_alignment": score,
+
+        # raw diagnostics (NON-learning, audit only)
+        "raw_win_rate":      perf["raw"]["win_rate"],
+        "raw_matched_ratio": perf["raw"]["matched_ratio"],
     }
 
-# === PATCH END ===
+# === PATCH END =========================================================
+
+
+
+
 
