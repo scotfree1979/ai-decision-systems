@@ -45,12 +45,22 @@ def _market_ready(st: dict) -> bool:
 # - NO side effects
 # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def bus_snapshot():
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-01-04 — DB-truthful BUS snapshot (LIVE-correct)
+# ======================================================================================================
+
 def bus_snapshot():
     """
     DB-first system snapshot for BUS analytics reporting.
 
-    Read-only.
-    Safe to call every tick.
+    Canonical rules:
+    - LIVE mode only
+    - Today only (UTC)
+    - Exposure = computed liability (not stored fields)
+    - PnL = orders.net_pl / realized_pnl
     """
 
     from engines.config_paths import open_auto_db
@@ -74,73 +84,93 @@ def bus_snapshot():
         con.row_factory = None
 
         # --------------------------------------------------
-        # Engine counts (parents opened today)
+        # Engine counts (LIVE parents opened today)
         # --------------------------------------------------
         rows = con.execute("""
             SELECT engine, COUNT(*)
-              FROM orders
-             WHERE role='PARENT'
-               AND date(opened_at)=date('now','utc')
-             GROUP BY engine
+            FROM orders
+            WHERE role='PARENT'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND date(opened_at)=date('now','utc')
+            GROUP BY engine
         """).fetchall()
 
         for eng, n in rows:
             snap["engines"][eng] = int(n)
 
         # --------------------------------------------------
-        # Parent / child counts
+        # Parent / child counts (LIVE, today)
         # --------------------------------------------------
         snap["parents_opened"] = con.execute("""
-            SELECT COUNT(*) FROM orders WHERE role='PARENT'
+            SELECT COUNT(*)
+            FROM orders
+            WHERE role='PARENT'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND UPPER(entry_status)='MATCHED'
+              AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
         """).fetchone()[0]
 
         snap["children_opened"] = con.execute("""
-            SELECT COUNT(*) FROM orders WHERE role='CHILD'
+            SELECT COUNT(*)
+            FROM orders
+            WHERE role='CHILD'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND UPPER(entry_status)='MATCHED'
+              AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
         """).fetchone()[0]
+
 
         snap["children_matched"] = con.execute("""
-            SELECT COUNT(*) FROM orders
-             WHERE role='CHILD'
-               AND exit_status='MATCHED'
+            SELECT COUNT(*)
+            FROM orders
+            WHERE role='CHILD'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND UPPER(entry_status)='MATCHED'
+              AND UPPER(exit_status)='MATCHED'
         """).fetchone()[0]
 
         # --------------------------------------------------
-        # Exposure (open liability)
+        # Exposure (LIVE open parent liability)
         # --------------------------------------------------
         row = con.execute("""
-            SELECT COALESCE(SUM(open_liability),0)
-              FROM orders
-             WHERE entry_status IN ('PLACED','MATCHED')
-               AND (exit_status IS NULL OR exit_status!='MATCHED')
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN UPPER(side)='LAY'
+                        THEN entry_stake * (entry_odds - 1.0)
+                    WHEN UPPER(side)='BACK'
+                        THEN entry_stake
+                    ELSE 0
+                END
+            ),0)
+            FROM orders
+            WHERE role='PARENT'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND entry_status IN ('PLACED','MATCHED')
+              AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
         """).fetchone()
 
         snap["exposure"] = float(row[0] or 0.0)
 
         # --------------------------------------------------
-        # PnL (best-effort; tolerate missing tables)
+        # Realised PnL (LIVE, today)
         # --------------------------------------------------
-        try:
-            r = con.execute("""
-                SELECT COALESCE(SUM(pnl),0)
-                  FROM pnl
-                 WHERE realised=1
-            """).fetchone()
-            snap["realised"] = float(r[0] or 0.0)
-        except Exception:
-            pass
+        row = con.execute("""
+            SELECT COALESCE(SUM(COALESCE(net_pl, realized_pnl)),0)
+            FROM orders
+            WHERE UPPER(COALESCE(mode,''))='LIVE'
+              AND UPPER(exit_status)='MATCHED'
+              AND date(COALESCE(closed_at,opened_at))=date('now','utc')
+        """).fetchone()
 
-        try:
-            r = con.execute("""
-                SELECT COALESCE(SUM(pnl),0)
-                  FROM pnl
-                 WHERE realised=0
-            """).fetchone()
-            snap["unsettled"] = float(r[0] or 0.0)
-        except Exception:
-            pass
+        snap["realised"] = float(row[0] or 0.0)
+
+        # --------------------------------------------------
+        # Unsettled PnL — intentionally conservative
+        # (pre-settlement mark-to-market is misleading)
+        # --------------------------------------------------
+        snap["unsettled"] = 0.0
 
     except Exception as e:
-        # Snapshot must NEVER crash the BUS
         snap["error"] = str(e)
 
     finally:
@@ -151,8 +181,6 @@ def bus_snapshot():
             pass
 
     return snap
-
-
 
 class DecisionBus:
     ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F"}

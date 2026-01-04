@@ -76,19 +76,52 @@ def _trade_stats(period_days=None):
     """, params)
     total = row[0] if row else 0
 
-    # GOOD: matched hedge children (H)
+    # matched parents (denominator)
+    row = _safe_read_one(f"""
+        SELECT COUNT(DISTINCT id)
+          FROM orders
+         WHERE role='PARENT'
+           AND UPPER(entry_status)='MATCHED'
+           {where}
+    """, params)
+    matched_parents = row[0] if row else 0
+
+    # parents with matched child (numerator)
+    row = _safe_read_one(f"""
+        SELECT COUNT(DISTINCT p.id)
+          FROM orders p
+          JOIN orders c ON c.hedge_of = p.id
+         WHERE p.role='PARENT'
+           AND UPPER(p.entry_status)='MATCHED'
+           AND c.role='CHILD'
+           AND UPPER(c.entry_status)='MATCHED'
+           {where.replace('opened_at','p.opened_at')}
+    """, params)
+    parents_with_child = row[0] if row else 0
+
+
+    # === PATCH START =======================================================
+    # 📍 TARGET: engines/mastery/goal_adapter.py:_trade_stats
+    # 📆 PATCHED: 2026-01-04 — exit_kind semantic expansion (H → HEDGE)
+    # =======================================================================
+
+    # GOOD: matched hedge children
     row = _safe_read_one(f"""
         SELECT COUNT(DISTINCT p.id)
           FROM orders p
           JOIN orders c ON c.hedge_of = p.id
          WHERE p.role='PARENT'
            AND c.role='CHILD'
-           AND c.source='H'
+           AND UPPER(c.exit_kind) IN ('HEDGE','H')
            AND UPPER(c.entry_status)='MATCHED'
            {where.replace('opened_at','p.opened_at')}
     """, params)
     good = row[0] if row else 0
-    bad = total - good
+
+# === PATCH END =========================================================
+
+    bad = matched_parents - good
+
 
     # --- Win rate via v_dashboard_cashout (DAL-safe) ---------------------
     rowset = _safe_read(f"""
@@ -114,7 +147,10 @@ def _trade_stats(period_days=None):
     else:
         win_rate = 0.0
 
-    matched_ratio = good / total if total > 0 else 0.0
+    matched_ratio = (
+        parents_with_child / matched_parents
+        if matched_parents > 0 else 0.0
+    )
 
     return dict(
         total=total,
@@ -253,7 +289,8 @@ def _trade_good_bad_counts():
          WHERE p.role='PARENT'
            AND date(p.opened_at)=date('now','utc')
            AND c.role='CHILD'
-           AND c.source='H'
+           AND UPPER(c.exit_kind) IN ('HEDGE','H')
+
            AND UPPER(c.entry_status)='MATCHED'
     """)
     good = row[0] if row else 0
@@ -322,7 +359,8 @@ def _matched_ratio_today():
          WHERE p.role='PARENT'
            AND date(p.opened_at)=date('now','utc')
            AND c.role='CHILD'
-           AND c.source='H'
+           AND UPPER(c.exit_kind) IN ('HEDGE','H')
+
            AND UPPER(c.entry_status)='MATCHED'
     """)
     good = row[0] if row else 0
