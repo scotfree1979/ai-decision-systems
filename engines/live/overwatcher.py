@@ -984,6 +984,25 @@ def enforce_stop_losses():
                   )
             """).fetchall()
 
+            for sl in sl_rows:
+                parent_id = int(sl["parent_id"])
+
+                # 🔑 RISC TERMINATION FLAG (AUTHORITATIVE)
+                try:
+                    cur.execute("""
+                        UPDATE orders
+                           SET stoploss_triggered = 1
+                         WHERE id = ?
+                    """, (parent_id,))
+                    con.commit()
+                except Exception:
+                    pass
+
+                # Runtime bridge (same tick)
+                global _TSL_LAST_PARENT
+                _TSL_LAST_PARENT = parent_id
+
+
             if sl_rows:
                 app_key, token = _keys()
 

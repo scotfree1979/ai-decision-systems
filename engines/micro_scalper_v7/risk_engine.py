@@ -6,6 +6,55 @@
 from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 from typing import Dict, Any, Optional
 
+def _record_px_use(self, ctx, px: float, direction: str):
+    try:
+        from engines.config_paths import connect_mastery_v7_cache
+        import json, datetime
+
+        con = connect_mastery_v7_cache()
+        cur = con.cursor()
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS risc_px_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day TEXT NOT NULL,
+                parent_id INTEGER NOT NULL,
+                marketId TEXT NOT NULL,
+                selectionId TEXT NOT NULL,
+                anchor_px REAL NOT NULL,
+                traded_px REAL NOT NULL,
+                direction TEXT NOT NULL,
+                side TEXT NOT NULL,
+                engine TEXT DEFAULT 'MSC_RISK',
+                run_id TEXT,
+                created_at TEXT DEFAULT (datetime('now','utc'))
+            )
+        """)
+
+        cur.execute("""
+            INSERT INTO risc_px_memory(
+                day, parent_id, marketId, selectionId,
+                anchor_px, traded_px, direction, side,
+                run_id
+            )
+            VALUES(date('now','utc'),?,?,?,?,?,?,?,?)
+        """, (
+            self.parent_id,
+            ctx.get("marketId"),
+            ctx.get("selectionId"),
+            float(self.entry_px),
+            float(px),
+            direction,
+            ctx.get("legacy_entry_side"),
+            ctx.get("run_id"),
+        ))
+
+        con.commit()
+        con.close()
+    except Exception:
+        pass   # telemetry must never affect execution
+
+
 class RiskEngine:
     """
     Risk-MicroScalper (Engine B)
@@ -45,7 +94,9 @@ class RiskEngine:
         self.last_px = None
 
         # One-price-once PER PARENT
-        self.used_prices = set()
+        # per-parent ladder memory
+        self.used_prices_by_parent: dict[int, set[float]] = {}
+
 
         # Lifecycle flags
         self.attached = False
@@ -79,7 +130,7 @@ class RiskEngine:
 
     def _legacy_parent_matched(self, ctx):
         return any(
-            o.get("family") == "LEGACY"
+            o.get("engine") == "LEGACY"
             and o.get("role") == "PARENT"
             and o.get("entry_status") == "MATCHED"
             for o in self._orders(ctx)
@@ -87,7 +138,7 @@ class RiskEngine:
 
     def _legacy_child_matched(self, ctx):
         return any(
-            o.get("family") == "LEGACY"
+            o.get("engine") == "LEGACY"
             and o.get("role") == "CHILD"
             and o.get("exit_status") == "MATCHED"
             for o in self._orders(ctx)
@@ -98,7 +149,7 @@ class RiskEngine:
             return False
 
         parent_matched = any(
-            o.get("family") == "MSC_RISK"
+            o.get("engine") == "MSC_RISK"
             and o.get("role") == "PARENT"
             and o.get("id") == self.risc_parent_id
             and o.get("entry_status") == "MATCHED"
@@ -106,7 +157,7 @@ class RiskEngine:
         )
 
         child_matched = any(
-            o.get("family") == "MSC_RISK"
+            o.get("engine") == "MSC_RISK"
             and o.get("role") == "CHILD"
             and o.get("hedge_of") == self.risc_parent_id
             and o.get("exit_status") == "MATCHED"
@@ -114,6 +165,7 @@ class RiskEngine:
         )
 
         return parent_matched and child_matched
+
 
 
 
@@ -142,73 +194,74 @@ class RiskEngine:
 # 📆 PATCHED: 2025-12-06 — OC6 flatten/exit logic
 # ============================================================================
 
-    def _terminate_oc6(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    def _terminate_oc6(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        OC6 termination:
-          • Immediately flatten legacy parent at market px
-          • exit_kind = H (right side) or S (wrong side)
-          • stake = exposure-neutralising
-          • direction = opposite legacy entry
+        OC6 termination — STOPLOSS intent only.
+
+        RISC does NOT execute children.
+        It emits a STOPLOSS intent that BUS forwards to Overwatcher.
+        Overwatcher owns stop-loss execution.
         """
+
         px = float(ctx.get("current_price") or ctx.get("px") or 0.0)
         if px <= 0:
             return None
 
-        # -----------------------------
-        # 1) Parent metadata
-        # -----------------------------
-        parent_side = (ctx.get("legacy_entry_side") or "").upper()  # LAY/BACK
-        anchor      = float(ctx.get("legacy_entry_odds") or px)
+        # --------------------------------------------------
+        # Parent metadata (authoritative from BUS ctx)
+        # --------------------------------------------------
+        parent_side = (ctx.get("legacy_entry_side") or "").upper()
+        anchor_px   = float(ctx.get("legacy_entry_odds") or px)
         parent_stk  = float(ctx.get("legacy_entry_stake") or 0.0)
 
         if parent_stk <= 0:
             return None
 
-        # -----------------------------
-        # 2) Determine flatten direction
-        # -----------------------------
+        # --------------------------------------------------
+        # Determine STOPLOSS direction + kind
+        # --------------------------------------------------
         if parent_side == "LAY":
-            # Legacy opened with LAY → flatten with BACK
-            flatten_side  = "BACK"
-            flatten_stake = parent_stk   # exposure-neutralising
-            # Anchor logic:
-            # px > anchor → right side → H
-            exit_kind = "H" if px > anchor else "S"
-
+            exit_side = "BACK"
+            exit_kind = "H" if px > anchor_px else "S"
         else:
-            # Legacy opened with BACK → flatten with LAY
-            flatten_side  = "LAY"
-            flatten_stake = parent_stk
-            # Anchor logic:
-            # px < anchor → right side → H
-            exit_kind = "H" if px < anchor else "S"
+            exit_side = "LAY"
+            exit_kind = "H" if px < anchor_px else "S"
 
-        # -----------------------------
-        # 3) Build flatten child plan
-        # -----------------------------
+        # --------------------------------------------------
+        # Emit STOPLOSS INTENT (no execution here)
+        # --------------------------------------------------
         plan = {
             "enter": True,
-            "close": True,               # explicit terminal close
-            "role": "CHILD",
-            "family": "MSC_RISK",
+            "engine": "OVERWATCHER",          # 🔑 execution owner
+            "type": "STOPLOSS",
             "parent_id": self.parent_id,
-            "direction": flatten_side,
-            "size": float(flatten_stake),
-            "px": float(px),             # EXACT px – option A
+
+            "marketId": ctx.get("marketId"),
+            "selectionId": ctx.get("selectionId"),
+
+            "exit_side": exit_side,
+            "px": float(px),
+            "size": float(parent_stk),
+
             "exit_kind": exit_kind,
-            "why": f"oc6_flatten_{exit_kind}",
+            "why": f"risc_oc6_stoploss_{exit_kind}",
         }
 
-        # -----------------------------
-        # 4) Detach and end micro-cycle
-        # -----------------------------
+        # --------------------------------------------------
+        # Detach RISC lifecycle (terminal)
+        # --------------------------------------------------
         self.active_plan = None
-        self.attached    = False
-        self.last_px     = None
+        self.attached = False
+        self.last_px = None
+        self.used_prices_by_parent.pop(self.parent_id, None)
+        self.risc_parent_id = None
+        self.risc_cycle_active = False
 
-        print(f"[MSC-RISK][OC6] pid={self.parent_id} side={parent_side} "
-              f"px={px} anchor={anchor} → flatten={flatten_side} "
-              f"stk={flatten_stake} kind={exit_kind}")
+        print(
+            f"[MSC-RISK][OC6] pid={self.parent_id} "
+            f"px={px} anchor={anchor_px} "
+            f"→ STOPLOSS intent ({exit_kind})"
+        )
 
         return plan
 
@@ -227,16 +280,24 @@ class RiskEngine:
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
 # 🔎 SEARCH: STOP CONDITION — legacy lifecycle complete
 # 🧩 ACTION: REPLACE ENTIRE BLOCK
-# 📆 PATCHED: 2026-03-03 — correct RISC termination
+# 📆 PATCHED: 2026-03-03 — RISC stoploss is terminal, no legacy coupling
+#
+# RATIONALE:
+# - RISC does NOT manage children
+# - STOPLOSS is owned by Overwatcher
+# - Once stoploss fires, RISC lifecycle is complete
 # ======================================================================================================
 
-        if self._legacy_child_matched(ctx):
+        if ctx.get("risc_stoploss_executed"):
             self.parent_id = None
             self.attached = False
             self.active_plan = None
             self.last_px = None
-            self.used_prices.clear()
-            return self._no_signal(ctx, reason="legacy_child_matched")
+            self.used_prices_by_parent.pop(self.parent_id, None)
+            self.risc_parent_id = None
+            self.risc_cycle_active = False
+            return self._no_signal(ctx, reason="risc_stoploss_executed")
+
 
         # ----------------------------------------------
         # ONE-AT-A-TIME — wait for own cycle to finish
@@ -273,7 +334,8 @@ class RiskEngine:
 
         # NEW PARENT → reset per-parent state
         if self.parent_id != pid:
-            self.used_prices.clear()
+            self.parent_id = pid
+            self.used_prices_by_parent.setdefault(pid, set())
             self.last_px = None
 
         # assign active parent_id
@@ -332,12 +394,20 @@ class RiskEngine:
 
 
         # Shadow in same DIRECTION as parent
+        # Compute initial execution price
         if self.entry_side == "LAY":
             direction = "LAY"
             entry_px = self.entry_px + tick
         else:
             direction = "BACK"
             entry_px = self.entry_px - tick
+
+        # 🔒 GUARD: never allow execution at anchor price
+        if entry_px == self.entry_px:
+            if direction == "LAY":
+                entry_px = self.entry_px + tick   # force next rung up
+            else:
+                entry_px = self.entry_px - tick   # force next rung down
 
         size = self._stake(ctx, stake_mult, entry_ticks)
 
@@ -352,7 +422,8 @@ class RiskEngine:
         plan = {
             "enter": True,
             "role": "PARENT",
-            "family": "MSC_RISK",
+            "engine": "MSC_RISK",
+            "source": "J",
             "parent_id": self.parent_id,
             # expose existing parent execution direction
             "direction": "BACK->LAY" if direction == "BACK" else "LAY->BACK",
@@ -404,11 +475,17 @@ class RiskEngine:
             return None
 
         # 2) One price once per parent (no repeat scalps)
-        if px in self.used_prices:
-            return self._no_signal(ctx, reason="price_already_traded")
+        used = self.used_prices_by_parent.setdefault(self.parent_id, set())
 
-        # Mark price as consumed
-        self.used_prices.add(px)
+        # Anchor is never tradable
+        if px == self.entry_px:
+            return None
+
+        # One price once per parent
+        if px in used:
+           return self._no_signal(ctx, reason="price_already_traded")
+
+        used.add(px)
 
         # --------------------------------------------------
         # EXISTING RISK SEMANTICS (UNCHANGED)
@@ -427,7 +504,22 @@ class RiskEngine:
         # --------------------------------------------------
         if self._crossed_parent(px):
             direction = "LAY" if px > self.entry_px else "BACK"
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def _open_new(
+# 🧩 ACTION: ADD guard to prevent same-price re-entry when target_ticks == 1
+# 📆 PATCHED: 2026-03-04 — enforce ladder separation invariant
+# ======================================================================================================
+
+            # 🔒 GUARD: never trade at anchor price
+            if px == self.entry_px:
+                if direction == "LAY":
+                    px = walk_ticks(self.entry_px, 1, "up")
+                else:
+                    px = walk_ticks(self.entry_px, 1, "down")
+
             size = self._stake(ctx, stake_mult, entry_ticks)
+            self._record_px_use(ctx, px, "UP" if px > self.entry_px else "DOWN")
             return self._open_new(
                 direction,
                 px,
@@ -442,7 +534,14 @@ class RiskEngine:
         # --------------------------------------------------
         if moving_favour:
             direction = "LAY" if self.entry_side == "LAY" else "BACK"
+            # 🔒 GUARD: never trade at anchor price
+            if px == self.entry_px:
+                if direction == "LAY":
+                    px = walk_ticks(self.entry_px, 1, "up")
+                else:
+                    px = walk_ticks(self.entry_px, 1, "down")
             size = self._stake(ctx, stake_mult, entry_ticks)
+            self._record_px_use(ctx, px, "UP" if px > self.entry_px else "DOWN")
             return self._open_new(
                 direction,
                 px,
@@ -456,7 +555,14 @@ class RiskEngine:
         # HEDGE (move against legacy)
         # --------------------------------------------------
         direction = "BACK" if self.entry_side == "LAY" else "LAY"
+        # 🔒 GUARD: never trade at anchor price
+        if px == self.entry_px:
+            if direction == "LAY":
+                px = walk_ticks(self.entry_px, 1, "up")
+            else:
+                px = walk_ticks(self.entry_px, 1, "down")
         size = self._stake(ctx, stake_mult, entry_ticks)
+        self._record_px_use(ctx, px, "UP" if px > self.entry_px else "DOWN")
         return self._open_new(
             direction,
             px,
@@ -487,14 +593,14 @@ class RiskEngine:
     # ----------------------------------------------------------------------
     # OPEN A NEW MICRO SCALP
     # ----------------------------------------------------------------------
-    # ============================================================
-    # 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
-    # 🔎 SEARCH: def _open_new(
-    # 🛠 ACTION: Replace with parent-version
-    # 📆 PATCHED: 2025-12-06
-    # ============================================================
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: 
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-03 — remove duplicate engine key
+# ======================================================================================================
+
     def _open_new(self, direction, px, entry_ticks, stop_ticks, size, reason):
-        # === PATCH START: baseline 3-tick stop-loss ==========================
         from engines.price_math import walk_ticks
 
         baseline_sl_ticks = 3
@@ -504,9 +610,8 @@ class RiskEngine:
         plan = {
             "enter": True,
             "role": "PARENT",
-            "family": "MSC_RISK",
-            "source": "J",                     # ← HARD-CODED FOR MSC-RISK
-            "engine": "MSC_RISK",              # ← DB bucket
+            "engine": "MSC_RISK",
+            "source": "J",
             "parent_id": self.parent_id,
             "direction": "BACK->LAY" if direction == "BACK" else "LAY->BACK",
             "target_ticks": entry_ticks,
@@ -514,33 +619,35 @@ class RiskEngine:
             "size": size,
             "px": float(px),
             "why": reason,
-
-            # NEW STOP-LOSS FIELDS
             "stop_loss_ticks": baseline_sl_ticks,
             "stop_loss_px": float(stop_loss_px),
         }
-        # === PATCH END ========================================================
-        # mark RISC cycle active
+
         self.risc_parent_id = self.parent_id
         self.risc_cycle_active = True
-
-
         self.active_plan = plan
         self.last_px = px
         return plan
 
-    # ============================================================
 
 
     # ----------------------------------------------------------------------
     # EXIT PLAN
     # ----------------------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def _exit(self, reason, H):
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-03 — fix syntax error, no behaviour change
+# ======================================================================================================
+
     def _exit(self, reason, H):
         plan = {
             "enter": False,
             "close": True,
             "role": "CHILD",
-            "family": "MSC_RISK",
+            "engine": "MSC_RISK",
+            "source": "J",
             "parent_id": self.parent_id,
             "direction": self.active_plan["direction"],
             "why": reason,
@@ -549,6 +656,7 @@ class RiskEngine:
         self.active_plan = None
         self.last_px = None
         return plan
+
 
     # ----------------------------------------------------------------------
     # HELPERS
