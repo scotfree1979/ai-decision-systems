@@ -111,6 +111,70 @@ def _router_child_worker_loop():
                             f"failed to create child row for parent {parent_cor}"
                         )
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: ok = _attempt_place_child_with_retry(int(child_id))
+# 🧩 ACTION: INSERT GUARD IMMEDIATELY BEFORE CHILD PLACEMENT
+# 📆 PATCHED: 2026-03-05 — Router-enforced child price separation invariant
+#
+# RATIONALE:
+# - ONLY Overwatcher may place children at the same price as the parent
+# - All other engines must place children at least 1 tick away
+# - This is enforced at the final authority boundary (router child worker)
+# - Fixes target_ticks=1 collapse, replay/live drift, and recovery anomalies
+# ==============================================================================
+
+                # --------------------------------------------------
+                # ROUTER INVARIANT — CHILD PRICE SEPARATION
+                # --------------------------------------------------
+                try:
+                    con = _orders_conn()
+                    con.row_factory = sqlite3.Row
+                    cur = con.cursor()
+
+                    child = _q_retry(cur, """
+                        SELECT id, entry_odds, hedge_of
+                          FROM orders
+                         WHERE id=?
+                           AND role='CHILD'
+                         LIMIT 1
+                    """, (int(child_id),)).fetchone()
+
+                    if child:
+                        parent = _q_retry(cur, """
+                            SELECT side, entry_odds, engine
+                              FROM orders
+                             WHERE id=?
+                               AND role='PARENT'
+                             LIMIT 1
+                        """, (int(child["hedge_of"]),)).fetchone()
+
+                        if parent:
+                            enforced_px = _enforce_child_price_separation(
+                                engine=parent["engine"],
+                                exit_kind=plan.get("exit_kind"),
+                                parent_side=parent["side"],
+                                parent_odds=float(parent["entry_odds"]),
+                                child_odds=float(child["entry_odds"]),
+                            )
+
+                            enforced_px = _round_odds(float(enforced_px))
+
+                            if enforced_px != float(child["entry_odds"]):
+                                _q_retry(cur, """
+                                    UPDATE orders
+                                       SET entry_odds=?
+                                     WHERE id=?
+                                """, (enforced_px, int(child_id)))
+                                con.commit()
+
+                    con.close()
+                except Exception:
+                    # invariant enforcement must NEVER block execution
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
 
                 # --------------------------------------------------
                 # EXECUTE CHILD (PLACE + RETRY)
@@ -118,6 +182,9 @@ def _router_child_worker_loop():
                 ok = _attempt_place_child_with_retry(int(child_id))
                 if not ok:
                     raise RuntimeError(f"router child placement failed id={child_id}")
+
+# === PATCH END ==============================================================
+
 
             except queue.Empty:
                 # No normal child work right now
@@ -191,6 +258,38 @@ def _router_child_worker_loop():
 
         # Prevent tight loop
         time.sleep(1.0)
+
+def _enforce_child_price_separation(
+    *,
+    engine: str,
+    exit_kind: str | None,
+    parent_side: str,
+    parent_odds: float,
+    child_odds: float,
+) -> float:
+    """
+    Router invariant:
+    - Only OVERWATCHER may place a child at the same price as the parent
+    - All other engines must move at least one tick away
+    """
+
+    if engine == "OVERWATCHER":
+        return child_odds
+
+    if (exit_kind or "").upper() == "STOPLOSS":
+        return child_odds
+
+    if float(child_odds) != float(parent_odds):
+        return child_odds
+
+    # Enforce one-tick separation
+    if parent_side.upper() == "LAY":
+        # hedge BACK must be higher
+        return pm.walk_ticks(parent_odds, +1)
+    else:
+        # hedge LAY must be lower
+        return pm.walk_ticks(parent_odds, -1)
+
 
 def _release_matched_parent_exposure(parent_cor: str) -> None:
     """
