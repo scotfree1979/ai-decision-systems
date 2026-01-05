@@ -2423,7 +2423,9 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
         from engines.price_math import walk_ticks
         from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
-        tick_dir = -ticks if parent_side == "LAY" else ticks
+        # ✅ CORRECT ladder direction
+        tick_dir = ticks if parent_side == "LAY" else -ticks
+
         hedge_odds = walk_ticks(float(parent["entry_odds"]), tick_dir)
         hedge_odds = _round_odds(float(hedge_odds))
 

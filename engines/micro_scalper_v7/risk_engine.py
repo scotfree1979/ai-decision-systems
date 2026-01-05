@@ -105,10 +105,15 @@ class RiskEngine:
 
 # === PATCH END ==============================================================
         # --------------------------------------------------
-        # RISC lifecycle tracking (one-at-a-time)
+        # RISC lifecycle tracking (compatibility only)
         # --------------------------------------------------
+        # NOTE:
+        # These are retained for backward compatibility and logging only.
+        # They MUST NOT block execution.
+        # RISC is per-parent, not global.
         self.risc_parent_id = None
         self.risc_cycle_active = False
+
 
 
 # === PATCH START ============================================================
@@ -299,19 +304,23 @@ class RiskEngine:
             return self._no_signal(ctx, reason="risc_stoploss_executed")
 
 
-        # ----------------------------------------------
-        # ONE-AT-A-TIME — wait for own cycle to finish
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # RISC lifecycle completion (PER-PARENT, NOT GLOBAL)
+        # --------------------------------------------------
         if self.risc_cycle_active:
-            if not self._risc_parent_and_child_matched(ctx):
-                return self._no_signal(ctx, reason="risc_cycle_active")
-            else:
-                # previous RISC cycle completed
+            # Only terminate the cycle if *this parent* has completed
+            if self._risc_parent_and_child_matched(ctx):
+                # End lifecycle for THIS parent only
                 self.risc_parent_id = None
                 self.risc_cycle_active = False
                 self.attached = False
                 self.active_plan = None
                 self.last_px = None
+
+            # IMPORTANT:
+            # Never block execution for other parents
+            # RISC continues evaluating per-parent
+
 
         # direction-engine decision (already built)
         # --------------------------------------------------

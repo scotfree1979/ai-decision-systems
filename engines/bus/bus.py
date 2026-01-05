@@ -1370,39 +1370,45 @@ class DecisionBus:
 # ======================================================================================================
 
                 # --------------------------------------------------
-                # BUS DE-DUPLICATION — ONE PLAN PER (MID, SID, PX, SOURCE)
+                # BUS DE-DUPLICATION — LEGACY ONLY (ENGINE + LETTER)
                 # --------------------------------------------------
-                if "seen_plan_keys" not in tick_ctx:
-                    tick_ctx["seen_plan_keys"] = set()
-                    tick_ctx["dup_blocked_by_engine"] = {
-                        "LEGACY": 0,
-                        "MSC_EXPLORATORY": 0,
-                        "MSC_INPLAY": 0,
-                        "MSC_RISK": 0,
-                    }
+                engine = plan.get("engine")
 
-                mid = plan.get("marketId")
-                sid = plan.get("selectionId")
-                px  = float(plan.get("px") or 0.0)
+                # BUS must NOT de-duplicate MSC engines
+                # MSC_RISK / MSC_EXPLORATORY / MSC_INPLAY manage their own lifecycles
+                if engine == "LEGACY":
 
-                source = (
-                    plan.get("source")
-                    or plan.get("letter")
-                    or plan.get("engine")
-                )
+                    if "seen_plan_keys" not in tick_ctx:
+                        tick_ctx["seen_plan_keys"] = set()
+                        tick_ctx["dup_blocked_by_engine"] = {
+                            "LEGACY": 0,
+                        }
 
-                key = (mid, sid, px, source)
+                    mid = plan.get("marketId")
+                    sid = plan.get("selectionId")
+                    px  = float(plan.get("px") or 0.0)
 
-                if key in tick_ctx["seen_plan_keys"]:
-                    eng_name = plan.get("engine")
-                    tick_ctx["dup_blocked_by_engine"][eng_name] += 1
-                    tick_ctx["plans_route_failed"].append(
-                        (plan, "duplicate_price_source")
+                    # LEGACY execution identity is ENGINE + LETTER
+                    # (S, B, X, G may all place at same PX)
+                    letter = (
+                        plan.get("source")
+                        or plan.get("letter")
+                        or ""
                     )
-                    engine_report[eng_name]["note"] = "duplicate_price_source"
-                    continue
+                    letter = str(letter).upper()[:1]
 
-                tick_ctx["seen_plan_keys"].add(key)
+                    key = (engine, letter, mid, sid, px)
+
+                    if key in tick_ctx["seen_plan_keys"]:
+                        tick_ctx["dup_blocked_by_engine"]["LEGACY"] += 1
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "duplicate_legacy_engine_letter_price")
+                        )
+                        engine_report["LEGACY"]["note"] = "duplicate_legacy_engine_letter_price"
+                        continue
+
+                    tick_ctx["seen_plan_keys"].add(key)
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
