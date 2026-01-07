@@ -10,6 +10,17 @@ from .intel_adapter import build_micro_state
 from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 from engines.mastery.event_sink import emit
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
+# 🔎 SEARCH: from engines.mastery.event_sink import emit
+# 📆 PATCHED: 2026-03-08 — fix missing compute_dynamic_stake import (MSC Exploratory exception)
+# PURPOSE:
+#   • Prevent NameError during MSC sizing
+#   • Allow valid Exploratory plans to be emitted
+#   • Preserve existing behaviour and NO-SIGNAL contract
+# ======================================================================================================
+
+from engines.math.dynamic_stake_v7 import compute_dynamic_stake
 
 
 class ExploratoryEngine:
