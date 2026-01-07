@@ -176,27 +176,59 @@ class RiskEngine:
 
         return parent_matched and child_matched
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-01-07 — RISC no_signal is telemetry-only (non-blocking)
+#
+# RATIONALE:
+# - RISC is a mechanical engine, not a signal engine
+# - "no_signal" means "no direction at this PX", NOT "blocked"
+# - Returning a payload causes BUS to treat this as an explicit decision
+# - RISC must be allowed to re-emit on the next tick unconditionally
+#
+# INVARIANT:
+# - Telemetry is preserved
+# - Control flow is NOT affected
+# - Budget/exposure blocking remains owned by Placement/BankState
+# ======================================================================================================
 
+    def _no_signal(self, ctx: Dict[str, Any], *, reason: str):
+        """
+        Telemetry-only helper.
 
+        Indicates that RISC could not infer a trade direction at this PX
+        (e.g. anchor price or already-traded price).
 
-    def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
-        from engines.mastery.event_sink import emit
-
-        payload = {
-            "enter": False,
-            "blocked": True,
-            "engine": "MSC_RISK",
-            "reason": reason,
-            "re_eval": True,
-        }
-
+        IMPORTANT:
+        - This function MUST NOT block future emissions
+        - It MUST NOT return a plan-like payload
+        - Returning None preserves correct BUS semantics
+        """
         try:
-            emit("msc_risk.no_signal", payload)
+            from engines.mastery.event_sink import emit
+
+            emit("msc_risk.no_signal", {
+                "engine": "MSC_RISK",
+                "reason": reason,
+                "marketId": ctx.get("marketId"),
+                "selectionId": ctx.get("selectionId"),
+                "parent_id": ctx.get("legacy_parent_id"),
+                "px": ctx.get("current_price") or ctx.get("px"),
+                "ts": ctx.get("ts"),
+            })
         except Exception:
+            # Telemetry must never affect execution
             pass
 
-        return payload
+        # CRITICAL:
+        # Returning None means:
+        # - RISC did not emit a plan this tick
+        # - BUS is free to re-evaluate RISC on the next tick
+        return None
 
+# === PATCH END ========================================================================================
 
 
 # === PATCH START ============================================================
