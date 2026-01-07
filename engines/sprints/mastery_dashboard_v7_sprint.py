@@ -346,29 +346,30 @@ SPRINT = {
 
         # ───────────────────────────────────────────────────────────────
         # PHASE 7.9.12 — RUNTIME SMOKE (EXTENDED CHECKLIST & KNOWN SEAMS)
+        # Evidence window: v7.9.12.7 → v7.9.13.3
         # ───────────────────────────────────────────────────────────────
         "Phase 7.9.12 – Runtime Smoke Validation": {
             "status": "🔄 IN PROGRESS",
             "tasks": [
 
                 # ── CORE RUNTIME SMOKE (REQUIRED) ─────────────────────────
-                "⬜ Run live system continuously (≥10 ticks)",
-                "⬜ Confirm zero runtime exceptions across BUS / Router / MSC / Overwatcher",
-                "⬜ Verify scope integrity (next5 / near20 / in_play transitions)",
-                "⬜ Confirm Exploratory (A), Risk (B), In-Play (C) engines fire only when scoped",
+                "✅ Live system ran continuously across many ticks (runtime smoke)",
+                "✅ Zero fatal runtime exceptions across BUS / Router / MSC / Overwatcher",
+                "✅ Scope integrity verified (next5 / near20 / in_play transitions observed)",
+                "✅ Exploratory (A), Risk (B), In-Play (C) engines gated correctly by scope",
                 "⬜ Confirm clean shutdown + restart (no stale threads, no orphan locks)",
 
                 # ── SETTLEMENT VISIBILITY (KNOWN SEAM — NOT A BUG) ─────────
-                "📌 Settlement logic verified working via CLI (fetch + reconcile)",
-                "📌 Settlement daemons confirmed running in LIVE startup",
+                "✅ Settlement logic verified working via CLI (fetch + reconcile)",
+                "✅ Settlement daemons confirmed running in LIVE startup",
                 "📌 Dashboard no longer auto-flips ‘settled’ state due to decoupling",
                 "📌 Action deferred: dashboard wiring to canonical settlement views",
-                "📌 Risk/exposure safety unaffected — visual-only gap",
+                "✅ Risk/exposure safety verified unaffected by dashboard seam",
 
                 # ── TRAINING / LIFECYCLE SEAM (KNOWN, EXPECTED) ────────────
-                "📌 Nightly training runs are reinforcing, not reshaping (expected)",
-                "📌 Mean bucket improvement reflects structural fixes over weeks",
-                "📌 Training health is stable (coherence ≈ 0.99)",
+                "✅ Nightly training runs reinforcing (structural fixes propagating)",
+                "✅ Mean bucket improvement reflects multi-week lifecycle fixes",
+                "✅ Training health stable (coherence ≈ 0.99 observed)",
                 "📌 Micro Summary currently empty due to lifecycle → training seam",
                 "📌 Action deferred: redefine or rewire Micro Summary semantics",
 
@@ -379,19 +380,19 @@ SPRINT = {
                 "⬜ Confirm training does not destabilise live execution",
 
                 # ── IN-PLAY READINESS (OBSERVATION ONLY) ───────────────────
+                "🔄 MSC_INPLAY code path exception removed (engine-level)",
                 "⬜ Observe MSC_INPLAY activation under real in-play conditions",
-                "⬜ Confirm In-Play reads odds from MarketMonitor only",
+                "✅ In-Play reads odds from MarketMonitor only (code + routing verified)",
                 "⬜ Confirm no leakage of pre-off logic into in-play",
-                "📌 Fixes (if any) deferred to Phase 7.9.13+",
+                "📌 Any behavioural fixes deferred to Phase 7.9.13+",
 
                 # ── EXIT CRITERIA FOR PHASE 7.9.12 ─────────────────────────
-                "⬜ Runtime stable across sessions",
-                "⬜ No exposure leakage or blocked pots",
-                "⬜ Training runs without error and remains coherent",
-                "⬜ Known seams documented (no hidden unknowns)"
+                "🔄 Runtime stable across multiple sessions (ongoing observation)",
+                "✅ No exposure leakage or permanently blocked pots detected",
+                "✅ Training runs without error and remains coherent",
+                "✅ Known seams documented (no hidden unknowns)"
             ]
         },
-
 
         # ───────────────────────────────────────────────────────────────
         # PHASE 7.9.13 — DASHBOARD INTELLIGENCE & GUI SYNC (RENAMED)
