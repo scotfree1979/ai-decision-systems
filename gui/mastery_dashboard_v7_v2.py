@@ -419,7 +419,7 @@ class MasteryDashboardV7(tk.Tk):
         card = make_card(scroll, "Execution Summary")
 
         try:
-            r = con.execute("""
+            row = con.execute("""
                 SELECT
                     parents_open,
                     matched_exposure,
@@ -427,9 +427,11 @@ class MasteryDashboardV7(tk.Tk):
                     net_pl_open,
                     last_activity_ts
                 FROM v_dash_overview_execution
-            """).fetchone() or {}
+            """).fetchone()
+            r = dict(row) if row else {}
         except Exception:
             r = {}
+
 
         rows = [
             ("Open Parents",        r.get("parents_open", 0)),
@@ -504,7 +506,7 @@ class MasteryDashboardV7(tk.Tk):
         health = make_card(scroll, "System Health Snapshot")
 
         try:
-            r = con.execute("""
+            row = con.execute("""
                 SELECT
                     orders_total,
                     parents_placed,
@@ -513,9 +515,11 @@ class MasteryDashboardV7(tk.Tk):
                     greened_up,
                     open_parents
                 FROM v_dash_overview_health
-            """).fetchone() or {}
+            """).fetchone()
+            r = dict(row) if row else {}
         except Exception:
             r = {}
+
 
         rows = [
             ("Orders",        r.get("orders_total", 0)),
@@ -642,8 +646,7 @@ class MasteryDashboardV7(tk.Tk):
                     r["letter"] or "∅",
                     r["trades"],
                     f"{r['win_pct']:.1f}%",
-                    f"£{r['avg_pnl']:.2f}",
-                    f"£{r['total_pnl']:.2f}",
+                    f"£{float(r['avg_pnl'] or 0.0):.2f}",                    f"£{float(r['total_pnl'] or 0.0):.2f}",
                     f"{r['avg_drift']:+.4f}",
                 ),
             )
@@ -761,8 +764,8 @@ class MasteryDashboardV7(tk.Tk):
                     r["letter"] or "—",
                     r["trades"],
                     f"{r['win_pct']:.1f}%",
-                    f"£{r['avg_pnl']:.2f}",
-                    f"£{r['total_pnl']:.2f}",
+                    f"£{float(r['avg_pnl'] or 0.0):.2f}",                    
+                    f"£{float(r['total_pnl'] or 0.0):.2f}",
                     f"{r['avg_drift']:+.3f}"
                 )
             )
@@ -1157,8 +1160,7 @@ class MasteryDashboardV7(tk.Tk):
                     r["grp"],
                     r["trades"],
                     f"{r['win_pct']:.1f}%",
-                    f"£{r['avg_pnl']:.2f}",
-                ),
+                    f"£{float(r['avg_pnl'] or 0.0):.2f}",                ),
             )
 
         # ==========================================================
