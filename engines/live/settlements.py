@@ -1666,7 +1666,7 @@ def reconcile_orders() -> Tuple[int,int]:
                     UPDATE orders
                        SET realized_pnl = ?,
                            net_pl       = ?,
-                           exit_status  = COALESCE(exit_status, 'matched'),
+                           exit_status  = COALESCE(exit_status, 'SETTLED'),
                            closed_at    = COALESCE(closed_at, ?)
                      WHERE bf_bet_id = ?
                 """, (
