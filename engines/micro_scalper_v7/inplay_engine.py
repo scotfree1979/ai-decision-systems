@@ -8,6 +8,7 @@
 from typing import Dict, Any, Optional
 from .state_machine import InPlaySubState
 from .intel_adapter import build_micro_state
+from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 
 from engines.cashout_calc import cashout_calc
 from engines.market_monitor.monitor import get_market_state
