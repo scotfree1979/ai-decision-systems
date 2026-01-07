@@ -1,58 +1,8 @@
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/micro_scalaper_v7/risk_engine.py
-# 🔎 SEARCH: class RiskEngine
-# 📆 PATCHED: 2025-12-02 — Full v7 Risk-MicroScalper rewrite
-# ==============================================================================
+
 from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 from typing import Dict, Any, Optional
 
-def _record_px_use(self, ctx, px: float, direction: str):
-    try:
-        from engines.config_paths import connect_mastery_v7_cache
-        import json, datetime
 
-        con = connect_mastery_v7_cache()
-        cur = con.cursor()
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS risc_px_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day TEXT NOT NULL,
-                parent_id INTEGER NOT NULL,
-                marketId TEXT NOT NULL,
-                selectionId TEXT NOT NULL,
-                anchor_px REAL NOT NULL,
-                traded_px REAL NOT NULL,
-                direction TEXT NOT NULL,
-                side TEXT NOT NULL,
-                engine TEXT DEFAULT 'MSC_RISK',
-                run_id TEXT,
-                created_at TEXT DEFAULT (datetime('now','utc'))
-            )
-        """)
-
-        cur.execute("""
-            INSERT INTO risc_px_memory(
-                day, parent_id, marketId, selectionId,
-                anchor_px, traded_px, direction, side,
-                run_id
-            )
-            VALUES(date('now','utc'),?,?,?,?,?,?,?,?)
-        """, (
-            self.parent_id,
-            ctx.get("marketId"),
-            ctx.get("selectionId"),
-            float(self.entry_px),
-            float(px),
-            direction,
-            ctx.get("legacy_entry_side"),
-            ctx.get("run_id"),
-        ))
-
-        con.commit()
-        con.close()
-    except Exception:
-        pass   # telemetry must never affect execution
 
 
 class RiskEngine:
@@ -113,6 +63,61 @@ class RiskEngine:
         # RISC is per-parent, not global.
         self.risc_parent_id = None
         self.risc_cycle_active = False
+
+    # --------------------------------------------------
+    # TELEMETRY — price usage memory (NON-BLOCKING)
+    # --------------------------------------------------
+    def _record_px_use(self, ctx, px: float, direction: str):
+        """
+        Best-effort telemetry.
+        MUST NEVER affect execution.
+        """
+        try:
+            from engines.config_paths import connect_mastery_v7_cache
+
+            con = connect_mastery_v7_cache()
+            cur = con.cursor()
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS risc_px_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day TEXT NOT NULL,
+                    parent_id INTEGER NOT NULL,
+                    marketId TEXT NOT NULL,
+                    selectionId TEXT NOT NULL,
+                    anchor_px REAL NOT NULL,
+                    traded_px REAL NOT NULL,
+                    direction TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    engine TEXT DEFAULT 'MSC_RISK',
+                    run_id TEXT,
+                    created_at TEXT DEFAULT (datetime('now','utc'))
+                )
+            """)
+
+            cur.execute("""
+                INSERT INTO risc_px_memory(
+                    day, parent_id, marketId, selectionId,
+                    anchor_px, traded_px, direction, side,
+                    run_id
+                )
+                VALUES(date('now','utc'),?,?,?,?,?,?,?,?)
+            """, (
+                self.parent_id,
+                ctx.get("marketId"),
+                ctx.get("selectionId"),
+                float(self.entry_px),
+                float(px),
+                direction,
+                ctx.get("legacy_entry_side"),
+                ctx.get("run_id"),
+            ))
+
+            con.commit()
+            con.close()
+        except Exception:
+            # Telemetry must never break trading
+            pass
 
 
 
@@ -681,29 +686,61 @@ class RiskEngine:
 
     def _stake(self, ctx, stake_mult, entry_ticks):
         """
-        Mechanical risk stake:
-        - Anchored to legacy parent exposure
-        - Independent of intelligence / confidence
+        RISC stake logic (final):
+        - Variant of parent stake (never fractional hedge)
+        - Scales naturally as parent stake grows
+        - Odds-aware taper (high odds need less size)
+        - Hard capped and safe
         """
 
         parent_stake = float(ctx.get("legacy_entry_stake") or 0.0)
         if parent_stake <= 0:
             return 0.0
 
-        # Mode-based attenuation
+        # ----------------------------------------
+        # Mode-based multiplier (parent-relative)
+        # ----------------------------------------
         if self.mode == "AGGRESSIVE":
-            frac = 0.5
+            mode_mult = 1.25
         elif self.mode == "CONSERVATIVE":
-            frac = 0.15
+            mode_mult = 0.60
         else:  # MODERATE
-            frac = 0.25
+            mode_mult = 1.00
 
-        base = parent_stake * frac
+        base = parent_stake * mode_mult
 
-        # Optional tick scaling (keeps behaviour symmetric)
+        # ----------------------------------------
+        # Odds-aware taper (entry odds of legacy)
+        # ----------------------------------------
+        entry_odds = float(ctx.get("legacy_entry_odds") or 0.0)
+
+        if entry_odds >= 12.0:
+            odds_mult = 0.40
+        elif entry_odds >= 10.0:
+            odds_mult = 0.55
+        elif entry_odds >= 7.0:
+            odds_mult = 0.85
+        else:
+            odds_mult = 1.00
+
+        base *= odds_mult
+
+        # ----------------------------------------
+        # Optional tick scaling (mild symmetry)
+        # ----------------------------------------
         base *= max(1.0, float(entry_ticks))
 
-        return round(float(base) * float(stake_mult), 2)
+        size = float(base) * float(stake_mult)
+
+        # ----------------------------------------
+        # Absolute RISC safety caps
+        # ----------------------------------------
+        size = min(size, 7.00)
+
+        from engines.daily_config import MIN_STAKE
+        size = max(size, MIN_STAKE)
+
+        return round(size, 2)
 
 
 # === PATCH END ================================================================

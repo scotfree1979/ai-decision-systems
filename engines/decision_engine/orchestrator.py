@@ -3698,6 +3698,17 @@ def start_live_loop(*args, **kwargs):
     bank_state.init_from_budget_allocations()
 
     # ------------------------------------------------------------------
+    # 6H) AFTER BankState.init_bank_state()
+    # ------------------------------------------------------------------
+    try:
+        from engines.exposure.exposure_guardian import ExposureGuardian
+        _EXPOSURE_GUARDIAN = ExposureGuardian(interval_s=300)
+        _EXPOSURE_GUARDIAN.start()
+    except Exception as e:
+        print(f"[EXPOSURE-GUARDIAN] failed to start: {e}")
+
+
+    # ------------------------------------------------------------------
     # 7) START BUS LOOP (BUS-OWNED LOOP)
     # ------------------------------------------------------------------
     try:
