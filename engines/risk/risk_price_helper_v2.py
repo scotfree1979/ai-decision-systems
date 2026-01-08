@@ -264,17 +264,18 @@ if __name__ == "__main__":
         print(f"✅ Live Odds for {runner['runnerName']}: {odds}")
 
         # ------------------------------------------------------------------
-        # PROOF: FETCH LIVE ODDS FOR PARENTS WITH NO MATCHED CHILD
+        # ✅ V2 HELPER: LEGACY MATCHED PARENTS + LIVE ODDS (TODAY)
         # ------------------------------------------------------------------
 
         import sqlite3
         from engines.config_paths import auto_conn
 
-        print("\n=== PROOF: PARENTS WITH NO MATCHED CHILD ===\n")
+        print("\n=== V2: LEGACY MATCHED PARENTS + LIVE ODDS (TODAY UTC) ===\n")
 
         con = auto_conn(rw=False)
         con.row_factory = sqlite3.Row
 
+        # 1️⃣ Enumerate LEGACY matched parents today (authoritative DB truth)
         rows = con.execute("""
             SELECT
                 p.id          AS parent_id,
@@ -283,41 +284,45 @@ if __name__ == "__main__":
                 p.side,
                 p.entry_odds
             FROM orders p
-            LEFT JOIN orders c
-              ON c.parent_order_id = p.id
-             AND c.role = 'CHILD'
-             AND c.entry_status = 'MATCHED'
-            WHERE
-                p.role = 'PARENT'
-                AND p.entry_status = 'MATCHED'
-            GROUP BY p.id
-            HAVING COUNT(c.id) = 0
-            LIMIT 10
+            WHERE p.role = 'PARENT'
+              AND p.engine = 'LEGACY'
+              AND p.entry_status = 'MATCHED'
+              AND date(p.opened_at) = date('now','utc')
+            ORDER BY p.opened_at ASC
         """).fetchall()
 
         con.close()
 
         if not rows:
-            print("⚠️ No eligible parents found")
+            print("⚠️ No matched LEGACY parents found today")
         else:
+            print(f"Found {len(rows)} LEGACY matched parents\n")
+
+            enriched = []
+
+            # 2️⃣ Enrich each (marketId, selectionId) with live odds
             for r in rows:
                 odds = fetch_live_odds(
                     session_token=SESSION_TOKEN,
                     marketId=r["marketId"],
-                    selectionId=r["selectionId"]
+                    selectionId=r["selectionId"],
                 )
 
-                print({
-                    "parent_id": r["parent_id"],
-                    "marketId": r["marketId"],
+                enriched.append({
+                    "parent_id":   r["parent_id"],
+                    "marketId":    r["marketId"],
                     "selectionId": r["selectionId"],
-                    "entry_odds": r["entry_odds"],
-                    "live_odds": odds
+                    "side":        r["side"],
+                    "entry_odds":  r["entry_odds"],
+                    "live_back":   odds.get("back"),
+                    "live_lay":    odds.get("lay"),
                 })
 
-        print("\n=== END PROOF ===\n")
+            # 3️⃣ Print sample (human proof)
+            for row in enriched[:10]:
+                print(row)
 
-
+        print("\n=== END V2 HELPER ===\n")
 
     except Exception as e:
         print(f"❌ Error: {e}")
