@@ -299,13 +299,21 @@ def _release_matched_parent_exposure(parent_cor: str) -> None:
       • child is MATCHED
       • OR market is FINISHED (checked by caller)
     """
+
     try:
         con = _orders_conn()
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
+        # === PATCH START ============================================================
+        # 📍 TARGET: engines/live/live_router.py
+        # 🔎 SEARCH: def _release_matched_parent_exposure(parent_cor: str) -> None:
+        # 🧩 ACTION: FIX manual-parent guard order (parent must be loaded first)
+        # 📆 PATCHED: 2026-01-08 — prevent NameError + correct exposure bypass
+        # ============================================================================
+
         parent = _q_retry(cur, """
-            SELECT id, engine, entry_odds, entry_stake, exit_status
+            SELECT id, engine, entry_odds, entry_stake, exit_status, source
               FROM orders
              WHERE customerOrderRef=?
                AND role='PARENT'
@@ -315,6 +323,13 @@ def _release_matched_parent_exposure(parent_cor: str) -> None:
 
         if not parent:
             return
+
+        # ✅ Manual parents never reserve or release exposure
+        if _is_manual_parent(parent):
+            return
+
+        # === PATCH END ==============================================================
+
 
         # idempotency guard
         if (parent["exit_status"] or "").upper() in ("SETTLED","CANCELLED","EXPIRED"):
@@ -3836,6 +3851,18 @@ def mark_parent_exit_kind_by_cor(parent_cor: str, kind: str) -> None:
 
 from engines.mastery import event_sink
 
+def _is_manual_parent(row) -> bool:
+    engine = (row["engine"] or "").upper()
+    source = (row["source"] or "").upper()
+
+    # manual if no engine OR source not governed
+    if not engine:
+        return True
+
+    if engine == "LEGACY" and source not in LETTER_MAP:
+        return True
+
+    return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4046,6 +4073,18 @@ def place_parent_and_hedge(
 
     # 3) place parent -----------------------------------------------------------
     bf_parent_id, detail = None, {}
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: if _is_manual_parent(parent_row):
+# 🧩 ACTION: FIX VARIABLE + EARLY RETURN
+# 📆 PATCHED: 2026-01-08 — activate manual parent exposure bypass
+# ============================================================================
+
+    if _is_manual_parent(row):
+        return None, parent_ref
+
+# === PATCH END ==============================================================
+
     try:
         # 1️⃣ Reserve FIRST
         bank_state.on_parent_placed(
