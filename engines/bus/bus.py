@@ -15,6 +15,7 @@ from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
 from engines.market_monitor.phase_clock import MarketPhaseClock
 from engines.live.overwatcher import evaluate_redistribution
+from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
 
 
 import time
@@ -1054,38 +1055,30 @@ class DecisionBus:
 # ======================================================================================================
 
             # ==================================================
-            # MSC_RISK — PARENT-DRIVEN PROTECTION (DB-FIRST)
+            # MSC_RISK — PARENT-DRIVEN PROTECTION (HELPER-DRIVEN)
             # ==================================================
             try:
                 risc = self.engines.get("MSC_RISK")
                 if risc:
 
-                    from engines.config_paths import open_auto_db
-                    con = open_auto_db(rw=False)
-                    con.row_factory = None
-
-                    rows = con.execute("""
-                        SELECT
-                            id AS parent_id,
-                            marketId,
-                            selectionId,
-                            side,
-                            entry_odds,
-                            entry_stake
-                        FROM orders
-                        WHERE engine = 'LEGACY'
-                          AND role = 'PARENT'
-                          AND entry_status = 'MATCHED'
-                          AND (exit_status IS NULL OR exit_status <> 'MATCHED')
-                    """).fetchall()
-
-                    con.close()
+                    # --------------------------------------------------
+                    # 🔑 UNIFIED HELPER CALL (DB + LIVE ODDS)
+                    # --------------------------------------------------
+                    parents = get_legacy_parent_odds_snapshot()
+                    #          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    #          THIS IS THE HELPER CALL
 
                     risc_evaluated = False
 
-                    for parent_id, mid, sid, side, entry_odds, entry_stake in rows:
+                    for p in parents:
+                        parent_id   = p["parent_id"]
+                        mid         = p["marketId"]
+                        sid         = p["selectionId"]
+                        side        = p["side"]
+                        entry_odds  = p["entry_odds"]
+                        entry_stake = p["entry_stake"]
 
-                        # Scope is authoritative for liveness
+                        # Scope is authoritative
                         if mid not in mids:
                             continue
 
@@ -1094,63 +1087,32 @@ class DecisionBus:
                             continue
 
                         # --------------------------------------------------
-                        # 🔑 AUTHORITATIVE PARENT CONTEXT (REQUIRED)
+                        # AUTHORITATIVE LEGACY CONTEXT
                         # --------------------------------------------------
                         ctx["legacy_parent_id"]    = parent_id
                         ctx["legacy_entry_side"]  = side
                         ctx["legacy_entry_odds"]  = entry_odds
                         ctx["legacy_entry_stake"] = entry_stake
 
+                        # Optional live odds (already fetched by helper)
+                        ctx["live_back"] = p.get("live_back")
+                        ctx["live_lay"]  = p.get("live_lay")
+
                         risc_evaluated = True
 
-                        p = risc.tick(ctx)
+                        r = risc.tick(ctx)
 
-                        if p is None:
-                            print(
-                                f"[BUS][RISC] mid={mid} sid={sid} "
-                                f"pid={parent_id} px={ctx.get('px')} → no_signal"
-                            )
-                            continue
-
-                        if p.get("enter"):
-                            p = dict(p)
-                            p["engine"] = "MSC_RISK"
-
-                            # ======================================================================================================
-                            # 📍 TARGET: engines/bus/bus.py
-                            # 🔎 SEARCH: engine_report["MSC_RISK"]
-                            # 🧩 ACTION: FIX reporting semantics (tick-level, truthful)
-                            # 📆 PATCHED: 2026-03-03
-                            # ======================================================================================================
-
-                            plans.append(("MSC_RISK", p, ctx))
+                        if r and r.get("enter"):
+                            r["engine"] = "MSC_RISK"
+                            plans.append(("MSC_RISK", r, ctx))
                             plans_by_engine["MSC_RISK"] += 1
-
-                            engine_report["MSC_RISK"]["evaluated"] = True
                             engine_report["MSC_RISK"]["fired"] += 1
-
-                            print(
-                                f"[BUS][RISC] mid={mid} sid={sid} "
-                                f"pid={parent_id} px={ctx.get('px')} → PLAN {p.get('why')}"
-                            )
                         else:
                             engine_report["MSC_RISK"]["evaluated"] = True
-                            print(
-                                f"[BUS][RISC] mid={mid} sid={sid} "
-                                f"pid={parent_id} px={ctx.get('px')} → no_signal ({p.get('reason')})"
-                            )
-
-                    # ------------------------------------------------------------------
-                    # FINAL TICK-LEVEL RISC NOTE (AFTER ALL PARENTS)
-                    # ------------------------------------------------------------------
-                    if risc_evaluated and engine_report["MSC_RISK"]["fired"] == 0:
-                        engine_report["MSC_RISK"]["note"] = "no_plan"
-                    elif not risc_evaluated:
-                        engine_report["MSC_RISK"]["note"] = "not_evaluated"
 
             except Exception as e:
-                engine_report["MSC_RISK"]["evaluated"] = False
                 engine_report["MSC_RISK"]["note"] = str(e)
+
 
             # ==================================================
             # MSC_EXPLORATORY — SCOPE-DRIVEN (PRE-INPLAY) ENGINE
