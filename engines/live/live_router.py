@@ -803,16 +803,8 @@ def _router_child_recovery_sweep():
 
             # NOTE:
             # _orders_insert_child_queued is POSITIONAL.
-            _orders_insert_child_queued(
-                r["parent_id"],          # hedge_of
-                r["marketId"],
-                r["selectionId"],
-                child_side,
-                hedge_odds,
-                hedge_stake,
-                "H",
-                "HEDGE",
-            )
+            _orders_insert_child_queued(r["parent_cor"])
+
 
             print(f"[ROUTER][RECOVER] child rebuilt for {r['parent_cor']}")
 
