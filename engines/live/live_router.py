@@ -2332,7 +2332,7 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                             entry_odds=float(r["entry_odds"]),
                             entry_stake=float(r["entry_stake"]),
                         )
-
+                        close_logically_finished_parents()
                         fixed += 1
                         continue
 
@@ -2346,6 +2346,7 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                 # Terminal market condition
                 if mto is not None and float(mto) <= -GRACE_MINUTES:
                     _release_matched_parent_exposure(parent_ref)
+                    close_logically_finished_parents()
                     fixed += 1
 
             except Exception as e:
@@ -2714,6 +2715,34 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         except Exception as e:
             _log_event("WARN","live_router",f"child_matched: could not stamp avg match ref={cor} err={e}")
 
+        # ============================================================
+        # 🔒 CANONICAL PARENT CLOSE — CHILD MATCHED
+        # ============================================================
+        try:
+            _q_retry(cur, """
+                UPDATE orders
+                   SET parent_closed = 1,
+                       exit_status   = COALESCE(exit_status, 'MATCHED'),
+                       closed_at     = COALESCE(closed_at, datetime('now','utc'))
+                 WHERE id = ?
+                   AND role = 'PARENT'
+                   AND parent_closed = 0
+            """, (pid,))
+            con.commit()
+
+            _log_event(
+                "INFO",
+                "live_router",
+                f"[PARENT CLOSED] ref={cor} reason=child_matched"
+            )
+
+        except Exception as e:
+            _log_event(
+                "ERROR",
+                "live_router",
+                f"[PARENT CLOSE FAILED] ref={cor}: {e}"
+            )
+
         # === PATCH START: per-letter CAP summary hook =========================
         try:
             # 1️⃣ locate parent row by its customerOrderRef
@@ -2944,6 +2973,40 @@ def _ensure_book_state_schema() -> None:
     finally:
         try: con.close()
         except Exception: pass
+
+def close_logically_finished_parents():
+    con = _orders_conn()
+    cur = con.cursor()
+
+    # Parents closed by matched children
+    cur.execute("""
+        UPDATE orders
+           SET parent_closed = 1
+         WHERE role='PARENT'
+           AND parent_closed = 0
+           AND EXISTS (
+                SELECT 1 FROM orders c
+                 WHERE c.hedge_of = orders.id
+                   AND c.entry_status = 'MATCHED'
+           )
+    """)
+
+    # Parents closed by market time
+    cur.execute("""
+        UPDATE orders
+           SET parent_closed = 1
+         WHERE role='PARENT'
+           AND parent_closed = 0
+           AND marketId IN (
+                SELECT marketId
+                  FROM bets.bets
+                 WHERE datetime(marketStartTime) < datetime('now','utc','-15 minutes')
+           )
+    """)
+
+    con.commit()
+    con.close()
+
 
 def _update_book_state(run_id: str = "LIVE") -> None:
     """
