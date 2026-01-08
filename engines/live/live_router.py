@@ -179,9 +179,27 @@ def _router_child_worker_loop():
                 # --------------------------------------------------
                 # EXECUTE CHILD (PLACE + RETRY)
                 # --------------------------------------------------
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: raise RuntimeError(f"router child placement failed id={child_id}")
+# 🧩 ACTION: Make child placement failure non-fatal to router worker
+# 📆 PATCHED: 2026-01-08 — child placement failures are expected, not fatal
+#
+# RATIONALE:
+# - _attempt_place_child_with_retry() already marks FAILED
+# - Router must NOT crash on normal Betfair rejections
+# - Recovery is handled by rehedge / rescue / market-finish logic
+# ============================================================================
+
                 ok = _attempt_place_child_with_retry(int(child_id))
                 if not ok:
-                    raise RuntimeError(f"router child placement failed id={child_id}")
+                    _log_event(
+                        "WARN",
+                        "live_router",
+                        f"[CHILD PLACE FAILED] id={child_id} — marked FAILED, will retry/rescue later"
+                    )
+                    # IMPORTANT: do NOT raise
+                    continue
 
 # === PATCH END ==============================================================
 
@@ -3851,18 +3869,44 @@ def mark_parent_exit_kind_by_cor(parent_cor: str, kind: str) -> None:
 
 from engines.mastery import event_sink
 
-def _is_manual_parent(row) -> bool:
-    engine = (row["engine"] or "").upper()
-    source = (row["source"] or "").upper()
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _is_manual_parent(row) -> bool:
+# 🧩 ACTION: Make key access defensive (row may not include 'source')
+# 📆 PATCHED: 2026-01-08 — fix IndexError on placement pre-verify rows
+# ============================================================================
 
-    # manual if no engine OR source not governed
+def _is_manual_parent(row) -> bool:
+    """
+    Determine whether a parent should bypass exposure logic.
+
+    NOTE:
+    - 'row' may be a partial sqlite Row (placement pre-verify path)
+    - Must never assume optional columns exist
+    """
+
+    try:
+        engine = (row["engine"] or "").upper()
+    except Exception:
+        engine = ""
+
+    try:
+        source = (row["source"] or "").upper()
+    except Exception:
+        source = ""
+
+    # manual if no engine resolved
     if not engine:
         return True
 
-    if engine == "LEGACY" and source not in LETTER_MAP:
+    # LEGACY but not governed by a known letter
+    if engine == "LEGACY" and source and source not in LETTER_MAP:
         return True
 
     return False
+
+# === PATCH END ==============================================================
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
