@@ -407,137 +407,261 @@ class MasteryDashboardV7(tk.Tk):
         _bind_canvas_autosize(canvas, window_id)
         _enable_smooth_scroll(canvas)
 
+        scroll.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
         canvas.configure(yscrollcommand=vsb.set)
         canvas.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
         con = DBConnection.get()
+        con.row_factory = sqlite3.Row
+
+        def rowdict(sql, params=()):
+            try:
+                row = con.execute(sql, params).fetchone()
+                return dict(row) if row else {}
+            except Exception:
+                return {}
+
+        def attach_settlements():
+            """
+            Ensure settlements.db is attached as 'settle'.
+            Safe to call multiple times.
+            """
+            try:
+                con.execute("ATTACH DATABASE 'data/settlements.db' AS settle")
+            except sqlite3.OperationalError:
+                # already attached
+                pass
+
+
+        def realised_pnl_by_window(days=None):
+            """
+            Canonical realised P&L from Betfair settlements, joined to orders.
+            days=None  -> all time
+            days=7/30/90 -> rolling window on settledDate
+            """
+            attach_settlements()
+
+            where = ""
+            params = []
+
+            if days is not None:
+                where = "AND datetime(c.settledDate) >= datetime('now','utc', ?)"
+                params.append(f"-{days} days")
+
+            row = con.execute(f"""
+                SELECT
+                    COALESCE(SUM(c.profit),0.0) AS realised_pnl
+                FROM settle.bf_cleared_orders c
+                JOIN orders o
+                  ON o.entry_bet_id = c.betId
+                WHERE 1=1
+                {where}
+            """, params).fetchone()
+
+            return float(row["realised_pnl"] or 0.0) if row else 0.0
+
+
+        def realised_pnl_by_engine(days=None):
+            attach_settlements()
+
+            where = ""
+            params = []
+
+            if days is not None:
+                where = "AND datetime(c.settledDate) >= datetime('now','utc', ?)"
+                params.append(f"-{days} days")
+
+            rows = con.execute(f"""
+                SELECT
+                    o.engine,
+                    ROUND(SUM(c.profit),2) AS realised_pnl
+                FROM settle.bf_cleared_orders c
+                JOIN orders o
+                  ON o.entry_bet_id = c.betId
+                WHERE 1=1
+                {where}
+                GROUP BY o.engine
+            """, params).fetchall()
+
+            return {r["engine"]: float(r["realised_pnl"] or 0.0) for r in rows}
+
 
         # ==========================================================
         # EXECUTION SUMMARY
         # ==========================================================
-        card = make_card(scroll, "Execution Summary")
+        header = make_card(scroll, "Execution Summary")
+        boxes = tk.Frame(header, bg=INNER_BG)
+        boxes.pack(fill="x", pady=6)
 
-        try:
-            row = con.execute("""
-                SELECT
-                    parents_open,
-                    matched_exposure,
-                    net_pl_total,
-                    net_pl_open,
-                    last_activity_ts
-                FROM v_dash_overview_execution
-            """).fetchone()
-            r = dict(row) if row else {}
-        except Exception:
-            r = {}
-
-
-        rows = [
-            ("Open Parents",        r.get("parents_open", 0)),
-            ("Matched Exposure",    f"£{float(r.get('matched_exposure') or 0):,.2f}"),
-            ("Total P&L",           f"£{float(r.get('net_pl_total') or 0):,.2f}"),
-            ("Open P&L",            f"£{float(r.get('net_pl_open') or 0):,.2f}"),
-            ("Last Activity",       r.get("last_activity_ts", "—")),
-        ]
-
-        for k, v in rows:
-            row = tk.Frame(card, bg=INNER_BG)
-            row.pack(fill="x", padx=12, pady=3)
-            tk.Label(row, text=k, bg=INNER_BG, fg="#333",
-                     width=24, anchor="w").pack(side="left")
-            tk.Label(row, text=str(v), bg=INNER_BG, fg="#000",
-                     font=("Segoe UI", 10, "bold")).pack(side="left")
-
-        # ==========================================================
-        # STRATEGY / ENGINE PERFORMANCE
-        # ==========================================================
-        strat = make_card(scroll, "Strategy Performance")
-
-        cols = (
-            "Engine",
-            "Parents",
-            "Open",
-            "Exposure £",
-            "Net P&L",
-            "Last Trade",
-        )
-
-        table = ttk.Treeview(strat, columns=cols, show="headings", height=8)
-
-        for c in cols:
-            table.heading(c, text=c)
-            table.column(c, width=160 if c == "Engine" else 120)
-
-        table.pack(fill="both", expand=True, padx=8, pady=6)
-
-        try:
-            rows = con.execute("""
-                SELECT
-                    engine,
-                    parents_total,
-                    parents_open,
-                    matched_exposure,
-                    net_pl,
-                    last_trade_ts
-                FROM v_dash_overview_strategy
-                ORDER BY net_pl DESC
-            """).fetchall()
-        except Exception:
-            rows = []
-
-        for r in rows:
-            table.insert(
-                "",
-                "end",
-                values=(
-                    r["engine"] or "—",
-                    r["parents_total"],
-                    r["parents_open"],
-                    f"£{float(r['matched_exposure'] or 0):,.2f}",
-                    f"£{float(r['net_pl'] or 0):,.2f}",
-                    r["last_trade_ts"] or "—",
-                ),
+        def summary_box(title, rows):
+            box = tk.Frame(
+                boxes, bg="#f9f9f9",
+                highlightbackground="#ccc",
+                highlightthickness=1,
+                padx=10, pady=6
             )
+            box.pack(side="left", expand=True, fill="both", padx=6)
+
+            tk.Label(
+                box, text=title,
+                bg="#f9f9f9", fg="#000",
+                font=("Segoe UI", 10, "bold")
+            ).pack(anchor="w", pady=(0, 4))
+
+            for k, v in rows:
+                r = tk.Frame(box, bg="#f9f9f9")
+                r.pack(fill="x", pady=1)
+                tk.Label(
+                    r, text=k, width=16, anchor="w",
+                    bg="#f9f9f9", fg="#444"
+                ).pack(side="left")
+                tk.Label(
+                    r, text=v, anchor="e",
+                    bg="#f9f9f9", fg="#000",
+                    font=("Segoe UI", 9, "bold")
+                ).pack(side="right")
+
+        # ---- TODAY ----
+        r = rowdict("""
+            SELECT
+                parents_open,
+                matched_exposure,
+                open_pnl,
+                last_activity_ts
+            FROM v_dash_overview_execution_today
+        """)
+
+        today_pnl = realised_pnl_by_window(0)
+
+        summary_box("Today", [
+            ("Open Parents", r.get("parents_open", 0)),
+            ("Exposure", f"£{float(r.get('matched_exposure') or 0):,.2f}"),
+            ("Realised P&L", f"£{today_pnl:,.2f}"),
+            ("Open P&L", f"£{float(r.get('open_pnl') or 0):,.2f}"),
+            ("Last Act", r.get("last_activity_ts") or "—"),
+        ])
+
+        # ---- HISTORICAL ----
+        def hist_box(title, days):
+            r = rowdict("""
+                SELECT
+                    parents_placed,
+                    children_placed,
+                    match_rate
+                FROM v_dash_overview_execution_hist
+                WHERE window_days = ?
+            """, (days,))
+
+            pnl = realised_pnl_by_window(days)
+
+            summary_box(title, [
+                ("Parents", r.get("parents_placed", 0)),
+                ("Children", r.get("children_placed", 0)),
+                ("Match %", f"{float(r.get('match_rate') or 0) * 100:.1f}%"),
+                ("Realised P&L", f"£{pnl:,.2f}"),
+            ])
+
+        hist_box("7 Days", 7)
+        hist_box("30 Days", 30)
+        hist_box("90 Days", 90)
 
         # ==========================================================
-        # SYSTEM HEALTH SNAPSHOT
+        # STRATEGY PERFORMANCE
+        # ==========================================================
+        def strategy_table(title, view_name):
+            card = make_card(scroll, title)
+
+            cols = (
+                "Engine", "Parents", "Matched", "Children",
+                "Match %", "Realised P&L", "Avg P&L",
+                "Win %", "Last Trade"
+            )
+            widths = [120, 80, 80, 80, 90, 120, 100, 80, 160]
+
+            tv = ttk.Treeview(card, columns=cols, show="headings", height=8)
+            for c, w in zip(cols, widths):
+                tv.heading(c, text=c)
+                tv.column(c, width=w, anchor="center")
+
+            tv.pack(fill="both", expand=True, padx=8, pady=6)
+
+            try:
+                pnl_map = realised_pnl_by_engine(
+                    None if "today" in view_name.lower()
+                    else 7 if "7d" in view_name.lower()
+                    else 30 if "30d" in view_name.lower()
+                    else 90
+                )
+
+                rows = con.execute(
+                    f"SELECT * FROM {view_name}"
+                ).fetchall()
+
+            except Exception:
+                rows = []
+
+            for r in rows:
+                tv.insert("", "end", values=(
+                    r["engine"],
+                    r["parents_placed"],
+                    r["parents_matched"],
+                    r["children_placed"],
+                    f"{float(r['match_rate'] or 0) * 100:.1f}%",
+                    f"£{pnl_map.get(r['engine'], 0.0):,.2f}",
+                    f"£{float(r['avg_pnl'] or 0):,.2f}",
+                    f"{float(r['win_pct'] or 0):.1f}%",
+                    r["last_trade_ts"] or "—",
+                ))
+
+
+        strategy_table("Strategy Performance — Today", "v_dash_strategy_today")
+        strategy_table("Strategy Performance — 7 Days", "v_dash_strategy_7d")
+        strategy_table("Strategy Performance — 30 Days", "v_dash_strategy_30d")
+        strategy_table("Strategy Performance — 90 Days", "v_dash_strategy_90d")
+
+        # ==========================================================
+        # SYSTEM HEALTH
         # ==========================================================
         health = make_card(scroll, "System Health Snapshot")
 
-        try:
-            row = con.execute("""
-                SELECT
-                    orders_total,
-                    parents_placed,
-                    children_placed,
-                    stop_losses,
-                    greened_up,
-                    open_parents
-                FROM v_dash_overview_health
-            """).fetchone()
-            r = dict(row) if row else {}
-        except Exception:
-            r = {}
+        r = rowdict("""
+            SELECT
+                orders_total,
+                parents_total,
+                children_total,
+                parents_closed,
+                parents_open,
+                stop_losses,
+                greened_up,
+                orphan_parents
+            FROM v_dash_overview_health
+        """)
 
-
-        rows = [
-            ("Orders",        r.get("orders_total", 0)),
-            ("Parents",       r.get("parents_placed", 0)),
-            ("Children",      r.get("children_placed", 0)),
-            ("Stop Losses",   r.get("stop_losses", 0)),
-            ("Greened",       r.get("greened_up", 0)),
-            ("Open Parents",  r.get("open_parents", 0)),
-        ]
-
-        for k, v in rows:
-            row = tk.Frame(health, bg=INNER_BG)
-            row.pack(fill="x", padx=12, pady=3)
-            tk.Label(row, text=k, bg=INNER_BG, fg="#333",
-                     width=24, anchor="w").pack(side="left")
-            tk.Label(row, text=str(v), bg=INNER_BG, fg="#000",
-                     font=("Segoe UI", 10, "bold")).pack(side="left")
-
+        for k, v in [
+            ("Orders", r.get("orders_total", 0)),
+            ("Parents", r.get("parents_total", 0)),
+            ("Children", r.get("children_total", 0)),
+            ("Parents Closed", r.get("parents_closed", 0)),
+            ("Parents Open", r.get("parents_open", 0)),
+            ("Stop Losses", r.get("stop_losses", 0)),
+            ("Greened", r.get("greened_up", 0)),
+            ("Orphan Parents", r.get("orphan_parents", 0)),
+        ]:
+            rowf = tk.Frame(health, bg=INNER_BG)
+            rowf.pack(fill="x", padx=12, pady=3)
+            tk.Label(
+                rowf, text=k, bg=INNER_BG,
+                fg="#333", width=24, anchor="w"
+            ).pack(side="left")
+            tk.Label(
+                rowf, text=str(v), bg=INNER_BG,
+                fg="#000", font=("Segoe UI", 10, "bold")
+            ).pack(side="left")
 
     # ===============================================================
     # TAB 2 – STRATEGY & POSTERIOR EVOLUTION  (v7 Intelligence Wireframe)
