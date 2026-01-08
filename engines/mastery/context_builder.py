@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from engines.decision_engine.strategies.common import CTXV7   # <-- add import at top of file
 # Canonical DB paths
 from engines.config_paths import connect_db, autoscalp_db
+from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
 
 # Optional: live odds API fallback (resolves session token internally)
 try:
@@ -696,6 +697,25 @@ def build_context(source: str | None = None) -> tuple[dict, dict]:
     if not mids:
         return {"source": src}, {}
 
+    # ------------------------------------------------------------------
+    # LEGACY PARENT SNAPSHOT (DB-FIRST, LIVE ODDS)
+    # ------------------------------------------------------------------
+    # This augments context with parent-driven runners for MSC_RISK
+    # while preserving legacy market-driven selection.
+    try:
+        legacy_parents = get_legacy_parent_odds_snapshot()
+    except Exception:
+        legacy_parents = []
+
+    # Index parents by marketId → [parent records]
+    parents_by_market: dict[str, list[dict]] = {}
+    for p in legacy_parents:
+        mid = str(p.get("marketId"))
+        if not mid:
+            continue
+        parents_by_market.setdefault(mid, []).append(p)
+
+
     mid = mids[0]
     sids = list(map(str, _SCOPE_STATE.get("active_sids", {}).get(mid, [])))
     if not sids:
@@ -729,6 +749,31 @@ def build_context(source: str | None = None) -> tuple[dict, dict]:
         ctx["source"] = src
         ctx["marketId"] = mid
         ctx["selectionId"] = sid
+
+        # --------------------------------------------------
+        # LEGACY PARENT CONTEXT (MSC_RISK ONLY)
+        # --------------------------------------------------
+        parent_rows = parents_by_market.get(str(mid), [])
+
+        # Default: no parent attached (legacy behaviour unchanged)
+        ctx["legacy_parent"] = None
+
+        # If this runner has an open legacy parent, attach the first one
+        for p in parent_rows:
+            if str(p.get("selectionId")) == str(sid):
+                ctx["legacy_parent"] = p
+
+                # Explicit, authoritative fields
+                ctx["legacy_parent_id"]    = p.get("parent_id")
+                ctx["legacy_entry_side"]   = p.get("side")
+                ctx["legacy_entry_odds"]   = p.get("entry_odds")
+                ctx["legacy_entry_stake"]  = p.get("entry_stake")
+
+                # Live odds already resolved by helper
+                ctx["live_back"] = p.get("live_back")
+                ctx["live_lay"]  = p.get("live_lay")
+                break
+
 
         # Legacy bridge prep
         ctx["legacy_parent_id"] = None
