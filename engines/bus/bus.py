@@ -240,6 +240,94 @@ class DecisionBus:
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
+# 🆕 ADD: _run_risc_pipeline
+# 📆 PATCHED: 2026-03-09 — Uncoupled RISC parent-driven pipeline
+#
+# PURPOSE:
+# - Fully decouple MSC_RISK from bucketed runner selection
+# - Evaluate EVERY matched legacy parent on EVERY tick
+# - Use DB-first helper as sole input surface
+# - No de-duplication, no rotation, no throttling
+#
+# CONTRACT:
+# - RISC lifecycle guards live ONLY inside RiskEngine
+# - BUS never blocks or deduplicates RISC plans
+# - Returned plans merge with legacy plans downstream
+# ======================================================================================================
+
+    def _run_risc_pipeline(self, base_ctx, mids, engine_report):
+        """
+        Parent-driven MSC_RISK pipeline.
+
+        Evaluated EVERY tick.
+        Evaluates ALL matched LEGACY parents returned by helper.
+        """
+        engine_report["MSC_RISK"]["evaluated"] = True
+
+        plans = []
+        
+        risc = self.engines.get("MSC_RISK")
+        if not risc:
+            return plans
+
+        try:
+            parents = get_legacy_parent_odds_snapshot()
+        except Exception as e:
+            engine_report["MSC_RISK"]["note"] = f"helper_error:{e}"
+            return plans
+
+        risc_evaluated = False
+
+        for p in parents:
+            try:
+                parent_id   = p.get("parent_id")
+                mid         = p.get("marketId")
+                sid         = p.get("selectionId")
+
+                # Scope remains authoritative for market inclusion
+                if not parent_id or not mid or not sid or mid not in mids:
+                    continue
+
+                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                if not ctx:
+                    continue
+
+                # --------------------------------------------------
+                # AUTHORITATIVE LEGACY CONTEXT INJECTION
+                # --------------------------------------------------
+                ctx["legacy_parent_id"]    = parent_id
+                ctx["legacy_entry_side"]  = p.get("side")
+                ctx["legacy_entry_odds"]  = p.get("entry_odds")
+                ctx["legacy_entry_stake"] = p.get("entry_stake")
+
+                # Optional live odds (already resolved by helper)
+                ctx["live_back"] = p.get("live_back")
+                ctx["live_lay"]  = p.get("live_lay")
+
+                risc_evaluated = True
+
+                r = risc.tick(ctx)
+
+                if r and r.get("enter"):
+                    r = dict(r)
+                    r["engine"] = "MSC_RISK"
+
+                    plans.append(("MSC_RISK", r, ctx))
+                    engine_report["MSC_RISK"]["fired"] += 1
+                else:
+                    engine_report["MSC_RISK"]["evaluated"] = True
+
+            except Exception as e:
+                engine_report["MSC_RISK"]["note"] = f"risc_tick_error:{e}"
+
+        if risc_evaluated and engine_report["MSC_RISK"]["fired"] == 0:
+            engine_report["MSC_RISK"]["note"] = "no_plan"
+
+        return plans
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus
 # 🧩 ACTION: ADD (new helper method, no replacements)
 # 📆 PATCHED: 2025-12-15 — Unconditional TICK context container
@@ -694,10 +782,12 @@ class DecisionBus:
     # TICK — rewritten only to call the two new helper functions
     # ======================================================================
     def tick(self):
+        
         self.tick_id += 1
         tick_ctx = self._new_tick_ctx()
-     
 
+        # 🔑 AUTHORITATIVE PLAN ACCUMULATOR (PER TICK)
+        all_plans = []
 
         try:
             # ==================================================
@@ -925,7 +1015,9 @@ class DecisionBus:
                     tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
                     continue
 
-                plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+                runner_plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+                all_plans.extend(runner_plans)
+
 
 
 # ======================================================================================================
@@ -934,8 +1026,22 @@ class DecisionBus:
 # 🧩 ACTION: ADD (BUS execution contract enforcement)
 # 📆 PATCHED: 2025-12-31 — Legacy enter/letter hard filter
 # ======================================================================================================
+            # ==================================================
+            # MSC_RISK — PARENT-DRIVEN PIPELINE (ONCE PER TICK)
+            # ==================================================
 
-            
+            risc_plans = self._run_risc_pipeline(
+                base_ctx=base_ctx,
+                mids=mids,
+                engine_report=engine_report,
+            )
+
+            # 🔑 RISC must extend the authoritative accumulator
+            all_plans.extend(risc_plans)
+
+            # 🔑 From this point on, plans = all plans for this tick
+            plans = all_plans
+
 
             filtered_plans = []
 
@@ -954,6 +1060,7 @@ class DecisionBus:
                 filtered_plans.append((eng, plan, pctx))
 
             plans = filtered_plans
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -1045,143 +1152,6 @@ class DecisionBus:
             # ------------------------------------
             for _eng, _plan, _ctx in plans:
                 tick_ctx["plans_raw"].append(_plan)
-
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: MSC_RISK — PARENT-DRIVEN PROTECTION (BUS AUTHORITY)
-# 🧩 ACTION: REPLACE ENTIRE BLOCK
-# 📆 PATCHED: 2026-03-03 — DB-first per-parent RISC evaluation
-# ======================================================================================================
-
-            # ==================================================
-            # MSC_RISK — PARENT-DRIVEN PROTECTION (HELPER-DRIVEN)
-            # ==================================================
-            try:
-                risc = self.engines.get("MSC_RISK")
-                if risc:
-
-                    # --------------------------------------------------
-                    # 🔑 UNIFIED HELPER CALL (DB + LIVE ODDS)
-                    # --------------------------------------------------
-                    parents = get_legacy_parent_odds_snapshot()
-                    #          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                    #          THIS IS THE HELPER CALL
-
-                    risc_evaluated = False
-
-                    for p in parents:
-                        parent_id   = p["parent_id"]
-                        mid         = p["marketId"]
-                        sid         = p["selectionId"]
-                        side        = p["side"]
-                        entry_odds  = p["entry_odds"]
-                        entry_stake = p["entry_stake"]
-
-                        # Scope is authoritative
-                        if mid not in mids:
-                            continue
-
-                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                        if not ctx:
-                            continue
-
-                        # --------------------------------------------------
-                        # AUTHORITATIVE LEGACY CONTEXT
-                        # --------------------------------------------------
-                        ctx["legacy_parent_id"]    = parent_id
-                        ctx["legacy_entry_side"]  = side
-                        ctx["legacy_entry_odds"]  = entry_odds
-                        ctx["legacy_entry_stake"] = entry_stake
-
-                        # Optional live odds (already fetched by helper)
-                        ctx["live_back"] = p.get("live_back")
-                        ctx["live_lay"]  = p.get("live_lay")
-
-                        risc_evaluated = True
-
-                        r = risc.tick(ctx)
-
-                        if r and r.get("enter"):
-                            r["engine"] = "MSC_RISK"
-                            plans.append(("MSC_RISK", r, ctx))
-                            plans_by_engine["MSC_RISK"] += 1
-                            engine_report["MSC_RISK"]["fired"] += 1
-                        else:
-                            engine_report["MSC_RISK"]["evaluated"] = True
-
-            except Exception as e:
-                engine_report["MSC_RISK"]["note"] = str(e)
-
-
-            # ==================================================
-            # MSC_EXPLORATORY — SCOPE-DRIVEN (PRE-INPLAY) ENGINE
-            # ==================================================
-            #
-            # Contract:
-            # - Evaluated EVERY tick
-            # - Scope-authoritative
-            # - Explicitly EXCLUDED once market enters in_play bucket
-            # - Independent of runner rotation
-            #
-            try:
-                exp = self.engines.get("MSC_EXPLORATORY")
-                if exp:
-
-                    in_play_mids = set(
-                        scope.get("buckets", {}).get("in_play", []) or []
-                    )
-
-                    exp_evaluated = False
-
-                    for mid in mids:
-
-                        # ----------------------------------------------
-                        # HARD GATE: Exploratory must NOT run in-play
-                        # ----------------------------------------------
-                        if mid in in_play_mids:
-                            continue
-
-                        st = get_market_state(mid) or {}
-                        runners = st.get("runners") or {}
-
-                        for sid, r in runners.items():
-                            if r.get("band") not in ("ACTIVE", "PASSIVE"):
-                                continue
-
-                            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                            if not ctx:
-                                continue
-
-                            exp_evaluated = True
-
-                            p = exp.tick(ctx)
-                            if p is None:
-                                continue
-
-                            if p.get("enter"):
-                                p = dict(p)
-                                p["engine"] = "MSC_EXPLORATORY"
-
-                                engine_report["MSC_EXPLORATORY"]["fired"] += 1
-                                engine_report["MSC_EXPLORATORY"]["evaluated"] = True
-
-                                plans.append(("MSC_EXPLORATORY", p, ctx))
-                                plans_by_engine["MSC_EXPLORATORY"] += 1
-
-                                print(
-                                    f"[BUS][MSC_EXP] mid={mid} sid={sid} "
-                                    f"px={ctx.get('px')} → PLAN {p.get('why')}"
-                                )
-                            else:
-                                engine_report["MSC_EXPLORATORY"]["evaluated"] = True
-
-                    if exp_evaluated and engine_report["MSC_EXPLORATORY"]["fired"] == 0:
-                        engine_report["MSC_EXPLORATORY"]["note"] = "no_plan"
-
-            except Exception as e:
-                engine_report["MSC_EXPLORATORY"]["evaluated"] = False
-                engine_report["MSC_EXPLORATORY"]["note"] = str(e)
 
 
             # Enrichment — unchanged
