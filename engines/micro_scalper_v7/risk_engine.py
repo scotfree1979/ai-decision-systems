@@ -518,7 +518,7 @@ class RiskEngine:
 
         # 1) Anchor price is NEVER tradable
         if px == self.entry_px:
-            rreturn self._no_signal(ctx, reason="anchor_price")
+            return self._no_signal(ctx, reason="anchor_price")
 
         # 2) One price once per parent (no repeat scalps)
         used = self.used_prices_by_parent.setdefault(self.parent_id, set())

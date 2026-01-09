@@ -192,6 +192,81 @@ def check_market_off_flag(marketId, session_token):
         logging.error(f"❌ Error checking in-play flag: {e}")
         return False
 
+# ======================================================================
+# PUBLIC API — Legacy matched parents + live odds (V2)
+# ======================================================================
+
+def get_legacy_parent_odds_snapshot(session_token=None):
+    """
+    Enumerate LEGACY matched parents for today (UTC) and enrich
+    each with live back/lay odds.
+
+    DB-first, read-only, side-effect free.
+
+    Returns:
+        List[dict] with keys:
+            parent_id
+            marketId
+            selectionId
+            side
+            entry_odds
+            entry_stake
+            live_back
+            live_lay
+    """
+
+    from engines.config_paths import auto_conn
+    from engines.utils.api_tools import fetch_live_odds
+    import sqlite3
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        rows = con.execute("""
+            SELECT
+                p.id          AS parent_id,
+                p.marketId    AS marketId,
+                p.selectionId AS selectionId,
+                p.side        AS side,
+                p.entry_odds  AS entry_odds,
+                p.entry_stake AS entry_stake
+            FROM orders p
+            WHERE p.role = 'PARENT'
+              AND p.engine = 'LEGACY'
+              AND p.entry_status = 'MATCHED'
+              AND date(p.opened_at) = date('now','utc')
+            ORDER BY p.opened_at ASC
+        """).fetchall()
+    finally:
+        con.close()
+
+    if not rows:
+        return []
+
+    enriched = []
+
+    for r in rows:
+        odds = fetch_live_odds(
+            session_token=session_token,
+            marketId=r["marketId"],
+            selectionId=r["selectionId"],
+        ) or {}
+
+        enriched.append({
+            "parent_id":   r["parent_id"],
+            "marketId":    r["marketId"],
+            "selectionId": r["selectionId"],
+            "side":        r["side"],
+            "entry_odds":  r["entry_odds"],
+            "entry_stake": r["entry_stake"],
+            "live_back":   odds.get("back"),
+            "live_lay":    odds.get("lay"),
+        })
+
+    return enriched
+
+
 # -----------------------------
 # ✅ STANDALONE TEST TOOL (SCRAPER)
 # -----------------------------
