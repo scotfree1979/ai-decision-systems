@@ -19,6 +19,19 @@ _STATS = {
 _LAST_HEARTBEAT = [0]
 
 
+# ======================================================================================================
+# 📍 TARGET: engines/brain/brain_listener.py
+# 🔎 SEARCH: def _brain_on_event(ev: dict):
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-06 — align Brain counters with LiveRouter EventSync taxonomy
+#
+# RATIONALE:
+# - Router emits BOTH `type` and `event` fields
+# - Settlement events wrap `HEDGE_EXIT` / `STOPLOSS_EXIT`
+# - Brain must count parents, children, hedges, stoploss accurately
+# - No execution logic, telemetry only
+# ======================================================================================================
+
 def _brain_on_event(ev: dict):
     """
     Phase-1 Brain Listener
@@ -31,33 +44,51 @@ def _brain_on_event(ev: dict):
     if not isinstance(ev, dict):
         return
 
+    # --------------------------------------------------
+    # Normalise event name (router emits in two shapes)
+    # --------------------------------------------------
     etype = ev.get("type") or ev.get("event")
     if not etype:
         return
 
+    etype = str(etype).upper()
+
     # store timeline
     _BRAIN_WINDOW.append(ev)
 
-    # light structural accounting
-    if etype == "parent_queued":
+    # --------------------------------------------------
+    # Parent lifecycle
+    # --------------------------------------------------
+    if etype == "PARENT_QUEUED":
         _STATS["parents"] += 1
 
-    elif etype in ("HEDGE_EXIT",):
+    # --------------------------------------------------
+    # Child lifecycle (hedge / stoploss)
+    # --------------------------------------------------
+    elif etype == "HEDGE_EXIT":
+        _STATS["children"] += 1
         _STATS["hedges"] += 1
 
-    elif etype in ("STOPLOSS_EXIT",):
+    elif etype == "STOPLOSS_EXIT":
+        _STATS["children"] += 1
         _STATS["stoploss"] += 1
 
-    elif etype == "plan_outcome":
-        outcome = ev.get("outcome")
+    # --------------------------------------------------
+    # Outcome accounting
+    # --------------------------------------------------
+    elif etype == "PLAN_OUTCOME":
+        outcome = str(ev.get("outcome") or "").upper()
         if outcome in _STATS["outcomes"]:
             _STATS["outcomes"][outcome] += 1
 
-    # ultra-low-noise heartbeat (once every ~30s)
+    # --------------------------------------------------
+    # Heartbeat (proof of life)
+    # --------------------------------------------------
     now = datetime.now(timezone.utc).timestamp()
     if now - _LAST_HEARTBEAT[0] > 30:
         _LAST_HEARTBEAT[0] = now
         _emit_brain_heartbeat()
+
 
 
 def _emit_brain_heartbeat():
