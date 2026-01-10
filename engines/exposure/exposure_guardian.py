@@ -146,6 +146,28 @@ class ExposureGuardian:
         skipped = 0
         reasons: Dict[str, int] = {}
 
+# ======================================================================================================
+# 📍 TARGET: engines/exposure/exposure_guardian.py
+# 🔎 ANCHOR: def _handle_market(self, market_id: str):
+# 🧩 ACTION: ADD final invariant enforcement (finished market ⇒ zero exposure)
+# 📆 PATCHED: 2026-01-10 — Final exposure invariant (market truth > DB truth)
+#
+# PURPOSE:
+#   Enforce the non-negotiable rule:
+#     If a market is finished, it must carry ZERO exposure.
+#
+#   This is a LAST-LINE SAFETY NET.
+#   It does NOT replace settlement, cancels, or hedge logic.
+#   It only fires when all other mechanisms failed.
+#
+# ARCHITECTURAL RULE:
+#   Market lifecycle is authoritative over order state.
+# ======================================================================================================
+
+        # -----------------------------------------------------------
+        # FINAL INVARIANT:
+        #   Finished market ⇒ zero exposure (regardless of DB state)
+        # -----------------------------------------------------------
         rows = q_retry(cur, """
             SELECT
               p.id,
@@ -156,23 +178,21 @@ class ExposureGuardian:
             FROM orders p
             WHERE p.marketId=?
               AND p.role='PARENT'
-              AND UPPER(p.entry_status)='MATCHED'
               AND (p.exit_status IS NULL OR UPPER(p.exit_status)<>'MATCHED')
-              AND NOT EXISTS (
-                    SELECT 1 FROM orders c
-                    WHERE c.hedge_of=p.id
-              )
+              AND COALESCE(p.exposure_released,0)=0
         """, (str(market_id),)).fetchall()
 
         for (pid, cor, engine, odds, stake) in rows:
             parents_checked += 1
 
+            # Guard: nothing to release
             if not stake or stake <= 0:
                 skipped += 1
-                reasons["no_stake"] = reasons.get("no_stake", 0) + 1
+                reasons["no_stake_final"] = reasons.get("no_stake_final", 0) + 1
                 continue
 
             try:
+                # Force-release exposure (idempotent by design)
                 bank_state.on_parent_closed(
                     engine=str(engine),
                     entry_odds=float(odds),
@@ -181,19 +201,25 @@ class ExposureGuardian:
 
                 q_retry(cur, """
                     UPDATE orders
-                       SET exit_status='EXPIRED',
+                       SET exit_status='FORCED_RELEASE',
                            closed_at=datetime('now','utc'),
                            exposure_released=1
                      WHERE id=?
                 """, (int(pid),))
 
                 released += 1
-                reasons["released_on_scope_exit"] = reasons.get("released_on_scope_exit", 0) + 1
+                reasons["forced_release_finished_market"] = (
+                    reasons.get("forced_release_finished_market", 0) + 1
+                )
 
             except Exception as e:
                 skipped += 1
-                reasons["release_error"] = reasons.get("release_error", 0) + 1
-                print(f"[EXPOSURE-GUARDIAN][WARN] release failed cor={cor}: {e}")
+                reasons["forced_release_error"] = reasons.get("forced_release_error", 0) + 1
+                print(
+                    f"[EXPOSURE-GUARDIAN][WARN] forced release failed "
+                    f"market={market_id} cor={cor}: {e}"
+                )
+
 
         con.commit()
         con.close()
