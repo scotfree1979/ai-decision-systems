@@ -2290,33 +2290,62 @@ def _run_single_settlement_cycle():
 
     print(f"[settlements] window {from_iso} → {to_iso}")
 
-    # --- API fetch ---
+    # ------------------------------------------------------------------
+    # API fetch (MATCHES CLI `fetch --with-meta` BEHAVIOUR)
+    # ------------------------------------------------------------------
     try:
-        n = fetch_cleared_orders_api(from_iso, to_iso)
-        print(f"[settlements] fetched={n}")
+        total = 0
+        for status in ["SETTLED", "VOIDED", "LAPSED", "CANCELLED"]:
+            n = fetch_cleared_orders_api(from_iso, to_iso, bet_status=status)
+            print(f"[settlements] fetched {status}: +{n}")
+            total += n
+
+        print(f"[settlements] fetched clearedOrders total={total}")
+
+        # --- METADATA PHASE (THIS WAS MISSING IN LIVE) ---
+        with connect_db(settlements_db_path()) as con:
+            market_ids = [
+                r["marketId"]
+                for r in con.execute(
+                    "SELECT DISTINCT marketId FROM bf_cleared_orders WHERE marketId IS NOT NULL"
+                )
+            ]
+
+        if market_ids:
+            cats, books = fetch_market_metadata_api(market_ids)
+            print(f"[settlements] metadata upserted: catalogue={cats}, book={books}")
+        else:
+            print("[settlements] no markets found for metadata fetch")
+
     except Exception as e:
         print(f"[settlements] fetch failed: {e}")
         return  # SAFETY EXIT
 
-    # --- reconcile ---
-    if n > 0:
+    # ------------------------------------------------------------------
+    # reconcile
+    # ------------------------------------------------------------------
+    if total > 0:
         try:
             updated, _ = reconcile_orders()
             print(f"[settlements] reconciled={updated}")
         except Exception as e:
             print(f"[settlements] reconcile failed: {e}")
 
-    # --- Update Bank State ---
+    # ------------------------------------------------------------------
+    # Update Bank State
+    # ------------------------------------------------------------------
     from engines.live import bank_state
     bank_state.reconcile_realized_pnl_from_orders()
 
-
-    # --- expire closed markets ---
+    # ------------------------------------------------------------------
+    # expire closed markets
+    # ------------------------------------------------------------------
     try:
         expired = close_settled_markets()
         print(f"[settlements] expired={expired}")
     except Exception as e:
         print(f"[settlements] expire failed: {e}")
+
 
 
 # === PATCH START ===
