@@ -79,7 +79,7 @@ class EngineReportShim(dict):
 # - NEVER raises
 # ======================================================================================================
 
-def _record_reason(engine_report, engine_report: dict, engine: str, reason: str | None):
+def _record_reason(engine_report: dict, engine: str, reason: str | None):
     if not engine_report or not engine or not reason:
         return
 
@@ -310,7 +310,7 @@ class DecisionBus:
         try:
             snapshot = get_legacy_snapshot()
         except Exception as e:
-            _record_reason(engine_report, engine_report, "LEGACY", "helper_error")
+            _record_reason(engine_report, "LEGACY", "helper_error")
             return plans
 
         engine_report["LEGACY"]["evaluated"] = True
@@ -339,7 +339,7 @@ class DecisionBus:
                 res = mp.propose_trade(dict(ctx))
 
                 if res is None:
-                    _record_reason(engine_report, engine_report, "LEGACY", "no_signal")
+                    _record_reason(engine_report, "LEGACY", "no_signal")
                     continue
 
                 if res.get("enter"):
@@ -348,13 +348,13 @@ class DecisionBus:
                     plans.append(("LEGACY", res, ctx))
                     engine_report["LEGACY"]["fired"] += 1
                 else:
-                    _record_reason(engine_report, engine_report, "LEGACY", res.get("why"))
+                    _record_reason(engine_report, "LEGACY", res.get("why"))
 
             except Exception as e:
                 engine_report.record_reason("LEGACY", f"mastery_error:{e}")
 
         if engine_report["LEGACY"]["fired"] == 0:
-            _record_reason(engine_report, engine_report, "LEGACY", "no_signal")
+            _record_reason(engine_report, "LEGACY", "no_signal")
 
         return plans
 
@@ -439,7 +439,7 @@ class DecisionBus:
                     engine_report["MSC_RISK"]["evaluated"] = True
 
             except Exception as e:
-                _record_reason(engine_report, engine_report, "MSC_RISK", "risc_tick_error")
+                _record_reason(engine_report, "MSC_RISK", "risc_tick_error")
 
         if risc_evaluated and engine_report["MSC_RISK"]["fired"] == 0:
             engine_report["MSC_RISK"]["reasons"]["no_signal"] += 1
@@ -1355,7 +1355,7 @@ class DecisionBus:
                         tick_ctx["plans_route_failed"].append(
                             (plan, "risk_plan_missing_size")
                         )
-                        _record_reason(engine_report, engine_report, engine, "risk_plan_missing_size")
+                        _record_reason(engine_report, engine, "risk_plan_missing_size")
                         continue  # 🔴 DO NOT ROUTE
                     plan["_stake_source"] = "risk_engine"
 
@@ -1374,7 +1374,7 @@ class DecisionBus:
                             tick_ctx["plans_route_failed"].append(
                                 (plan, "dynamic_stake_missing_inputs")
                             )
-                            _record_reason(engine_report, engine_report, engine, "dynamic_stake_zero")
+                            _record_reason(engine_report, engine, "dynamic_stake_zero")
                             continue  # 🔴 DO NOT ROUTE
 
                         try:
@@ -1393,7 +1393,7 @@ class DecisionBus:
                                 tick_ctx["plans_route_failed"].append(
                                     (plan, "dynamic_stake_zero")
                                 )
-                                _record_reason(engine_report, engine_report, engine, "dynamic_stake_zero")
+                                _record_reason(engine_report, engine, "dynamic_stake_zero")
                                 continue  # 🔴 DO NOT ROUTE
 
                             plan["size"] = float(stake)
@@ -1405,7 +1405,7 @@ class DecisionBus:
                             tick_ctx["plans_route_failed"].append(
                                 (plan, f"dynamic_stake_error:{e}")
                             )
-                            _record_reason(engine_report, engine_report, engine, "dynamic_stake_error")
+                            _record_reason(engine_report, engine, "dynamic_stake_error")
                             continue  # 🔴 DO NOT ROUTE
 
 
@@ -1467,7 +1467,7 @@ class DecisionBus:
                         tick_ctx["plans_route_failed"].append(
                             (plan, "duplicate_legacy_engine_letter_price")
                         )
-                        _record_reason(engine_report, engine_report, "LEGACY", "duplicate_legacy_engine_letter_price")
+                        _record_reason(engine_report, "LEGACY", "duplicate_legacy_engine_letter_price")
                         continue
 
                     tick_ctx["seen_plan_keys"].add(key)
