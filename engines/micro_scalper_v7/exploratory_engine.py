@@ -65,88 +65,95 @@ class ExploratoryEngine:
     # -----------------------------------------------------------
     # PUBLIC API
     # -----------------------------------------------------------
-# ======================================================================================================
+#  ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
 # 🔎 SEARCH: def tick(self, ctx:
-# 📆 PATCHED: 2025-12-12 — eliminate silent None, emit NO-SIGNAL + training event
-# PURPOSE:
-#   • Preserve existing MSC logic
-#   • Replace silent None with explicit NO-SIGNAL contract
-#   • Enable BUS observability + future training
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-10 — Exploratory fail-open scout engine
+#
+# RATIONALE:
+# - Exploratory is a scout, not a signal engine
+# - It must NEVER block on confidence, direction, or budget
+# - Placement/BankState own rejection
+# - Direction engine ALWAYS provides bias
+#
+# INVARIANTS:
+# - Always emits a plan for runnable runners
+# - Never emits NO-SIGNAL in normal flow
+# - Uses dynamic stake with engine min/max clamp
 # ======================================================================================================
 
     def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """
-        PRE-OFF only. Returns an MSC PARENT plan or a NO-SIGNAL envelope.
+        Exploratory scout tick.
+        Always emits a plan for a runnable runner.
         """
 
-        # --------------------------------------------------
-        # HARD GATE: in-play
-        # --------------------------------------------------
-        if ctx.get("oc_phase", 100) >= 7:
-            return self._no_signal(ctx, reason="not_preoff")
-
-        # --------------------------------------------------
-        # Build micro state (existing logic)
-        # --------------------------------------------------
-        micro_state = build_micro_state(ctx)
-
-        # --------------------------------------------------
-        # Direction model (existing logic)
-        # --------------------------------------------------
-        from .direction_engine import compute_msc_decision
-        msc_decision = compute_msc_decision(ctx)
-
-        if not msc_decision:
-            return self._no_signal(ctx, reason="no_direction")
-
-        # --------------------------------------------------
-        # Existing conversion logic
-        # --------------------------------------------------
-        direction_label = msc_decision["direction"]
-       
-
-        # --------------------------------------------------
-        # Enrich ctx (unchanged)
-        # --------------------------------------------------
-        ctx["msc_direction"]    = direction_label
-        ctx["msc_mode"]         = msc_decision["mode"]
-        ctx["msc_entry_ticks"]  = msc_decision["entry_ticks"]
-        ctx["msc_stop_ticks"]   = msc_decision["stop_ticks"]
-        ctx["msc_decision"]     = msc_decision
-
-        # --------------------------------------------------
-        # Existing confidence / filters remain untouched
-        # (any early exit now becomes NO-SIGNAL)
-        # --------------------------------------------------
         try:
-            plan = {
-                "enter": True,
-                "engine": "MSC_EXPLORATORY",
-                "target_ticks": int(msc_decision["entry_ticks"]),
-                "entry_ticks": msc_decision["entry_ticks"],
-                "stop_ticks": msc_decision["stop_ticks"],
-                "px": ctx.get("px"),
-                # expose already-computed execution direction
-                "direction": msc_decision["direction"],  # ← canonical
-            }
+            # --------------------------------------------------
+            # Direction & mode inference (authoritative)
+            # --------------------------------------------------
+            from .direction_engine import compute_msc_decision
+            msc = compute_msc_decision(ctx)
 
-            # === MSC sizing (engine-complete) ===
-            stake = compute_dynamic_stake(
-                engine=plan.get("engine"),
-                letter=plan.get("letter"),  # MSC may omit; function tolerates None
+            # --------------------------------------------------
+            # Enrich ctx (telemetry / downstream use)
+            # --------------------------------------------------
+            ctx["msc_decision"]    = msc
+            ctx["msc_direction"]   = msc["direction"]
+            ctx["msc_mode"]        = msc["mode"]
+            ctx["msc_entry_ticks"] = msc["entry_ticks"]
+            ctx["msc_stop_ticks"]  = msc["stop_ticks"]
+
+            # --------------------------------------------------
+            # Stake (engine-level min/max enforced downstream)
+            # --------------------------------------------------
+            size = compute_dynamic_stake(
                 ctx=ctx,
+                engine="MSC_EXPLORATORY",
             )
 
-            # guard: do not emit non-executable plans
-            if not stake or float(stake) <= 0:
-                return None
+            # --------------------------------------------------
+            # Emit parent plan (no blockers)
+            # --------------------------------------------------
+            return {
+                "enter": True,
+                "engine": "MSC_EXPLORATORY",
+                "role": "PARENT",
+                "direction": msc["direction"],
+                "entry_ticks": msc["entry_ticks"],
+                "target_ticks": msc["entry_ticks"],
+                "stop_ticks": msc["stop_ticks"],
+                "px": ctx.get("px"),
+                "size": float(size),
+                "why": "exploratory_scout",
+            }
 
-            plan["size"] = float(stake)
-            return plan
+        except Exception as e:
+            # Telemetry only — NEVER block
+            try:
+                emit("msc_exploratory.exception", {
+                    "error": str(e),
+                    "marketId": ctx.get("marketId"),
+                    "selectionId": ctx.get("selectionId"),
+                })
+            except Exception:
+                pass
 
-        except Exception:
-            return self._no_signal(ctx, reason="exception")
+            # Fail-open fallback: minimal scout probe
+            return {
+                "enter": True,
+                "engine": "MSC_EXPLORATORY",
+                "role": "PARENT",
+                "direction": "LAY->BACK",
+                "entry_ticks": 1,
+                "target_ticks": 1,
+                "stop_ticks": 4,
+                "px": ctx.get("px"),
+                "size": float(compute_dynamic_stake(ctx, "MSC_EXPLORATORY")),
+                "why": "exploratory_fallback",
+            }
+
 
     # --------------------------------------------------
     # INTERNAL: NO-SIGNAL helper
