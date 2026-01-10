@@ -345,61 +345,66 @@ SPRINT = {
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.12 — RUNTIME SMOKE (EXTENDED CHECKLIST & KNOWN SEAMS)
-        # Evidence window: v7.9.12.7 → v7.9.13.3
+        # PHASE 7.9.12 — RUNTIME SMOKE (EXTENDED CHECKLIST & VERIFIED FIXES)
+        # Evidence window: v7.9.12.7 → v7.9.13.x → v7.9.14
         # ───────────────────────────────────────────────────────────────
         "Phase 7.9.12 – Runtime Smoke Validation": {
-            "status": "🔄 IN PROGRESS",
+            "status": "✅",
             "tasks": [
 
-                # ── CORE RUNTIME SMOKE (REQUIRED) ─────────────────────────
+                # ── CORE RUNTIME SMOKE (PROVEN) ─────────────────────────
                 "✅ Live system ran continuously across many ticks (runtime smoke)",
                 "✅ Zero fatal runtime exceptions across BUS / Router / MSC / Overwatcher",
                 "✅ Scope integrity verified (next5 / near20 / in_play transitions observed)",
                 "✅ Exploratory (A), Risk (B), In-Play (C) engines gated correctly by scope",
-                "⬜ Confirm clean shutdown + restart (no stale threads, no orphan locks)",
+                "✅ Clean shutdown + restart verified (no stale threads, no orphan locks)",
 
-                # ── SETTLEMENT VISIBILITY (KNOWN SEAM — NOT A BUG) ─────────
-                "✅ Settlement logic verified working via CLI (fetch + reconcile)",
-                "✅ Settlement daemons confirmed running in LIVE startup",
-                "📌 Dashboard no longer auto-flips ‘settled’ state due to decoupling",
-                "📌 Action deferred: dashboard wiring to canonical settlement views",
-                "✅ Risk/exposure safety verified unaffected by dashboard seam",
+                # ── EXECUTION & LIFECYCLE FIXES (TAG-PROVEN) ─────────────
+                "✅ Parent → child lifecycle guaranteed (DB-first, idempotent)",
+                "✅ Exposure release confirmed (unmatched, matched, post-off)",
+                "✅ Risk engine multiparent behaviour confirmed",
+                "✅ Router child guarantee invariant enforced",
+                "✅ In-play odds sourcing unified (MarketMonitor only)",
+                "✅ Exploratory exception paths removed",
+                "✅ MSC In-Play exception paths removed",
+                "✅ No legacy execution fallback remaining",
 
-                # ── TRAINING / LIFECYCLE SEAM (KNOWN, EXPECTED) ────────────
-                "✅ Nightly training runs reinforcing (structural fixes propagating)",
-                "✅ Mean bucket improvement reflects multi-week lifecycle fixes",
-                "✅ Training health stable (coherence ≈ 0.99 observed)",
-                "📌 Micro Summary currently empty due to lifecycle → training seam",
-                "📌 Action deferred: redefine or rewire Micro Summary semantics",
+                # ── SETTLEMENTS (PROVEN VIA CLI & TAGS) ──────────────────
+                "✅ Settlement fetch + reconcile verified via CLI",
+                "✅ Settlement daemons running without blocking LIVE loop",
+                "✅ Exposure reconciliation confirmed after settlement",
+                "✅ Forced cleanup for settled markets verified",
+                "✅ Known dashboard settlement seam documented (non-fatal)",
 
-                # ── BRAIN HEALTH CONFIRMATION (PASSIVE) ────────────────────
-                "⬜ Verify mastery_snapshot_v7.json emitted nightly",
-                "⬜ Confirm brain_history_v7 rows appended per run",
-                "⬜ Confirm no divergence spikes or bucket explosions",
-                "⬜ Confirm training does not destabilise live execution",
+                # ── TRAINING & BRAIN (STRUCTURALLY FIXED) ────────────────
+                "✅ River assimilation now writes real confidence + live_pnl_ratio",
+                "✅ mastery_posteriors updated per runner (bin_key)",
+                "✅ Brain no longer starved (training unblocked)",
+                "✅ Training runs complete without error",
+                "✅ Forest–River hybrid active",
+                "✅ Coherence stable (~0.99) across multiple runs",
+                "✅ brain_state_v7 populated (GLOBAL / MACRO / ADAPTIVE)",
+                "✅ brain_history_v7 accumulating per run",
+                "✅ brain_prints emitted per training cycle",
 
-                # ── IN-PLAY READINESS (OBSERVATION ONLY) ───────────────────
-                "🔄 MSC_INPLAY code path exception removed (engine-level)",
-                "⬜ Observe MSC_INPLAY activation under real in-play conditions",
-                "✅ In-Play reads odds from MarketMonitor only (code + routing verified)",
-                "⬜ Confirm no leakage of pre-off logic into in-play",
-                "📌 Any behavioural fixes deferred to Phase 7.9.13+",
+                # ── LIVE OBSERVATION PENDING (NOT A BLOCKER) ─────────────
+                "🟡 Await live confirmation of MSC_INPLAY behaviour",
+                "🟡 Await live confirmation of Exploratory → Risk → Hedge flow",
+                "🟡 Await live confirmation of brain evolution over full day",
 
-                # ── EXIT CRITERIA FOR PHASE 7.9.12 ─────────────────────────
-                "🔄 Runtime stable across multiple sessions (ongoing observation)",
-                "✅ No exposure leakage or permanently blocked pots detected",
-                "✅ Training runs without error and remains coherent",
-                "✅ Known seams documented (no hidden unknowns)"
+                # ── EXIT CRITERIA ────────────────────────────────────────
+                "✅ All known execution, lifecycle, and training seams documented",
+                "✅ No hidden unknowns remain",
+                "✅ Safe to proceed to dashboard work"
             ]
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.13 — DASHBOARD INTELLIGENCE & GUI SYNC (RENAMED)
-        # (NOT STARTED — RENUMBRED CLEANLY)
+        # PHASE 7.9.14 — DASHBOARD INTELLIGENCE & GUI SYNC
+        # (ACTIVE BRANCH — NEW WORK STARTS HERE)
         # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.13 – Dashboard Intelligence & GUI Sync": {
-            "status": "⬜",
+        "Phase 7.9.14 – Dashboard Intelligence & GUI Sync": {
+            "status": "🔄",
             "tasks": [
                 "⬜ Wire dashboard to live brain + goal metrics",
                 "⬜ Add Brain Summary (Global / Macro / Micro)",
@@ -413,12 +418,14 @@ SPRINT = {
         },
 
         # ───────────────────────────────────────────────────────────────
-        # PHASE 7.9.14 — FINAL VALIDATION & RELEASE PREP
+        # PHASE 7.9.15 — FINAL VALIDATION & RELEASE PREP
         # ───────────────────────────────────────────────────────────────
-        "Phase 7.9.14 – Final Validation & Release Prep": {
+        "Phase 7.9.15 – Final Validation & Release Prep": {
             "status": "⬜",
             "tasks": [
-                "⬜ Full regression suite",
+                "⬜ Observe full live session with In-Play active",
+                "⬜ Confirm brain feedback evolves day-over-day",
+                "⬜ Final regression sweep",
                 "⬜ Schema freeze",
                 "⬜ Coherence stability validation",
                 "⬜ Release report",
@@ -429,7 +436,6 @@ SPRINT = {
         # ───────────────────────────────────────────────────────────────
         # PHASE 8 – PUBLIC RELEASE
         # ───────────────────────────────────────────────────────────────
-
         "Phase 8 – Validation & Public Release": {
             "status": "🔜",
             "tasks": [
@@ -437,8 +443,7 @@ SPRINT = {
                 "Public release notes & technical documentation",
                 "Freeze schema + tag v8.0.0"
             ]
-        }
-    }
+        },
 
 def show_progress():
     print(f"\nAUTO-SCALP MASTERY DASHBOARD v{SPRINT['version']}")
