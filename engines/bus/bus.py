@@ -310,7 +310,7 @@ class DecisionBus:
         try:
             snapshot = get_legacy_snapshot()
         except Exception as e:
-            _record_reason(engine_report, "LEGACY", "helper_error")
+            _record_reason("LEGACY", "helper_error")
             return plans
 
         engine_report["LEGACY"]["evaluated"] = True
@@ -348,10 +348,10 @@ class DecisionBus:
                     plans.append(("LEGACY", res, ctx))
                     engine_report["LEGACY"]["fired"] += 1
                 else:
-                    _record_reason(engine_report, "LEGACY", res.get("why"))
+                    _record_reason("LEGACY", res.get("why"))
 
             except Exception as e:
-                engine_report.record_reason("LEGACY", f"mastery_error:{e}")
+                engine_report["LEGACY"]["note"] = f"mastery_error:{e}"
 
         if engine_report["LEGACY"]["fired"] == 0:
             _record_reason(engine_report, "LEGACY", "no_signal")
@@ -394,7 +394,7 @@ class DecisionBus:
         try:
             parents = get_legacy_parent_odds_snapshot()
         except Exception as e:
-            engine_report.record_reason("MSC_RISK", f"helper_error:{e}")
+            engine_report["MSC_RISK"]["note"] = f"helper_error:{e}"
             return plans
 
         risc_evaluated = False
@@ -439,7 +439,7 @@ class DecisionBus:
                     engine_report["MSC_RISK"]["evaluated"] = True
 
             except Exception as e:
-                _record_reason(engine_report, "MSC_RISK", "risc_tick_error")
+                _record_reason("MSC_RISK", "risc_tick_error")
 
         if risc_evaluated and engine_report["MSC_RISK"]["fired"] == 0:
             engine_report["MSC_RISK"]["reasons"]["no_signal"] += 1
@@ -465,7 +465,7 @@ class DecisionBus:
         try:
             from engines.market_monitor.monitor import get_market_state
         except Exception as e:
-            engine_report.record_reason("MSC_INPLAY", f"monitor_error:{e}")
+            engine_report["MSC_INPLAY"]["note"] = f"monitor_error:{e}"
             return plans
 
         fired_any = False
@@ -504,13 +504,72 @@ class DecisionBus:
                         fired_any = True
 
             except Exception as e:
-                engine_report.record_reason("MSC_INPLAY", f"inplay_loop_error:{e}")
+                engine_report["MSC_INPLAY"]["note"] = f"inplay_loop_error:{e}"
 
         if not fired_any:
-            engine_report.record_reason("MSC_INPLAY", "no_plan")
+            engine_report["MSC_INPLAY"]["note"] = "no_plan"
 
         return plans
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🆕 ADD: _run_exploratory_pipeline
+# 📆 PATCHED: 2026-03-10 — Exploratory scout-only lane
+#
+# PURPOSE:
+# - Allow MSC_EXPLORATORY to scout freely
+# - Decouple from runner rotation
+# - Budget-limited, not bucket-limited
+#
+# CONTRACT:
+# - Evaluated once per tick
+# - Uses MarketMonitor runners
+# - No deduplication
+# ======================================================================================================
+
+    def _run_exploratory_pipeline(self, base_ctx, mids, engine_report):
+        """
+        Scout-driven MSC_EXPLORATORY pipeline.
+        Evaluated once per tick across all scoped markets.
+        """
+
+        engine_report["MSC_EXPLORATORY"]["evaluated"] = True
+        plans = []
+
+        exp = self.engines.get("MSC_EXPLORATORY")
+        if not exp:
+            return plans
+
+        from engines.market_monitor.monitor import get_market_state
+
+        for mid in mids:
+            st = get_market_state(mid) or {}
+            runners = st.get("runners") or {}
+
+            for sid, r in runners.items():
+                if r.get("px") is None:
+                    continue
+
+                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                if not ctx:
+                    continue
+
+                try:
+                    p = exp.tick(ctx)
+
+                    if p and p.get("enter"):
+                        p = dict(p)
+                        p["engine"] = "MSC_EXPLORATORY"
+                        plans.append(("MSC_EXPLORATORY", p, ctx))
+                        engine_report["MSC_EXPLORATORY"]["fired"] += 1
+
+                except Exception:
+                    _record_reason(engine_report, "MSC_EXPLORATORY", "exception")
+
+        if engine_report["MSC_EXPLORATORY"]["fired"] == 0:
+            _record_reason(engine_report, "MSC_EXPLORATORY", "no_signal")
+
+        return plans
 
 
 # ======================================================================================================
@@ -1177,6 +1236,15 @@ class DecisionBus:
             # 🔑 From this point on, plans = all plans for this tick
             plans = all_plans
 
+            # ==================================================
+            # MSC_EXPLORATORY — MARKET-DRIVEN PIPELINE (ONCE PER TICK)
+            # ==================================================
+            exploratory_plans = self._run_exploratory_pipeline(
+                base_ctx=base_ctx,
+                mids=mids,
+                engine_report=engine_report,
+            )
+            all_plans.extend(exploratory_plans)
 
 
             filtered_plans = []
@@ -1355,7 +1423,7 @@ class DecisionBus:
                         tick_ctx["plans_route_failed"].append(
                             (plan, "risk_plan_missing_size")
                         )
-                        _record_reason(engine_report, engine, "risk_plan_missing_size")
+                        _record_reason(engine, "risk_plan_missing_size")
                         continue  # 🔴 DO NOT ROUTE
                     plan["_stake_source"] = "risk_engine"
 
@@ -1393,7 +1461,7 @@ class DecisionBus:
                                 tick_ctx["plans_route_failed"].append(
                                     (plan, "dynamic_stake_zero")
                                 )
-                                _record_reason(engine_report, engine, "dynamic_stake_zero")
+                                _record_reason(engine, "dynamic_stake_zero")
                                 continue  # 🔴 DO NOT ROUTE
 
                             plan["size"] = float(stake)
@@ -1405,7 +1473,7 @@ class DecisionBus:
                             tick_ctx["plans_route_failed"].append(
                                 (plan, f"dynamic_stake_error:{e}")
                             )
-                            _record_reason(engine_report, engine, "dynamic_stake_error")
+                            _record_reason(engine, "dynamic_stake_error")
                             continue  # 🔴 DO NOT ROUTE
 
 
@@ -1416,13 +1484,13 @@ class DecisionBus:
                 # Direction drift annotation (diagnostic only)
                 if plan_dir and exec_dir and plan_dir != exec_dir:
                     plan["_bus_note"] = "direction_changed"
-                    _record_reason(engine_report, plan["engine"], "direction_changed")
+                    _record_reason(plan["engine"], "direction_changed")
                     tick_ctx["plans_annotated"].append((plan, "direction_changed"))
 
                 # Budget annotation (diagnostic only — router decides)
                 if not self._has_budget(plan, ctx):
                     plan["_bus_note"] = "insufficient_budget_at_plan_time"
-                    _record_reason(engine_report, plan["engine"], "insufficient_budget")
+                    _record_reason(plan["engine"], "insufficient_budget")
                     tick_ctx["plans_annotated"].append((plan, "insufficient_budget"))
 
 # ======================================================================================================
@@ -1467,7 +1535,7 @@ class DecisionBus:
                         tick_ctx["plans_route_failed"].append(
                             (plan, "duplicate_legacy_engine_letter_price")
                         )
-                        _record_reason(engine_report, "LEGACY", "duplicate_legacy_engine_letter_price")
+                        _record_reason("LEGACY", "duplicate_legacy_engine_letter_price")
                         continue
 
                     tick_ctx["seen_plan_keys"].add(key)
@@ -1487,7 +1555,7 @@ class DecisionBus:
                     tick_ctx["plans_route_failed"].append(
                         (plan, "missing_execution_identity")
                     )
-                    engine_report.record_reason(plan.get("engine", "UNKNOWN"), "missing_marketId")
+                    engine_report[plan.get("engine", "UNKNOWN")]["note"] = "missing_marketId"
                     continue
 
 
