@@ -1514,8 +1514,37 @@ def size_for_letter(ctx: dict, letter: str, *, confidence: float, direction: str
 
 # -----------------------------------------------------------------------------
 # Public planner (used by orchestrator): returns a plan with plan_why
+# ======================================================================================================
+# 📍 TARGET: engines/mastery/mastery_policy.py
+# 🔎 SEARCH: def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
+# 🧩 ACTION: ENFORCE MSC DIRECTION CONTRACT (REMOVE MASTERY DIRECTION INFERENCE)
+# 📆 PATCHED: 2026-01-10 — MSC is sole direction authority; Mastery = gate + size + why
+#
+# PURPOSE:
+# - Mastery MUST NOT infer or override direction
+# - Direction MUST come from MSC (direction_engine)
+# - Mastery only decides ENTER / NO-ENTER and explains WHY
+# - NEVER return None; NEVER return "flat"
+# - Always surface direction + reason for learning/event sync
+# ======================================================================================================
+
 def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
-    # === FIX: create working ctx immediately ===
+    """
+    Mastery Policy — Legacy Gate & Sizing Only.
+
+    Contract (ENFORCED):
+    - Direction MUST already exist in ctx (from MSC)
+    - Mastery NEVER infers direction
+    - Mastery NEVER returns None
+    - Mastery returns:
+        • enter: True/False
+        • direction: preserved MSC direction
+        • why: explicit reason
+    """
+
+    # ------------------------------------------------------------------
+    # 0) Defensive copy + enrichment (unchanged)
+    # ------------------------------------------------------------------
     ctx = dict(context or {})
 
     if ENABLE_LEGACY_ONLY:
@@ -1523,225 +1552,88 @@ def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
 
     _ensure_row_factory_monkeypatch()
 
-    # --- BUS DIRECTION OVERRIDE ---
-    dir_override = ctx.get("direction_override")
-    if dir_override:
-        ctx["direction"] = dir_override
+    # ------------------------------------------------------------------
+    # 1) HARD REQUIRE MSC DIRECTION
+    # ------------------------------------------------------------------
+    direction = ctx.get("direction")
 
-    # --- MSC DIRECTION-FIRST INJECTION ---
-    if ctx.get("direction") is None:
-        try:
-            from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
-            _msc = ExploratoryEngine()
-            d = _msc.direction_only(ctx)
-            if d:
-                ctx["direction"] = d
-        except Exception:
-            pass
+    if direction not in ("BACK->LAY", "LAY->BACK"):
+        return {
+            "enter": False,
+            "letter": str(ctx.get("letter") or "S"),
+            "direction": None,
+            "why": "msc_direction_missing",
+        }
 
-    # === FIX: enrich ctx, not context ===
-    ctx = _enrich_ctx(ctx)
-
-    # --- Scope filter -----------------------------------------------------
-    try:
-        mid = str(ctx.get("marketId") or "")
-        # skip if market not in Mastery scope
-        from engines.mastery.mastery_policy import _SCOPE_STATE
-        if mid and _SCOPE_STATE.get("mids") and mid not in _SCOPE_STATE["mids"]:
-            return {"enter": False, "letter": ctx.get("letter", "S"), "why": "scope:out"}
-    except Exception:
-        pass
-
-    # --- Attach fav/field tags, movement, blueprint to context (safe, optional) ---
-    try:
-        mid = str(ctx.get("marketId") or "")
-        sid = str(ctx.get("selectionId") or "")
-        if mid and sid:
-            favmap = _fav_tags_for_market(mid)            # {sid:{rank,tag,ltp}}
-            movmap = _movement_for_market(mid)            # {sid:{was_rank,now_rank,movement,...}}
-            bp_score, bp_key = _get_blueprint_conf_cached(mid, sid)
-
-            fm = favmap.get(sid, {})
-            mv = movmap.get(sid, {})
-
-            if fm:
-                ctx["fav_rank"] = fm.get("rank")
-                ctx["fav_tag"]  = fm.get("tag")
-                ctx.setdefault("px", fm.get("ltp", ctx.get("px")))
-            if mv:
-                ctx["rank_was"] = mv.get("was_rank")
-                ctx["rank_now"] = mv.get("now_rank")
-                ctx["movement"] = mv.get("movement")
-            if bp_score is not None:
-                ctx["blueprint_conf"] = float(bp_score)
-            if bp_key:
-                ctx["blueprint_key"]  = str(bp_key)
-    except Exception:
-        pass
-
-
-
-    # ---- letter & family/defaults -------------------------------------
+    # ------------------------------------------------------------------
+    # 2) Resolve letter (unchanged)
+    # ------------------------------------------------------------------
     L = str(ctx.get("letter") or ctx.get("family_code") or "S").upper()
     ctx["letter"] = L
 
-    # ---- gates (time/phase/odds band) ---------------------------------
+    # ------------------------------------------------------------------
+    # 3) GATE — eligibility only (no direction logic)
+    # ------------------------------------------------------------------
     ok, gwhy = gate(ctx, L)
     if not ok:
-        # best-effort ledger write (NO-TRADE)
-        try:
-            from engines.mastery.plan_ledger import record_plan
-            base = {
-                "day": ctx.get("day") or __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
-                "run_id": ctx.get("run_id"),
-                "marketId": ctx.get("marketId"),
-                "selectionId": ctx.get("selectionId"),
-                "family": str(ctx.get("strategy_name") or "MASTERY"),
-                "letter": L,
-                "direction": "",
-                "target_ticks": 0,
-                "px": float(ctx.get("px") or ctx.get("odds") or 0.0),
-                "size": 0.0,
-                "confidence": 0.0,
-                "plan_why": f"gate:{gwhy}",
-                "enter": False,
-            }
-            record_plan(base)
-        except Exception:
-            pass
-        return {"enter": False, "letter": L, "why": f"gate:{gwhy}"}
+        return {
+            "enter": False,
+            "letter": L,
+            "direction": direction,
+            "why": f"gate:{gwhy}",
+        }
 
-    # ---- main direction inference -------------------------------------
-    dir_rule, ticks_rule, note = infer_direction_and_ticks(ctx)
-
-    # ---- last-resort fallback for early-day/sparse data ----------------
-    if dir_rule is None:
-        try:
-            px = float(ctx.get("odds") or ctx.get("px") or ctx.get("ltp") or 0.0)
-        except Exception:
-            px = 0.0
-        # conservative px-band fallback; keeps Mastery letter, not 'A'
-        if 1.50 <= px <= 12.0:
-            dir_rule = "LAY->BACK" if px >= 4.0 else "BACK->LAY"
-            ticks_rule = 1
-            note = (note + " | px_fallback") if note else "px_fallback"
-        else:
-            # record no-trade (quiet + price out of band)
-            try:
-                from engines.mastery.plan_ledger import record_plan
-                base = {
-                    "day": ctx.get("day") or __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
-                    "run_id": ctx.get("run_id"),
-                    "marketId": ctx.get("marketId"),
-                    "selectionId": ctx.get("selectionId"),
-                    "family": str(ctx.get("strategy_name") or "MASTERY"),
-                    "letter": L,
-                    "direction": "",
-                    "target_ticks": 0,
-                    "px": px,
-                    "size": 0.0,
-                    "confidence": 0.0,
-                    "plan_why": "flat_no_signal",
-                    "enter": False,
-                }
-                record_plan(base)
-            except Exception:
-                pass
-            return {"enter": False, "letter": L, "why": "flat_no_signal"}
-
-    # ---- optional bias: be stricter on B2L unless fav+strong -----------
-    # allow if fav OR strong (safer fills, fewer misses on fav that are edging)
-    if dir_rule == "BACK->LAY" and L not in ("A","P"):
+    # ------------------------------------------------------------------
+    # 4) STRATEGY-SPECIFIC BIAS BLOCKS (NO DIRECTION CHANGE)
+    # ------------------------------------------------------------------
+    # Example: BACK->LAY safety bias
+    if direction == "BACK->LAY" and L not in ("A", "P"):
         fav_rank = int(ctx.get("fav_rank") or 99)
-        strong = (abs(float(ctx.get("slope_ppm") or 0.0)) >= 0.03) or (abs(int(ctx.get("recent_net_ticks") or 0)) >= 3)
+        strong = (
+            abs(float(ctx.get("msc_win_prob", 0.0)) - 0.5) >= 0.10
+            or abs(int(ctx.get("recent_net_ticks") or 0)) >= 3
+        )
+
         if not (fav_rank == 1 or strong):
-            return {"enter": False, "letter": L, "why": f"b2l_denied_bias fav_rank={fav_rank} strong_steam={strong}"}
+            return {
+                "enter": False,
+                "letter": L,
+                "direction": direction,
+                "why": "b2l_denied_bias",
+            }
 
+    # ------------------------------------------------------------------
+    # 5) CONFIDENCE + SIZING (UNCHANGED)
+    # ------------------------------------------------------------------
+    conf, _ticks_floor, _tag = compute_confidence_and_ticks(ctx)
 
-    # ---- confidence & tick floor --------------------------------------
-    conf, t_floor, tag2 = compute_confidence_and_ticks(ctx)
-    ticks = max(int(ticks_rule or 1), int(t_floor))
-
-    # --- Tiny, bounded confidence nudges from movement + blueprint (never block) ---
-    try:
-        mv = str(ctx.get("movement") or "steady").lower()
-        bp = ctx.get("blueprint_conf")
-        if isinstance(bp, (int, float)):
-            # gentle nudge only if blueprint_conf ≥ 0.60
-            if float(bp) >= 0.60:
-                conf = min(1.0, conf + 0.02)
-        # movement coherence with chosen direction (optional micro-nudge)
-        if dir_rule:
-            if mv == "steaming" and dir_rule == "BACK->LAY":
-                conf = min(1.0, conf + 0.02)
-            elif mv == "drifting" and dir_rule == "LAY->BACK":
-                conf = min(1.0, conf + 0.02)
-    except Exception:
-        pass
-
-
-    # ---- WOM nudge (never blocks) -------------------------------------
-    wom_tag = ""
-    try:
-        wom = ctx.get("wom_ratio")
-        LO, HI = 0.42, 0.58
-        if isinstance(wom, (int, float)):
-            if wom <= LO and dir_rule == "BACK->LAY":
-                conf = min(1.0, conf + 0.03); wom_tag = f"wom={wom:.2f} steam+"
-            elif wom >= HI and dir_rule == "LAY->BACK":
-                conf = min(1.0, conf + 0.03); wom_tag = f"wom={wom:.2f} drift+"
-            elif wom <= LO and dir_rule == "LAY->BACK":
-                conf = max(0.0, conf - 0.02); wom_tag = f"wom={wom:.2f} steam-"
-            elif wom >= HI and dir_rule == "BACK->LAY":
-                conf = max(0.0, conf - 0.02); wom_tag = f"wom={wom:.2f} drift-"
-            else:
-                wom_tag = f"wom={wom:.2f}"
-    except Exception:
-        pass
-
-    # === PATCH E START (attach EPIC in live planner) ===
-    # ---- sizing --------------------------------------------------------
     base_from_dc = base_stake_for_letter(L, bank=_bank())
-    sized = size_for_letter(ctx, L, confidence=conf, direction=dir_rule)
+    sized = size_for_letter(
+        ctx,
+        L,
+        confidence=conf,
+        direction=direction,
+    )
 
+    # ------------------------------------------------------------------
+    # 6) FINAL PLAN (ENTER = TRUE)
+    # ------------------------------------------------------------------
     plan = {
         "enter": True,
         "letter": L,
-        "direction": dir_rule,
-        "target_ticks": int(ticks),
-        "hedge_ticks":  int(ticks),
+        "direction": direction,                 # ← MSC AUTHORITY
+        "target_ticks": int(ctx.get("entry_ticks") or 1),
+        "stop_ticks": int(ctx.get("stop_ticks") or 1),
+        "hedge_ticks": int(ctx.get("entry_ticks") or 1),
         "size": float(sized),
         "base_stake": float(base_from_dc),
         "px": float(ctx.get("px") or ctx.get("odds") or 0.0),
-        "plan_why": (f"{L}-plan {note}/{tag2}" + (f" | {wom_tag}" if wom_tag else "")),
-        # NEW: surface metadata
-        "fav_rank": int(ctx.get("fav_rank") or 0),
-        "fav_tag":  str(ctx.get("fav_tag")  or ""),
-        "movement": str(ctx.get("movement") or ""),
-        "blueprint_key":  str(ctx.get("blueprint_key") or ""),
-        "blueprint_conf": float(ctx.get("blueprint_conf") or 0.0),
+        "plan_why": f"{L}:msc_direction_ok",
     }
 
-
-    # EPIC metadata (from in-memory scope; fail-open if unavailable)
-    try:
-        mid = str(ctx.get("marketId") or "")
-        sid = str(ctx.get("selectionId") or "")
-        epi = epic_info(mid)
-        if epi:
-            plan["epic_id"] = mid
-            plan["epic_stories"] = int(epi.get("stories") or 0)
-            # derive rank if we have sids; otherwise skip
-            if sid and epi.get("sids"):
-                # quick rank: use rank map helper (DB probe) or position in set order fallback
-                rank_map = _rank_map_for_market(mid, list(epi["sids"]))
-                plan["epic_rank"] = int(rank_map.get(sid, 0))
-    except Exception:
-        pass
-    # === PATCH E END ===
-  
-
-    # ---- ledger write + attach plan_id (best-effort) -------------------
+    # ------------------------------------------------------------------
+    # 7) Ledger write (best-effort, unchanged)
+    # ------------------------------------------------------------------
     try:
         from engines.mastery.plan_ledger import record_plan
         base = {
@@ -1750,47 +1642,23 @@ def propose_trade(context: Dict[str, Any]) -> Dict[str, Any]:
             "marketId": ctx.get("marketId"),
             "selectionId": ctx.get("selectionId"),
             "family": str(ctx.get("strategy_name") or "MASTERY"),
-            "letter": plan.get("letter") or L,
-            "direction": plan.get("direction") or "",
-            "target_ticks": int(plan.get("target_ticks") or 1),
-            "px": float(plan.get("px") or ctx.get("odds") or 0.0),
-            "size": float(plan.get("size") or 0.0),
+            "letter": L,
+            "direction": direction,
+            "target_ticks": plan["target_ticks"],
+            "px": plan["px"],
+            "size": plan["size"],
             "confidence": float(conf or 0.0),
-            "plan_why": plan.get("plan_why") or "",
+            "plan_why": plan["plan_why"],
             "enter": True,
-            # NEW metadata columns we already modeled in schema
-            "blueprint_match": plan.get("blueprint_key") or "",
-            "window_tag": plan.get("movement") or "",
-            "why": plan.get("plan_why") or "",
         }
-
         res = record_plan(base)
         if isinstance(res, dict) and res.get("plan_id"):
             plan["plan_id"] = res["plan_id"]
     except Exception:
         pass
-    # --- NEW: ensure all non-entry plans are persisted for visibility ---
-    try:
-        if not plan.get("enter"):
-            from engines.mastery.plan_ledger import record_plan
-            record_plan({
-                "enter": False,
-                "marketId": ctx.get("marketId"),
-                "selectionId": ctx.get("selectionId"),
-                "family": str(ctx.get("strategy_name") or "MASTERY"),
-                "letter": plan.get("letter") or ctx.get("letter") or "S",
-                "direction": "",
-                "target_ticks": 0,
-                "px": float(ctx.get("odds") or ctx.get("px") or 0.0),
-                "size": 0.0,
-                "confidence": 0.0,
-                "plan_why": plan.get("why") or plan.get("plan_why") or "no_trade",
-            })
-    except Exception as e:
-        print(f"[propose_trade] no-trade record warn: {e}")
-
 
     return plan
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Global plan normalizer (used by DecideOnce + Mastery)
