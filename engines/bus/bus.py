@@ -238,6 +238,72 @@ class DecisionBus:
 
             time.sleep(interval)
 
+    def _run_legacy_pipeline(self, base_ctx, engine_report):
+        """
+        LEGACY pipeline — helper-driven, no filtering.
+
+        Contract:
+        - Helper defines ALL runnable (mid, sid)
+        - BUS builds ctx
+        - Mastery decides
+        """
+        from engines.legacy_snapshot_helper import get_legacy_snapshot
+        import engines.mastery.mastery_policy as mp
+
+        plans = []
+
+        try:
+            snapshot = get_legacy_snapshot()
+        except Exception as e:
+            engine_report["LEGACY"]["note"] = f"helper_error:{e}"
+            return plans
+
+        engine_report["LEGACY"]["evaluated"] = True
+
+        for row in snapshot:
+            mid = row.get("marketId")
+            sid = row.get("selectionId")
+
+            if not mid or not sid:
+                continue
+
+            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+            if not ctx:
+                continue
+
+            # 🔑 AUTHORITATIVE PX FROM HELPER
+            ctx["px"] = row.get("odds")
+            ctx["odds"] = row.get("odds")
+            ctx["back"] = row.get("back")
+            ctx["lay"] = row.get("lay")
+
+            ctx["runner_band"] = row.get("band")
+            ctx["is_fav"] = row.get("is_favourite")
+
+            try:
+                res = mp.propose_trade(dict(ctx))
+
+                if res is None:
+                    engine_report["LEGACY"]["note"] = "no_signal"
+                    continue
+
+                if res.get("enter"):
+                    res = dict(res)
+                    res["engine"] = "LEGACY"
+                    plans.append(("LEGACY", res, ctx))
+                    engine_report["LEGACY"]["fired"] += 1
+                else:
+                    engine_report["LEGACY"]["note"] = res.get("why") or "no_signal"
+
+            except Exception as e:
+                engine_report["LEGACY"]["note"] = f"mastery_error:{e}"
+
+        if engine_report["LEGACY"]["fired"] == 0:
+            engine_report["LEGACY"]["note"] = "no_signal"
+
+        return plans
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🆕 ADD: _run_risc_pipeline
@@ -737,59 +803,6 @@ class DecisionBus:
 
 
 
-        # ============================
-        # Legacy propose_trade
-        # ============================
-        try:
-            import engines.mastery.mastery_policy as mp
-            lp = mp.propose_trade(dict(ctx))
-
-            if lp is None:
-                _record("LEGACY", evaluated=True, fired=False, why="no_plan")
-            elif lp.get("enter"):
-                lp["engine"] = "LEGACY"
-                lp["strategy"] = "PROPOSE_TRADE"
-                _record("LEGACY", evaluated=True, fired=True)
-                plans.append(("LEGACY", lp, ctx))
-            else:
-                _record(
-                    "LEGACY",
-                    evaluated=True,
-                    fired=False,
-                    why=lp.get("reason") or lp.get("why") or "note",
-                )
-        except Exception as e:
-            _record("LEGACY", evaluated=False, fired=False, why=str(e))
-
-        # ============================
-        # Legacy strategy registry
-        # ============================
-        try:
-            for strat_name, strat_fn in self.legacy_strategies:
-                if strat_name.upper() in ("L", "MLM", "ALWAYS_ON"):
-                    continue
-
-                sp = plan_for_strategy(strat_name, ctx)
-
-                if sp is None:
-                    _record("LEGACY", evaluated=True, fired=False, why="no_plan")
-                elif sp.get("enter"):
-                    sp["engine"] = "LEGACY"
-                    sp["strategy"] = strat_name
-                    _record("LEGACY", evaluated=True, fired=True)
-                    plans.append(("LEGACY", sp, ctx))
-                else:
-                    _record(
-                        "LEGACY",
-                        evaluated=True,
-                        fired=False,
-                        why=sp.get("reason") or sp.get("why") or "note",
-                    )
-        except Exception as e:
-            _record("LEGACY", evaluated=False, fired=False, why=str(e))
-
-        return plans
-
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: def _run_engines_for_tick(self, mid, sid, ctx, engine_report):
@@ -1092,6 +1105,16 @@ class DecisionBus:
 # 🧩 ACTION: ADD (BUS execution contract enforcement)
 # 📆 PATCHED: 2025-12-31 — Legacy enter/letter hard filter
 # ======================================================================================================
+
+            # ==================================================
+            # LEGACY — HELPER-DRIVEN PIPELINE
+            # ==================================================
+            legacy_plans = self._run_legacy_pipeline(
+                base_ctx=base_ctx,
+                engine_report=engine_report,
+            )
+
+            all_plans.extend(legacy_plans)
             # ==================================================
             # MSC_RISK — PARENT-DRIVEN PIPELINE (ONCE PER TICK)
             # ==================================================
