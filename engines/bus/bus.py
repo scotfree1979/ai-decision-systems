@@ -325,6 +325,72 @@ class DecisionBus:
 
         return plans
 
+    def _run_inplay_pipeline(self, base_ctx, mids, engine_report):
+        """
+        Market-driven MSC_INPLAY pipeline.
+
+        Evaluated EVERY tick.
+        Evaluates ALL runners in ALL in-play markets.
+        NO filtering. NO throttling. NO de-duplication.
+        """
+
+        engine_report["MSC_INPLAY"]["evaluated"] = True
+        plans = []
+
+        inplay = self.engines.get("MSC_INPLAY")
+        if not inplay:
+            return plans
+
+        try:
+            from engines.market_monitor.monitor import get_market_state
+        except Exception as e:
+            engine_report["MSC_INPLAY"]["note"] = f"monitor_error:{e}"
+            return plans
+
+        fired_any = False
+
+        for mid in mids:
+            try:
+                st = get_market_state(mid) or {}
+                runners = st.get("runners") or {}
+
+                for sid, r in runners.items():
+
+                    # BUS RULE: only build ctx if runner has live px
+                    if r.get("px") is None:
+                        continue
+
+                    ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                    if not ctx:
+                        continue
+
+                    # 🔑 AUTHORITATIVE IN-PLAY SNAPSHOT
+                    ctx["in_play_market"] = True
+                    ctx["runner_px"] = r.get("px")
+                    ctx["runner_back"] = r.get("back")
+                    ctx["runner_lay"] = r.get("lay")
+                    ctx["runner_band"] = r.get("band")
+                    ctx["runner_traded"] = r.get("traded")
+                    ctx["runner_ts"] = r.get("ts")
+
+                    res = inplay.tick(ctx)
+
+                    if res and res.get("enter"):
+                        p = dict(res)
+                        p["engine"] = "MSC_INPLAY"
+                        plans.append(("MSC_INPLAY", p, ctx))
+                        engine_report["MSC_INPLAY"]["fired"] += 1
+                        fired_any = True
+
+            except Exception as e:
+                engine_report["MSC_INPLAY"]["note"] = f"inplay_loop_error:{e}"
+
+        if not fired_any:
+            engine_report["MSC_INPLAY"]["note"] = "no_plan"
+
+        return plans
+
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -1039,8 +1105,22 @@ class DecisionBus:
             # 🔑 RISC must extend the authoritative accumulator
             all_plans.extend(risc_plans)
 
+            # ==================================================
+            # MSC_INPLAY — MARKET-DRIVEN PIPELINE (ONCE PER TICK)
+            # ==================================================
+
+            inplay_plans = self._run_inplay_pipeline(
+                base_ctx=base_ctx,
+                mids=mids,
+                engine_report=engine_report,
+            )
+
+            # 🔑 INPLAY must extend the authoritative accumulator
+            all_plans.extend(inplay_plans)
+
             # 🔑 From this point on, plans = all plans for this tick
             plans = all_plans
+
 
 
             filtered_plans = []

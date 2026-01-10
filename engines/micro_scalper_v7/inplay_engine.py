@@ -15,77 +15,94 @@ from engines.market_monitor.monitor import get_market_state
 
 from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 
+from engines.mastery.event_sink import emit
+from engines.micro_scalper_v7.v7_snapshot_helper import get_v7_inplay_snapshot
+
 class InPlayEngine:
-    """
-    IN-PLAY MSC Engine (Engine C)
-    -------------------------------------------
-    Rules (as specified):
-
-    • Only LAY collapsing runners.
-    • Trigger requires:
-          - oc_phase >= 7
-          - win_probability collapse OR OC collapse signals
-    • Stake MUST NOT create net negative PnL for the runner.
-      That is: stake <= runner’s canonical positive PnL.
-    • Sweetspot ≈ odds ≥ 7.0 (configurable)
-    • Exit conditions:
-          - Trailing/boundary exit → CHILD_T
-          - Collapse reversal → CHILD_S
-          - Profit reached → CHILD_H
-    • No exit until boundary or reversal.
-    """
-
-    SWEETSPOT_MIN_ODDS = 7.0
-    HARD_LOWER_BOUND = 1.5     # protective close
-    HARD_UPPER_BOUND = 12.0    # protective close
+    SWEETSPOT = 7.0
+    ODDS_MAX  = 12.0
 
     def __init__(self):
         self.state = InPlaySubState.IDLE
-        self.active_plan = None
-        self.entry_px = None
-        self.parent_pnl_cache = {}   # per-runner PnL from cashout system
-
-    # ----------------------------------------------------------------------
-    # PUBLIC API
-    # ----------------------------------------------------------------------
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
-# 🔎 SEARCH: def tick(self, ctx:
-# 📆 PATCHED: 2025-12-12 — eliminate silent None, emit NO-SIGNAL
-# ======================================================================================================
+        self.last_odds = {}   # (mid, sid) -> last odds
 
     def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        mid = ctx.get("marketId")
+        sid = ctx.get("selectionId")
 
-        if ctx.get("oc_phase", 0) < 7:
-            return self._no_signal(ctx, reason="not_inplay")
+        snap = get_v7_inplay_snapshot(mid, sid)
+        if not snap:
+            return self._no_signal("intel_missing")
 
-        try:
-            plan = self._build_inplay_plan(ctx)
-            if plan:
-                plan["enter"] = True
-                plan["engine"] = "MSC_INPLAY"
-                return plan
-        except Exception:
-            pass
+        odds = snap["odds"]
+        fav_rank = snap["fav_rank"]
+        win_prob = snap["win_prob"]
+        race_q   = snap["race_quartile"]
 
-        return self._no_signal(ctx, reason="no_signal")
+        # ---- hard filters ------------------------------------------------
+        if odds is None:
+            return self._no_signal("odds_unavailable")
 
-    def _no_signal(self, ctx: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
-        from engines.mastery.event_sink import emit
+        if odds > self.ODDS_MAX:
+            return self._no_signal("odds_too_high")
 
+        if fav_rank == 1 and snap["is_leading"]:
+            return self._no_signal("favourite_leading")
+
+        if race_q in ("Q1", "Q4"):
+            return self._no_signal("race_phase_invalid")
+
+        # ---- anchor logic ------------------------------------------------
+        key = (mid, sid)
+        prev = self.last_odds.get(key)
+        self.last_odds[key] = odds
+
+        # below anchor → monitor
+        if odds < self.SWEETSPOT:
+            return self._no_signal("below_anchor_monitoring")
+
+        # observation zone
+        if self.SWEETSPOT < odds <= self.ODDS_MAX:
+            if prev is None:
+                return self._no_signal("observation_zone")
+
+            # CROSS UP through 7
+            if prev < self.SWEETSPOT and odds >= self.SWEETSPOT:
+                if win_prob < 0.25:
+                    return self._emit_plan(odds)
+                return self._no_signal("anchor_cross_fav_filtered")
+
+            # CROSS DOWN then UP (reversal)
+            if prev > self.SWEETSPOT and odds >= self.SWEETSPOT:
+                return self._no_signal("observation_zone")
+
+        return self._no_signal("no_signal")
+
+    # ------------------------------------------------------------------
+
+    def _emit_plan(self, odds: float) -> Dict[str, Any]:
+        return {
+            "enter": True,
+            "engine": "MSC_INPLAY",
+            "source": "V",
+            "direction": "LAY->BACK",
+            "px": odds,
+            "target_ticks": 50,
+            "why": "inplay_anchor_cross",
+        }
+
+    def _no_signal(self, reason: str) -> Dict[str, Any]:
         payload = {
             "enter": False,
-            "blocked": True,
             "engine": "MSC_INPLAY",
             "reason": reason,
             "re_eval": True,
         }
-
         try:
             emit("msc_inplay.no_signal", payload)
         except Exception:
             pass
-
+        return payload
         return payload
 
 
