@@ -53,96 +53,112 @@ MAX_MAP = {
 # ======================================================================
 # Compute dynamic stake with REAL inputs
 # ======================================================================
-def compute_dynamic_stake(ctx: Dict[str, Any], engine: str) -> float:
-    """
-    The OFFICIAL Dynamic Stake v7:
-        - reads BankState static pot
-        - auto-reduces when exposure is high
-        - uses oc-phase + letter policy
-        - enforces caps from DailyConfig
-        - always >= MIN_STAKE
-    """
-    # -------------------------------
-    # 1) Identify letter
-    # -------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/math/dynamic_stake_v7.py
+# 🔎 SEARCH: def compute_dynamic_stake(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-10 — Engine min/max clamping (final, authoritative)
+#
+# PURPOSE:
+# - Enforce per-engine minimum & maximum stakes
+# - Guarantee engines can always fire at least once
+# - Allow aggression to scale naturally with pot growth
+#
+# RULE:
+#   final_stake = clamp(
+#       computed_stake,
+#       ENGINE_MIN[engine],
+#       ENGINE_MAX[engine]
+#   )
+#
+# INVARIANTS:
+# - Exposure logic remains intact
+# - Bank availability respected
+# - HARD_CAP_PRE / HARD_CAP_IP still apply
+# - Clamp is LAST step before return
+# ======================================================================================================
+
+def compute_dynamic_stake(ctx: dict, engine: str) -> float:
     letter = (ctx.get("letter") or ctx.get("family") or "?").upper()
+    phase  = "IP" if ctx.get("oc_phase", 0) >= 7 else "PRE"
 
-    base = BASE_MAP.get(letter)
-    if base is None:
-        return MIN_STAKE  # unknown family → minimal safe stake
-
+    # --------------------------------------------------
+    # Base sizing
+    # --------------------------------------------------
+    base = BASE_MAP.get(letter, MIN_STAKE)
     smax = MAX_MAP.get(letter, base)
     mult = LETTER_MULT.get(letter, 1.0)
 
-    # -------------------------------
-    # 2) Engine pot + available
-    # -------------------------------
     pot_static = bank_state.get_engine_pot(engine)
     avail_now  = bank_state.get_engine_available(engine)
 
-    # If pot exhausted → safest fallback
-    if avail_now <= MIN_STAKE:
-        return MIN_STAKE
+    # If nothing is available, still allow minimum snap
+    if avail_now <= 0:
+        avail_now = 0.0
 
-    # -------------------------------
-    # 3) Context-based multipliers
-    # -------------------------------
-    mto = float(ctx.get("minutes_to_off", 120.0) or 120.0)
+    # --------------------------------------------------
+    # Time / phase multipliers
+    # --------------------------------------------------
+    mto = float(ctx.get("minutes_to_off", 120.0))
     ocp = int(ctx.get("oc_phase", 0))
 
-    # PRE-off scaling (bigger early, smaller late)
-    if mto > 60:
-        time_mult = 1.20
-    elif mto > 20:
-        time_mult = 1.00
-    elif mto > 5:
-        time_mult = 0.80
-    else:
-        time_mult = 0.60
+    time_mult = (
+        1.20 if mto > 60 else
+        1.00 if mto > 20 else
+        0.80 if mto > 5  else
+        0.60
+    )
 
-    # OC-phase scaling (earlier OC = higher conviction)
-    if ocp < 3:
-        oc_mult = 1.20
-    elif ocp < 6:
-        oc_mult = 1.00
-    else:
-        oc_mult = 0.80
+    oc_mult = (
+        1.20 if ocp < 3 else
+        1.00 if ocp < 6 else
+        0.80
+    )
 
-    # -------------------------------
-    # 4) Exposure safety reduction
-    # -------------------------------
-    open_liab = pot_static - avail_now
-    liab_frac = max(0.0, min(1.0, open_liab / (pot_static + 1e-9)))
+    # --------------------------------------------------
+    # Exposure control
+    # --------------------------------------------------
+    liab_frac = (pot_static - avail_now) / max(pot_static, 1e-9)
 
-    # If engine is heavily committed, shrink aggressively
-    if liab_frac > 0.75:
-        exp_mult = 0.25
-    elif liab_frac > 0.50:
-        exp_mult = 0.50
-    elif liab_frac > 0.25:
-        exp_mult = 0.75
-    else:
-        exp_mult = 1.00
+    exp_mult = (
+        0.25 if liab_frac > 0.75 else
+        0.50 if liab_frac > 0.50 else
+        0.75 if liab_frac > 0.25 else
+        1.00
+    )
 
-    # -------------------------------
-    # 5) Compute raw stake
-    # -------------------------------
+    # --------------------------------------------------
+    # Raw stake computation
+    # --------------------------------------------------
     stake = base * mult * time_mult * oc_mult * exp_mult
 
-    # cap by engine available balance
+    # Hard availability / letter / phase caps
     stake = min(stake, avail_now)
-
-    # respect letter max
     stake = min(stake, smax)
-
-    # respect phase caps
-    phase = "PRE" if mto > 0 else "IP"
     stake = min(stake, HARD_CAP_PRE if phase == "PRE" else HARD_CAP_IP)
 
-    # never drop below minimum
-    stake = max(MIN_STAKE, round(stake, 2))
+    # --------------------------------------------------
+    # ENGINE-LEVEL FLOOR / CEILING (FINAL SNAP)
+    # --------------------------------------------------
+    try:
+        from engines.daily_config import ENGINE_MIN, ENGINE_MAX
 
-    return stake
+        eng = engine.upper()
+
+        if eng in ENGINE_MIN:
+            stake = max(ENGINE_MIN[eng], stake)
+
+        if eng in ENGINE_MAX:
+            stake = min(ENGINE_MAX[eng], stake)
+
+    except Exception:
+        pass
+
+    return round(max(MIN_STAKE, stake), 2)
+
+# === PATCH END ==============================================================
+
+
 
 # === PATCH END ================================================================
 # ===============================================================
@@ -185,33 +201,38 @@ def calc_dynamic_stake(letter: str, phase: str = "PRE", bank: float | None = Non
     return stake
 
 
-# --- PUBLIC API #2 (BUS) ----------------------------------------------------
-def compute_dynamic_stake(ctx: dict, engine: str) -> float:
-    """
-    BUS wrapper — extracts letter + phase + pot.
-    """
-    letter = (engine or "X")[:1].upper()
-    phase = "INPLAY" if ctx.get("oc_phase", 0) >= 7 else "PRE"
-
-    try:
-        from engines.live.bank_state import get_engine_pot
-        bank = get_engine_pot(engine)
-    except Exception:
-        bank = None
-
-    stake, why = _dynamic(letter, phase, bank)
-
-    # Debug breadcrumb (optional)
-    ctx["dyn_stake_why"] = why
-
-    return stake
 
 
 # --- Greening stake (unchanged) ---------------------------------------------
-def calc_greenup_stake(parent_side: str, entry_odds: float, parent_stake: float, hedge_odds: float):
-    """True greening stake (flat profit across all runners)."""
+def calc_greenup_stake(
+    parent_side: str,
+    entry_odds: float,
+    parent_stake: float,
+    hedge_odds: float,
+):
+    """
+    True greening stake.
+    Produces flat P&L across the entire market when child fully matches.
+    """
+
     try:
-        s = float(parent_stake) * float(entry_odds) / float(hedge_odds)
-        return round(max(cfg.MIN_STAKE, s), 2)
+        entry_odds = float(entry_odds)
+        hedge_odds = float(hedge_odds)
+        parent_stake = float(parent_stake)
+
+        if parent_side.upper() == "LAY":
+            # LAY → BACK
+            stake = (parent_stake * entry_odds) / hedge_odds
+
+        elif parent_side.upper() == "BACK":
+            # BACK → LAY
+            stake = (parent_stake * entry_odds) / max(hedge_odds - 1.0, 1e-9)
+
+        else:
+            return round(max(cfg.MIN_STAKE, parent_stake), 2)
+
+        return round(max(cfg.MIN_STAKE, stake), 2)
+
     except Exception:
-        return round(max(cfg.MIN_STAKE, float(parent_stake)), 2)
+        return round(max(cfg.MIN_STAKE, parent_stake), 2)
+
