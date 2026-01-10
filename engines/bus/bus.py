@@ -453,7 +453,7 @@ class DecisionBus:
             rows = con.execute("""
                 SELECT
                     id,
-                    family,
+                    engine,
                     role,
                     entry_status,
                     exit_status,
@@ -468,7 +468,7 @@ class DecisionBus:
             ctx["orders_by_runner"] = [
                 {
                     "id": r[0],
-                    "family": r[1],
+                    "engine": r[1],
                     "role": r[2],
                     "entry_status": r[3],
                     "exit_status": r[4],
@@ -493,7 +493,7 @@ class DecisionBus:
 
         for o in ctx.get("orders_by_runner", []):
             if (
-                o.get("family") == "LEGACY"
+                o.get("engine") == "LEGACY"
                 and o.get("role") == "PARENT"
                 and o.get("entry_status") == "MATCHED"
             ):
