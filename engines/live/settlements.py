@@ -363,83 +363,76 @@ def force_cancel_all_for_settled_markets() -> int:
     released = 0
     cancelled = 0
 
-    con = _auto_conn(rw=True)
+    from engines.config_paths import auto_conn
+    from engines.live import bank_state
+    import sqlite3
+
+    # AUTO DB (orders)
+    con = auto_conn(rw=True)
     con.row_factory = sqlite3.Row
 
-    try:
-        # Find settled markets
-        # Collect markets settled either by Betfair OR by time
-        mids = set()
+    # SETTLEMENTS DB (market status)
+    with connect_db(settlements_db_path()) as s:
 
-        # 1️⃣ Betfair-confirmed CLOSED markets
-        for r in s.execute(
-            "SELECT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
-        ).fetchall():
-            mids.add(str(r["marketId"]))
+        try:
+            mids = set()
 
-        # 2️⃣ Time-based settlement (authoritative fallback)
-        for r in s.execute(
-            "SELECT DISTINCT marketId FROM orders WHERE role='PARENT'"
-        ).fetchall():
-            mid = str(r["marketId"])
-            try:
-                if _eligible_for_settlement(mid):
-                    mids.add(mid)
-            except Exception:
-                pass
+            # 1️⃣ Betfair-confirmed CLOSED markets
+            for r in s.execute(
+                "SELECT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
+            ).fetchall():
+                mids.add(str(r["marketId"]))
 
-        mids = list(mids)
+            # 2️⃣ Time-based fallback (authoritative safety net)
+            for r in con.execute(
+                "SELECT DISTINCT marketId FROM orders WHERE role='PARENT'"
+            ).fetchall():
+                mid = str(r["marketId"])
+                try:
+                    if _eligible_for_settlement(mid):
+                        mids.add(mid)
+                except Exception:
+                    pass
 
+            if not mids:
+                return 0
 
-        if not mids:
-            return 0
+            for mid in mids:
 
-        for mid in mids:
+                # --- CHILDREN FIRST ---
+                con.execute("""
+                    UPDATE orders
+                       SET exit_status='CANCELLED',
+                           closed_at=datetime('now','utc')
+                     WHERE marketId=?
+                       AND role='CHILD'
+                       AND (exit_status IS NULL OR exit_status='')
+                """, (mid,))
+                cancelled += con.total_changes or 0
 
-            # --- PARENTS FIRST ---
-            parents = con.execute("""
-                SELECT id, engine, entry_odds, entry_stake
-                  FROM orders
-                 WHERE marketId=?
-                   AND role='PARENT'
-                   AND (exit_status IS NULL OR exit_status='')
-            """, (mid,)).fetchall()
+                # --- THEN PARENTS ---
+                con.execute("""
+                    UPDATE orders
+                       SET exit_status='CANCELLED',
+                           closed_at=datetime('now','utc')
+                     WHERE marketId=?
+                       AND role='PARENT'
+                       AND (exit_status IS NULL OR exit_status='')
+                """, (mid,))
+                cancelled += con.total_changes or 0
 
-            # --- CHILDREN ---
-            con.execute("""
-                UPDATE orders
-                   SET exit_status='CANCELLED',
-                       closed_at=datetime('now','utc')
-                 WHERE marketId=?
-                   AND role='CHILD'
-                   AND (exit_status IS NULL OR exit_status='')
-            """, (mid,))
+            con.commit()
 
-            cancelled += con.total_changes or 0
-
-            # --- FINALISE PARENTS ---
-            con.execute("""
-                UPDATE orders
-                   SET exit_status='CANCELLED',
-                       closed_at=datetime('now','utc')
-                 WHERE marketId=?
-                   AND role='PARENT'
-                   AND (exit_status IS NULL OR exit_status='')
-            """, (mid,))
-
-            cancelled += con.total_changes or 0
-
-        con.commit()
-
-    finally:
-        con.close()
+        finally:
+            con.close()
 
     print(
         f"[settlements] FORCE CLEANUP complete → "
-        f"released_exposure={released} cancelled_orders={cancelled}"
+        f"cancelled_orders={cancelled}"
     )
 
     return cancelled
+
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/settlements.py:_detect_bucket
