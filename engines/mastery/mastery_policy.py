@@ -1768,13 +1768,6 @@ def _stoploss_exit_plan(ctx: dict) -> dict | None:
 # === PATCH END ===
 
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/mastery/mastery_policy.py:plan_for_strategy
-# 🔎 SEARCH: def plan_for_strategy(fam: str, ctx: dict) -> dict:
-# 🎯 ACTION: Disable ALWAYS_ON (A) strategy completely
-# 📆 PATCHED: 2025-12-05Z
-# ============================================================================
-
 def plan_for_strategy(fam: str, ctx: dict) -> dict:
     # --- HARD DISABLE ALWAYS_ON (A) STRATEGY ------------------------------
     if str(fam).upper() == "ALWAYS_ON":
@@ -1786,27 +1779,55 @@ def plan_for_strategy(fam: str, ctx: dict) -> dict:
             "target_ticks": 0,
             "size": 0.0,
         }
-    # === PATCH END ========================================================
 
-
+    # ------------------------------------------------------------------
+    # 0) DEFENSIVE COPY
+    # ------------------------------------------------------------------
+    ctx = dict(ctx or {})
 
     mid = str(ctx.get("marketId") or "")
     sid = str(ctx.get("selectionId") or "")
     letter = _FAM_LETTER.get(fam, fam[:1])
+
+    # ------------------------------------------------------------------
+    # 1) FAST PATH — PLAN BOARD (already direction-complete)
+    # ------------------------------------------------------------------
     entry = PLAN_BOARD.get((mid, sid, letter))
     if entry and entry["valid_from"] <= time.time() <= entry["valid_until"]:
         return dict(entry["plan"])
-    # fallback — compute fresh plan
+
+    # ------------------------------------------------------------------
+    # 2) MSC DIRECTION INJECTION (AUTHORITATIVE)
+    # ------------------------------------------------------------------
+    # Legacy MUST have direction before reaching Mastery
+    if ctx.get("direction") not in ("BACK->LAY", "LAY->BACK"):
+        try:
+            from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+            dec = compute_msc_decision(ctx)
+            if isinstance(dec, dict):
+                d = dec.get("direction")
+                if d in ("BACK->LAY", "LAY->BACK"):
+                    ctx["direction"] = d
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 3) STRATEGY-SPECIFIC HANDLER (IF EXISTS)
+    # ------------------------------------------------------------------
     fn = globals().get(f"plan_for_{fam.lower()}")
     if callable(fn):
         raw = fn(ctx)
     else:
-        ctx = dict(ctx or {})
-        ctx["letter"] = letter              # ← inject correct letter
+        # ------------------------------------------------------------------
+        # 4) FALLBACK → MASTERy GATE + SIZE ONLY
+        # ------------------------------------------------------------------
+        ctx["letter"] = letter
         raw = propose_trade(ctx)
+
+    # ------------------------------------------------------------------
+    # 5) CANONICAL NORMALISATION (NEVER NONE)
+    # ------------------------------------------------------------------
     return _ensure_plan(fam, ctx, raw)
-
-
 
 # -----------------------------------------------------------------------------
 # Optional strategy-name entry point (kept compatible with your router)

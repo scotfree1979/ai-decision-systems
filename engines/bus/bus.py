@@ -336,7 +336,13 @@ class DecisionBus:
             ctx["is_fav"] = row.get("is_favourite")
 
             try:
-                res = mp.propose_trade(dict(ctx))
+                plan = plan_for_strategy(dict(ctx))
+
+                if not plan:
+                    _record_reason(engine_report, "LEGACY", "no_strategy")
+                    continue
+
+                res = mp.propose_trade(dict(plan))
 
                 if res is None:
                     _record_reason(engine_report, "LEGACY", "no_signal")
@@ -348,7 +354,7 @@ class DecisionBus:
                     plans.append(("LEGACY", res, ctx))
                     engine_report["LEGACY"]["fired"] += 1
                 else:
-                    _record_reason("LEGACY", res.get("why"))
+                    _record_reason(engine_report, "LEGACY", res.get("why"))
 
             except Exception as e:
                 engine_report["LEGACY"]["note"] = f"mastery_error:{e}"
@@ -357,6 +363,7 @@ class DecisionBus:
             _record_reason(engine_report, "LEGACY", "no_signal")
 
         return plans
+
 
 
 # ======================================================================================================
@@ -439,7 +446,7 @@ class DecisionBus:
                     engine_report["MSC_RISK"]["evaluated"] = True
 
             except Exception as e:
-                _record_reason("MSC_RISK", "risc_tick_error")
+                _record_reason(engine_report, "MSC_RISK", "risc_tick_error")
 
         if risc_evaluated and engine_report["MSC_RISK"]["fired"] == 0:
             engine_report["MSC_RISK"]["reasons"]["no_signal"] += 1
@@ -1462,7 +1469,7 @@ class DecisionBus:
                                 tick_ctx["plans_route_failed"].append(
                                     (plan, "dynamic_stake_zero")
                                 )
-                                _record_reason(engine, "dynamic_stake_zero")
+                                _record_reason(engine_report, engine, "dynamic_stake_zero")
                                 continue  # 🔴 DO NOT ROUTE
 
                             plan["size"] = float(stake)
@@ -1485,13 +1492,13 @@ class DecisionBus:
                 # Direction drift annotation (diagnostic only)
                 if plan_dir and exec_dir and plan_dir != exec_dir:
                     plan["_bus_note"] = "direction_changed"
-                    _record_reason(plan["engine"], "direction_changed")
+                    _record_reason(engine_report, plan["engine"], "direction_changed")
                     tick_ctx["plans_annotated"].append((plan, "direction_changed"))
 
                 # Budget annotation (diagnostic only — router decides)
                 if not self._has_budget(plan, ctx):
                     plan["_bus_note"] = "insufficient_budget_at_plan_time"
-                    _record_reason(plan["engine"], "insufficient_budget")
+                    _record_reason(engine_report, plan["engine"], "insufficient_budget")
                     tick_ctx["plans_annotated"].append((plan, "insufficient_budget"))
 
 # ======================================================================================================
@@ -1536,7 +1543,8 @@ class DecisionBus:
                         tick_ctx["plans_route_failed"].append(
                             (plan, "duplicate_legacy_engine_letter_price")
                         )
-                        _record_reason("LEGACY", "duplicate_legacy_engine_letter_price")
+                        _record_reason(engine_report, "LEGACY", "duplicate_legacy_engine_letter_price")
+
                         continue
 
                     tick_ctx["seen_plan_keys"].add(key)
