@@ -140,58 +140,6 @@ def _auto_local_conn(timeout: float = 8.0) -> sqlite3.Connection:
         pass
     return con
 
-# 📍 engines/live/settlements.py
-# === PATCH: LOCAL CREDENTIAL RESOLVER ===
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py:_resolve_betfair_creds_localonly
-# 🔎 SEARCH: SELECT key, value FROM app_kv WHERE key IN ('APP_KEY','SESSION_TOKEN')
-# 📆 PATCHED: 2025-12-03 — settlements must read SAME key names as GUI/live_router
-
-def _resolve_betfair_creds_localonly() -> tuple[str | None, str | None]:
-    """
-    Authoritative resolver for settlements.
-
-    APP_KEY: engines.daily_config.APP_KEY
-    SESSION : autoscalp_gui.db.app_kv (GUI Step-1)
-    """
-    app_key = None
-    session = None
-
-    # APP KEY (static)
-    try:
-        from engines.daily_config import APP_KEY
-        app_key = APP_KEY.strip()
-    except Exception:
-        app_key = None
-
-    # SESSION TOKEN (GUI DB)
-    try:
-        import sqlite3
-        from engines.config_paths import autoscalp_db
-
-        con = sqlite3.connect(autoscalp_db())
-        con.row_factory = sqlite3.Row
-        row = con.execute(
-            """
-            SELECT value
-              FROM app_kv
-             WHERE LOWER(key) IN ('betfair_session_token','session_token','betfair_session')
-             ORDER BY updated_at DESC
-             LIMIT 1
-            """
-        ).fetchone()
-        con.close()
-
-        if row and row["value"]:
-            session = row["value"].strip()
-    except Exception:
-        session = None
-
-    return app_key, session
-
-# === PATCH END ===
-
-
 
 # 🧩 Monkey-patch safeguard:
 # Any accidental import of auto_conn within this module will redirect here.
@@ -907,26 +855,6 @@ def _close_parents_children() -> int:
     return updated
 
 # === PATCH END ===============================================================
-
-    # ======================================================================
-    # 📍 PATCH 3 — EventSync for cascaded child settlements
-    # 🔎 SEARCH: "for k in kids:"
-    # 📆 PATCHED: 2026-02-10
-    # ======================================================================
-
-    try:
-        _emit_settlement_event("child_settled", {
-            "marketId": p["marketId"],
-            "selectionId": p["selectionId"],
-            "parent_id": p["id"],
-            "child_id": k["id"],
-            "net_pl": float(p["net_pl"] or 0.0),
-        })
-    except Exception as e:
-        print(f"[EventSync][child_settled] warn: {e}")
-
-    return updated
-# === PATCH END ===
 
 # =============================================================================
 # 📍 TARGET: engines/live/settlements.py
@@ -2298,30 +2226,27 @@ def _run_single_settlement_cycle():
 
         print(f"[settlements] fetched clearedOrders total={total}")
 
-        # --- METADATA PHASE (THIS WAS MISSING IN LIVE) ---
-        # ✅ Instead, read winners ONLY from settlements DB
+        # --------------------------------------------------------------
+        # CLOSED MARKETS SNAPSHOT (DB-TRUTHFUL, NO METADATA FETCH)
+        # --------------------------------------------------------------
         with connect_db(settlements_db_path()) as con:
-            rows = con.execute("""
+            winners = con.execute(
+                """
                 SELECT marketId, selectionId
                 FROM bf_market_book
                 WHERE status='CLOSED'
-            """).fetchall()
+                """
+            ).fetchall()
 
-        winners = [
-            (r["marketId"], r["selectionId"])
-            for r in rows
-        ]
-
-            print(f"[settlements] metadata upserted: catalogue={cats}, book={books}")
-        else:
-            print("[settlements] no markets found for metadata fetch")
+        if not winners:
+            print("[settlements] no closed markets found this cycle")
 
     except Exception as e:
         print(f"[settlements] fetch failed: {e}")
         return  # SAFETY EXIT
 
     # ------------------------------------------------------------------
-    # reconcile
+    # RECONCILE INTO AUTO DB
     # ------------------------------------------------------------------
     if total > 0:
         try:
@@ -2331,19 +2256,22 @@ def _run_single_settlement_cycle():
             print(f"[settlements] reconcile failed: {e}")
 
     # ------------------------------------------------------------------
-    # Update Bank State
+    # BANK STATE SYNC (REALIZED PNL)
     # ------------------------------------------------------------------
-    from engines.live import bank_state
-    bank_state.reconcile_realized_pnl_from_orders()
+    try:
+        bank_state.reconcile_realized_pnl_from_orders()
+    except Exception as e:
+        print(f"[settlements] bank_state sync failed: {e}")
 
     # ------------------------------------------------------------------
-    # expire closed markets
+    # EXPIRE CLOSED MARKETS
     # ------------------------------------------------------------------
     try:
         expired = close_settled_markets()
         print(f"[settlements] expired={expired}")
     except Exception as e:
         print(f"[settlements] expire failed: {e}")
+
 
 
 
