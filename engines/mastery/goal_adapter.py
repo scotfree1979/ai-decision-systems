@@ -221,8 +221,9 @@ def print_trade_outcome_summary():
         print(f"  Total parents : {s['total']}")
         print(f"  Good (hedged) : {s['good']}")
         print(f"  Bad           : {s['bad']}")
-        print(f"  Win rate      : {s['win_rate']:.3f}")
-        print(f"  Matched ratio : {s['matched_ratio']:.3f}")
+        print(f"  Win rate      : {s['win_rate']*100:.1f}%")
+        print(f"  Matched ratio : {s['matched_ratio']*100:.1f}%")
+
 
     print_trade_outcome_summary.__wrapped__ = True  # marker
 
@@ -450,37 +451,40 @@ def compute_historical_performance():
         "stats": stats,
     }
 
-
 # === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:compute_live_goals
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-01-04 — historical-weighted learning signal
+# 📆 PATCHED: 2026-01-11 — align live inputs with dashboard truth
 # =======================================================================
 
-from gui.dashboard_data import _live_realized_today
+from gui.dashboard_data import kpi_tiles
 
 def compute_live_goals():
     """
-    Returns learning-aligned metrics:
-      • live_pnl        → settlement-verified (today)
-      • win_rate        → weighted historical
-      • matched_ratio   → weighted historical
-
-    This removes today-only noise from learning.
+    Live GoalAdapter inputs (dashboard-aligned):
+      • live_pnl        → dashboard 'today'
+      • win_rate        → dashboard win_pct_mkt (percent → ratio)
+      • matched_ratio   → existing matched logic (today)
     """
 
-    try:
-        live_pnl = float(_live_realized_today() or 0.0)
-    except Exception:
-        live_pnl = 0.0
+    # --- dashboard truth ---
+    kpis = kpi_tiles(source="LIVE")
 
-    perf = compute_historical_performance()
+    live_pnl = float(kpis.get("today", 0.0))
+
+    # dashboard provides percent (e.g. 33.3), convert to ratio
+    win_rate = float(kpis.get("win_pct_mkt", 0.0)) / 100.0
+
+    # keep existing matched calculation (already correct ≈ 0.55 today)
+    matched_ratio = _matched_ratio_today()
 
     return (
         live_pnl,
-        perf["win_rate"],
-        perf["matched_ratio"],
+        win_rate,
+        matched_ratio,
     )
+
+# === PATCH END =========================================================
+
 
 
 # === PATCH START =======================================================
