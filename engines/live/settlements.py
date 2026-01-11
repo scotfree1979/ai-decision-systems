@@ -2238,6 +2238,13 @@ def start_settlement_daemon(interval_s: int = 300):
     t.start()
     print(f"[settlements-loop] daemon started (interval={interval_s}s)")
 
+# ======================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def _run_single_settlement_cycle():
+# 🎯 ACTION: Make reconciliation UNCONDITIONAL
+# 📆 PATCHED: 2026-03-11 — ensure lifecycle always converges in LIVE
+# ======================================================================
+
 def _run_single_settlement_cycle():
     to_dt = datetime.now(timezone.utc)
     from_iso = (to_dt - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2246,7 +2253,7 @@ def _run_single_settlement_cycle():
     print(f"[settlements] window {from_iso} → {to_iso}")
 
     # ------------------------------------------------------------------
-    # API fetch (MATCHES CLI `fetch --with-meta` BEHAVIOUR)
+    # API fetch (may return zero rows)
     # ------------------------------------------------------------------
     try:
         total = 0
@@ -2257,34 +2264,18 @@ def _run_single_settlement_cycle():
 
         print(f"[settlements] fetched clearedOrders total={total}")
 
-        # --------------------------------------------------------------
-        # CLOSED MARKETS SNAPSHOT (DB-TRUTHFUL, NO METADATA FETCH)
-        # --------------------------------------------------------------
-        with connect_db(settlements_db_path()) as con:
-            winners = con.execute(
-                """
-                SELECT marketId
-                FROM bf_market_book
-                WHERE status='CLOSED'
-                """
-            ).fetchall()
-
-        if not winners:
-            print("[settlements] no closed markets found this cycle")
-
     except Exception as e:
         print(f"[settlements] fetch failed: {e}")
-        return  # SAFETY EXIT
+        return  # SAFETY EXIT — do not attempt reconcile if fetch exploded
 
     # ------------------------------------------------------------------
-    # RECONCILE INTO AUTO DB
+    # 🔑 UNCONDITIONAL RECONCILIATION (FIX)
     # ------------------------------------------------------------------
-    if total > 0:
-        try:
-            updated, _ = reconcile_orders()
-            print(f"[settlements] reconciled={updated}")
-        except Exception as e:
-            print(f"[settlements] reconcile failed: {e}")
+    try:
+        updated, _ = reconcile_orders()
+        print(f"[settlements] reconciled={updated}")
+    except Exception as e:
+        print(f"[settlements] reconcile failed: {e}")
 
     # ------------------------------------------------------------------
     # BANK STATE SYNC (REALIZED PNL)
@@ -2302,8 +2293,6 @@ def _run_single_settlement_cycle():
         print(f"[settlements] expired={expired}")
     except Exception as e:
         print(f"[settlements] expire failed: {e}")
-
-
 
 
 # === PATCH START ===

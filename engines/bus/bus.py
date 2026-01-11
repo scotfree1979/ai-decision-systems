@@ -295,22 +295,23 @@ class DecisionBus:
 
     def _run_legacy_pipeline(self, base_ctx, engine_report):
         """
-        LEGACY pipeline — helper-driven, no filtering.
+        LEGACY pipeline — helper-driven, letter-fanned.
 
         Contract:
         - Helper defines ALL runnable (mid, sid)
-        - BUS builds ctx
+        - BUS builds ctx ONCE per (mid, sid)
+        - BUS fans ctx across ALL legacy letters
         - Mastery decides
         """
         from engines.legacy_snapshot_helper import get_legacy_snapshot
-        import engines.mastery.mastery_policy as mp
+        from engines.mastery.mastery_policy import plan_for_strategy
 
         plans = []
 
         try:
             snapshot = get_legacy_snapshot()
-        except Exception as e:
-            _record_reason("LEGACY", "helper_error")
+        except Exception:
+            _record_reason(engine_report, "LEGACY", "helper_error")
             return plans
 
         engine_report["LEGACY"]["evaluated"] = True
@@ -322,49 +323,44 @@ class DecisionBus:
             if not mid or not sid:
                 continue
 
-            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-            if not ctx:
+            ctx_base = self._build_ctx_for_market(base_ctx, mid, sid)
+            if not ctx_base:
                 continue
 
-            # 🔑 AUTHORITATIVE PX FROM HELPER
-            ctx["px"] = row.get("odds")
-            ctx["odds"] = row.get("odds")
-            ctx["back"] = row.get("back")
-            ctx["lay"] = row.get("lay")
+            # Authoritative odds from helper
+            ctx_base["px"] = row.get("odds")
+            ctx_base["odds"] = row.get("odds")
+            ctx_base["back"] = row.get("back")
+            ctx_base["lay"] = row.get("lay")
+            ctx_base["runner_band"] = row.get("band")
+            ctx_base["is_fav"] = row.get("is_favourite")
 
-            ctx["runner_band"] = row.get("band")
-            ctx["is_fav"] = row.get("is_favourite")
+            for letter in self.ALLOWED_LEGACY_LETTERS:
+                ctx = dict(ctx_base)
+                ctx["letter"] = letter
 
-            try:
-                plan = plan_for_strategy(dict(ctx))
+                try:
+                    res = plan_for_strategy(letter, ctx)
 
-                if not plan:
-                    _record_reason(engine_report, "LEGACY", "no_strategy")
-                    continue
+                    if not res:
+                        _record_reason(engine_report, "LEGACY", "no_signal")
+                        continue
 
-                res = mp.propose_trade(dict(plan))
+                    if res.get("enter"):
+                        plan = dict(res)
+                        plan["engine"] = "LEGACY"
+                        plans.append(("LEGACY", plan, ctx))
+                        engine_report["LEGACY"]["fired"] += 1
+                    else:
+                        _record_reason(engine_report, "LEGACY", res.get("why"))
 
-                if res is None:
-                    _record_reason(engine_report, "LEGACY", "no_signal")
-                    continue
-
-                if res.get("enter"):
-                    res = dict(res)
-                    res["engine"] = "LEGACY"
-                    plans.append(("LEGACY", res, ctx))
-                    engine_report["LEGACY"]["fired"] += 1
-                else:
-                    _record_reason(engine_report, "LEGACY", res.get("why"))
-
-            except Exception as e:
-                engine_report["LEGACY"]["note"] = f"mastery_error:{e}"
+                except Exception as e:
+                    _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
 
         if engine_report["LEGACY"]["fired"] == 0:
             _record_reason(engine_report, "LEGACY", "no_signal")
 
         return plans
-
-
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
