@@ -140,57 +140,36 @@ def _auto_local_conn(timeout: float = 8.0) -> sqlite3.Connection:
         pass
     return con
 
-def _resolve_betfair_creds_localonly() -> tuple[str|None, str|None]:
-    """
-    Settlements must read the SAME credential keys that GUI + live_router use.
-    Always read LOCAL autoscalp_gui.db directly.
-    """
-    app_key = None
-    session = None
+def _resolve_betfair_creds_localonly() -> tuple[str | None, str | None]:
+    from engines.config_paths import autoscalp_db_path
+    import sqlite3
 
-    try:
-        import sqlite3
-        from engines.config_paths import autoscalp_db
-        path = autoscalp_db()   # always LOCAL, never LiveCache
-        con = sqlite3.connect(path)
-        con.row_factory = sqlite3.Row
+    con = sqlite3.connect(autoscalp_db_path(), timeout=6)
+    con.row_factory = sqlite3.Row
 
-        # --- Unified key list (GUI + live_router + feeder) ---
-        app_keys = (
-            'app_key','APP_KEY','bf_app_key','betfair_app_key'
-        )
-        session_keys = (
-            'session','session_token','betfair_session','betfair_session_token','x-authentication'
-        )
-
-        # APP KEY
+    def _get(keys):
+        q = ",".join("?" * len(keys))
         row = con.execute(
-            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(app_keys))}) "
-            "ORDER BY updated_at DESC LIMIT 1",
-            tuple(k.lower() for k in app_keys)
+            f"""
+            SELECT value
+              FROM app_kv
+             WHERE LOWER(key) IN ({q})
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """,
+            [k.lower() for k in keys],
         ).fetchone()
-        if row and row["value"]:
-            app_key = row["value"]
+        return row["value"] if row and row["value"] else None
 
-        # SESSION TOKEN
-        row = con.execute(
-            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(session_keys))}) "
-            "ORDER BY updated_at DESC LIMIT 1",
-            tuple(k.lower() for k in session_keys)
-        ).fetchone()
-        if row and row["value"]:
-            session = row["value"]
+    app_key = _get(("betfair_app_key", "app_key", "app_key_live"))
+    session = _get(("betfair_session_token", "session_token", "session"))
 
-        con.close()
-    except Exception:
-        pass
+    con.close()
 
-    # fallbacks unchanged...
-
-    return (app_key.strip() if isinstance(app_key,str) else app_key,
-            session.strip() if isinstance(session,str) else session)
-# === PATCH END ===
-
+    return (
+        app_key.strip() if isinstance(app_key, str) else None,
+        session.strip() if isinstance(session, str) else None,
+    )
 
 
 # 🧩 Monkey-patch safeguard:
@@ -1123,7 +1102,7 @@ class BetfairClient:
     API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 
     def __init__(self):
-        ak, ss = _resolve_betfair_creds_localonly()
+        ak, ss = _resolve_betfair_creds()
         if not ak or not ss:
             raise RuntimeError("Missing Betfair APP_KEY / SESSION_TOKEN")
 
