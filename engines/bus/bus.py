@@ -915,7 +915,7 @@ class DecisionBus:
         except Exception as e:
             _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
 
-
+    return plans
     # ======================================================================
     # analytics_report() — unchanged
     # ======================================================================

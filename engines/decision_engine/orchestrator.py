@@ -3546,13 +3546,18 @@ def start_live_loop(*args, **kwargs):
             print("[BudgetManager] allocations initialised (no diagnostics)")
 
         # 2️⃣ Now BankState can safely initialise STATIC pots using correct allocations
-        from engines.live import bank_state, start_bankstate_reporter
+        from engines.live import bank_state
         bank_state.init_bank_state()
-        start_bankstate_reporter(60)      
+        bank_state.start_bankstate_reporter(60)      
         try:
-            pots = bank_state.get_daily_pots()
-            total = bank_state.get_balance()
-            print(f"[BankState] initialised pots → {pots} total={total:.2f}")
+            pots  = bank_state.get_engine_pots()
+            used  = bank_state.get_engine_used_map()
+            avail = bank_state.get_engine_available_map()
+            open_exp = bank_state.get_open_exposure()
+            print(
+                f"[BankState] initialised "
+                f"pots={pots} used={used} avail={avail} open={open_exp:.2f}"
+            )
         except Exception:
             print("[BankState] initialised (no diagnostics)")
 
