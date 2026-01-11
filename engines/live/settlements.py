@@ -140,6 +140,58 @@ def _auto_local_conn(timeout: float = 8.0) -> sqlite3.Connection:
         pass
     return con
 
+def _resolve_betfair_creds_localonly() -> tuple[str|None, str|None]:
+    """
+    Settlements must read the SAME credential keys that GUI + live_router use.
+    Always read LOCAL autoscalp_gui.db directly.
+    """
+    app_key = None
+    session = None
+
+    try:
+        import sqlite3
+        from engines.config_paths import autoscalp_db
+        path = autoscalp_db()   # always LOCAL, never LiveCache
+        con = sqlite3.connect(path)
+        con.row_factory = sqlite3.Row
+
+        # --- Unified key list (GUI + live_router + feeder) ---
+        app_keys = (
+            'app_key','APP_KEY','bf_app_key','betfair_app_key'
+        )
+        session_keys = (
+            'session','session_token','betfair_session','betfair_session_token','x-authentication'
+        )
+
+        # APP KEY
+        row = con.execute(
+            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(app_keys))}) "
+            "ORDER BY updated_at DESC LIMIT 1",
+            tuple(k.lower() for k in app_keys)
+        ).fetchone()
+        if row and row["value"]:
+            app_key = row["value"]
+
+        # SESSION TOKEN
+        row = con.execute(
+            f"SELECT value FROM app_kv WHERE LOWER(key) IN ({','.join('?'*len(session_keys))}) "
+            "ORDER BY updated_at DESC LIMIT 1",
+            tuple(k.lower() for k in session_keys)
+        ).fetchone()
+        if row and row["value"]:
+            session = row["value"]
+
+        con.close()
+    except Exception:
+        pass
+
+    # fallbacks unchanged...
+
+    return (app_key.strip() if isinstance(app_key,str) else app_key,
+            session.strip() if isinstance(session,str) else session)
+# === PATCH END ===
+
+
 
 # 🧩 Monkey-patch safeguard:
 # Any accidental import of auto_conn within this module will redirect here.
@@ -2281,49 +2333,78 @@ def _run_single_settlement_cycle():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def start_winners_daemon(interval_s: int = 5):
     """
-    Background loop that polls Betfair for recently-settled markets,
-    extracts winners, and updates runner_form_canonical in settlements.db.
-    Runs indefinitely every <interval_s> seconds.
+    Background loop that extracts winners from bf_market_book.resultJson.
+    Schema-safe: does NOT assume runner-level columns.
     """
+
     def _loop():
         while True:
             try:
-                to_dt = datetime.now(timezone.utc)
-                from_dt = to_dt - timedelta(minutes=5)
-                from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                to_iso   = to_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 with connect_db(settlements_db_path()) as con:
-                    winners = con.execute("""
-                        SELECT marketId, selectionId
+                    rows = con.execute("""
+                        SELECT marketId, resultJson
                         FROM bf_market_book
                         WHERE status='CLOSED'
+                          AND resultJson IS NOT NULL
                     """).fetchall()
 
-                if winners:
-                    with connect_db(settlements_db_path()) as con:
-                        for mid, sid in winners:
+                if not rows:
+                    time.sleep(interval_s)
+                    continue
+
+                with connect_db(settlements_db_path()) as con:
+                    for r in rows:
+                        mid = r["marketId"]
+                        try:
+                            data = json.loads(r["resultJson"] or "[]")
+                        except Exception:
+                            continue
+
+                        # Betfair resultJson = list of runners
+                        for runner in data:
+                            sid = runner.get("selectionId")
+                            status = runner.get("status")
+
+                            # Winner = ACTIVE runner with WINNER status
+                            if not sid or status not in ("WINNER", "PLACED"):
+                                continue
+
                             con.execute("""
                                 INSERT INTO runner_form_canonical(
-                                    marketId, selectionId, day, status, profit, runs, wins, win_rate
-                                ) VALUES (?, ?, date('now','utc'), 'WIN', 1.0, 1, 1, 1.0)
+                                    marketId,
+                                    selectionId,
+                                    day,
+                                    status,
+                                    profit,
+                                    runs,
+                                    wins,
+                                    win_rate,
+                                    last_seen
+                                ) VALUES (
+                                    ?, ?, date('now','utc'),
+                                    'WIN', 1.0, 1, 1, 1.0,
+                                    datetime('now','utc')
+                                )
                                 ON CONFLICT(marketId, selectionId)
                                 DO UPDATE SET
                                     runs = runs + 1,
                                     wins = wins + 1,
                                     win_rate = ROUND(1.0 * wins / runs, 3),
                                     last_seen = datetime('now','utc')
-                            """, (mid, sid))
-                        con.commit()
-                    print(f"[winners-daemon] updated {len(winners)} winners → runner_form_canonical")
+                            """, (mid, str(sid)))
+
+                    con.commit()
+
+                print(f"[winners-daemon] processed {len(rows)} closed markets")
+
             except Exception as e:
                 print(f"[winners-daemon] warn: {e}")
+
             time.sleep(interval_s)
 
     t = threading.Thread(target=_loop, name="WinnersDaemon", daemon=True)
     t.start()
     print(f"[winners-daemon] started (interval={interval_s}s)")
-# === PATCH END ===
-
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/settlements.py (__main__ guard)
