@@ -444,16 +444,22 @@ SPRINT = {
                 "Freeze schema + tag v8.0.0"
             ]
         },
+         }
 
 def show_progress():
     print(f"\nAUTO-SCALP MASTERY DASHBOARD v{SPRINT['version']}")
     print("=" * 60)
-    for name, data in SPRINT["phases"].items():
+
+    for name, data in SPRINT.items():
+        if not name.startswith("Phase"):
+            continue
+
         print(f"{name}: {data['status']}")
-        if "tasks" in data:
-            for t in data["tasks"]:
-                print(f"   - {t}")
+        for t in data.get("tasks", []):
+            print(f"   - {t}")
+
     print("\nCurrent phase:", SPRINT["current_phase"])
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
