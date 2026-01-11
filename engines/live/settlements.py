@@ -2263,7 +2263,7 @@ def _run_single_settlement_cycle():
         with connect_db(settlements_db_path()) as con:
             winners = con.execute(
                 """
-                SELECT marketId, selectionId
+                SELECT marketId
                 FROM bf_market_book
                 WHERE status='CLOSED'
                 """
