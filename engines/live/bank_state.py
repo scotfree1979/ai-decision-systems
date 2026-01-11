@@ -53,6 +53,91 @@ def init_bank_state():
     except Exception as e:
         print(f"[BankState][WARN] init failed: {e}")
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: end of file
+# 🧩 ACTION: ADD OBSERVABILITY REPORT LOOP (READ-ONLY)
+# 📆 PATCHED: 2026-01-11 — BankState minute telemetry (pots / used / available)
+#
+# PURPOSE:
+# - Provide live visibility during runtime smoke tests
+# - Verify exposure vs pots behaviour in real time
+# - NO execution logic
+# - NO state mutation
+#
+# SAFETY:
+# - Read-only
+# - Daemon thread
+# - Never blocks trading
+# ======================================================================================================
+
+import threading
+import time
+
+_REPORT_THREAD = None
+
+def _bankstate_report_loop(interval_s: int = 60):
+    """
+    Periodic read-only BankState report.
+    Prints engine pots, used, available, and total open exposure.
+    """
+    while True:
+        try:
+            with _LOCK:
+                divisor = _effective_market_count()
+                open_exp = _clamp(_OPEN_EXPOSURE)
+
+                now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+
+                print(
+                    f"[BANKSTATE][REPORT] t={now} "
+                    f"divisor={divisor} "
+                    f"open={open_exp:.2f}"
+                )
+
+                for engine in sorted(_ENGINE_POTS.keys()):
+                    pot   = _ENGINE_POTS.get(engine, 0.0)
+                    used  = _ENGINE_USED.get(engine, 0.0)
+                    avail = get_engine_available(engine)
+
+                    print(
+                        f"  {engine:<15} "
+                        f"pot={pot:.2f} "
+                        f"used={used:.2f} "
+                        f"avail={avail:.2f}"
+                    )
+
+        except Exception as e:
+            print(f"[BankState][REPORT][WARN] {e}")
+
+        time.sleep(interval_s)
+
+
+def start_bankstate_reporter(interval_s: int = 60):
+    """
+    Start the BankState observability reporter.
+    Safe to call multiple times (singleton).
+    """
+    global _REPORT_THREAD
+
+    try:
+        if _REPORT_THREAD and _REPORT_THREAD.is_alive():
+            return
+    except Exception:
+        pass
+
+    t = threading.Thread(
+        target=_bankstate_report_loop,
+        args=(int(interval_s),),
+        name="BankStateReporter",
+        daemon=True,
+    )
+    _REPORT_THREAD = t
+    t.start()
+
+    print(f"[BankState] observability reporter started (interval={interval_s}s)")
+
+
 
 # -------------------------------------------------------------------
 # SIMULATION MODE (OFF BY DEFAULT)
