@@ -316,7 +316,7 @@ def close_settled_markets() -> int:
         o.commit()
 
     print(f"[settlements] expired all orders in {len(mids)} closed markets → {closed} rows updated")
-    return closed
+
 
     # ======================================================================
     # 📍 PATCH 4 — EventSync for market expiry settlement
@@ -1257,9 +1257,12 @@ class BetfairClient:
 
 
     def list_market_book(
+
         self,
         market_ids: List[str],
     ) -> List[Dict[str, Any]]:
+        if not market_ids:
+            return []  # HARD GUARD
         params = {
             "marketIds": market_ids,
             "priceProjection": {
@@ -2296,16 +2299,19 @@ def _run_single_settlement_cycle():
         print(f"[settlements] fetched clearedOrders total={total}")
 
         # --- METADATA PHASE (THIS WAS MISSING IN LIVE) ---
+        # ✅ Instead, read winners ONLY from settlements DB
         with connect_db(settlements_db_path()) as con:
-            market_ids = [
-                r["marketId"]
-                for r in con.execute(
-                    "SELECT DISTINCT marketId FROM bf_cleared_orders WHERE marketId IS NOT NULL"
-                )
-            ]
+            rows = con.execute("""
+                SELECT marketId, selectionId
+                FROM bf_market_book
+                WHERE status='CLOSED'
+            """).fetchall()
 
-        if market_ids:
-            cats, books = fetch_market_metadata_api(market_ids)
+        winners = [
+            (r["marketId"], r["selectionId"])
+            for r in rows
+        ]
+
             print(f"[settlements] metadata upserted: catalogue={cats}, book={books}")
         else:
             print("[settlements] no markets found for metadata fetch")
@@ -2358,14 +2364,13 @@ def start_winners_daemon(interval_s: int = 5):
                 from_dt = to_dt - timedelta(minutes=5)
                 from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 to_iso   = to_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                client = BetfairClient()
-                books = client.list_market_book([])  # empty list ⇒ recent markets handled by API
-                winners = []
-                for b in books or []:
-                    mid = b.get("marketId")
-                    for r in b.get("runners", []):
-                        if r.get("status") == "WINNER":
-                            winners.append((mid, str(r.get("selectionId"))))
+                with connect_db(settlements_db_path()) as con:
+                    winners = con.execute("""
+                        SELECT marketId, selectionId
+                        FROM bf_market_book
+                        WHERE status='CLOSED'
+                    """).fetchall()
+
                 if winners:
                     with connect_db(settlements_db_path()) as con:
                         for mid, sid in winners:
