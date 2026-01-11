@@ -104,8 +104,8 @@ def _record_reason(engine_report: dict, engine: str, reason: str | None):
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: def bus_snapshot():
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-01-04 — DB-truthful BUS snapshot (LIVE-correct)
+# 🧩 ACTION: ADD missing lifecycle counters (children_matched, hedge_ops, stop_ops)
+# 📆 PATCHED: 2026-01-11 — BUS snapshot lifecycle correctness (read-only)
 # ======================================================================================================
 
 def bus_snapshot():
@@ -114,9 +114,9 @@ def bus_snapshot():
 
     Canonical rules:
     - LIVE mode only
-    - Today only (UTC)
-    - Exposure = computed liability (not stored fields)
-    - PnL = orders.net_pl / realized_pnl
+    - Today-independent (current lifecycle state)
+    - Exposure = open parent liability only
+    - PnL = realised only
     """
 
     from engines.config_paths import open_auto_db
@@ -137,7 +137,6 @@ def bus_snapshot():
     con = None
     try:
         con = open_auto_db(rw=False)
-        con.row_factory = None
 
         # --------------------------------------------------
         # Engine counts (LIVE parents opened today)
@@ -155,7 +154,7 @@ def bus_snapshot():
             snap["engines"][eng] = int(n)
 
         # --------------------------------------------------
-        # Parent / child counts (LIVE, today)
+        # Parent / child lifecycle counts (LIVE, open only)
         # --------------------------------------------------
         snap["parents_opened"] = con.execute("""
             SELECT COUNT(*)
@@ -175,7 +174,9 @@ def bus_snapshot():
               AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
         """).fetchone()[0]
 
-
+        # --------------------------------------------------
+        # Children fully matched (completed lifecycle)
+        # --------------------------------------------------
         snap["children_matched"] = con.execute("""
             SELECT COUNT(*)
             FROM orders
@@ -201,8 +202,8 @@ def bus_snapshot():
             FROM orders
             WHERE role='PARENT'
               AND UPPER(COALESCE(mode,''))='LIVE'
-              AND entry_status='MATCHED'
-              AND (exit_status IS NULL OR exit_status!='MATCHED')
+              AND UPPER(entry_status)='MATCHED'
+              AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
         """).fetchone()
 
         snap["exposure"] = float(row[0] or 0.0)
@@ -214,15 +215,37 @@ def bus_snapshot():
             SELECT COALESCE(SUM(net_pl),0)
             FROM orders
             WHERE UPPER(COALESCE(mode,''))='LIVE'
-              AND exit_status='MATCHED'
+              AND UPPER(exit_status)='MATCHED'
               AND date(closed_at)=date('now','utc')
         """).fetchone()
 
         snap["realised"] = float(row[0] or 0.0)
 
         # --------------------------------------------------
-        # Unsettled PnL — intentionally conservative
-        # (pre-settlement mark-to-market is misleading)
+        # Risk ops (matched CHILD exits)
+        # --------------------------------------------------
+        snap["risk_hedges"] = con.execute("""
+            SELECT COUNT(*)
+            FROM orders
+            WHERE role='CHILD'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND UPPER(exit_kind) IN ('HEDGE','H')
+              AND UPPER(entry_status)='MATCHED'
+        """).fetchone()[0]
+
+        snap["risk_stops"] = con.execute("""
+            SELECT COUNT(*)
+            FROM orders
+            WHERE role='CHILD'
+              AND UPPER(COALESCE(mode,''))='LIVE'
+              AND UPPER(exit_kind)='STOPLOSS'
+              AND UPPER(entry_status)='MATCHED'
+        """).fetchone()[0]
+
+        snap["stoploss_fired"] = snap["risk_stops"]
+
+        # --------------------------------------------------
+        # Unsettled PnL intentionally disabled
         # --------------------------------------------------
         snap["unsettled"] = 0.0
 
@@ -237,7 +260,6 @@ def bus_snapshot():
             pass
 
     return snap
-
 class DecisionBus:
     ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F"}
     def __init__(self):
