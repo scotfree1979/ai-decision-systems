@@ -1535,10 +1535,55 @@ def _fold_in_live_state(df: pd.DataFrame):
         print(f"[meta-reinforce] warn: {e}")
         return df
 # ========================================================================
+# =====================================================================
+# 🧠 Brain Readiness Evaluation
+# =====================================================================
+
+def _evaluate_brain_readiness(con) -> str:
+    """
+    Classify collective readiness based on recent brain_state_v7 history.
+
+    Returns one of:
+      LEARNING
+      STABILISING
+      STABLE
+      READY_FOR_EXPANSION
+    """
+
+    rows = con.execute("""
+        SELECT coherence, adjustment
+          FROM brain_state_v7
+         WHERE layer='GLOBAL'
+         ORDER BY recorded_at DESC
+         LIMIT 5;
+    """).fetchall()
+
+    if not rows:
+        return "LEARNING"
+
+    coherences = [float(r["coherence"] or 0.0) for r in rows]
+    adjustments = [abs(float(r["adjustment"] or 0.0)) for r in rows]
+
+    mean_coh = sum(coherences) / len(coherences)
+    mean_adj = sum(adjustments) / len(adjustments)
+
+    # Conservative, first-pass thresholds (can be tuned later)
+    if mean_coh < 0.55:
+        return "LEARNING"
+
+    if mean_coh < 0.70:
+        return "STABILISING"
+
+    if mean_coh >= 0.70 and mean_adj > 0.05:
+        return "STABLE"
+
+    # Sustained coherence + low divergence
+    if mean_coh >= 0.75 and mean_adj <= 0.05:
+        return "READY_FOR_EXPANSION"
+
+    return "STABLE"
 
 import shutil, os
-
-
 
 # === PATCH START ===
 # 📍 TARGET: engines/mastery/train_mastery_v7.py : main()
@@ -1648,8 +1693,6 @@ def main(days:int=7, epochs:int=25):
         divergence=abs(0.42 - 0.35)
     )
 
-
-
     # Stage 7.5 — Brain coherence alignment (macro/global)
     from engines.mastery import brain_trainer
     print("\n[stage 7.5/8] Aligning brain coherence (macro/global)…")
@@ -1665,7 +1708,7 @@ def main(days:int=7, epochs:int=25):
 
     # Ensure previous brain_trainer writes are fully committed
     sqlite3.connect("data/mastery_v7.db").close()
-
+  
     # 🧠 attach both DBs (write→mastery_v7, read→autoscalp_gui)
     con = sqlite3.connect("data/mastery_v7.db", isolation_level=None)
     con.row_factory = sqlite3.Row
@@ -1677,6 +1720,122 @@ def main(days:int=7, epochs:int=25):
         brain_trainer.train_brain()
     except Exception as e:
         print(f"[brain] warn: brain_trainer failed ({e})")
+
+    # ======================================================================================================
+    # 📍 TARGET: engines/mastery/train_mastery_v7.py
+    # 🔎 ANCHOR: after MACRO brain coherence refresh (Stage 8A)
+    # 🧩 ACTION: REPLACE — derive MICRO POTs by engine (settlement truth)
+    # 📆 PATCHED: 2026-01-12 — restore engine-scoped Micro POTs (settlement-truth)
+    #
+    # RATIONALE:
+    # - cache_mastery_day does NOT contain engine or confidence
+    # - P&L must be COMPUTED, never read
+    # - MICRO POTs are split ONLY by engine
+    # - Uses settlement winners as ground truth
+    # ======================================================================================================
+
+    print("\n=== 🧠 MICRO POT derivation (by engine, settlement truth) ===")
+
+    con_gui = sqlite3.connect(autoscalp_db())
+    con_gui.row_factory = sqlite3.Row
+    cur = con_gui.cursor()
+
+    cur.execute("ATTACH DATABASE 'data/settlements.db' AS settle;")
+
+    rows = cur.execute("""
+        WITH winners AS (
+            SELECT
+                mb.marketId,
+                json_extract(r.value, '$.selectionId') AS selectionId
+            FROM settle.bf_market_book mb,
+                 json_each(mb.resultJson) r
+            WHERE
+                mb.status = 'CLOSED'
+                AND json_extract(r.value, '$.status') = 'WINNER'
+        ),
+
+        parent_orders AS (
+            SELECT
+                o.marketId,
+                o.selectionId,
+                o.engine,
+                UPPER(o.side)  AS side,
+                o.entry_odds   AS odds,
+                o.entry_stake AS stake
+            FROM orders o
+            WHERE
+                o.mode = 'LIVE'
+                AND (o.role IS NULL OR o.role = 'PARENT')
+                AND o.entry_status = 'MATCHED'
+        ),
+
+        runner_pnl AS (
+            SELECT
+                p.engine,
+                CASE
+                    WHEN p.side = 'BACK' AND w.selectionId IS NOT NULL
+                        THEN (p.odds - 1.0) * p.stake
+                    WHEN p.side = 'BACK' AND w.selectionId IS NULL
+                        THEN -p.stake
+                    WHEN p.side = 'LAY'  AND w.selectionId IS NOT NULL
+                        THEN -(p.odds - 1.0) * p.stake
+                    WHEN p.side = 'LAY'  AND w.selectionId IS NULL
+                        THEN p.stake
+                    ELSE 0.0
+                END AS pnl
+            FROM parent_orders p
+            LEFT JOIN winners w
+              ON w.marketId = p.marketId
+             AND w.selectionId = p.selectionId
+        )
+
+        SELECT
+            engine,
+            COUNT(*)            AS samples,
+            ROUND(SUM(pnl), 2)  AS total_pnl
+        FROM runner_pnl
+        GROUP BY engine;
+    """).fetchall()
+
+    cur.execute("DETACH DATABASE settle;")
+    con_gui.close()
+
+    # write results into brain_state_v7
+    con_brain = sqlite3.connect("data/mastery_v7.db")
+    cur_brain = con_brain.cursor()
+
+    for r in rows:
+        engine = r["engine"] or "UNKNOWN"
+        samples = int(r["samples"])
+        total_pnl = float(r["total_pnl"] or 0.0)
+
+        cur_brain.execute("""
+            INSERT INTO brain_state_v7(
+                layer, bucket, samples, total_pnl,
+                coherence, adjustment, notes
+            )
+            VALUES(?,?,?,?,?,?,?)
+        """, (
+            "MICRO",
+            engine,
+            samples,
+            total_pnl,
+            None,
+            None,
+            "engine-scoped micro pot (settlement truth)",
+        ))
+
+        print(
+            f"[micro-pot] {engine:<16} "
+            f"samples={samples:<6} "
+            f"pnl={total_pnl:>8.2f}"
+        )
+
+    con_brain.commit()
+    con_brain.close()
+
+    print("=== 🧠 MICRO POT derivation complete ===")
+
 
     # --- 8B. River / Forest live coherence -----------------------------------
     try:
@@ -1716,14 +1875,32 @@ def main(days:int=7, epochs:int=25):
                ROUND(adjustment,4) AS adj,notes,recorded_at
           FROM brain_state_v7
          WHERE layer='GLOBAL'
-      ORDER BY recorded_at DESC LIMIT 5;
+           AND coherence IS NOT NULL
+      ORDER BY recorded_at DESC
+         LIMIT 5;
     """).fetchall()
+
     if rows:
         print("Layer | Bucket | Samples | Coherence | ΔPrev | Label")
         print("-------|--------|----------|------------|--------|-----------")
         prev = rows[1]["coh"] if len(rows) > 1 else rows[0]["coh"]
-        delta = rows[0]["coh"] - prev
-        label = "IMPROVED" if delta > 0.01 else "DECLINED" if delta < -0.01 else "STABLE"
+        # ======================================================================
+        # 📍 TARGET: engines/mastery/train_mastery_v7.py
+        # 🔎 SEARCH: delta = rows[0]["coh"] - prev
+        # 🧩 ACTION: REPLACE BLOCK — NULL-safe GLOBAL coherence handling
+        # 📆 PATCHED: 2026-01-12 — GLOBAL coherence may be NULL (settlement-truth)
+        # ======================================================================
+
+        coh_now = rows[0]["coh"]
+        coh_prev = prev
+
+        if coh_now is None or coh_prev is None:
+            delta = 0.0
+            label = "N/A"
+        else:
+            delta = coh_now - coh_prev
+            label = "IMPROVED" if delta > 0.01 else "DECLINED" if delta < -0.01 else "STABLE"
+
         r = rows[0]
         print(f"{r['layer']:<6} | {r['bucket']:<6} | {r['samples']:>8} "
               f"| {r['coh']:>8.3f} | {delta:+6.3f} | {label}")
@@ -1832,8 +2009,31 @@ def main(days:int=7, epochs:int=25):
     except Exception as e:
         print(f"[brain] warn: history persist failed ({e})")
 
+
     con.execute("DETACH DATABASE live;")
     con.close()
+
+    # ------------------------------------------------------------------
+    # 🧠 Collective Readiness Declaration
+    # ------------------------------------------------------------------
+    try:
+        con_ready = sqlite3.connect("data/mastery_v7.db")
+        con_ready.row_factory = sqlite3.Row
+
+        readiness = _evaluate_brain_readiness(con_ready)
+        con_ready.close()
+
+        print("\n[BRAIN STATUS] 🧠 Collective readiness phase:")
+        print(f"[BRAIN STATUS] ▶ {readiness}")
+
+        if readiness == "READY_FOR_EXPANSION":
+            print("[BRAIN STATUS] ✅ System may accept additional agents")
+        else:
+            print("[BRAIN STATUS] ℹ️ Expansion not yet advised")
+
+    except Exception as e:
+        print(f"[BRAIN STATUS] ⚠️ readiness evaluation failed: {e}")
+
 
     print(f"\n[Mastery v7 Trainer] ✅ complete — {days}-day window, {epochs} epochs.\n")
 
@@ -1895,7 +2095,6 @@ def on_settlement_event(market_id: str, selection_id: str, pnl: float, success: 
     con.commit(); con.close()
     print(f"[river-live] Reinforced {market_id}:{selection_id} → conf={conf_value:.3f}")
 # === PATCH END ===
-
 
 if __name__ == "__main__":
     import argparse

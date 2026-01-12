@@ -10,86 +10,211 @@ and records alignment results into mastery_v7.db.
 import os, sqlite3, statistics, datetime
 from engines.config_paths import autoscalp_db
 
+# =====================================================================
+# 🧠 MICRO / MACRO POT DERIVATION (AUTHORITATIVE)
+# =====================================================================
 
-# === PATCH START ===
-# 📍 TARGET: engines/mastery/brain_trainer.py:train_brain
-# 📆 PATCHED: 2025-11-10Z — safe key access for sqlite3.Row
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def train_brain():
-    live_db  = autoscalp_db()
-    local_db = os.path.join(os.path.dirname(__file__), "../../data/mastery_v7.db")
-    con = sqlite3.connect(live_db); con.row_factory = sqlite3.Row
-    con.execute(f"ATTACH DATABASE '{local_db}' AS brain;")
+def _compute_engine_pots(con_gui: sqlite3.Connection) -> dict:
+    """
+    Compute GLOBAL + MICRO pots using settlement truth.
+    MICRO pots are split by engine only.
 
-    con.executescript("""
-        DROP VIEW IF EXISTS main.v_mastery_brain_macro;
-        CREATE VIEW main.v_mastery_brain_macro AS
+    Returns:
+        {
+          "GLOBAL": float,
+          "ENGINE": { engine_name: pnl }
+        }
+    """
+
+    cur = con_gui.cursor()
+
+    cur.execute("ATTACH DATABASE 'data/settlements.db' AS settle;")
+
+    rows = cur.execute("""
+        WITH winners AS (
+            SELECT
+                mb.marketId,
+                json_extract(r.value, '$.selectionId') AS selectionId
+            FROM settle.bf_market_book mb,
+                 json_each(mb.resultJson) r
+            WHERE
+                mb.status = 'CLOSED'
+                AND json_extract(r.value, '$.status') = 'WINNER'
+        ),
+
+        parent_orders AS (
+            SELECT
+                o.marketId,
+                o.selectionId,
+                o.engine,
+                UPPER(o.side)  AS side,
+                o.entry_odds   AS odds,
+                o.entry_stake AS stake
+            FROM orders o
+            WHERE
+                o.mode = 'LIVE'
+                AND (o.role IS NULL OR o.role = 'PARENT')
+                AND o.entry_status = 'MATCHED'
+        ),
+
+        runner_pnl AS (
+            SELECT
+                p.engine,
+                CASE
+                    WHEN p.side = 'BACK' AND w.selectionId IS NOT NULL
+                        THEN (p.odds - 1.0) * p.stake
+                    WHEN p.side = 'BACK' AND w.selectionId IS NULL
+                        THEN -p.stake
+                    WHEN p.side = 'LAY'  AND w.selectionId IS NOT NULL
+                        THEN -(p.odds - 1.0) * p.stake
+                    WHEN p.side = 'LAY'  AND w.selectionId IS NULL
+                        THEN p.stake
+                    ELSE 0.0
+                END AS pnl
+            FROM parent_orders p
+            LEFT JOIN winners w
+              ON w.marketId = p.marketId
+             AND w.selectionId = p.selectionId
+        )
+
         SELECT
-            bucket,
-            COUNT(*) AS samples,
-            ROUND(AVG(confidence),4) AS p1_mean,
-            ROUND(AVG(bucket_confidence),4) AS p2_mean,
-            ROUND(AVG(live_pnl_ratio),4) AS p3_mean,
-            ROUND(AVG(COALESCE(weight, weight_applied, 1.0)),4) AS weight
-        FROM mastery_posteriors
-        GROUP BY bucket;
-    """)
-    con.commit()
+            engine,
+            ROUND(SUM(pnl), 2) AS total_pnl
+        FROM runner_pnl
+        GROUP BY engine;
+    """).fetchall()
 
-    try:
-        lobes = con.execute("SELECT * FROM main.v_mastery_brain_macro").fetchall()
-        globals_ = con.execute("SELECT * FROM main.v_mastery_brain_global").fetchone()
-    except sqlite3.OperationalError as e:
-        print(f"[brain_trainer] ❌ view read failed: {e}")
-        con.close(); return
+    cur.execute("DETACH DATABASE settle;")
 
-    if not lobes or not globals_:
-        print("[brain_trainer] ⚠️ no brain data found — skipping.")
-        con.close(); return
+    engine_pots = {}
+    global_pnl = 0.0
 
-    import statistics, datetime
-    p1s = [float(r["p1_mean"] or 0.0) for r in lobes]
-    mean_p1 = statistics.mean(p1s) if p1s else 0.0
-    var_p1 = statistics.pstdev(p1s) if len(p1s) > 1 else 0.0
-    coherence = max(0.0, 1.0 - var_p1)
-    g_keys = globals_.keys()
-    g_p1 = float(globals_["p1_mean"] or 0.0) if "p1_mean" in g_keys else 0.0
-    adjustment = round(mean_p1 - g_p1, 4)
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    for r in rows:
+        engine = r["engine"] or "UNKNOWN"
+        pnl = float(r["total_pnl"] or 0.0)
+        engine_pots[engine] = pnl
+        global_pnl += pnl
 
-    if coherence > 0.7 and abs(adjustment) > 0.05:
-        payload = {"ts": now, "coherence": coherence, "adjustment": adjustment,
-                   "reason": "Brain–Overwatcher bridge pulse"}
-        from engines.mastery import event_sink
-        event_sink.emit("brain_plan", payload)
-        print(f"[brain_trainer] ⚡ emitted bridge_pulse (coh={coherence:.2f}, Δ={adjustment:+.3f})")
+    return {
+        "GLOBAL": round(global_pnl, 2),
+        "ENGINE": engine_pots
+    }
 
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS brain.brain_state_v7(
+# ======================================================================================================
+# 📍 TARGET: engines/mastery/brain_trainer.py
+# 🔎 SEARCH: def train_brain():
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-01-12 — restore engine-based lobes + settlement-truth pots
+#
+# RATIONALE:
+# - Old brain architecture expected "lobes"
+# - Lobes are now ENGINE families
+# - MONEY truth comes ONLY from settlements + orders
+# - BELIEF truth comes ONLY from mastery_posteriors
+# - Cache is NEVER used for P&L
+# ======================================================================================================
+
+def train_brain():
+    """
+    Authoritative Brain Trainer
+
+    Responsibilities:
+    - Compute settlement-truth GLOBAL + MICRO (engine) pots
+    - Persist pots into brain_state_v7
+    - Compute coherence ONLY from mastery_posteriors (belief-space)
+    """
+
+    # --------------------------------------------------
+    # Connections
+    # --------------------------------------------------
+    gui_db   = autoscalp_db()
+    brain_db = os.path.join(os.path.dirname(__file__), "../../data/mastery_v7.db")
+
+    con_gui = sqlite3.connect(gui_db)
+    con_gui.row_factory = sqlite3.Row
+
+    con_brain = sqlite3.connect(brain_db)
+    con_brain.row_factory = sqlite3.Row
+    cur_brain = con_brain.cursor()
+
+    # --------------------------------------------------
+    # Ensure brain_state_v7 exists
+    # --------------------------------------------------
+    cur_brain.execute("""
+        CREATE TABLE IF NOT EXISTS brain_state_v7(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             recorded_at TEXT DEFAULT (datetime('now','utc')),
-            layer TEXT,bucket TEXT,samples INTEGER,total_pnl REAL,
-            coherence REAL,adjustment REAL,notes TEXT
+            layer TEXT,
+            bucket TEXT,
+            samples INTEGER,
+            total_pnl REAL,
+            coherence REAL,
+            adjustment REAL,
+            notes TEXT
         );
     """)
 
-    total_pnl = float(globals_["total_pnl"]) if "total_pnl" in g_keys else 0.0
-    con.execute("""
-        INSERT INTO brain.brain_state_v7(layer,bucket,samples,total_pnl,coherence,adjustment,notes)
-        VALUES('GLOBAL','GLOBAL',?,?,?,?,?)
-    """, (globals_["samples"], total_pnl, coherence, adjustment, "global alignment"))
+    # --------------------------------------------------
+    # 1️⃣ SETTLEMENT-TRUTH POT DERIVATION (ENGINE = LOBE)
+    # --------------------------------------------------
+    pots = _compute_engine_pots(con_gui)
 
-    for r in lobes:
-        keys = r.keys()
-        total_pnl = float(r["total_pnl"]) if "total_pnl" in keys else 0.0
-        con.execute("""
-            INSERT INTO brain.brain_state_v7(layer,bucket,samples,total_pnl,coherence,adjustment,notes)
-            VALUES('MACRO',?,?,?,?,?,?)
-        """, (r["bucket"], r["samples"], total_pnl, coherence, adjustment, "lobe alignment"))
+    # GLOBAL pot
+    cur_brain.execute("""
+        INSERT INTO brain_state_v7
+        (layer, bucket, samples, total_pnl, coherence, adjustment, notes)
+        VALUES ('GLOBAL', 'GLOBAL', 0, ?, NULL, NULL, 'settlement-truth global pot')
+    """, (pots["GLOBAL"],))
 
-    con.commit(); con.close()
-    print(f"[brain_trainer] 🧠 coherence={coherence:.3f} Δ={adjustment:+.4f} ({len(lobes)} lobes synced)")
-# === PATCH END ===
+    # MICRO pots (engine-scoped lobes)
+    for engine, pnl in pots["ENGINE"].items():
+        cur_brain.execute("""
+            INSERT INTO brain_state_v7
+            (layer, bucket, samples, total_pnl, coherence, adjustment, notes)
+            VALUES ('MICRO', ?, 0, ?, NULL, NULL, 'engine-scoped settlement pot')
+        """, (engine, pnl))
+
+    # --------------------------------------------------
+    # 2️⃣ BELIEF-SPACE COHERENCE (NO MONEY)
+    # --------------------------------------------------
+    try:
+        rows = con_gui.execute("""
+            SELECT
+                bucket,
+                AVG(confidence)        AS river_mean,
+                AVG(bucket_confidence) AS forest_mean
+            FROM mastery_posteriors
+            GROUP BY bucket;
+        """).fetchall()
+    except Exception as e:
+        print(f"[brain_trainer] ⚠️ coherence skipped ({e})")
+        con_gui.close()
+        con_brain.commit()
+        con_brain.close()
+        return
+
+    if rows:
+        deltas = [
+            abs((r["river_mean"] or 0.5) - (r["forest_mean"] or 0.5))
+            for r in rows
+        ]
+        coherence = 1.0 - (sum(deltas) / len(deltas)) if deltas else 0.0
+
+        cur_brain.execute("""
+            INSERT INTO brain_state_v7
+            (layer, bucket, samples, total_pnl, coherence, adjustment, notes)
+            VALUES ('MACRO', 'COHERENCE', ?, NULL, ?, NULL, 'posterior belief coherence')
+        """, (len(rows), coherence))
+
+        print(f"[brain_trainer] 🧠 coherence={coherence:.3f}")
+
+    # --------------------------------------------------
+    # Cleanup
+    # --------------------------------------------------
+    con_gui.close()
+    con_brain.commit()
+    con_brain.close()
+
 
 
 if __name__ == "__main__":
