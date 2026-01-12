@@ -32,20 +32,39 @@ _LAST_HEARTBEAT = [0]
 # - No execution logic, telemetry only
 # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/brain/brain_listener.py
+# 🔎 SEARCH: def _brain_on_event(ev: dict):
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-06 — canonical EventSync normalisation for Brain telemetry
+#
+# LOCKED CONTRACT:
+# - Brain is telemetry-only
+# - No execution logic
+# - No strategy interpretation
+# - Only counts: parents, hedges, stoplosses, outcomes
+# ======================================================================================================
+
 def _brain_on_event(ev: dict):
     """
     Phase-1 Brain Listener
     ----------------------
-    Observes system events and builds internal state.
-    NEVER emits plans.
-    NEVER blocks execution.
+    Observes EventSync traffic and maintains internal telemetry.
+
+    Counts ONLY:
+      • Parent queued
+      • Hedge exits
+      • Stoploss exits
+      • Final outcomes (GOOD / BAD)
+
+    Everything else is ignored by design.
     """
 
     if not isinstance(ev, dict):
         return
 
     # --------------------------------------------------
-    # Normalise event name (router emits in two shapes)
+    # Normalise event name (emitters use `type` or `event`)
     # --------------------------------------------------
     etype = ev.get("type") or ev.get("event")
     if not etype:
@@ -53,7 +72,7 @@ def _brain_on_event(ev: dict):
 
     etype = str(etype).upper()
 
-    # store timeline
+    # store rolling timeline (debug only)
     _BRAIN_WINDOW.append(ev)
 
     # --------------------------------------------------
@@ -63,18 +82,34 @@ def _brain_on_event(ev: dict):
         _STATS["parents"] += 1
 
     # --------------------------------------------------
-    # Child lifecycle (hedge / stoploss)
+    # Child exits — HEDGE (many aliases)
     # --------------------------------------------------
-    elif etype == "HEDGE_EXIT":
+    elif etype in {
+        "HEDGE_EXIT",
+        "CHILD_MATCHED",
+        "GREENUP",
+        "GREENUP_ENFORCED",
+        "LEGACY_BOUNDARY_EXIT",
+    }:
         _STATS["children"] += 1
         _STATS["hedges"] += 1
 
-    elif etype == "STOPLOSS_EXIT":
+    # --------------------------------------------------
+    # Child exits — STOPLOSS (many aliases)
+    # --------------------------------------------------
+    elif etype in {
+        "STOPLOSS_EXIT",
+        "STOPLOSS",
+        "STOP_LOSS_TRIGGERED",
+        "STOP_LOSS_THRESHOLD_HIT",
+        "MSC_STOPLOSS_CLOSE",
+        "CHILD_STOPLOSS_CREATED",
+    }:
         _STATS["children"] += 1
         _STATS["stoploss"] += 1
 
     # --------------------------------------------------
-    # Outcome accounting
+    # Final outcome accounting (authoritative)
     # --------------------------------------------------
     elif etype == "PLAN_OUTCOME":
         outcome = str(ev.get("outcome") or "").upper()
@@ -88,7 +123,6 @@ def _brain_on_event(ev: dict):
     if now - _LAST_HEARTBEAT[0] > 30:
         _LAST_HEARTBEAT[0] = now
         _emit_brain_heartbeat()
-
 
 
 def _emit_brain_heartbeat():
