@@ -63,41 +63,60 @@ def _placement_worker_loop():
             con = open_auto_db(rw=True)
             con.row_factory = sqlite3.Row
 
+            # Attach BETS DB (required for marketStartTime)
+            try:
+                from engines.config_paths import bets_db
+                con.execute(
+                    f"ATTACH DATABASE '{bets_db()}' AS bets"
+                )
+            except Exception:
+                pass
+
             row = con.execute(
                 """
                 SELECT
-                    customerOrderRef,
-                    marketId,
-                    selectionId,
-                    side,
-                    entry_odds,
-                    entry_stake,
-                    engine,
-                    source,
-                    run_id
-                FROM orders
-                WHERE role='PARENT'
-                  AND entry_status='QUEUED'
+                    o.customerOrderRef,
+                    o.marketId,
+                    o.selectionId,
+                    o.side,
+                    o.entry_odds,
+                    o.entry_stake,
+                    o.engine,
+                    o.source,
+                    o.run_id,
+                    o.required_exposure
+                FROM orders o
+                LEFT JOIN bets.bets b
+                  ON b.marketId = o.marketId
+                WHERE o.role = 'PARENT'
+                  AND o.entry_status = 'QUEUED'
                 ORDER BY
-                    CASE engine
+                    CASE o.engine
                         WHEN 'MSC_INPLAY' THEN 1
                         WHEN 'MSC_RISK' THEN 2
                         WHEN 'LEGACY' THEN 3
                         WHEN 'MSC_EXPLORATORY' THEN 4
                         ELSE 9
                     END,
-                    CASE
-                        WHEN is_in_play = 1 THEN 0
-                        ELSE ABS(
-                            strftime('%s', marketStartTime) -
-                            strftime('%s', 'now')
-                        )
-                    END ASC,
-                    opened_at ASC
+                    ABS(
+                        strftime('%s', b.marketStartTime) -
+                        strftime('%s', 'now')
+                    ) ASC,
+                    o.opened_at ASC
                 LIMIT 1
                 """
             ).fetchone()
 
+            if row:
+                try:
+                    from engines.decision_engine.decide_once.scope import _SCOPE_STATE
+                    in_play_markets = set(_SCOPE_STATE.get("in_play", []))
+                    if row["marketId"] in in_play_markets:
+                        con.close()
+                        time.sleep(0.05)
+                        continue
+                except Exception:
+                    pass
 
             if row:
                 # Mark as PLACING immediately to avoid double-pick
@@ -195,13 +214,12 @@ def _canon_ids(d):
 # ------------------------------------------------------------------------------
 # Public enqueue API (used by BUS / router adapters)
 # ------------------------------------------------------------------------------
-def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
+def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str, float]:
     from engines.live import bank_state
 
     engine = ctx.get("engine")
     if not engine:
         raise RuntimeError("PLACEMENT INVARIANT VIOLATION: engine missing")
-
 
     try:
         stake = float(plan.get("size") or 0.0)
@@ -209,9 +227,8 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
         side  = str(plan.get("side") or "").upper()
 
         if stake <= 0 or odds <= 0:
-            return False, "invalid_stake_or_odds"
+            return False, "invalid_stake_or_odds", 0.0
 
-        # FULL lifecycle exposure
         if side == "LAY":
             parent_liab = stake * max(odds - 1.0, 0.0)
             child_liab  = stake
@@ -223,17 +240,13 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str]:
         available = bank_state.get_engine_available(engine)
 
         if available < required:
-            return False, (
-                f"insufficient_engine_budget "
-                f"engine={engine} "
-                f"required={required:.2f} "
-                f"available={available:.2f}"
-            )
+            return False, "insufficient_engine_budget", required
 
-        return True, "ok"
+        return True, "ok", required
 
     except Exception as e:
-        return False, f"gate_error:{e}"
+        return False, f"gate_error:{e}", 0.0
+
 
 # =====================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
