@@ -120,7 +120,7 @@ def _placement_worker_loop():
                 # --------------------------------------------------
                 # Execute parent (ONLY side-effect in worker)
                 # --------------------------------------------------
-                place_parent_and_hedge(
+                bet_id, parent_ref = place_parent_and_hedge(
                     market_id=row["marketId"],
                     selection_id=row["selectionId"],
                     side=row["side"],
@@ -144,8 +144,9 @@ def _placement_worker_loop():
                     from engines.live import bank_state
                     bank_state.on_parent_placed(
                         engine=row["engine"],
-                        required_exposure=row["required_exposure"],
+                        required_exposure=row["required_exposure"],  # 🔑 THIS is the fix
                     )
+
 
                 # Loop immediately (one-by-one semantics)
                 continue
