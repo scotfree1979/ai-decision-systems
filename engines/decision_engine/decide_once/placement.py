@@ -63,12 +63,10 @@ def _placement_worker_loop():
             con = open_auto_db(rw=True)
             con.row_factory = sqlite3.Row
 
-            # Attach BETS DB (required for marketStartTime)
+            # Attach BETS DB (required for marketStartTime ordering)
             try:
                 from engines.config_paths import bets_db
-                con.execute(
-                    f"ATTACH DATABASE '{bets_db()}' AS bets"
-                )
+                con.execute(f"ATTACH DATABASE '{bets_db()}' AS bets")
             except Exception:
                 pass
 
@@ -83,8 +81,7 @@ def _placement_worker_loop():
                     o.entry_stake,
                     o.engine,
                     o.source,
-                    o.run_id,
-                    o.required_exposure
+                    o.run_id
                 FROM orders o
                 LEFT JOIN bets.bets b
                   ON b.marketId = o.marketId
@@ -108,17 +105,6 @@ def _placement_worker_loop():
             ).fetchone()
 
             if row:
-                try:
-                    from engines.decision_engine.decide_once.scope import _SCOPE_STATE
-                    in_play_markets = set(_SCOPE_STATE.get("in_play", []))
-                    if row["marketId"] in in_play_markets:
-                        con.close()
-                        time.sleep(0.05)
-                        continue
-                except Exception:
-                    pass
-
-            if row:
                 # Mark as PLACING immediately to avoid double-pick
                 con.execute(
                     """
@@ -131,10 +117,10 @@ def _placement_worker_loop():
                 con.commit()
                 con.close()
 
-                from engines.live.bank_state import on_parent_placed
-
-                # Execute parent (THIS MUST STAY FIRST)
-                bet_id = place_parent_and_hedge(
+                # --------------------------------------------------
+                # Execute parent (ONLY side-effect in worker)
+                # --------------------------------------------------
+                place_parent_and_hedge(
                     market_id=row["marketId"],
                     selection_id=row["selectionId"],
                     side=row["side"],
@@ -154,10 +140,28 @@ def _placement_worker_loop():
                     },
                 )
 
+                if bet_id:
+                    from engines.live import bank_state
+                    bank_state.on_parent_placed(
+                        engine=row["engine"],
+                        required_exposure=row["required_exposure"],
+                    )
+
                 # Loop immediately (one-by-one semantics)
                 continue
 
             con.close()
+
+            # --------------------------------------------------
+            # 2️⃣ FALLBACK: in-memory queue (unchanged)
+            # --------------------------------------------------
+            name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
+            place_from_plan(name, plan, ctx)
+
+        except Exception:
+            traceback.print_exc()
+            time.sleep(0.5)
+
 
             # --------------------------------------------------
             # 2️⃣ FALLBACK: in-memory queue (unchanged)
