@@ -3677,6 +3677,14 @@ def start_live_loop(*args, **kwargs):
     _router_child_recovery_sweep()
     start_router_child_worker()
 
+    # --------------------------------------------------------------
+    # 6C.1) START ROUTER HOUSEKEEPING LOOP (REHEDGE / CLEANUP)
+    # --------------------------------------------------------------
+    try:
+        from engines.live.live_router import _start_rehedge_loop
+        _start_rehedge_loop()
+    except Exception as e:
+        print(f"[LIVE_ROUTER][WARN] failed to start rehedge loop: {e}")
 
     # --------------------------------------------------------------
     # 6D) START BRAIN LISTENER
