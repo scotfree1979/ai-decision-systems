@@ -2294,6 +2294,12 @@ def _run_single_settlement_cycle():
     except Exception as e:
         print(f"[settlements] expire failed: {e}")
 
+    # ------------------------------------------------------------------
+    # UPDATE DASHBOARD
+    # ------------------------------------------------------------------
+    from gui.dashboard_data import rebuild_kpi_tiles
+    rebuild_kpi_tiles(source="LIVE")
+
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/settlements.py (append below start_settlement_daemon)
