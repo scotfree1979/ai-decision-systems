@@ -78,10 +78,26 @@ def _placement_worker_loop():
                 FROM orders
                 WHERE role='PARENT'
                   AND entry_status='QUEUED'
-                ORDER BY opened_at ASC
+                ORDER BY
+                    CASE engine
+                        WHEN 'MSC_INPLAY' THEN 1
+                        WHEN 'MSC_RISK' THEN 2
+                        WHEN 'LEGACY' THEN 3
+                        WHEN 'MSC_EXPLORATORY' THEN 4
+                        ELSE 9
+                    END,
+                    CASE
+                        WHEN is_in_play = 1 THEN 0
+                        ELSE ABS(
+                            strftime('%s', marketStartTime) -
+                            strftime('%s', 'now')
+                        )
+                    END ASC,
+                    opened_at ASC
                 LIMIT 1
                 """
             ).fetchone()
+
 
             if row:
                 # Mark as PLACING immediately to avoid double-pick
