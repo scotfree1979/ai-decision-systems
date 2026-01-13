@@ -154,15 +154,6 @@ def _placement_worker_loop():
                     },
                 )
 
-                # 🔑 RESERVE ONLY AFTER BETFAIR CALL
-                if bet_id:
-                    
-                    on_parent_placed(
-                        engine=row["engine"],
-                        required_exposure=row["required_exposure"],
-                    )
-
-
                 # Loop immediately (one-by-one semantics)
                 continue
 
