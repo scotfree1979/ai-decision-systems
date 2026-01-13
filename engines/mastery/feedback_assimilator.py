@@ -23,6 +23,59 @@ from engines.config_paths import autoscalp_db
 from engines.config_paths import mastery_v7_db
 DB_PATH = mastery_v7_db()
 # === PATCH END ===
+# ============================================================
+# 📍 TARGET: engines/mastery/feedback_assimilator.py
+# 🧩 ACTION: ADD — long-lived assimilator service
+# 📆 PATCHED: 2026-03-11 — daemonised River assimilation loop
+# ============================================================
+
+import threading, time
+
+_ASSIMILATOR_THREAD = None
+
+def start_feedback_assimilator(
+    *,
+    interval_s: int = 300,
+    limit_minutes: int = 15,
+) -> None:
+    """
+    Start the River → Mastery assimilation loop.
+
+    • Runs independently of orchestrator tick lifecycle
+    • Safe to call multiple times (idempotent)
+    • Single-writer to mastery_v7.db
+    """
+
+    global _ASSIMILATOR_THREAD
+
+    try:
+        if _ASSIMILATOR_THREAD and _ASSIMILATOR_THREAD.is_alive():
+            return
+    except Exception:
+        pass
+
+    def _loop():
+        while True:
+            try:
+                rows = assimilate_feedback(limit_minutes=limit_minutes)
+                if rows:
+                    print(f"[ASSIMILATOR] 🧬 applied {rows} mastery updates")
+            except Exception as e:
+                print(f"[ASSIMILATOR][WARN] {e}")
+            time.sleep(interval_s)
+
+    t = threading.Thread(
+        target=_loop,
+        name="FeedbackAssimilator",
+        daemon=True,
+    )
+    _ASSIMILATOR_THREAD = t
+    t.start()
+
+    print(
+        f"[ASSIMILATOR] 🧬 started "
+        f"(interval={interval_s}s limit={limit_minutes}m)"
+    )
 
 # ======================================================================================================
 # 📍 TARGET: engines/mastery/feedback_assimilator.py

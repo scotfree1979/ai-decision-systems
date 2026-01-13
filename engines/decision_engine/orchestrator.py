@@ -3699,6 +3699,19 @@ def start_live_loop(*args, **kwargs):
     start_context_observer()
 
     # --------------------------------------------------------------
+    # 6E.1) START FEEDBACK ASSIMILATOR (RIVER → POLICY)
+    # --------------------------------------------------------------
+
+    # --------------------------------------------------------------
+    # 6E.2) START FEEDBACK ASSIMILATOR (RIVER)
+    # --------------------------------------------------------------
+    try:
+        from engines.mastery.feedback_assimilator import start_feedback_assimilator
+        start_feedback_assimilator(interval_s=300, limit_minutes=15)
+    except Exception as e:
+        print(f"[ASSIMILATOR][WARN] failed to start: {e}")
+
+    # --------------------------------------------------------------
     # 6F) START CHILD PROCESS
     # --------------------------------------------------------------
  
