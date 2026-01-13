@@ -131,14 +131,15 @@ def _placement_worker_loop():
                 con.commit()
                 con.close()
 
-                # Execute parent
-                place_parent_and_hedge(
+                from engines.live.bank_state import on_parent_placed
+
+                # Execute parent (THIS MUST STAY FIRST)
+                bet_id = place_parent_and_hedge(
                     market_id=row["marketId"],
                     selection_id=row["selectionId"],
                     side=row["side"],
                     entry_odds=row["entry_odds"],
                     stake=row["entry_stake"],
-                   
                     source=row["source"],
                     run_id=row["run_id"],
                     parent_persistence="LAPSE",
@@ -151,8 +152,15 @@ def _placement_worker_loop():
                         "customerOrderRef": row["customerOrderRef"],
                         "engine": row["engine"],
                     },
-
                 )
+
+                # 🔑 RESERVE ONLY AFTER BETFAIR CALL
+                if bet_id:
+                    
+                    on_parent_placed(
+                        engine=row["engine"],
+                        required_exposure=row["required_exposure"],
+                    )
 
 
                 # Loop immediately (one-by-one semantics)
@@ -334,7 +342,7 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     # ------------------------------------------------------------------
     # 🔒 AFFORDABILITY GATE (THIS IS THE FIX)
     # ------------------------------------------------------------------
-    ok, _ = placement_affordable(plan, ctx)
+    ok, _, required = placement_affordable(plan, ctx)
     if not ok:
         return
 
@@ -872,7 +880,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
 
     # Affordability gate (shared)
-    ok, _ = placement_affordable(plan, ctx)
+    ok, _, required = placement_affordable(plan, ctx)
     if not ok:
         return None
 
