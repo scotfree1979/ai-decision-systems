@@ -88,7 +88,7 @@ def _bankstate_report_loop(interval_s: int = 60):
                 open_exp = _clamp(_OPEN_EXPOSURE)
 
                 now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
-
+                print("\n============ V7 BANK STATE REPORT ============")
                 print(
                     f"[BANKSTATE][REPORT] t={now} "
                     f"divisor={divisor} "
@@ -106,7 +106,7 @@ def _bankstate_report_loop(interval_s: int = 60):
                         f"used={used:.2f} "
                         f"avail={avail:.2f}"
                     )
-
+                print("=================================================\n")
         except Exception as e:
             print(f"[BankState][REPORT][WARN] {e}")
 

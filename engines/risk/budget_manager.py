@@ -81,6 +81,30 @@ _profit_tracker = {
     for eng in ENGINES
 }
 
+def _collect_pnl_today():
+    """
+    Return per-engine TODAY pnl using dashboard truth.
+    Uses the same source as GoalAdapter (kpi_tiles).
+    """
+    try:
+        from gui.dashboard_data import kpi_tiles
+
+        # dashboard aggregates by engine internally
+        kpis = kpi_tiles(source="LIVE")
+
+        # expected keys: pnl_<ENGINE>
+        out = {}
+        for eng in ENGINES:
+            key = f"pnl_{eng.lower()}"
+            out[eng] = float(kpis.get(key, 0.0))
+
+        return out
+
+    except Exception:
+        # hard safety: never break report
+        return {eng: 0.0 for eng in ENGINES}
+
+
 # 📍 TARGET: engines/risk/budget_manager.py — add v7 budget table schema
 # 🔎 SEARCH: _profit_tracker = {
 # 📆 PATCHED: 2026-01-19
@@ -480,8 +504,8 @@ def report_allocations():
     Hidden engines printed separately if 0 activity.
     """
     final = get_allocations()
-    perf = _collect_pnl_today()
-    exp = exposure_snapshot()
+    perf = _collect_pnl_today()      # ✅ now real PnL
+    exp  = exposure_snapshot()
 
     print("\n============ V7 ENGINE BUDGET REPORT ============")
     print(f"Day: {datetime.datetime.utcnow().strftime('%Y-%m-%d')}")
@@ -489,14 +513,19 @@ def report_allocations():
     hidden = []
 
     for eng in ENGINES:
-        pct = final.get(eng, 0.0)
-        pnl = perf.get(eng, 0.0)
+        pct      = final.get(eng, 0.0)
+        pnl      = perf.get(eng, 0.0)
         exposure = exp.get(eng, 0.0)
 
         if pct == 0 and exposure == 0 and pnl == 0:
             hidden.append(eng)
 
-        print(f"{eng:16s} pct={pct*100:5.1f}%   pnl={pnl:+.2f}   exposure={exposure:.2f}")
+        print(
+            f"{eng:16s} "
+            f"pct={pct*100:5.1f}%   "
+            f"pnl={pnl:+.2f}   "
+            f"exposure={exposure:.2f}"
+        )
 
     if hidden:
         print("\n(HIDDEN ENGINES — NO ACTIVITY)")
@@ -504,6 +533,7 @@ def report_allocations():
             print(f"  {h}")
 
     print("=================================================\n")
+
 
 
 def report_exposure():
