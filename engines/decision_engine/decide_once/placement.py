@@ -309,6 +309,7 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     if not ok:
         return
 
+    plan["required_exposure"] = required
     # ------------------------------------------------------------------
     # 🔑 DB-FIRST PARENT PRECLAIM (AUTHORITATIVE)
     # ------------------------------------------------------------------
@@ -647,6 +648,16 @@ def _insert_pending_parent(
         # INSERT PARENT (IDEMPOTENT)
         # -------------------------------
         try:
+            # FULL lifecycle exposure (parent + child)
+            if side.upper() == "LAY":
+                parent_liab = float(entry_stake) * max(float(entry_odds) - 1.0, 0.0)
+                child_liab  = float(entry_stake)
+            else:
+                parent_liab = float(entry_stake)
+                child_liab  = float(entry_stake) * max(float(entry_odds) - 1.0, 0.0)
+
+            required_exposure = round(parent_liab + child_liab, 2)
+
             cur.execute(
                 """
                 INSERT INTO orders (
@@ -659,6 +670,7 @@ def _insert_pending_parent(
                     entry_odds,
                     entry_stake,
                     target_ticks,
+                    required_exposure,
                     entry_status,
                     role,
                     source,
@@ -668,7 +680,7 @@ def _insert_pending_parent(
                     opened_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', 'PARENT',
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', 'PARENT',
                     ?, ?, ?, ?, ?
                 )
                 """,
@@ -682,6 +694,7 @@ def _insert_pending_parent(
                     float(entry_odds),
                     float(entry_stake),
                     target_ticks,
+                    float(plan["required_exposure"]),
                     str(letter),
                     str(engine),
                     str(stoploss_mode).upper(),
@@ -689,6 +702,7 @@ def _insert_pending_parent(
                     datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 )
             )
+
 
             pending_id = int(cur.lastrowid)
 
@@ -832,6 +846,8 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     ok, _ = placement_affordable(plan, ctx)
     if not ok:
         return None
+
+    plan["required_exposure"] = required
 
     # 🔑 SINGLE ACTION
     enqueue_for_placement(name, plan, ctx)

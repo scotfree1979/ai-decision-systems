@@ -334,39 +334,26 @@ def get_engine_available(engine: str) -> float:
 # 📆 PATCHED: 2025-12-21 — reserve full lifecycle exposure on parent placed
 # ======================================================================================================
 
-def on_parent_placed(*, engine: str, side: str,
-                     entry_odds: float, entry_stake: float) -> None:
+def on_parent_placed(*, engine: str, required_exposure: float) -> None:
     """
     Reserve FULL lifecycle exposure at placement time.
-
-    Exposure model:
-      LAY  → parent liability + child stake
-      BACK → parent stake + child liability
-
-    This is a RESERVATION, not a match.
+    Uses precomputed required_exposure from orders.
     """
 
     global _OPEN_EXPOSURE
 
+    amount = _clamp(required_exposure)
+
     with _LOCK:
-        if side.upper() == "LAY":
-            parent_liab = entry_stake * max(entry_odds - 1.0, 0.0)
-            child_liab  = entry_stake
-        else:
-            parent_liab = entry_stake
-            child_liab  = entry_stake * max(entry_odds - 1.0, 0.0)
-
-        total = _clamp(parent_liab + child_liab)
-
-        _OPEN_EXPOSURE += total
-        _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + total
-
+        _OPEN_EXPOSURE += amount
+        _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + amount
 
         print(
             f"[BankState] +RESERVE engine={engine} "
-            f"total={total:.2f} "
+            f"total={amount:.2f} "
             f"open={_OPEN_EXPOSURE:.2f}"
         )
+
 
 
 def can_place(engine: str, required: float) -> bool:
