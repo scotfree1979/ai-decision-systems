@@ -66,6 +66,84 @@ class EngineReportShim(dict):
         if note:
             self.record_reason(engine, note)
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: class DecisionBus
+# 🧩 ACTION: ADD helper ABOVE class (module-level)
+# 📆 PATCHED: 2026-03-10 — Cadence Controller (BUS admission gate)
+#
+# PURPOSE:
+# - Enforce fixed execution cadence
+# - Prevent tick overload
+# - Preserve BUS as pure router
+#
+# CANONICAL PARAMETERS:
+#   window_seconds = 30
+#   tick_seconds   = 6
+#   ticks_per_win  = 5
+#   plans_per_win  = 300
+#   plans_per_tick = 60
+# ======================================================================================================
+
+import time
+from collections import deque
+
+class CadenceController:
+    def __init__(self):
+        # Locked parameters
+        self.window_seconds   = 30
+        self.tick_seconds     = 6
+        self.ticks_per_window = 5
+        self.plans_per_window = 300
+        self.plans_per_tick   = 60
+
+        # State
+        self.window_start_ts = time.time()
+        self.tick_index = 0
+        self.queue = deque()
+
+    def _roll_window_if_needed(self):
+        now = time.time()
+        if now - self.window_start_ts >= self.window_seconds:
+            if self.queue:
+                print(
+                    f"[CADENCE][WARN] window rollover with {len(self.queue)} deferred plans"
+                )
+            self.window_start_ts = now
+            self.tick_index = 0
+            self.queue.clear()
+
+    def enqueue(self, plans: list[tuple]):
+        """
+        Accept raw BUS plans (non-blocking).
+        """
+        self._roll_window_if_needed()
+        for p in plans:
+            if len(self.queue) < self.plans_per_window:
+                self.queue.append(p)
+            else:
+                # Hard backpressure: defer to next window
+                break
+
+    def admit_for_tick(self) -> list[tuple]:
+        """
+        Admit up to plans_per_tick plans for this tick.
+        """
+        self._roll_window_if_needed()
+        self.tick_index += 1
+
+        admitted = []
+        for _ in range(min(self.plans_per_tick, len(self.queue))):
+            admitted.append(self.queue.popleft())
+
+        print(
+            f"[CADENCE] tick={self.tick_index}/{self.ticks_per_window} "
+            f"admitted={len(admitted)} remaining={len(self.queue)}"
+        )
+
+        return admitted
+
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -280,6 +358,19 @@ class DecisionBus:
         print("[BUS] registered engines:", list(self.engines.keys()))
         print("[BUS] registered strategies:",
               [name for (name, _fn) in self.legacy_strategies])
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: class DecisionBus.__init__
+# 🧩 ACTION: ADD
+# 📆 PATCHED: 2026-03-10 — Cadence Controller initialisation
+# ======================================================================================================
+
+        # ------------------------------------------------------------------
+        # Cadence Controller (execution admission gate)
+        # ------------------------------------------------------------------
+        self._cadence = CadenceController()
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -638,55 +729,6 @@ class DecisionBus:
             # errors (never fatal)
             "errors": [],
         }
-
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: class DecisionBus
-# 🧩 ACTION: ADD (new helper method)
-# 📆 PATCHED: 2025-12-14 — BUS budget pre-check helper
-# ======================================================================================================
-
-    def _has_budget(self, plan, ctx) -> bool:
-        from engines.live.bank_state import get_engine_available
-
-        engine = plan.get("engine")
-        if not engine:
-            return False
-
-        try:
-            avail = get_engine_available(engine)
-            size = float(plan.get("size") or 0)
-            px = float(plan.get("px") or 0)
-            direction = plan.get("direction")
-
-            if size <= 0 or px <= 0:
-                return False
-
-            if direction == "BACK->LAY":
-                liab = size
-            else:
-                liab = size * max(px - 1.0, 0.0)
-
-            # Conservative pre-check (router re-validates)
-            return avail >= (liab * 2)
-
-        except Exception:
-            return False
-
-            # --------------------------------------------------
-            # RUNNER COUNT (DIAGNOSTIC — REAL, NOT DERIVED)
-            # --------------------------------------------------
-            try:
-                st = get_market_state(mid) or {}
-                tick_ctx["runners_seen"] = len(
-                    [
-                        r for r in (st.get("runners") or {}).values()
-                        if r.get("band") in ("ACTIVE", "PASSIVE")
-                    ]
-                )
-            except Exception:
-                tick_ctx["runners_seen"] = 0
 
 
     # ======================================================================
@@ -1383,7 +1425,15 @@ class DecisionBus:
             # ------------------------------------
             tick_ctx["engine_outcomes"] = engine_report
 
-            plan_queue.extend(plans)
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: plan_queue.extend(plans)
+# 🧩 ACTION: REPLACE
+# 📆 PATCHED: 2026-03-10 — Route plans through cadence controller
+# ======================================================================================================
+
+            # Feed ALL generated plans into cadence controller
+            self._cadence.enqueue(plans)
 
             # ------------------------------------
             # RAW PLAN CAPTURE (analysis visibility)
@@ -1513,11 +1563,7 @@ class DecisionBus:
                     _record_reason(engine_report, plan["engine"], "direction_changed")
                     tick_ctx["plans_annotated"].append((plan, "direction_changed"))
 
-                # Budget annotation (diagnostic only — router decides)
-                if not self._has_budget(plan, ctx):
-                    plan["_bus_note"] = "insufficient_budget_at_plan_time"
-                    _record_reason(engine_report, plan["engine"], "insufficient_budget")
-                    tick_ctx["plans_annotated"].append((plan, "insufficient_budget"))
+       
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -1642,17 +1688,13 @@ class DecisionBus:
             # Routing
             from engines.decision_engine.decide_once.placement import enqueue_for_placement
 
-            for eng, p, ctx in final_plans:
+            admitted = self._cadence.admit_for_tick()
 
-                # ------------------------------------------------------------------
-                # AUTHORITATIVE CUSTOMER ORDER REF (BUS OWNERSHIP)
-                # ------------------------------------------------------------------
+            for eng, p, ctx in admitted:
                 if not p.get("customerOrderRef"):
-                    p["customerOrderRef"] = (
-                        f"{p['engine'][:1]}-{uuid.uuid4().hex[:10]}"
-                    )
+                    p["customerOrderRef"] = f"{p['engine'][:1]}-{uuid.uuid4().hex[:10]}"
 
-                ctx["engine"] = p["engine"]          # authoritative stamp
+                ctx["engine"] = p["engine"]
                 enqueue_for_placement(p["engine"], p, ctx)
 
 # ======================================================================================================
@@ -1672,7 +1714,8 @@ class DecisionBus:
             # ==================================================
 
             plans_generated = sum(plans_by_engine.values())
-            plans_delegated = len(final_plans)
+            plans_delegated = len(admitted)
+        
             plans_not_delegated = max(plans_generated - plans_delegated, 0)
 
             tick_ctx["plans_routed"] = plans_delegated
