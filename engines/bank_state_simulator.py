@@ -138,11 +138,11 @@ def placement_worker():
             continue
 
         # ✅ RESERVE (serial, authoritative)
+        required = compute_required(side, odds, stake)
+
         bank_state.on_parent_placed(
             engine=engine,
-            side=side,
-            entry_odds=odds,
-            entry_stake=stake,
+            required_exposure=required,
         )
 
         release_tick = CURRENT_TICK + HOLD_TICKS
@@ -166,7 +166,7 @@ def child_worker():
 
         bank_state.on_child_matched(
             engine=plan["engine"],
-            side=plan["side"],
+    
             entry_odds=plan["odds"],
             entry_stake=plan["stake"],
         )
@@ -245,7 +245,7 @@ def run_simulation():
         for plan in plans:
             bank_state.on_child_matched(
                 engine=plan["engine"],
-                side=plan["side"],
+       
                 entry_odds=plan["odds"],
                 entry_stake=plan["stake"],
             )

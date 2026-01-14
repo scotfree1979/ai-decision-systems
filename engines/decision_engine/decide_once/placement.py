@@ -73,15 +73,17 @@ def _placement_worker_loop():
             row = con.execute(
                 """
                 SELECT
-                    o.customerOrderRef,
-                    o.marketId,
-                    o.selectionId,
-                    o.side,
-                    o.entry_odds,
-                    o.entry_stake,
-                    o.engine,
-                    o.source,
-                    o.run_id
+                   o.customerOrderRef,
+                   o.marketId,
+                   o.selectionId,
+                   o.side,
+                   o.entry_odds,
+                   o.entry_stake,
+                   o.engine,
+                   o.source,
+                   o.run_id,
+                   o.required_exposure
+
                 FROM orders o
                 LEFT JOIN bets.bets b
                   ON b.marketId = o.marketId
@@ -228,21 +230,14 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str, float]:
     try:
         stake = float(plan.get("size") or 0.0)
         odds  = float(plan.get("px") or 0.0)
-        side  = str(plan.get("side") or "").upper()
 
         if stake <= 0 or odds <= 0:
             return False, "invalid_stake_or_odds", 0.0
 
-        if side == "LAY":
-            parent_liab = stake * max(odds - 1.0, 0.0)
-            child_liab  = stake
-        else:
-            parent_liab = stake
-            child_liab  = stake * max(odds - 1.0, 0.0)
+        # 🔑 FULL lifecycle exposure (parent + child)
+        required = round(stake * odds, 2)
 
-        required = parent_liab + child_liab
         available = bank_state.get_engine_available(engine)
-
         if available < required:
             return False, "insufficient_engine_budget", required
 
@@ -250,7 +245,6 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str, float]:
 
     except Exception as e:
         return False, f"gate_error:{e}", 0.0
-
 
 # =====================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
@@ -682,14 +676,7 @@ def _insert_pending_parent(
         # -------------------------------
         try:
             # FULL lifecycle exposure (parent + child)
-            if side.upper() == "LAY":
-                parent_liab = float(entry_stake) * max(float(entry_odds) - 1.0, 0.0)
-                child_liab  = float(entry_stake)
-            else:
-                parent_liab = float(entry_stake)
-                child_liab  = float(entry_stake) * max(float(entry_odds) - 1.0, 0.0)
-
-            required_exposure = round(parent_liab + child_liab, 2)
+            required_exposure = float(plan["required_exposure"])
 
             cur.execute(
                 """

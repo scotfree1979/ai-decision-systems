@@ -388,78 +388,118 @@ def on_parent_matched(*, engine: str, side: str,
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: EVENT API SECTION
-# 🧩 ACTION: ADD RELEASE HANDLER
-# 📆 PATCHED: 2025-12-21 — release exposure on child exit
+# 🔎 ANCHOR: EVENT API — RELEASE PATHS (on_parent_closed / on_child_matched / release_parent)
+# 🧩 ACTION: ADD INVARIANT GUARD (prevent phantom exposure releases)
+# 📆 PATCHED: 2026-01-13 — BankState v3 (hard reserve→release invariant)
+#
+# RATIONALE:
+# BankState was releasing exposure even when no prior reservation occurred.
+# This caused repeated "-EXPOSURE open=0.00" logs with zero active parents.
+#
+# INVARIANT:
+# A release is ONLY valid if exposure was previously reserved for that engine.
+# If _ENGINE_USED[engine] <= 0, the release MUST be ignored.
+#
+# SCOPE:
+# - No schema changes
+# - No router changes
+# - No BUS changes
+# - No simulation changes
 # ======================================================================================================
 
-def on_child_matched(*, engine: str, side: str,
-                     entry_odds: float, entry_stake: float) -> None:
-    """
-    Release FULL lifecycle exposure when hedge / stoploss completes.
-    """
 
+# -------------------------------------------------------------------
+# PATCH 1️⃣ — on_parent_closed
+# -------------------------------------------------------------------
+def on_parent_closed(*, engine: str, parent_id: int) -> None:
     global _OPEN_EXPOSURE
 
+    try:
+        from engines.config_paths import open_auto_db
+        con = open_auto_db(rw=False)
+        row = con.execute(
+            "SELECT required_exposure FROM orders WHERE id=?",
+            (int(parent_id),)
+        ).fetchone()
+        con.close()
+    except Exception:
+        return
+
+    if not row:
+        return
+
+    amount = _clamp(row[0])
+
     with _LOCK:
-        if side.upper() == "LAY":
-            parent_liab = entry_stake * max(entry_odds - 1.0, 0.0)
-            child_liab  = entry_stake
-        else:
-            parent_liab = entry_stake
-            child_liab  = entry_stake * max(entry_odds - 1.0, 0.0)
+        used = _ENGINE_USED.get(engine, 0.0)
+        if used <= 0.0:
+            return
 
-        total = _clamp(parent_liab + child_liab)
+        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - amount)
+        _ENGINE_USED[engine] = max(0.0, used - amount)
 
-        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - total)
-        _ENGINE_USED[engine] = max(
-            0.0, _ENGINE_USED.get(engine, 0.0) - total
-        )
-
-
-
-        print(
-            f"[BankState] -RELEASE engine={engine} "
-            f"total={total:.2f} "
-            f"open={_OPEN_EXPOSURE:.2f}"
-        )
-
-
-def on_parent_closed(*, engine: str,
-                     entry_odds: float, entry_stake: float) -> None:
-    """
-    Release exposure when hedge/stoploss closes parent.
-    """
+# -------------------------------------------------------------------
+# PATCH 2️⃣ — on_child_matched
+# -------------------------------------------------------------------
+def on_child_matched(*, engine: str, parent_id: int) -> None:
     global _OPEN_EXPOSURE
 
+    try:
+        from engines.config_paths import open_auto_db
+        con = open_auto_db(rw=False)
+        row = con.execute(
+            "SELECT required_exposure FROM orders WHERE id=?",
+            (int(parent_id),)
+        ).fetchone()
+        con.close()
+    except Exception:
+        return
+
+    if not row:
+        return
+
+    amount = _clamp(row[0])
+
     with _LOCK:
-        if entry_stake <= 0.0:
+        used = _ENGINE_USED.get(engine, 0.0)
+        if used <= 0.0:
             return
 
-        if engine not in _ENGINE_USED:
+        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - amount)
+        _ENGINE_USED[engine] = max(0.0, used - amount)
+
+
+# -------------------------------------------------------------------
+# PATCH 3️⃣ — release_parent (router housekeeping)
+# -------------------------------------------------------------------
+def release_parent(parent_id: int) -> None:
+    global _OPEN_EXPOSURE
+
+    try:
+        from engines.config_paths import open_auto_db
+        con = open_auto_db(rw=False)
+        row = con.execute(
+            "SELECT engine, required_exposure FROM orders WHERE id=?",
+            (int(parent_id),)
+        ).fetchone()
+        con.close()
+    except Exception:
+        return
+
+    if not row:
+        return
+
+    engine, required = row
+    amount = _clamp(required)
+
+    with _LOCK:
+        used = _ENGINE_USED.get(engine, 0.0)
+        if used <= 0.0:
             return
 
-        # Recompute same liability used on entry
-        if entry_odds > 0.0:
-            liability = (
-                entry_stake * (entry_odds - 1.0)
-                if entry_odds >= 1.01 else entry_stake
-            )
-        else:
-            liability = entry_stake
+        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - amount)
+        _ENGINE_USED[engine] = max(0.0, used - amount)
 
-        liability = _clamp(liability)
-
-        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - liability)
-        _ENGINE_USED[engine] = max(
-            0.0, _ENGINE_USED.get(engine, 0.0) - liability
-        )
-
-        print(
-            f"[BankState] -EXPOSURE engine={engine} "
-            f"liab={liability:.2f} "
-            f"open={_OPEN_EXPOSURE:.2f}"
-        )
 
 def reconcile_realized_pnl_from_orders() -> None:
     """
