@@ -329,15 +329,33 @@ def get_engine_available(engine: str) -> float:
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: EVENT API SECTION
-# 🧩 ACTION: ADD NEW EVENT HANDLER
-# 📆 PATCHED: 2025-12-21 — reserve full lifecycle exposure on parent placed
+# 🔎 ANCHOR: def on_parent_placed
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-01-14 — accept legacy kwargs (side) without changing behaviour
+#
+# RATIONALE:
+# - Router still passes `side` during parent placement
+# - BankState no longer needs it, but must accept it
+# - Prevents parent placement from failing before Betfair call
+#
+# BEHAVIOUR:
+# - Exposure reservation logic unchanged
+# - Extra kwargs ignored safely
 # ======================================================================================================
 
-def on_parent_placed(*, engine: str, required_exposure: float) -> None:
+def on_parent_placed(
+    *,
+    engine: str,
+    required_exposure: float,
+    side: str | None = None,
+    **_ignored,
+) -> None:
     """
     Reserve FULL lifecycle exposure at placement time.
-    Uses precomputed required_exposure from orders.
+
+    NOTE:
+    - `side` is accepted for backward compatibility
+    - BankState does NOT use side here
     """
 
     global _OPEN_EXPOSURE
