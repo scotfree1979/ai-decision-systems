@@ -1325,7 +1325,7 @@ class DecisionBus:
                 
 
             runner_plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
-            all_plans.extend(runner_plans)
+            generated_plans.extend(runner_plans)
 
 
 # ======================================================================================================
@@ -1348,7 +1348,7 @@ class DecisionBus:
             bus_exec_id = f"BUS-{self.tick_id}"
 
             normalised_plans = []
-            for eng, plan, ctx in plans:
+            for eng, plan, ctx in generated_plans:
                 plans_by_engine[plan["engine"]] += 1
                 plan = dict(plan)  # defensive copy
 
@@ -1405,7 +1405,8 @@ class DecisionBus:
                 )
 
             print("\nPLANS")
-            print(f"  raw            : {len(plans)}")
+            print(f"  raw            : {len(generated_plans)}")
+
 
             print("\nERRORS")
             if tick_ctx["errors"]:
@@ -1433,12 +1434,12 @@ class DecisionBus:
 # ======================================================================================================
 
             # Feed ALL generated plans into cadence controller
-            self._cadence.enqueue(plans)
+            self._cadence.enqueue(generated_plans)
 
             # ------------------------------------
             # RAW PLAN CAPTURE (analysis visibility)
             # ------------------------------------
-            for _eng, _plan, _ctx in plans:
+            for _eng, _plan, _ctx in generated_plans:
                 tick_ctx["plans_raw"].append(_plan)
 
 
@@ -1814,7 +1815,8 @@ class DecisionBus:
 
             print("\nEXECUTION")
             print("────────────────────────────────────────────────────────")
-            print(f"plans_generated : {len(plan_queue)}")
+            print(f"plans_generated : {len(generated_plans)}")
+
             print(f"plans_routed    : {len(final_plans)}")
 
             print("────────────────────────────────────────────────────────")
