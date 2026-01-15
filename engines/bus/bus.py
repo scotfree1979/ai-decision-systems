@@ -1007,7 +1007,6 @@ class DecisionBus:
         # 2️⃣ Diagnostic tick context
         tick_ctx = self._new_tick_ctx()
 
-        
         # 🔒 GUARANTEE ENGINE REPORT EXISTS
         engine_report = EngineReportShim()
 
@@ -1022,7 +1021,14 @@ class DecisionBus:
             self._route_id += 1
 
         # 5️⃣ Route initialisation (ONLY once per route)
-        # Build FULL route CTX map once (AUTHORITATIVE)
+        if self._bus_stop == 1 or self._route_snapshot is None:
+            from engines.bus_route import BusRouteSnapshot
+
+            self._route_snapshot = BusRouteSnapshot()
+            self._route_snapshot.build_route()
+            self._route_snapshot.partition_into_bus_stops()
+
+        # 6️⃣ Build FULL route CTX map (AUTHORITATIVE, PER TICK)
         self._route_ctx_map = {}
 
         for (mid, sid) in self._route_snapshot.get_all_runners():
@@ -1030,8 +1036,7 @@ class DecisionBus:
             if ctx:
                 self._route_ctx_map[(mid, sid)] = ctx
 
-
-        # 6️⃣ Legacy bus-stop slice (always defined)
+        # 7️⃣ Legacy bus-stop slice (always defined)
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
 
         # --------------------------------------------------
@@ -1042,10 +1047,6 @@ class DecisionBus:
             bus_stop_pairs=legacy_slice,
             engine_report=engine_report,
         )
-
-
-        # 7️⃣ Engine report (never optional)
-        engine_report = EngineReportShim()
 
         # 8️⃣ Lane counters (authoritative)
         lane_counts = {
@@ -1063,31 +1064,6 @@ class DecisionBus:
         # 🔒 PREFLIGHT COMPLETE — SAFE TO EXECUTE BUS LOGIC BELOW
         # ==================================================================
 
-        try:
-            # ==================================================
-            # BUS ROUTE — SINGLE AUTHORITATIVE PIPELINE
-            # ==================================================
-
-
-            self._ensure_route_buffer()
-
-            LEGACY_RUNNERS_PER_TICK = 3
-
-
-            # --------------------------------------------------
-            # SELECTED — v13 canonical (legacy-driven)
-            # --------------------------------------------------
-            selected = [("LEGACY", mid, sid) for (mid, sid) in legacy_slice]
-
-            if not selected:
-                tick_ctx["errors"].append(("analysis", "no_runnable_runners"))
-                return
-
-            for bucket_name, mid, sid in selected:
-                ctx = self._route_ctx_map.get((mid, sid))
-
-                if not ctx:
-                    continue
 
             # ==================================================
             # OVERWATCHER PHASE 2 — REDISTRIBUTION (ANALYSIS ONLY)
