@@ -561,6 +561,26 @@ class DecisionBus:
         self._route_id = 1          # starts at Route #1
         self._bus_stop = 0          # increments per tick, resets at 10
 
+        # ------------------------------------------------------------------
+        # BUILD BUS STOP CTXS
+        # ------------------------------------------------------------------
+
+        def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
+            """
+            Build CTX ONCE per runner for this bus stop.
+            Returns: {(mid, sid): ctx}
+            """
+            ctxs = {}
+    
+            for mid, sid in runner_pairs:
+                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                if not ctx:
+                    continue
+                ctxs[(mid, sid)] = ctx
+
+            return ctxs
+
+
 
 
 # ======================================================================================================
@@ -1232,52 +1252,53 @@ class DecisionBus:
     def tick(self):
 
         self.tick_id += 1
+        tick_ctx = self._new_tick_ctx()
 
         # --------------------------------------------------
         # ROUTE / BUS STOP ADVANCEMENT (AUTHORITATIVE)
         # --------------------------------------------------
         self._bus_stop += 1
-
         if self._bus_stop > 10:
             self._bus_stop = 1
             self._route_id += 1
+ 
+        try:
+            # ==================================================
+            # BUS ROUTE — SINGLE AUTHORITATIVE PIPELINE
+            # ==================================================
 
-        # ==================================================
-        # BUS ROUTE — SINGLE AUTHORITATIVE PIPELINE
-        # ==================================================
+            _bc = build_context(source="LIVE")
+            base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
 
-        _bc = build_context(source="LIVE")
-        base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
+            self._ensure_route_buffer()
 
-        self._ensure_route_buffer()
+            LEGACY_RUNNERS_PER_TICK = 3
 
-        LEGACY_RUNNERS_PER_TICK = 3
+            legacy_slice = []
+            for _ in range(min(LEGACY_RUNNERS_PER_TICK, len(self._route_buffer))):
+                _, mid, sid = self._route_buffer.popleft()
+                legacy_slice.append((mid, sid))
 
-        legacy_slice = []
-        for _ in range(min(LEGACY_RUNNERS_PER_TICK, len(self._route_buffer))):
-            _, mid, sid = self._route_buffer.popleft()
-            legacy_slice.append((mid, sid))
+            if not legacy_slice:
+                print("[BUS][ROUTE] empty slice — nothing to do")
+                return
 
-        if not legacy_slice:
-            print("[BUS][ROUTE] empty slice — nothing to do")
-            return
+            engine_report = EngineReportShim()
 
-        engine_report = EngineReportShim()
+            # --------------------------------------------------
+            # 🧱 BUILD CTX ONCE (BUS STOP SCOPE)
+            # --------------------------------------------------
+            ctx_map = self._build_bus_stop_ctxs(base_ctx, legacy_slice)
 
-        # --------------------------------------------------
-        # 🧱 BUILD CTX ONCE (BUS STOP SCOPE)
-        # --------------------------------------------------
-        ctx_map = self._build_bus_stop_ctxs(base_ctx, legacy_slice)
-
-        generated_plans = []
+            generated_plans = []
 
 
-   # ======================================================================================================
-    # 📍 TARGET: engines/bus/bus.py
-    # 🔎 ANCHOR: if not selected:
-    # 🧩 ACTION: REPLACE ENTIRE BLOCK
-    # 📆 PATCHED: 2025-12-15 — Prevent silent tick on no_runnable_runners
-    # ======================================================================================================
+            # ======================================================================================================
+            # 📍 TARGET: engines/bus/bus.py
+            # 🔎 ANCHOR: if not selected:
+            # 🧩 ACTION: REPLACE ENTIRE BLOCK
+            # 📆 PATCHED: 2025-12-15 — Prevent silent tick on no_runnable_runners
+            # ======================================================================================================
             if not selected:
                 tick_ctx["errors"].append(("analysis", "no_runnable_runners"))
 
@@ -1285,31 +1306,31 @@ class DecisionBus:
 
                 ctx = self._build_ctx_for_market(base_ctx, mid, sid)
 
-                # ==================================================
-                # OVERWATCHER PHASE 2 — REDISTRIBUTION (ANALYSIS ONLY)
-                # ==================================================
-                try:
-                    redist = evaluate_redistribution(ctx)
-                    if redist:
-                        ctx["redistribution"] = redist
-                        tick_ctx["enrichment_ran"] = True
+            # ==================================================
+            # OVERWATCHER PHASE 2 — REDISTRIBUTION (ANALYSIS ONLY)
+            # ==================================================
+            try:
+                redist = evaluate_redistribution(ctx)
+                if redist:
+                    ctx["redistribution"] = redist
+                    tick_ctx["enrichment_ran"] = True
 
-                        print(
-                            f"[BUS][REDIST] mid={redist.get('marketId')} "
-                            f"oc={redist.get('oc_phase')} "
-                            f"disp={redist.get('dispersion'):.2f} "
-                            f"urgency={redist.get('urgency')}"
-                        )
-                except Exception as e:
-                    tick_ctx["errors"].append(("redistribution", str(e)))
+                    print(
+                        f"[BUS][REDIST] mid={redist.get('marketId')} "
+                        f"oc={redist.get('oc_phase')} "
+                        f"disp={redist.get('dispersion'):.2f} "
+                        f"urgency={redist.get('urgency')}"
+                    )
+            except Exception as e:
+                tick_ctx["errors"].append(("redistribution", str(e)))
 
 
-                if not ctx:
-                    tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
-                    continue
+            if not ctx:
+                tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
+                
 
-                runner_plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
-                all_plans.extend(runner_plans)
+            runner_plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
+            all_plans.extend(runner_plans)
 
 
 # ======================================================================================================
@@ -1537,7 +1558,7 @@ class DecisionBus:
                             continue  # 🔴 DO NOT ROUTE
 
 
-
+            
                 # --- BUS MUST NEVER BLOCK EXECUTION ---
                 # Annotate only, router decides.
 
