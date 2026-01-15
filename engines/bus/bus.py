@@ -214,6 +214,7 @@ def _evaluate_runner(self, base_ctx, mid, sid, engine_report):
                 plan["engine"] = "LEGACY"
                 plans.append(("LEGACY", plan, ctx_l))
                 engine_report["LEGACY"]["fired"] += 1
+                lane_counts[1] += 1
         except Exception as e:
             _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
 
@@ -230,6 +231,7 @@ def _evaluate_runner(self, base_ctx, mid, sid, engine_report):
                     plan["engine"] = "MSC_RISK"
                     plans.append(("MSC_RISK", plan, ctx))
                     engine_report["MSC_RISK"]["fired"] += 1
+                    lane_counts[2] += 1
             except Exception:
                 _record_reason(engine_report, "MSC_RISK", "tick_error")
 
@@ -246,6 +248,7 @@ def _evaluate_runner(self, base_ctx, mid, sid, engine_report):
                     plan["engine"] = "MSC_INPLAY"
                     plans.append(("MSC_INPLAY", plan, ctx))
                     engine_report["MSC_INPLAY"]["fired"] += 1
+                    lane_counts[3] += 1
             except Exception:
                 _record_reason(engine_report, "MSC_INPLAY", "tick_error")
 
@@ -261,6 +264,7 @@ def _evaluate_runner(self, base_ctx, mid, sid, engine_report):
                 plan["engine"] = "MSC_EXPLORATORY"
                 plans.append(("MSC_EXPLORATORY", plan, ctx))
                 engine_report["MSC_EXPLORATORY"]["fired"] += 1
+                lane_counts[4] += 1
         except Exception:
             _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
 
@@ -1245,6 +1249,13 @@ class DecisionBus:
     # TICK — rewritten only to call the two new helper functions
     # ======================================================================
     def tick(self):
+        lane_counts = {
+            1: 0,  # LEGACY
+            2: 0,  # MSC_RISK
+            3: 0,  # MSC_INPLAY
+            4: 0,  # MSC_EXPLORATORY
+        }
+
 
         self.tick_id += 1
         tick_ctx = self._new_tick_ctx()
@@ -1349,7 +1360,6 @@ class DecisionBus:
 
             normalised_plans = []
             for eng, plan, ctx in generated_plans:
-                plans_by_engine[plan["engine"]] += 1
                 plan = dict(plan)  # defensive copy
 
                 upstream_pid = plan.get("plan_id")
@@ -1357,10 +1367,11 @@ class DecisionBus:
                     plan["plan_id"] = f"{bus_exec_id}-{upstream_pid}"
                 else:
                     plan["plan_id"] = bus_exec_id
-
+  
                 normalised_plans.append((eng, plan, ctx))
 
             plans = normalised_plans
+
             
 
             # --------------------------------------------------
@@ -1714,7 +1725,8 @@ class DecisionBus:
             # PHASE 3 — ROUTING REPORT (BUS-LOCAL DIAGNOSTICS)
             # ==================================================
 
-            plans_generated = sum(plans_by_engine.values())
+            plans_generated = sum(lane_counts.values())
+
             plans_delegated = len(admitted)
         
             plans_not_delegated = max(plans_generated - plans_delegated, 0)
@@ -1737,9 +1749,12 @@ class DecisionBus:
             print(f"  plans_delegated : {plans_delegated}")
             print(f"  not_delegated   : {plans_not_delegated}")
 
-            print("\nPLANS BY ENGINE")
-            for eng, n in plans_by_engine.items():
-                print(f"  {eng:<16}: {n}")
+            print("\nPLANS BY LANE")
+            print(f"  Lane 1 (LEGACY)         : {lane_counts[1]}")
+            print(f"  Lane 2 (MSC_RISK)       : {lane_counts[2]}")
+            print(f"  Lane 3 (MSC_INPLAY)     : {lane_counts[3]}")
+            print(f"  Lane 4 (MSC_EXPLORATORY): {lane_counts[4]}")
+
 
             if "dup_blocked_by_engine" in tick_ctx:
                 print("\nDUPLICATES BLOCKED")
