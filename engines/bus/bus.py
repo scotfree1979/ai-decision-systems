@@ -522,16 +522,18 @@ def bus_snapshot():
             pass
 
     return snap
+
 class DecisionBus:
     ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F"}
+
     def __init__(self):
         self.tick_id = 0
-        self.live_run_id: str | None = None
-
+        self.live_run_id = None
         self._route_buffer = deque()
         self._route_rotation = RunnerRotation()
-        self._route_id = 0
-
+        self._route_id = 1
+        self._bus_stop = 0
+        self._cadence = CadenceController()
 
         # Engine + strategy binding (existing working behaviour)
         from engines.bus.engine_registry import ENGINE_REGISTRY
@@ -561,26 +563,19 @@ class DecisionBus:
         self._route_id = 1          # starts at Route #1
         self._bus_stop = 0          # increments per tick, resets at 10
 
-        # ------------------------------------------------------------------
-        # BUILD BUS STOP CTXS
-        # ------------------------------------------------------------------
-
-        def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
-            """
-            Build CTX ONCE per runner for this bus stop.
-            Returns: {(mid, sid): ctx}
-            """
-            ctxs = {}
-    
-            for mid, sid in runner_pairs:
-                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                if not ctx:
-                    continue
-                ctxs[(mid, sid)] = ctx
-
-            return ctxs
-
-
+    # 🔑 THIS MUST BE HERE — SAME INDENT AS tick(), _build_ctx_for_market(), etc.
+    def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
+        """
+        Build CTX ONCE per runner for this bus stop.
+        Returns: {(mid, sid): ctx}
+        """
+        ctxs = {}
+        for mid, sid in runner_pairs:
+            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+            if not ctx:
+                continue
+            ctxs[(mid, sid)] = ctx
+        return ctxs
 
 
 # ======================================================================================================
