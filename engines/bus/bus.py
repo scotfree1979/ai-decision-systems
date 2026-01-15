@@ -17,7 +17,12 @@ from engines.market_monitor.phase_clock import MarketPhaseClock
 from engines.live.overwatcher import evaluate_redistribution
 from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
 
-
+from engines.bus_route import (
+    build_full_cycle,
+    build_bus_route_tick,
+    RunnerRotation,
+)
+from collections import deque
 import time
 
 def _market_ready(st: dict) -> bool:
@@ -178,6 +183,185 @@ def _record_reason(engine_report: dict, engine: str, reason: str | None):
 # - NO router coupling
 # - NO side effects
 # ======================================================================================================
+def _evaluate_runner(self, base_ctx, mid, sid, engine_report):
+    """
+    BUS STOP lane runner.
+
+    Contract:
+    - Build CTX once
+    - Run lanes 1–4 in order
+    - Apply per-engine CTX reuse gate
+    - Return plans ONLY (no routing, no cadence)
+    """
+
+    ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+    if not ctx:
+        return []
+
+    plans = []
+
+    # ==================================================
+    # LANE 1 — LEGACY (fan letters, always allowed)
+    # ==================================================
+    for letter in self.ALLOWED_LEGACY_LETTERS:
+        ctx_l = dict(ctx)
+        ctx_l["letter"] = letter
+
+        try:
+            res = plan_for_strategy(letter, ctx_l)
+            if res and res.get("enter"):
+                plan = dict(res)
+                plan["engine"] = "LEGACY"
+                plans.append(("LEGACY", plan, ctx_l))
+                engine_report["LEGACY"]["fired"] += 1
+        except Exception as e:
+            _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
+
+    # ==================================================
+    # LANE 2 — MSC_RISK (CTX reuse gate)
+    # ==================================================
+    risk = self.engines.get("MSC_RISK")
+    if risk and self._engine_ctx_allowed("MSC_RISK", ctx):
+        if ctx.get("legacy_parent_id"):
+            try:
+                r = risk.tick(ctx)
+                if r and r.get("enter"):
+                    plan = dict(r)
+                    plan["engine"] = "MSC_RISK"
+                    plans.append(("MSC_RISK", plan, ctx))
+                    engine_report["MSC_RISK"]["fired"] += 1
+            except Exception:
+                _record_reason(engine_report, "MSC_RISK", "tick_error")
+
+    # ==================================================
+    # LANE 3 — MSC_INPLAY (CTX reuse gate)
+    # ==================================================
+    inplay = self.engines.get("MSC_INPLAY")
+    if inplay and self._engine_ctx_allowed("MSC_INPLAY", ctx):
+        if ctx.get("in_play"):
+            try:
+                r = inplay.tick(ctx)
+                if r and r.get("enter"):
+                    plan = dict(r)
+                    plan["engine"] = "MSC_INPLAY"
+                    plans.append(("MSC_INPLAY", plan, ctx))
+                    engine_report["MSC_INPLAY"]["fired"] += 1
+            except Exception:
+                _record_reason(engine_report, "MSC_INPLAY", "tick_error")
+
+    # ==================================================
+    # LANE 4 — MSC_EXPLORATORY (CTX reuse gate)
+    # ==================================================
+    exp = self.engines.get("MSC_EXPLORATORY")
+    if exp and self._engine_ctx_allowed("MSC_EXPLORATORY", ctx):
+        try:
+            r = exp.tick(ctx)
+            if r and r.get("enter"):
+                plan = dict(r)
+                plan["engine"] = "MSC_EXPLORATORY"
+                plans.append(("MSC_EXPLORATORY", plan, ctx))
+                engine_report["MSC_EXPLORATORY"]["fired"] += 1
+        except Exception:
+            _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
+
+    return plans
+
+def _engine_ctx_allowed(self, engine: str, ctx: dict) -> bool:
+    """
+    DB-authoritative per-engine CTX gate.
+
+    Rules (lane-local, stateless):
+    - LEGACY is always allowed (parent creator)
+    - For all other engines:
+        • If NO matched parent exists for this engine → ALLOW
+        • If matched parent exists AND a matched child exists → ALLOW
+        • If matched parent exists AND child is NOT matched → BLOCK
+
+    This function makes NO assumptions and uses DB truth only.
+    """
+
+    # Legacy is never gated
+    if engine == "LEGACY":
+        return True
+
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+
+    if not mid or not sid:
+        # Defensive: missing identity → do not block execution
+        return True
+
+    try:
+        from engines.config_paths import open_auto_db
+
+        con = open_auto_db(rw=False)
+
+        row = con.execute(
+            """
+            SELECT
+                p.id                 AS parent_id,
+                p.entry_status       AS parent_status,
+                c.exit_status        AS child_exit_status
+            FROM orders p
+            LEFT JOIN orders c
+                ON c.hedge_of = p.id
+            WHERE p.engine = ?
+              AND p.marketId = ?
+              AND p.selectionId = ?
+              AND p.role = 'PARENT'
+              AND UPPER(p.entry_status) = 'MATCHED'
+            LIMIT 1
+            """,
+            (engine, mid, sid),
+        ).fetchone()
+
+        # --------------------------------------------------
+        # CASE 1: no matched parent → allow
+        # --------------------------------------------------
+        if row is None:
+            return True
+
+        _parent_id, _parent_status, child_exit_status = row
+
+        # --------------------------------------------------
+        # CASE 2: parent exists but no matched child → block
+        # --------------------------------------------------
+        if not child_exit_status or str(child_exit_status).upper() != "MATCHED":
+            return False
+
+        # --------------------------------------------------
+        # CASE 3: parent + child both matched → allow
+        # --------------------------------------------------
+        return True
+
+    except Exception:
+        # Fail-open: BUS must not deadlock on DB issues
+        return True
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+# NEW — minimal helper, lives inside DecisionBus
+
+def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
+    """
+    Build CTX ONCE per runner for this bus stop.
+    Returns: {(mid, sid): ctx}
+    """
+    ctxs = {}
+
+    for mid, sid in runner_pairs:
+        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+        if not ctx:
+            continue
+        ctxs[(mid, sid)] = ctx
+
+    return ctxs
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -344,6 +528,10 @@ class DecisionBus:
         self.tick_id = 0
         self.live_run_id: str | None = None
 
+        self._route_buffer = deque()
+        self._route_rotation = RunnerRotation()
+        self._route_id = 0
+
 
         # Engine + strategy binding (existing working behaviour)
         from engines.bus.engine_registry import ENGINE_REGISTRY
@@ -370,6 +558,9 @@ class DecisionBus:
         # Cadence Controller (execution admission gate)
         # ------------------------------------------------------------------
         self._cadence = CadenceController()
+        self._route_id = 1          # starts at Route #1
+        self._bus_stop = 0          # increments per tick, resets at 10
+
 
 
 # ======================================================================================================
@@ -389,6 +580,20 @@ class DecisionBus:
             "near60": set(),
             "next5": set(),
         }
+
+    def _ensure_route_buffer(self):
+        if self._route_buffer:
+            return
+
+        route = build_full_cycle()
+        self._route_buffer.extend(route)
+
+        print(
+            f"[BUS][ROUTE] buffer refilled "
+            f"size={len(route)} "
+            f"route={self._route_id}"
+        )
+
 
     def set_live_run_id(self, run_id: str):
         self.live_run_id = run_id
@@ -1025,199 +1230,48 @@ class DecisionBus:
     # TICK — rewritten only to call the two new helper functions
     # ======================================================================
     def tick(self):
-        
+
         self.tick_id += 1
-        tick_ctx = self._new_tick_ctx()
 
-        # 🔑 AUTHORITATIVE PLAN ACCUMULATOR (PER TICK)
-        all_plans = []
+        # --------------------------------------------------
+        # ROUTE / BUS STOP ADVANCEMENT (AUTHORITATIVE)
+        # --------------------------------------------------
+        self._bus_stop += 1
 
-        try:
-            # ==================================================
-            # PHASE A — ANALYSIS (UNCONDITIONAL)
-            # ==================================================
-            tick_ctx["analysis_ran"] = True
+        if self._bus_stop > 10:
+            self._bus_stop = 1
+            self._route_id += 1
 
-            scope = build_and_maintain_scope() or {}
-            markets = scope.get("markets") or []
-            mids = [m["marketId"] for m in markets if isinstance(m, dict)]
-            tick_ctx["markets_seen"] = len(mids)
+        # ==================================================
+        # BUS ROUTE — SINGLE AUTHORITATIVE PIPELINE
+        # ==================================================
 
-            base_ctx_raw = build_context(source="LIVE")
-            base_ctx = base_ctx_raw[0] if isinstance(base_ctx_raw, tuple) else base_ctx_raw
+        _bc = build_context(source="LIVE")
+        base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
 
-            # MarketMonitor refresh is advisory — never fatal
-            try:
-                import engines.market_monitor.monitor as monitor
-                if mids:
-                    monitor.refresh(mids, max_runners=20)
-            except Exception as e:
-                tick_ctx["errors"].append(("market_monitor_refresh", str(e)))
+        self._ensure_route_buffer()
 
-            # ------------------------------------
-            # PER-TICK ENGINE REPORT (RESET EACH TICK)
-            # ------------------------------------
-            engine_report = EngineReportShim()
+        LEGACY_RUNNERS_PER_TICK = 3
 
+        legacy_slice = []
+        for _ in range(min(LEGACY_RUNNERS_PER_TICK, len(self._route_buffer))):
+            _, mid, sid = self._route_buffer.popleft()
+            legacy_slice.append((mid, sid))
 
-            # ------------------------------------
-            # PER-ENGINE PLAN COUNTS (BUS-LOCAL)
-            # ------------------------------------
-            plans_by_engine = {
-                "LEGACY": 0,
-                "MSC_EXPLORATORY": 0,
-                "MSC_INPLAY": 0,
-                "MSC_RISK": 0,
-            }
+        if not legacy_slice:
+            print("[BUS][ROUTE] empty slice — nothing to do")
+            return
+
+        engine_report = EngineReportShim()
+
+        # --------------------------------------------------
+        # 🧱 BUILD CTX ONCE (BUS STOP SCOPE)
+        # --------------------------------------------------
+        ctx_map = self._build_bus_stop_ctxs(base_ctx, legacy_slice)
+
+        generated_plans = []
 
 
-            # ------------------------------------
-            # SCOPE (AUTHORITATIVE MARKET LIST)
-            # ------------------------------------
-            scope = build_and_maintain_scope() or {}
-            mids = [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
-
-            if not mids:
-                tick_ctx["errors"].append(("analysis", "no_markets_in_scope"))
-
-            # ==================================================
-            # 🟢 BUS FINISHED-MARKET FILTER — MONITOR / SCOPE TRUTH
-            # ==================================================
-            #
-            # RATIONALE:
-            # - BUS must NOT consult markets_schedule for execution viability.
-            # - markets_schedule is calendar metadata, NOT execution truth.
-            # - MarketMonitor + Scope already determine when a market is finished:
-            #     • no runners
-            #     • no ACTIVE / PASSIVE bands
-            #     • no usable px
-            #
-            # This filter:
-            # - Keeps markets with at least ONE runnable runner
-            # - Excludes only markets that MarketMonitor itself considers dead
-            # - Preserves the 'all_markets_finished' diagnostic WITHOUT time coupling
-            #
-            # ARCHITECTURAL RULE:
-            # BUS trusts execution-facing state ONLY (Scope + MarketMonitor).
-            # ==================================================
-
-            from engines.market_monitor.monitor import get_market_state
-
-            valid_mids = []
-            ignored_mids = []
-
-            for mid in mids:
-                st = get_market_state(mid) or {}
-                runners = st.get("runners") or {}
-
-                # Market is runnable if ANY runner is ACTIVE or PASSIVE with a price
-                runnable = any(
-                    r.get("band") in ("ACTIVE", "PASSIVE") and r.get("px") is not None
-                    for r in runners.values()
-                )
-
-                if runnable:
-                    valid_mids.append(mid)
-                else:
-                    ignored_mids.append(mid)
-
-            mids = valid_mids
-            tick_ctx["markets_seen"] = len(mids)
-
-            if ignored_mids:
-                print(
-                    f"[BUS] excluded {len(ignored_mids)} finished markets (monitor-driven):",
-                    ", ".join(ignored_mids[:6]) + ("…" if len(ignored_mids) > 6 else "")
-                )
-
-            if not mids:
-                tick_ctx["errors"].append(("analysis", "all_markets_finished"))
-
-
-            # ------------------------------------
-            # BASE CTX (MUST COME FIRST)
-            # ------------------------------------
-            _bc = build_context(source="LIVE")
-            if isinstance(_bc, tuple):
-                base_ctx, _meta = _bc
-            else:
-                base_ctx, _meta = _bc, {}
-
-
-            # ------------------------------------
-            # PLAN QUEUE (MUST EXIST BEFORE USE)
-            # ------------------------------------
-            plan_queue = []
-
-            # ------------------------------------
-            # MARKET MONITOR — ANALYSE, THEN READ
-            # ------------------------------------
-            import engines.market_monitor.monitor as monitor
-
-            try:
-                # 🔑 ACTIVE STEP: tell Monitor to analyse these markets
-                monitor.refresh(mids, max_runners=20)
-            except Exception as e:
-                print(f"[BUS][WARN] MarketMonitor refresh failed: {e}")
-
-    # ======================================================================================================
-    # 📍 TARGET: engines/bus/bus.py
-    # 🔎 SEARCH START:
-    #     for mid in mids:
-    # 🔎 SEARCH END:
-    #     plan_queue.extend(plans)
-    # 🧩 ACTION: REPLACE ENTIRE BLOCK
-    # 📆 PATCHED: 2025-12-14 — One runner per tick (bucket + market aware)
-    # ======================================================================================================
-
-            from engines.market_monitor.monitor import get_market_state
-
-         
-            bucketed = scope.get("buckets")
-            if not bucketed:
-                # Fallback: treat all markets as near20 if buckets not provided
-                bucketed = {
-                    "near20": [m["marketId"] for m in scope.get("markets", []) if isinstance(m, dict)]
-                }
-
-            RUNNERS_PER_TICK = 4
-            selected = []
-
-            # Priority order (locked)
-            for bucket_name in ("in_play", "near20", "near60", "next5"):
-
-                if len(selected) >= RUNNERS_PER_TICK:
-                    break
-
-                mids_in_bucket = bucketed.get(bucket_name) or []
-                if not mids_in_bucket:
-                    continue
-
-                candidates = []
-                for mid in mids_in_bucket:
-                    st = get_market_state(mid) or {}
-                    for sid, r in (st.get("runners") or {}).items():
-                        if r.get("band") in ("ACTIVE", "PASSIVE"):
-                            tick_ctx["runners_seen"] += 1
-                            candidates.append((mid, sid))
-
-                if not candidates:
-                    continue
-
-                seen = self._bucket_seen[bucket_name]
-
-                # Reset once all candidates seen
-                if len(seen) >= len(candidates):
-                    seen.clear()
-
-                for mid, sid in candidates:
-                    if len(selected) >= RUNNERS_PER_TICK:
-                        break
-
-                    key = (mid, sid)
-                    if key not in seen:
-                        selected.append((bucket_name, mid, sid))
-                        seen.add(key)
    # ======================================================================================================
     # 📍 TARGET: engines/bus/bus.py
     # 🔎 ANCHOR: if not selected:
@@ -1256,82 +1310,6 @@ class DecisionBus:
 
                 runner_plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
                 all_plans.extend(runner_plans)
-
-
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
-# 🧩 ACTION: ADD (BUS execution contract enforcement)
-# 📆 PATCHED: 2025-12-31 — Legacy enter/letter hard filter
-# ======================================================================================================
-
-            # ==================================================
-            # LEGACY — HELPER-DRIVEN PIPELINE
-            # ==================================================
-            legacy_plans = self._run_legacy_pipeline(
-                base_ctx=base_ctx,
-                engine_report=engine_report,
-            )
-
-            all_plans.extend(legacy_plans)
-            # ==================================================
-            # MSC_RISK — PARENT-DRIVEN PIPELINE (ONCE PER TICK)
-            # ==================================================
-
-            risc_plans = self._run_risc_pipeline(
-                base_ctx=base_ctx,
-                mids=mids,
-                engine_report=engine_report,
-            )
-
-            # 🔑 RISC must extend the authoritative accumulator
-            all_plans.extend(risc_plans)
-
-            # ==================================================
-            # MSC_INPLAY — MARKET-DRIVEN PIPELINE (ONCE PER TICK)
-            # ==================================================
-
-            inplay_plans = self._run_inplay_pipeline(
-                base_ctx=base_ctx,
-                mids=mids,
-                engine_report=engine_report,
-            )
-
-            # 🔑 INPLAY must extend the authoritative accumulator
-            all_plans.extend(inplay_plans)
-
-            # 🔑 From this point on, plans = all plans for this tick
-            plans = all_plans
-
-            # ==================================================
-            # MSC_EXPLORATORY — MARKET-DRIVEN PIPELINE (ONCE PER TICK)
-            # ==================================================
-            exploratory_plans = self._run_exploratory_pipeline(
-                base_ctx=base_ctx,
-                mids=mids,
-                engine_report=engine_report,
-            )
-            all_plans.extend(exploratory_plans)
-
-
-            filtered_plans = []
-
-            for eng, plan, pctx in plans:
-
-                # 1️⃣ Hard enter gate (ALL engines)
-                if not plan.get("enter"):
-                    continue
-
-                # 2️⃣ Legacy-specific letter gate
-                if plan.get("engine") == "LEGACY":
-                    legacy_letter = plan.get("source") or plan.get("letter")
-                    if legacy_letter not in self.ALLOWED_LEGACY_LETTERS:
-                        continue
-
-                filtered_plans.append((eng, plan, pctx))
-
-            plans = filtered_plans
 
 
 # ======================================================================================================
@@ -1373,7 +1351,13 @@ class DecisionBus:
             # PHASE 1 REPORT — ANALYSIS
             # --------------------------------------------------
             print("────────────────────────────────────────────────────────")
-            print(f"[BUS][PHASE 1][ANALYSIS] tick=#{self.tick_id}")
+            print(
+                f"[BUS][PHASE 1][ANALYSIS] "
+                f"tick=#{self.tick_id} "
+                f"route=#{self._route_id} "
+                f"bus_stop=#{self._bus_stop}"
+            )
+
             print("────────────────────────────────────────────────────────")
 
             print("SCOPE")
@@ -1722,7 +1706,13 @@ class DecisionBus:
             
 
             print("────────────────────────────────────────────────────────")
-            print(f"[BUS][PHASE 3][ROUTING] tick=#{self.tick_id}")
+            print(
+                f"[BUS][PHASE 3][ROUTING] "
+                f"tick=#{self.tick_id} "
+                f"route=#{self._route_id} "
+                f"bus_stop=#{self._bus_stop}"
+            )
+
             print("────────────────────────────────────────────────────────")
 
             print("ROUTING (BUS-LOCAL)")
@@ -1753,8 +1743,32 @@ class DecisionBus:
 
             print("────────────────────────────────────────────────────────\n")
 
+            # --------------------------------------------------
+            # Route through cadence controller
+            # --------------------------------------------------
+            self._cadence.enqueue(generated_plans)
 
+            admitted = self._cadence.admit_for_tick()
 
+            # --------------------------------------------------
+            # 🔢 FILL RATE METRIC (AUTHORITATIVE)
+            # --------------------------------------------------
+            attempted = len(legacy_slice)
+            delegated = len(admitted)
+
+            fill_rate = (delegated / attempted) if attempted > 0 else 0.0
+            fill_pct = fill_rate * 100.0
+
+            if fill_pct >= 50.0:
+                fill_colour = "🟢"
+            else:
+                fill_colour = "🔴"
+
+            print(
+                f"[BUS][FILL] attempted={attempted} "
+                f"delegated={delegated} "
+                f"fill_rate={fill_pct:.1f}% {fill_colour}"
+            )
 
             # ------------------------------------
             # TICK REPORT — ALWAYS PRINT
@@ -1766,7 +1780,7 @@ class DecisionBus:
             )
 
             print("────────────────────────────────────────────────────────")
-            print(f"[BUS][TICK] #{self.tick_id}   markets={len(mids)} runners={runner_count}")
+            print(f"[BUS][TICK] #{self.tick_id} #{self._route_id} #{self._bus_stop} markets={len(mids)} runners={runner_count}")
             print("────────────────────────────────────────────────────────\n")
 
             print("ENGINE SUMMARY")
