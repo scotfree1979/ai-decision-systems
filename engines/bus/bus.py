@@ -469,8 +469,15 @@ class DecisionBus:
         # ------------------------------------------------------------------
         # Route-level CTX (FULL SET — non-LEGACY lanes)
         # ------------------------------------------------------------------
-        self._route_snapshot = None          # BusRouteSnapshot
-        self._route_ctx_map = {}             # {(mid, sid): ctx}
+        
+        # Build FULL route CTX map once (AUTHORITATIVE)
+        self._route_ctx_map = {}
+
+        for (mid, sid) in self._route_snapshot.get_all_runners():
+            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+            if ctx:
+                self._route_ctx_map[(mid, sid)] = ctx
+
 
 
         # Engine + strategy binding (existing working behaviour)
@@ -1000,6 +1007,10 @@ class DecisionBus:
         # 2️⃣ Diagnostic tick context
         tick_ctx = self._new_tick_ctx()
 
+        
+        # 🔒 GUARANTEE ENGINE REPORT EXISTS
+        engine_report = EngineReportShim()
+
         # 3️⃣ Build base context (BUS OWNS THIS)
         _bc = build_context(source="LIVE")
         base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
@@ -1011,22 +1022,27 @@ class DecisionBus:
             self._route_id += 1
 
         # 5️⃣ Route initialisation (ONLY once per route)
-        if self._bus_stop == 1 or self._route_snapshot is None:
-            from engines.bus_route import BusRouteSnapshot
+        # Build FULL route CTX map once (AUTHORITATIVE)
+        self._route_ctx_map = {}
 
-            self._route_snapshot = BusRouteSnapshot()
-            self._route_snapshot.build_route()
-            self._route_snapshot.partition_into_bus_stops()
+        for (mid, sid) in self._route_snapshot.get_all_runners():
+            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+            if ctx:
+                self._route_ctx_map[(mid, sid)] = ctx
 
-            # Build FULL route CTX map once
-            self._route_ctx_map = {}
-            for (mid, sid) in self._route_snapshot.get_all_runners():
-                ctx = self._route_ctx_map.get((mid, sid))                
-                    if ctx:
-                    self._route_ctx_map[(mid, sid)] = ctx
 
         # 6️⃣ Legacy bus-stop slice (always defined)
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
+
+        # --------------------------------------------------
+        # AUTHORITATIVE PLAN GENERATION (BUS_ROUTE LANES)
+        # --------------------------------------------------
+        generated_plans = self._evaluate_runner(
+            base_ctx=base_ctx,
+            bus_stop_pairs=legacy_slice,
+            engine_report=engine_report,
+        )
+
 
         # 7️⃣ Engine report (never optional)
         engine_report = EngineReportShim()
