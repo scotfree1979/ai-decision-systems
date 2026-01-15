@@ -453,6 +453,20 @@ class DecisionBus:
         self._route_id = 1
         self._bus_stop = 0
         self._cadence = CadenceController()
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: class DecisionBus.__init__
+# 🧩 ACTION: ADD (defensive init)
+# 📆 PATCHED: 2026-03-16 — define route_snapshot at construction
+#
+# WHY:
+# BUS is imported at module load time.
+# route_snapshot is created later during tick().
+# Attribute must exist before any access.
+# ======================================================================================================
+
+        self._route_snapshot = None
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -472,13 +486,6 @@ class DecisionBus:
         
         # Build FULL route CTX map once (AUTHORITATIVE)
         self._route_ctx_map = {}
-
-        for (mid, sid) in self._route_snapshot.get_all_runners():
-            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-            if ctx:
-                self._route_ctx_map[(mid, sid)] = ctx
-
-
 
         # Engine + strategy binding (existing working behaviour)
         from engines.bus.engine_registry import ENGINE_REGISTRY
@@ -1029,27 +1036,63 @@ class DecisionBus:
         # ===============================================================
         # 4️⃣ ROUTE SNAPSHOT (AUTHORITATIVE, ONCE PER ROUTE)
         # ===============================================================
-        if self._bus_stop == 1 or not hasattr(self, "_route_snapshot") or self._route_snapshot is None:
+        if self._bus_stop == 1 or self._route_snapshot is None:
             from engines.bus_route import BusRouteSnapshot
 
             self._route_snapshot = BusRouteSnapshot()
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
 
-        # ===============================================================
-        # 5️⃣ BUILD FULL ROUTE CTX MAP (ONCE PER TICK)
-        # ===============================================================
-        self._route_ctx_map = {}
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: def tick(self):
+# 🧩 ACTION: REPLACE CTX BUILD SECTION (route-authoritative)
+# 📆 PATCHED: 2026-03-16 — Enforce route-owned runner identity for CTX
+#
+# WHY:
+# - BUS must NEVER recompute or rediscover (marketId, selectionId)
+# - BusRouteSnapshot is the sole authority for runner membership
+# - CTX is built ONLY for runners already selected by the route helper
+#
+# EFFECT:
+# - Fixes broken CTX → engine pipeline
+# - Prevents scope / monitor re-entry
+# - Restores correct plan generation flow
+# ======================================================================================================
 
-        for mid, sid in self._route_snapshot.get_all_runners():
-            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-            if ctx:
-                self._route_ctx_map[(mid, sid)] = ctx
+        # ===============================================================
+        # 5️⃣ BUILD ROUTE-LEVEL CTX MAP (AUTHORITATIVE)
+        # ===============================================================
+        #
+        # IMPORTANT:
+        # - Runner identity comes ONLY from BusRouteSnapshot
+        # - BUS does NOT filter, discover, or recompute mids/sids
+        # - CTX is keyed once per route and reused across ticks
+        #
+        # ===============================================================
+
+        # Initialise map if missing or new route
+        if not self._route_ctx_map or self._bus_stop == 1:
+
+            self._route_ctx_map = {}
+
+            for mid, sid in self._route_snapshot.get_all_runners():
+                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                if ctx:
+                    self._route_ctx_map[(mid, sid)] = ctx
 
         # ===============================================================
-        # 6️⃣ LEGACY BUS STOP SLICE
+        # 6️⃣ LEGACY BUS STOP SLICE (ROUTE-PROVIDED)
         # ===============================================================
+        #
+        # NOTE:
+        # - bus stop membership is precomputed by the route helper
+        # - BUS does NOT alter or filter this list
+        #
+        # ===============================================================
+
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
+
 
         # ===============================================================
         # 7️⃣ AUTHORITATIVE PLAN GENERATION (LANES ONLY)
@@ -1162,7 +1205,7 @@ class DecisionBus:
 
         print("────────────────────────────────────────────────────────\n")
 
-
+        try:
             # ==================================================
             # PHASE 2 — ENRICHMENT (BEGINS)
             # ==================================================
