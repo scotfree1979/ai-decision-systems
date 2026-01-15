@@ -3740,7 +3740,7 @@ def start_live_loop(*args, **kwargs):
     # ------------------------------------------------------------------
 
     from engines.bus_route import start_bus_loop
-        start_bus_loop(hz=2)
+    start_bus_loop()
 
 
     # ------------------------------------------------------------------
