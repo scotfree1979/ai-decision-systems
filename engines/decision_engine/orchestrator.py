@@ -3735,6 +3735,13 @@ def start_live_loop(*args, **kwargs):
     except Exception as e:
         print(f"[EXPOSURE-GUARDIAN] failed to start: {e}")
 
+    # ------------------------------------------------------------------
+    # 6I) START BUS ROUTE LOOP
+    # ------------------------------------------------------------------
+
+    from engines.bus_route import start_bus_loop
+        start_bus_loop(hz=2)
+
 
     # ------------------------------------------------------------------
     # 7) START BUS LOOP (BUS-OWNED LOOP)

@@ -655,6 +655,39 @@ def get_legacy_snapshot():
 
     return snapshot
 
+# ======================================================================================================
+# 📍 TARGET: engines/api_tools.py
+# 🔎 ANCHOR: end of file (before __main__ or final EOF)
+# 🧩 ACTION: ADD
+# 📆 PATCHED: 2026-03-15 — BUS live loop starter (authoritative)
+#
+# PURPOSE:
+# - Allow api_tools users to start BUS without orchestrator
+# - Ensure BUS ticks advance when api_tools is imported or run
+# - Preserve orchestrator ownership in production
+#
+# CONTRACT:
+# - BUS remains execution authority
+# - Placement worker must already be running
+# - This starts ONLY the BUS loop
+# ======================================================================================================
+def start_bus_loop():
+    """
+    Route bootstrap only.
+    No loop.
+    No timing.
+    No ticking.
+    """
+    from engines.bus.bus import BUS
+
+    BUS._route_snapshot = BusRouteSnapshot()
+    BUS._route_snapshot.build_route()
+    BUS._route_snapshot.partition_into_bus_stops()
+
+    BUS._route_ctx_map = {}
+
+    print("[BUS_ROUTE] route initialised (no loop)")
+
 
 
 # -----------------------------
