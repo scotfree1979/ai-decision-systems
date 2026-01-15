@@ -148,8 +148,6 @@ class CadenceController:
 
         return admitted
 
-
-
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: class DecisionBus
@@ -172,103 +170,88 @@ def _record_reason(engine_report: dict, engine: str, reason: str | None):
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: analytics_report
-# 🧩 ACTION: ADD helper (bus_snapshot) BEFORE analytics_report is called
-# 📆 PATCHED: 2026-03-03 — restore 10-tick snapshot (DB-truthful, read-only)
+# 🔎 SEARCH: def _evaluate_runner(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-15 — Authoritative BUS runner evaluator (final)
 #
-# PURPOSE:
-# - Fix NameError: bus_snapshot is not defined
-# - Provide stable, DB-first snapshot for 10-tick reporting
-# - NO execution logic
-# - NO router coupling
-# - NO side effects
+# CONTRACT:
+# - This is the ONLY place where engines are selected per runner
+# - BusRouteSnapshot defines WHAT runs
+# - BUS builds CTX
+# - Engines execute ONLY via _run_engines_for_tick
 # ======================================================================================================
-def _evaluate_runner(self, base_ctx, mid, sid, engine_report):
-    """
-    BUS STOP lane runner.
 
-    Contract:
-    - Build CTX once
-    - Run lanes 1–4 in order
-    - Apply per-engine CTX reuse gate
-    - Return plans ONLY (no routing, no cadence)
+def _evaluate_runner(self, base_ctx, bus_stop_pairs, engine_report):
     """
+    Authoritative BUS evaluator.
 
-    ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-    if not ctx:
-        return []
+    Responsibilities:
+    - Decide which (engine, mid, sid) run this tick
+    - Build CTX exactly once per execution
+    - Enforce bus-stop vs full-route semantics
+    """
+    lane_map = {
+        "LEGACY": 1,
+        "MSC_RISK": 2,
+        "MSC_INPLAY": 3,
+        "MSC_EXPLORATORY": 4,
+    }
 
     plans = []
 
     # ==================================================
-    # LANE 1 — LEGACY (fan letters, always allowed)
+    # LANE 1 — LEGACY (BUS STOP ONLY)
     # ==================================================
-    for letter in self.ALLOWED_LEGACY_LETTERS:
-        ctx_l = dict(ctx)
-        ctx_l["letter"] = letter
+    for (mid, sid) in bus_stop_pairs:
+        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+        if not ctx:
+            continue
 
-        try:
-            res = plan_for_strategy(letter, ctx_l)
-            if res and res.get("enter"):
-                plan = dict(res)
-                plan["engine"] = "LEGACY"
-                plans.append(("LEGACY", plan, ctx_l))
-                engine_report["LEGACY"]["fired"] += 1
-                lane_counts[1] += 1
-        except Exception as e:
-            _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
+        runner_plans = self._run_engines_for_tick(
+            mid,
+            sid,
+            ctx,
+            engine_report,
+        )
+        plans.extend(runner_plans)
+
+        # --- LANE ACCOUNTING: LEGACY ---
+        lane = lane_map.get("LEGACY")
+        if lane:
+            lane_counts[lane] += len(runner_plans)
+
 
     # ==================================================
-    # LANE 2 — MSC_RISK (CTX reuse gate)
+    # LANE 2–4 — FULL ROUTE (LIFECYCLE-GATED)
     # ==================================================
-    risk = self.engines.get("MSC_RISK")
-    if risk and self._engine_ctx_allowed("MSC_RISK", ctx):
-        if ctx.get("legacy_parent_id"):
+    for (mid, sid) in self._route_ctx_map.keys():
+        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+        if not ctx:
+            continue
+
+        for engine in ("MSC_RISK", "MSC_INPLAY", "MSC_EXPLORATORY"):
+            if not self._engine_ctx_allowed(engine, ctx):
+                continue
+
             try:
-                r = risk.tick(ctx)
-                if r and r.get("enter"):
-                    plan = dict(r)
-                    plan["engine"] = "MSC_RISK"
-                    plans.append(("MSC_RISK", plan, ctx))
-                    engine_report["MSC_RISK"]["fired"] += 1
-                    lane_counts[2] += 1
+                r = self.engines[engine].tick(ctx)
             except Exception:
-                _record_reason(engine_report, "MSC_RISK", "tick_error")
+                _record_reason(engine_report, engine, "tick_error")
+                continue
 
-    # ==================================================
-    # LANE 3 — MSC_INPLAY (CTX reuse gate)
-    # ==================================================
-    inplay = self.engines.get("MSC_INPLAY")
-    if inplay and self._engine_ctx_allowed("MSC_INPLAY", ctx):
-        if ctx.get("in_play"):
-            try:
-                r = inplay.tick(ctx)
-                if r and r.get("enter"):
-                    plan = dict(r)
-                    plan["engine"] = "MSC_INPLAY"
-                    plans.append(("MSC_INPLAY", plan, ctx))
-                    engine_report["MSC_INPLAY"]["fired"] += 1
-                    lane_counts[3] += 1
-            except Exception:
-                _record_reason(engine_report, "MSC_INPLAY", "tick_error")
-
-    # ==================================================
-    # LANE 4 — MSC_EXPLORATORY (CTX reuse gate)
-    # ==================================================
-    exp = self.engines.get("MSC_EXPLORATORY")
-    if exp and self._engine_ctx_allowed("MSC_EXPLORATORY", ctx):
-        try:
-            r = exp.tick(ctx)
             if r and r.get("enter"):
-                plan = dict(r)
-                plan["engine"] = "MSC_EXPLORATORY"
-                plans.append(("MSC_EXPLORATORY", plan, ctx))
-                engine_report["MSC_EXPLORATORY"]["fired"] += 1
-                lane_counts[4] += 1
-        except Exception:
-            _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
+                p = dict(r)
+                p["engine"] = engine
+                plans.append((engine, p, ctx))
+                engine_report[engine]["fired"] += 1
+                # --- LANE ACCOUNTING: NON-LEGACY ---
+                lane = lane_map.get(engine)
+                if lane:
+                    lane_counts[lane] += 1
+
 
     return plans
+
 
 def _engine_ctx_allowed(self, engine: str, ctx: dict) -> bool:
     """
@@ -538,6 +521,25 @@ class DecisionBus:
         self._route_id = 1
         self._bus_stop = 0
         self._cadence = CadenceController()
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: class DecisionBus.__init__
+# 🧩 ACTION: ADD
+# 📆 PATCHED: 2026-01-15 — Route-level CTX state (full route, non-LEGACY)
+#
+# PURPOSE:
+# - Hold FULL route CTX set (all runners for 10 ticks)
+# - LEGACY uses bus-stop subset only
+# - All other engines see full route every tick
+# ======================================================================================================
+
+        # ------------------------------------------------------------------
+        # Route-level CTX (FULL SET — non-LEGACY lanes)
+        # ------------------------------------------------------------------
+        self._route_snapshot = None          # BusRouteSnapshot
+        self._route_ctx_map = {}             # {(mid, sid): ctx}
+
 
         # Engine + strategy binding (existing working behaviour)
         from engines.bus.engine_registry import ENGINE_REGISTRY
@@ -1260,6 +1262,12 @@ class DecisionBus:
         self.tick_id += 1
         tick_ctx = self._new_tick_ctx()
 
+        generated_plans = self._evaluate_runner(
+            base_ctx=base_ctx,
+            bus_stop_pairs=legacy_slice,
+            engine_report=engine_report,
+        )
+
         # --------------------------------------------------
         # ROUTE / BUS STOP ADVANCEMENT (AUTHORITATIVE)
         # --------------------------------------------------
@@ -1267,6 +1275,38 @@ class DecisionBus:
         if self._bus_stop > 10:
             self._bus_stop = 1
             self._route_id += 1
+
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: def tick(self):
+# 🔎 SEARCH: # BUS ROUTE — SINGLE AUTHORITATIVE PIPELINE
+# 🧩 ACTION: ADD (near top of route section)
+# 📆 PATCHED: 2026-01-15 — Build FULL route CTX once per route
+#
+# PURPOSE:
+# - Build CTX for ALL runners in route (10 ticks)
+# - Odds refreshed later by MarketMonitor
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # ROUTE INITIALISATION (once per 10 ticks)
+            # --------------------------------------------------
+            if self._bus_stop == 1:
+                from engines.bus_route import BusRouteSnapshot
+
+                self._route_snapshot = BusRouteSnapshot()
+                self._route_snapshot.build_route()
+                self._route_snapshot.partition_into_bus_stops()
+
+                self._route_ctx_map = {}
+
+                for (mid, sid) in self._route_snapshot.get_all_runners():
+                    ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                    if ctx:
+                        self._route_ctx_map[(mid, sid)] = ctx
+
  
         try:
             # ==================================================
@@ -1280,14 +1320,29 @@ class DecisionBus:
 
             LEGACY_RUNNERS_PER_TICK = 3
 
-            legacy_slice = []
-            for _ in range(min(LEGACY_RUNNERS_PER_TICK, len(self._route_buffer))):
-                _, mid, sid = self._route_buffer.popleft()
-                legacy_slice.append((mid, sid))
+            # ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: def tick(self):
+# 🔎 SEARCH: legacy_slice = []
+# 🧩 ACTION: REPLACE BLOCK
+# 📆 PATCHED: 2026-01-15 — LEGACY uses bus-stop CTX only
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # LEGACY — bus-stop CTX ONLY
+            # --------------------------------------------------
+            legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop)
 
             if not legacy_slice:
-                print("[BUS][ROUTE] empty slice — nothing to do")
+                print("[BUS][ROUTE] empty bus stop — nothing to do")
                 return
+
+            legacy_ctxs = []
+            for (mid, sid) in legacy_slice:
+                ctx = self._route_ctx_map.get((mid, sid))
+                if ctx:
+                    legacy_ctxs.append(ctx)
+
 
             engine_report = EngineReportShim()
 
@@ -1296,7 +1351,8 @@ class DecisionBus:
             # --------------------------------------------------
             ctx_map = self._build_bus_stop_ctxs(base_ctx, legacy_slice)
 
-            generated_plans = []
+     
+
 
             # --------------------------------------------------
             # SELECTED — v13 canonical (legacy-driven)
@@ -1333,10 +1389,7 @@ class DecisionBus:
 
             if not ctx:
                 tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
-                
 
-            runner_plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
-            generated_plans.extend(runner_plans)
 
 
 # ======================================================================================================

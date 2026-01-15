@@ -12,7 +12,7 @@ from typing import List, Tuple
 from collections import defaultdict
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.market_monitor.monitor import get_market_state
-from engines.legacy_snapshot_helper import get_legacy_parent_odds_snapshot
+
 
 
 # --- at module level (top of file) ---
@@ -78,6 +78,43 @@ class RunnerRotation:
 
         self._idx[engine] = i
         return out
+
+class BusRouteSnapshot:
+    def __init__(self):
+        self.route_id = 0
+        self.runner_pool = []
+        self.bus_stops = {}
+
+    def build_route(self):
+        self.route_id += 1
+        self.runner_pool = _build_runner_pool()
+
+        if not self.runner_pool:
+            self.bus_stops = {}
+            return
+
+    def partition_into_bus_stops(self):
+        n = len(self.runner_pool)
+        if n == 0:
+            return
+
+        base = n // TICKS_PER_CYCLE
+        remainder = n % TICKS_PER_CYCLE
+
+        self.bus_stops = {}
+        idx = 0
+
+        for tick in range(1, TICKS_PER_CYCLE + 1):
+            size = base + (1 if tick <= remainder else 0)
+            self.bus_stops[tick] = self.runner_pool[idx:idx+size]
+            idx += size
+
+    def get_bus_stop(self, tick):
+        return self.bus_stops.get(tick, [])
+
+    def get_all_runners(self):
+        return self.runner_pool
+
 
 def build_bus_route_tick(rotation: RunnerRotation):
     """
@@ -835,19 +872,22 @@ if __name__ == "__main__":
         print("=== END LEGACY SNAPSHOT ===\n")
 
         # ------------------------------------------------------------------
-        # ✅ V7 BUS SNAPSHOT
+        # ✅ V7 BUS ROUTE SNAPSHOT
         # ------------------------------------------------------------------
 
-        r = build_full_cycle()
+        snap = BusRouteSnapshot()
+        snap.build_route()
+        snap.partition_into_bus_stops()
 
-        print(f"Total plans: {len(r)}")
-        by_engine = defaultdict(int)
-        for eng, _, _ in r:
-            by_engine[eng] += 1
+        print(f"Route {snap.route_id}")
+        print(f"Total runners: {len(snap.get_all_runners())}")
 
-        print("By engine:")
-        for k, v in by_engine.items():
-            print(f"  {k}: {v}")
+        for t in range(1, 11):
+            runners = snap.get_bus_stop(t)
+            print(f"Tick {t}: {len(runners)} runners")
+            for mid, sid in runners[:5]:
+                print(" ", mid, sid)
+
 
         print("=== END BUS SNAPSHOT ===\n")
 
