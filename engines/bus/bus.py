@@ -1287,19 +1287,19 @@ class DecisionBus:
 
             generated_plans = []
 
+            # --------------------------------------------------
+            # SELECTED — v13 canonical (legacy-driven)
+            # --------------------------------------------------
+            selected = [("LEGACY", mid, sid) for (mid, sid) in legacy_slice]
 
-            # ======================================================================================================
-            # 📍 TARGET: engines/bus/bus.py
-            # 🔎 ANCHOR: if not selected:
-            # 🧩 ACTION: REPLACE ENTIRE BLOCK
-            # 📆 PATCHED: 2025-12-15 — Prevent silent tick on no_runnable_runners
-            # ======================================================================================================
             if not selected:
                 tick_ctx["errors"].append(("analysis", "no_runnable_runners"))
+                return
 
             for bucket_name, mid, sid in selected:
-
-                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                ctx = ctx_map.get((mid, sid))
+                if not ctx:
+                    continue
 
             # ==================================================
             # OVERWATCHER PHASE 2 — REDISTRIBUTION (ANALYSIS ONLY)
