@@ -1805,10 +1805,11 @@ class DecisionBus:
             # ------------------------------------
             # TICK REPORT — ALWAYS PRINT
             # ------------------------------------
-            runner_count = sum(
-                1 for mid in mids
-                for r in (get_market_state(mid) or {}).get("runners", {}).values()
-                if r.get("band") in ("ACTIVE", "PASSIVE")
+            print(
+                f"[BUS][TICK] #{self.tick_id} "
+                f"route=#{self._route_id} "
+                f"bus_stop=#{self._bus_stop} "
+                f"plans={len(generated_plans)}"
             )
 
             print("────────────────────────────────────────────────────────")
