@@ -541,6 +541,16 @@ class DecisionBus:
             "next5": set(),
         }
 
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🔎 SEARCH: def _evaluate_runner(
+    # 🧩 ACTION: REPLACE SIGNATURE + RETURN
+    # 📆 PATCHED: 2026-03-16 — return lane counts explicitly
+    #
+    # WHY:
+    # lane_counts was being mutated out-of-scope, producing false diagnostics.
+    # ======================================================================================================
+
     def _evaluate_runner(self, base_ctx, bus_stop_pairs, engine_report):
         lane_map = {
             "LEGACY": 1,
@@ -549,13 +559,14 @@ class DecisionBus:
             "MSC_EXPLORATORY": 4,
         }
 
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0}
         plans = []
 
         # ==================================================
         # LANE 1 — LEGACY (BUS STOP ONLY)
         # ==================================================
         for (mid, sid) in bus_stop_pairs:
-            ctx = self._route_ctx_map.get((mid, sid))            
+            ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
                 continue
 
@@ -566,18 +577,12 @@ class DecisionBus:
                 engine_report,
             )
             plans.extend(runner_plans)
-
-            lane = lane_map["LEGACY"]
-            lane_counts[lane] += len(runner_plans)
+            lane_counts[1] += len(runner_plans)
 
         # ==================================================
         # LANE 2–4 — FULL ROUTE (LIFECYCLE-GATED)
         # ==================================================
-        for (mid, sid) in self._route_ctx_map.keys():
-            ctx = self._route_ctx_map.get((mid, sid))            
-            if not ctx:
-                continue
-
+        for (mid, sid), ctx in self._route_ctx_map.items():
             for engine in ("MSC_RISK", "MSC_INPLAY", "MSC_EXPLORATORY"):
                 if not self._engine_ctx_allowed(engine, ctx):
                     continue
@@ -595,7 +600,8 @@ class DecisionBus:
                     engine_report[engine]["fired"] += 1
                     lane_counts[lane_map[engine]] += 1
 
-        return plans
+        return plans, lane_counts
+
 
     def _ensure_route_buffer(self):
         if self._route_buffer:
@@ -991,83 +997,93 @@ class DecisionBus:
         print(f"  Stop Ops:  {snap['risk_stops']}")
         print("────────────────────────────────────────────────")
 
-
     # ======================================================================
-    # TICK — rewritten only to call the two new helper functions
+    # TICK — authoritative BUS lifecycle (route → ctx → lanes)
     # ======================================================================
     def tick(self):
-        # ==================================================================
-        # BUS TICK PREFLIGHT — AUTHORITATIVE VARIABLE BINDING
-        # This block guarantees ALL tick-local variables exist before use
-        # ==================================================================
-
-        # 1️⃣ Increment tick (BUS identity)
+        # ===============================================================
+        # 0️⃣ BUS IDENTITY
+        # ===============================================================
         self.tick_id += 1
 
-        # 2️⃣ Diagnostic tick context
+        # ===============================================================
+        # 1️⃣ DIAGNOSTICS (non-fatal, never blocks)
+        # ===============================================================
         tick_ctx = self._new_tick_ctx()
-
-        # 🔒 GUARANTEE ENGINE REPORT EXISTS
         engine_report = EngineReportShim()
 
-        # 3️⃣ Build base context (BUS OWNS THIS)
+        # ===============================================================
+        # 2️⃣ BASE CONTEXT (BUS-OWNED)
+        # ===============================================================
         _bc = build_context(source="LIVE")
         base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
 
-        # 4️⃣ Advance bus stop / route
+        # ===============================================================
+        # 3️⃣ ROUTE / BUS STOP ADVANCEMENT
+        # ===============================================================
         self._bus_stop += 1
         if self._bus_stop > 10:
             self._bus_stop = 1
             self._route_id += 1
 
-        # 5️⃣ Route initialisation (ONLY once per route)
-        if self._bus_stop == 1 or self._route_snapshot is None:
+        # ===============================================================
+        # 4️⃣ ROUTE SNAPSHOT (AUTHORITATIVE, ONCE PER ROUTE)
+        # ===============================================================
+        if self._bus_stop == 1 or not hasattr(self, "_route_snapshot") or self._route_snapshot is None:
             from engines.bus_route import BusRouteSnapshot
 
             self._route_snapshot = BusRouteSnapshot()
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
 
-        # 6️⃣ Build FULL route CTX map (AUTHORITATIVE, PER TICK)
+        # ===============================================================
+        # 5️⃣ BUILD FULL ROUTE CTX MAP (ONCE PER TICK)
+        # ===============================================================
         self._route_ctx_map = {}
 
-        for (mid, sid) in self._route_snapshot.get_all_runners():
+        for mid, sid in self._route_snapshot.get_all_runners():
             ctx = self._build_ctx_for_market(base_ctx, mid, sid)
             if ctx:
                 self._route_ctx_map[(mid, sid)] = ctx
 
-        # 7️⃣ Legacy bus-stop slice (always defined)
+        # ===============================================================
+        # 6️⃣ LEGACY BUS STOP SLICE
+        # ===============================================================
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
 
-        # --------------------------------------------------
-        # AUTHORITATIVE PLAN GENERATION (BUS_ROUTE LANES)
-        # --------------------------------------------------
-        generated_plans = self._evaluate_runner(
+        # ===============================================================
+        # 7️⃣ AUTHORITATIVE PLAN GENERATION (LANES ONLY)
+        # ===============================================================
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: generated_plans = self._evaluate_runner(
+        # 🧩 ACTION: REPLACE
+        # 📆 PATCHED: 2026-03-16 — bind returned lane counts
+        # ======================================================================================================
+
+        generated_plans, lane_counts = self._evaluate_runner(
             base_ctx=base_ctx,
             bus_stop_pairs=legacy_slice,
             engine_report=engine_report,
         )
 
-        # 8️⃣ Lane counters (authoritative)
-        lane_counts = {
-            1: 0,  # LEGACY
-            2: 0,  # MSC_RISK
-            3: 0,  # MSC_INPLAY
-            4: 0,  # MSC_EXPLORATORY
-        }
 
-        # 9️⃣ Derived diagnostics (used later in reports)
         all_runners = self._route_snapshot.get_all_runners() or []
         mids = {mid for (mid, _sid) in all_runners}
         runner_count = len(all_runners)
 
-        # 🔒 PREFLIGHT COMPLETE — SAFE TO EXECUTE BUS LOGIC BELOW
-        # ==================================================================
+        # ===============================================================
+        # 🔒 PREFLIGHT COMPLETE — SAFE TO EXECUTE BELOW
+        # ===============================================================
 
+        # ==================================================
+        # OVERWATCHER — REDISTRIBUTION (ANALYSIS ONLY)
+        # ==================================================
+        for (mid, sid) in legacy_slice:
+            ctx = self._route_ctx_map.get((mid, sid))
+            if not ctx:
+                continue
 
-            # ==================================================
-            # OVERWATCHER PHASE 2 — REDISTRIBUTION (ANALYSIS ONLY)
-            # ==================================================
             try:
                 redist = evaluate_redistribution(ctx)
                 if redist:
@@ -1083,100 +1099,69 @@ class DecisionBus:
             except Exception as e:
                 tick_ctx["errors"].append(("redistribution", str(e)))
 
+        # ==================================================
+        # BUS PLAN ID NORMALISATION (AUTHORITATIVE)
+        # ==================================================
+        bus_exec_id = f"BUS-{self.tick_id}"
 
-            if not ctx:
-                tick_ctx["errors"].append(("analysis", "ctx_build_failed"))
+        plans = []
+        for eng, plan, ctx in generated_plans:
+            plan = dict(plan)
 
+            upstream_pid = plan.get("plan_id")
+            if upstream_pid:
+                plan["plan_id"] = f"{bus_exec_id}-{upstream_pid}"
+            else:
+                plan["plan_id"] = bus_exec_id
 
+            plans.append((eng, plan, ctx))
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: plans = self._run_engines_for_tick(mid, sid, ctx, engine_report)
-# 🧩 ACTION: ADD (BUS plan_id normalisation — authoritative identity)
-# 📆 PATCHED: 2025-12-17 — BUS guarantees plan_id invariant
-# ======================================================================================================
+        # ==================================================
+        # PHASE 1 REPORT — ANALYSIS
+        # ==================================================
+        print("────────────────────────────────────────────────────────")
+        print(
+            f"[BUS][PHASE 1][ANALYSIS] "
+            f"tick=#{self.tick_id} "
+            f"route=#{self._route_id} "
+            f"bus_stop=#{self._bus_stop}"
+        )
+        print("────────────────────────────────────────────────────────")
 
-            # ------------------------------------------------------------------
-            # BUS PLAN ID NORMALISATION (AUTHORITATIVE)
-            #
-            # Rule:
-            # - Every plan MUST have plan_id
-            # - Preserve upstream plan_id if present
-            # - Prefix with BUS execution identity
-            # ------------------------------------------------------------------
-            import uuid
+        print("SCOPE")
+        print(f"  markets_seen   : {len(mids)}")
+        print(f"  runners_seen   : {runner_count}")
 
-            bus_exec_id = f"BUS-{self.tick_id}"
+        evaluated = len(engine_report)
+        fired = sum(1 for r in engine_report.values() if r.get("fired"))
 
-            normalised_plans = []
-            for eng, plan, ctx in generated_plans:
-                plan = dict(plan)  # defensive copy
+        print("\nENGINES")
+        print(f"  evaluated      : {evaluated}")
+        print(f"  fired          : {fired}")
 
-                upstream_pid = plan.get("plan_id")
-                if upstream_pid:
-                    plan["plan_id"] = f"{bus_exec_id}-{upstream_pid}"
-                else:
-                    plan["plan_id"] = bus_exec_id
-  
-                normalised_plans.append((eng, plan, ctx))
-
-            plans = normalised_plans
-
-            
-
-            # --------------------------------------------------
-            # PHASE 1 REPORT — ANALYSIS
-            # --------------------------------------------------
-            print("────────────────────────────────────────────────────────")
+        print("\nENGINE OUTCOMES")
+        for eng, info in engine_report.items():
+            reasons = info.get("reasons", {})
+            reason_str = ", ".join(f"{k}={v}" for k, v in reasons.items()) if reasons else "none"
             print(
-                f"[BUS][PHASE 1][ANALYSIS] "
-                f"tick=#{self.tick_id} "
-                f"route=#{self._route_id} "
-                f"bus_stop=#{self._bus_stop}"
+                f"  {eng:<16} "
+                f"evaluated={info.get('evaluated')} "
+                f"fired={info.get('fired')} "
+                f"reasons=[{reason_str}]"
             )
 
-            print("────────────────────────────────────────────────────────")
+        print("\nPLANS")
+        print(f"  raw            : {len(generated_plans)}")
 
-            print("SCOPE")
-            print(f"  markets_seen   : {tick_ctx['markets_seen']}")
-            print(f"  runners_seen   : {tick_ctx['runners_seen']}")
+        print("\nERRORS")
+        if tick_ctx["errors"]:
+            for e in tick_ctx["errors"]:
+                print(f"  - {e}")
+        else:
+            print("  none")
 
-            evaluated = len(engine_report)
-            fired = sum(1 for r in engine_report.values() if r.get("fired"))
+        print("────────────────────────────────────────────────────────\n")
 
-            print("\nENGINES")
-            print(f"  evaluated      : {evaluated}")
-            print(f"  fired          : {fired}")
-
-            print("\nENGINE OUTCOMES")
-            for eng, info in engine_report.items():
-                reasons = info.get("reasons", {})
-                if reasons:
-                    reason_str = ", ".join(
-                        f"{k}={v}" for k, v in sorted(reasons.items())
-                    )
-                else:
-                    reason_str = "none"
-
-                print(
-                    f"  {eng:<16} "
-                    f"evaluated={info.get('evaluated')} "
-                    f"fired={info.get('fired')} "
-                    f"reasons=[{reason_str}]"
-                )
-
-            print("\nPLANS")
-            print(f"  raw            : {len(generated_plans)}")
-
-
-            print("\nERRORS")
-            if tick_ctx["errors"]:
-                for e in tick_ctx["errors"]:
-                    print(f"  - {e}")
-            else:
-                print("  none")
-
-            print("────────────────────────────────────────────────────────\n")
 
             # ==================================================
             # PHASE 2 — ENRICHMENT (BEGINS)
@@ -1195,7 +1180,7 @@ class DecisionBus:
 # ======================================================================================================
 
             # Feed ALL generated plans into cadence controller
-            self._cadence.enqueue(generated_plans)
+            self._cadence.enqueue(plans)
 
             # ------------------------------------
             # RAW PLAN CAPTURE (analysis visibility)
@@ -1528,17 +1513,23 @@ class DecisionBus:
             # --------------------------------------------------
             # Route through cadence controller
             # --------------------------------------------------
-            self._cadence.enqueue(generated_plans)
 
-            admitted = self._cadence.admit_for_tick()
 
             # --------------------------------------------------
             # 🔢 FILL RATE METRIC (AUTHORITATIVE)
             # --------------------------------------------------
-            attempted = len(legacy_slice)
+            # ======================================================================================================
+            # 📍 TARGET: engines/bus/bus.py
+            # 🔎 SEARCH: fill_rate =
+            # 🧩 ACTION: CLARIFY METRIC
+            # 📆 PATCHED: 2026-03-16 — fill rate reflects cadence admission
+            # ======================================================================================================
+
+            attempted = len(generated_plans)
             delegated = len(admitted)
 
             fill_rate = (delegated / attempted) if attempted > 0 else 0.0
+
             fill_pct = fill_rate * 100.0
 
             if fill_pct >= 50.0:
@@ -1583,7 +1574,7 @@ class DecisionBus:
             print("────────────────────────────────────────────────────────")
             print(f"plans_generated : {len(generated_plans)}")
 
-            print(f"plans_routed    : {len(final_plans)}")
+            print(f"plans_routed    : {len(admitted)}")
 
             print("────────────────────────────────────────────────────────")
 
