@@ -608,7 +608,7 @@ class DecisionBus:
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
         # --------------------------------------------------
-        bus_pairs = legacy_slice
+        bus_pairs = bus_stop_pairs
 
         if bus_pairs:
             mids = {mid for (mid, _sid) in bus_pairs}
@@ -1211,6 +1211,7 @@ class DecisionBus:
         # ===============================================================
 
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
+        bus_stop_pairs = legacy_slice
 
 
         # ===============================================================
@@ -1241,7 +1242,7 @@ class DecisionBus:
         # ==================================================
         # OVERWATCHER — REDISTRIBUTION (ANALYSIS ONLY)
         # ==================================================
-        for (mid, sid) in legacy_slice:
+        for (mid, sid) in bus_stop_pairs:
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
                 continue

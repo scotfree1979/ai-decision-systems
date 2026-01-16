@@ -93,6 +93,16 @@ class BusRouteSnapshot:
             self.bus_stops = {}
             return
 
+
+    def get_bus_stop_pairs(self, tick: int):
+        """
+        Canonical BUS helper.
+
+        Returns:
+            List[(marketId, selectionId)] for this bus stop.
+        """
+        return self.bus_stops.get(tick, [])
+
     def partition_into_bus_stops(self):
         n = len(self.runner_pool)
         if n == 0:
