@@ -168,99 +168,6 @@ def _record_reason(engine_report: dict, engine: str, reason: str | None):
     reasons = eng.setdefault("reasons", {})
     reasons[reason] = reasons.get(reason, 0) + 1
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: def _evaluate_runner(
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-03-15 — Authoritative BUS runner evaluator (final)
-#
-# CONTRACT:
-# - This is the ONLY place where engines are selected per runner
-# - BusRouteSnapshot defines WHAT runs
-# - BUS builds CTX
-# - Engines execute ONLY via _run_engines_for_tick
-# ======================================================================================================
-
-
-
-
-def _engine_ctx_allowed(self, engine: str, ctx: dict) -> bool:
-    """
-    DB-authoritative per-engine CTX gate.
-
-    Rules (lane-local, stateless):
-    - LEGACY is always allowed (parent creator)
-    - For all other engines:
-        • If NO matched parent exists for this engine → ALLOW
-        • If matched parent exists AND a matched child exists → ALLOW
-        • If matched parent exists AND child is NOT matched → BLOCK
-
-    This function makes NO assumptions and uses DB truth only.
-    """
-
-    # Legacy is never gated
-    if engine == "LEGACY":
-        return True
-
-    mid = ctx.get("marketId")
-    sid = ctx.get("selectionId")
-
-    if not mid or not sid:
-        # Defensive: missing identity → do not block execution
-        return True
-
-    try:
-        from engines.config_paths import open_auto_db
-
-        con = open_auto_db(rw=False)
-
-        row = con.execute(
-            """
-            SELECT
-                p.id                 AS parent_id,
-                p.entry_status       AS parent_status,
-                c.exit_status        AS child_exit_status
-            FROM orders p
-            LEFT JOIN orders c
-                ON c.hedge_of = p.id
-            WHERE p.engine = ?
-              AND p.marketId = ?
-              AND p.selectionId = ?
-              AND p.role = 'PARENT'
-              AND UPPER(p.entry_status) = 'MATCHED'
-            LIMIT 1
-            """,
-            (engine, mid, sid),
-        ).fetchone()
-
-        # --------------------------------------------------
-        # CASE 1: no matched parent → allow
-        # --------------------------------------------------
-        if row is None:
-            return True
-
-        _parent_id, _parent_status, child_exit_status = row
-
-        # --------------------------------------------------
-        # CASE 2: parent exists but no matched child → block
-        # --------------------------------------------------
-        if not child_exit_status or str(child_exit_status).upper() != "MATCHED":
-            return False
-
-        # --------------------------------------------------
-        # CASE 3: parent + child both matched → allow
-        # --------------------------------------------------
-        return True
-
-    except Exception:
-        # Fail-open: BUS must not deadlock on DB issues
-        return True
-
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
 
 
 # NEW — minimal helper, lives inside DecisionBus
@@ -508,12 +415,100 @@ class DecisionBus:
 # 📆 PATCHED: 2026-03-10 — Cadence Controller initialisation
 # ======================================================================================================
 
+
+
         # ------------------------------------------------------------------
         # Cadence Controller (execution admission gate)
         # ------------------------------------------------------------------
         self._cadence = CadenceController()
         self._route_id = 1          # starts at Route #1
         self._bus_stop = 0          # increments per tick, resets at 10
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: class DecisionBus
+# 🧩 ACTION: ADD method (bind lifecycle gate to BUS instance)
+# 📆 PATCHED: 2026-03-18 — Fix missing _engine_ctx_allowed binding
+#
+# WHY:
+# - _engine_ctx_allowed was defined at module scope
+# - BUS calls it as an instance method (self._engine_ctx_allowed)
+# - This caused a runtime AttributeError during live ticks
+#
+# CONTRACT:
+# - Behaviour unchanged
+# - DB-first lifecycle gate preserved
+# - MSC + LEGACY semantics untouched
+# ======================================================================================================
+
+    def _engine_ctx_allowed(self, engine: str, ctx: dict) -> bool:
+        """
+        DB-authoritative per-engine CTX gate.
+
+        Rules:
+        - LEGACY always allowed
+        - Other engines:
+            • no matched parent → allow
+            • matched parent + matched child → allow
+            • matched parent + unmatched child → block
+        """
+
+        if engine == "LEGACY":
+            return True
+
+        mid = ctx.get("marketId")
+        sid = ctx.get("selectionId")
+
+        if not mid or not sid:
+            return True
+
+        try:
+            from engines.config_paths import open_auto_db
+
+            con = open_auto_db(rw=False)
+
+            row = con.execute(
+                """
+                SELECT
+                    p.id,
+                    p.entry_status,
+                    c.exit_status
+                FROM orders p
+                LEFT JOIN orders c
+                  ON c.hedge_of = p.id
+                WHERE p.engine = ?
+                  AND p.marketId = ?
+                  AND p.selectionId = ?
+                  AND p.role = 'PARENT'
+                  AND UPPER(p.entry_status) = 'MATCHED'
+                LIMIT 1
+                """,
+                (engine, mid, sid),
+            ).fetchone()
+
+            # No matched parent → allow
+            if row is None:
+                return True
+
+            _pid, _parent_status, child_exit_status = row
+
+            # Parent matched, child not matched → block
+            if not child_exit_status or str(child_exit_status).upper() != "MATCHED":
+                return False
+
+            # Parent + child matched → allow
+            return True
+
+        except Exception:
+            # BUS must fail-open, never deadlock
+            return True
+
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
 
     # 🔑 THIS MUST BE HERE — SAME INDENT AS tick(), _build_ctx_for_market(), etc.
     def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
@@ -551,63 +546,213 @@ class DecisionBus:
     # ======================================================================================================
     # 📍 TARGET: engines/bus/bus.py
     # 🔎 SEARCH: def _evaluate_runner(
-    # 🧩 ACTION: REPLACE SIGNATURE + RETURN
-    # 📆 PATCHED: 2026-03-16 — return lane counts explicitly
+    # 🧩 ACTION: REPLACE (FINAL CANONICAL LANE EXECUTION)
+    # 📆 PATCHED: 2026-03-18 — Lock BUS lane semantics + helper-owned odds
     #
-    # WHY:
-    # lane_counts was being mutated out-of-scope, producing false diagnostics.
+    # ARCHITECTURAL CONTRACT (DO NOT VIOLATE):
+    # ---------------------------------------
+    # • BusRoute is the SINGLE source of truth for:
+    #     - runner identity (marketId, selectionId)
+    #     - lane eligibility
+    #     - lifecycle exclusions
+    #     - in-play truth
+    #     - odds resolution (including fallback)
+    #
+    # • BUS responsibilities are ONLY:
+    #     - reuse prebuilt CTX
+    #     - filter CTX per lane
+    #     - refresh odds FROM HELPER
+    #     - send CTX to engines
+    #
+    # HARD RULES:
+    #   ❌ NO scope
+    #   ❌ NO MarketMonitor
+    #   ❌ NO DB lifecycle logic
+    #   ❌ NO runner discovery
+    #
+    # If this block changes, the system WILL regress.
     # ======================================================================================================
 
     def _evaluate_runner(self, base_ctx, bus_stop_pairs, engine_report):
-        lane_map = {
-            "LEGACY": 1,
-            "MSC_RISK": 2,
-            "MSC_INPLAY": 3,
-            "MSC_EXPLORATORY": 4,
-        }
+        """
+        FINAL CANONICAL LANE EXECUTION
 
-        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+        BUS responsibilities:
+        - Trust BusRoute helpers
+        - Reuse pre-built CTX
+        - Refresh odds via helper
+        - Send CTX to engines
+        """
+
         plans = []
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0}
 
-        # ==================================================
-        # LANE 1 — LEGACY (BUS STOP ONLY)
-        # ==================================================
-        for (mid, sid) in bus_stop_pairs:
+        # --------------------------------------------------
+        # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
+        # --------------------------------------------------
+        from engines.bus_route import get_runner_odds_map
+
+        all_pairs = list(self._route_ctx_map.keys())
+        odds_map = get_runner_odds_map(all_pairs)
+
+        for (mid, sid), odds in odds_map.items():
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
                 continue
 
-            runner_plans = self._run_engines_for_tick(
-                mid,
-                sid,
-                ctx,
-                engine_report,
-            )
-            plans.extend(runner_plans)
-            lane_counts[1] += len(runner_plans)
+            ctx["px"]   = odds["px"]
+            ctx["odds"] = odds["px"]
+            ctx["back"] = odds.get("back")
+            ctx["lay"]  = odds.get("lay")
 
-        # ==================================================
-        # LANE 2–4 — FULL ROUTE (LIFECYCLE-GATED)
-        # ==================================================
-        for (mid, sid), ctx in self._route_ctx_map.items():
-            for engine in ("MSC_RISK", "MSC_INPLAY", "MSC_EXPLORATORY"):
-                if not self._engine_ctx_allowed(engine, ctx):
+        # --------------------------------------------------
+        # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
+        # --------------------------------------------------
+        bus_pairs = legacy_slice
+
+        if bus_pairs:
+            mids = {mid for (mid, _sid) in bus_pairs}
+            total_pairs = len(bus_pairs)
+
+            # CTX presence
+            ctx_present = sum(
+                1 for (mid, sid) in bus_pairs
+                if (mid, sid) in self._route_ctx_map
+            )
+
+            # CTX with execution price (odds refreshed)
+            ctx_with_px = sum(
+                1 for (mid, sid) in bus_pairs
+                if (mid, sid) in self._route_ctx_map
+                and self._route_ctx_map[(mid, sid)].get("px") is not None
+            )
+
+            print(
+                f"[BUS][CTX] "
+                f"tick={self.tick_id} "
+                f"route={self._route_id} "
+                f"bus_stop={self._bus_stop} | "
+                f"markets={len(mids)} "
+                f"runners={total_pairs} "
+                f"ctx_present={ctx_present} "
+                f"ctx_with_px={ctx_with_px}"
+            )
+
+
+        # --------------------------------------------------
+        # 🟦 LANE 1 — LEGACY (BUS STOP ONLY)
+        # --------------------------------------------------
+        engine_report["LEGACY"]["evaluated"] = True
+
+        for mid, sid in bus_stop_pairs:
+            ctx = self._route_ctx_map.get((mid, sid))
+            if not ctx or ctx.get("px") is None:
+                continue
+
+            for letter in self.ALLOWED_LEGACY_LETTERS:
+                ctx_l = dict(ctx)
+                ctx_l["letter"] = letter
+
+                try:
+                    res = plan_for_strategy(letter, ctx_l)
+                    if res and res.get("enter"):
+                        plan = dict(res)
+                        plan["engine"] = "LEGACY"
+                        plans.append(("LEGACY", plan, ctx_l))
+                        engine_report["LEGACY"]["fired"] += 1
+                        lane_counts[1] += 1
+                except Exception as e:
+                    _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
+
+        # --------------------------------------------------
+        # 🟨 LANE 2 — MSC_RISK (HELPER-DRIVEN)
+        # --------------------------------------------------
+        engine_report["MSC_RISK"]["evaluated"] = True
+
+        from engines.bus_route import get_risk_legacy_parent_pairs
+
+        risc = self.engines.get("MSC_RISK")
+        if risc:
+            for mid, sid in get_risk_legacy_parent_pairs():
+                ctx = self._route_ctx_map.get((mid, sid))
+                if not ctx or ctx.get("px") is None:
                     continue
 
                 try:
-                    r = self.engines[engine].tick(ctx)
+                    r = risc.tick(ctx)
+                    if r and r.get("enter"):
+                        plan = dict(r)
+                        plan["engine"] = "MSC_RISK"
+                        plans.append(("MSC_RISK", plan, ctx))
+                        engine_report["MSC_RISK"]["fired"] += 1
+                        lane_counts[2] += 1
                 except Exception:
-                    _record_reason(engine_report, engine, "tick_error")
+                    _record_reason(engine_report, "MSC_RISK", "tick_error")
+
+        # --------------------------------------------------
+        # 🟥 LANE 3 — MSC_INPLAY (HELPER-DRIVEN)
+        # --------------------------------------------------
+        engine_report["MSC_INPLAY"]["evaluated"] = True
+
+        from engines.bus_route import get_v7_inplay_snapshot
+
+        inplay = self.engines.get("MSC_INPLAY")
+        if inplay:
+            seen_markets = set()
+            inplay_pairs = set()
+
+            for mid, _ in self._route_ctx_map.keys():
+                if mid in seen_markets:
+                    continue
+                seen_markets.add(mid)
+
+                for r in get_v7_inplay_snapshot(mid) or []:
+                    inplay_pairs.add((mid, str(r["selectionId"])))
+
+            for mid, sid in inplay_pairs:
+                ctx = self._route_ctx_map.get((mid, sid))
+                if not ctx or ctx.get("px") is None:
                     continue
 
-                if r and r.get("enter"):
-                    p = dict(r)
-                    p["engine"] = engine
-                    plans.append((engine, p, ctx))
-                    engine_report[engine]["fired"] += 1
-                    lane_counts[lane_map[engine]] += 1
+                try:
+                    r = inplay.tick(ctx)
+                    if r and r.get("enter"):
+                        plan = dict(r)
+                        plan["engine"] = "MSC_INPLAY"
+                        plans.append(("MSC_INPLAY", plan, ctx))
+                        engine_report["MSC_INPLAY"]["fired"] += 1
+                        lane_counts[3] += 1
+                except Exception:
+                    _record_reason(engine_report, "MSC_INPLAY", "tick_error")
+
+        # --------------------------------------------------
+        # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)
+        # --------------------------------------------------
+        engine_report["MSC_EXPLORATORY"]["evaluated"] = True
+
+        from engines.bus_route import get_exploratory_active_parent_pairs
+
+        exclusions = get_exploratory_active_parent_pairs()
+
+        exp = self.engines.get("MSC_EXPLORATORY")
+        if exp:
+            for (mid, sid), ctx in self._route_ctx_map.items():
+                if (mid, sid) in exclusions or ctx.get("px") is None:
+                    continue
+
+                try:
+                    r = exp.tick(ctx)
+                    if r and r.get("enter"):
+                        plan = dict(r)
+                        plan["engine"] = "MSC_EXPLORATORY"
+                        plans.append(("MSC_EXPLORATORY", plan, ctx))
+                        engine_report["MSC_EXPLORATORY"]["fired"] += 1
+                        lane_counts[4] += 1
+                except Exception:
+                    _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
 
         return plans, lane_counts
+
 
 
     def _ensure_route_buffer(self):
@@ -730,6 +875,22 @@ class DecisionBus:
 
         from engines.market_monitor.monitor import get_market_state
 
+        def _refresh_ctx_odds(self, ctx):
+            st = get_market_state(ctx["marketId"]) or {}
+            runners = st.get("runners") or {}
+            rn = runners.get(ctx["selectionId"])
+
+            if not rn:
+                return  # runner vanished; engine will no-op safely
+
+            px = rn.get("px")
+            if px is None:
+                return
+
+            ctx["px"] = px
+            ctx["odds"] = px
+            ctx["ltp"] = px
+
         ctx = dict(base_ctx)
         if not self.live_run_id:
             self.live_run_id = f"BOOT-{int(time.time())}"
@@ -800,81 +961,31 @@ class DecisionBus:
                 ctx["legacy_entry_stake"] = o.get("entry_stake")
                 break
 
-
-
-        # --------------------------------------------------
-        # MARKET MONITOR — SINGLE SOURCE OF RUNNER TRUTH
-        # --------------------------------------------------
-        st = get_market_state(mid) or {}
-        runners = st.get("runners") or {}
-
-        rn = runners.get(sid)
-        if not rn:
-            # Runner vanished or market not hydrated yet
-            return None
-
-        px = rn.get("px")
-
-        # Hard guarantee: ctx px must reflect live monitor state
-        ctx["px"] = ctx["odds"] = ctx["ltp"] = px
-        ctx["band"] = rn.get("band")
-        ctx["is_fav"] = rn.get("is_fav", False)
-
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: def _build_ctx_for_market(self, base_ctx, mid, sid):
-# 🧩 ACTION: FIX (unpack MarketPhaseClock.get return)
-# 📆 PATCHED: 2026-01-02 — Inject authoritative phase clock into MSC context
+# 🧩 ACTION: REMOVE phase clock dependency entirely
+# 📆 PATCHED: 2026-03-18 — BUS trusts route helper; remove OC/phase logic
 #
-# RATIONALE:
-# MarketPhaseClock.get() returns (MarketPhase, tto_window).
-# MSC requires minutes_to_off BEFORE plan generation.
-# Fallback to 999.0 was masking a tuple-unpack error.
+# WHY:
+# - Runner identity + lifecycle are owned by BusRouteSnapshot
+# - Temporal correctness is upstream (Scope + MarketMonitor + inbound OC cache)
+# - BUS only requires fresh odds + DB lifecycle truth
+#
+# EFFECT:
+# - Removes MarketPhaseClock dependency
+# - Eliminates None unpack crash
+# - Simplifies BUS responsibility to routing only
 # ======================================================================================================
 
-        # --------------------------------------------------
-        # AUTHORITATIVE CLOCK (TIME DIMENSION)
-        # --------------------------------------------------
-        try:
-            phase_obj, tto_window = MarketPhaseClock.get(mid)
+        # ❌ REMOVED:
+        # MarketPhaseClock.get()
+        # oc_phase
+        # minutes_to_off
+        # phase
+        # in_play
+        # tto_window
 
-            ctx["oc_phase"] = phase_obj.oc_phase
-            ctx["minutes_to_off"] = phase_obj.minutes_to_off
-            ctx["phase"] = phase_obj.phase
-            ctx["in_play"] = phase_obj.in_play
-
-            # Optional: expose tto_window explicitly (safe, read-only)
-            ctx["tto_window"] = tto_window
-
-        except Exception as e:
-            # Safe fallback — should not normally occur
-            ctx["oc_phase"] = 0.0
-            ctx["minutes_to_off"] = 999.0
-            ctx["phase"] = "PRE"
-            ctx["in_play"] = False
-            ctx["_phase_clock_error"] = str(e)
-
-
-        # --------------------------------------------------
-        # DERIVE TTO WINDOW (BUS-LOCAL, NOT STORED)
-        # --------------------------------------------------
-        mto = ctx["minutes_to_off"]
-        if mto <= 0:
-            ctx["tto_window"] = "INP"
-        elif mto <= 5:
-            ctx["tto_window"] = "S3"
-        elif mto <= 10:
-            ctx["tto_window"] = "S2"
-        elif mto <= 20:
-            ctx["tto_window"] = "S1"
-        elif mto <= 60:
-            ctx["tto_window"] = "60"
-        elif mto <= 120:
-            ctx["tto_window"] = "120"
-        else:
-            ctx["tto_window"] = "120+"
-
-        return ctx
 
     # ======================================================================
     # NEW FUNCTION 2 — extracted engine plan collection
@@ -1032,6 +1143,14 @@ class DecisionBus:
         if self._bus_stop > 10:
             self._bus_stop = 1
             self._route_id += 1
+
+        # ===============================================================
+        # 3️⃣ ROUTE / BUS CTX V7
+        # ===============================================================
+        if self._bus_stop == 1 or not self._route_ctx_map:
+            from engines.bus_route import build_route_ctx_map
+            self._route_ctx_map = build_route_ctx_map()
+
 
         # ===============================================================
         # 4️⃣ ROUTE SNAPSHOT (AUTHORITATIVE, ONCE PER ROUTE)

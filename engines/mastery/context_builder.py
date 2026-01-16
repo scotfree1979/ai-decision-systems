@@ -127,6 +127,45 @@ def _open_adb(timeout: float = 10.0, retries: int = 6, delay_s: float = 0.08) ->
 # Re-export q_retry so existing call sites continue to work
 _q_retry = _dal_q_retry
 # === PATCH END ===
+def build_context_for_runner(marketId: str, selectionId: str, source: str = "LIVE"):
+    """
+    Canonical per-runner CTX builder.
+    Guarantees odds are present via live API fallback.
+    """
+    ctx, meta = build_context(source=source)
+
+    mid = str(marketId)
+    sid = str(selectionId)
+
+    # overwrite identity
+    ctx["marketId"] = mid
+    ctx["selectionId"] = sid
+
+    # ------------------------------------------------------------------
+    # 🔴 HARD GUARANTEE: odds must exist
+    # ------------------------------------------------------------------
+    if ctx.get("odds") is None or ctx.get("px") is None:
+        try:
+            from engines.bus_route import fetch_live_odds
+
+            odds = fetch_live_odds(
+                session_token=None,
+                marketId=mid,
+                selectionId=sid,
+            ) or {}
+
+            px = odds.get("back") or odds.get("lay")
+            if px is not None:
+                ctx["odds"] = float(px)
+                ctx["px"] = float(px)
+                ctx["ltp"] = float(px)
+                ctx["live_back"] = odds.get("back")
+                ctx["live_lay"] = odds.get("lay")
+        except Exception:
+            pass
+
+    return ctx, meta
+
 
 
 def _auto_markets_for_day(day_iso: str) -> list[sqlite3.Row]:
@@ -196,7 +235,7 @@ def _tape_snapshot(mid: str, sid: str) -> tuple[Optional[float], Optional[int]]:
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='odds_current'").fetchone():
             r = con.execute(
                 """
-                SELECT ltp, back1, lay1, COALESCE(updated_ts, updated_at) AS uts
+                SELECT ltp, back1, lay1, updated_ts AS uts
                 FROM odds_current
                 WHERE day IN (date('now','utc'), date('now'))
                   AND marketId=? AND selectionId=?

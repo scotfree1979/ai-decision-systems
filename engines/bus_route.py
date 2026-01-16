@@ -1,4 +1,4 @@
-# ✅ api_tools.py – Shared API Functions (Updated with check_market_off_flag)
+# ✅ bus_route.py – Cloned API Functions (Updated to be the authority on mid & Sid lookup for trading)
 
 import json
 import requests
@@ -114,6 +114,103 @@ class BusRouteSnapshot:
 
     def get_all_runners(self):
         return self.runner_pool
+
+# ============================================================================
+# RISK ELIGIBILITY — LEGACY PARENTS WITHOUT MATCHED CHILD
+# ============================================================================
+def get_risk_legacy_parent_pairs(days_back: int = 7):
+    """
+    Authoritative RISK lookup.
+
+    Returns all (marketId, selectionId) for LEGACY parents that:
+    - are MATCHED
+    - have NO matched child
+    - occurred within the last `days_back` days (UTC)
+
+    DB-only. No scope. No monitor. No odds.
+    """
+
+    from engines.config_paths import auto_conn
+    import sqlite3
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                p.marketId,
+                p.selectionId
+            FROM orders p
+            LEFT JOIN orders c
+              ON c.hedge_of = p.id
+             AND UPPER(c.exit_status) = 'MATCHED'
+            WHERE p.engine = 'LEGACY'
+              AND p.role = 'PARENT'
+              AND UPPER(p.entry_status) = 'MATCHED'
+              AND c.id IS NULL
+              AND date(p.opened_at) >= date('now','utc', ?)
+            """,
+            (f"-{int(days_back)} days",),
+        ).fetchall()
+
+    finally:
+        con.close()
+
+    return [
+        (str(r["marketId"]), str(r["selectionId"]))
+        for r in rows
+        if r["marketId"] and r["selectionId"]
+    ]
+
+# ============================================================================
+# EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS
+# ============================================================================
+def get_exploratory_active_parent_pairs(days_back: int = 7):
+    """
+    Returns (marketId, selectionId) where MSC_EXPLORATORY has
+    a MATCHED parent with NO matched child.
+
+    Used to EXCLUDE runners from exploratory re-entry.
+
+    DB-only. No scope. No monitor.
+    """
+
+    from engines.config_paths import auto_conn
+    import sqlite3
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                p.marketId,
+                p.selectionId
+            FROM orders p
+            LEFT JOIN orders c
+              ON c.hedge_of = p.id
+             AND UPPER(c.exit_status) = 'MATCHED'
+            WHERE p.engine = 'MSC_EXPLORATORY'
+              AND p.role = 'PARENT'
+              AND UPPER(p.entry_status) = 'MATCHED'
+              AND c.id IS NULL
+              AND date(p.opened_at) >= date('now','utc', ?)
+            """,
+            (f"-{int(days_back)} days",),
+        ).fetchall()
+
+    finally:
+        con.close()
+
+    return {
+        (str(r["marketId"]), str(r["selectionId"]))
+        for r in rows
+        if r["marketId"] and r["selectionId"]
+    }
+
 
 
 def build_bus_route_tick(rotation: RunnerRotation):
@@ -655,6 +752,106 @@ def get_legacy_snapshot():
 
     return snapshot
 
+# ============================================================================
+# CANONICAL ODDS LOOKUP — BUS_ROUTE AUTHORITY
+# ============================================================================
+def get_runner_odds_map(
+    pairs: List[Tuple[str, str]],
+    session_token: str | None = None,
+):
+    """
+    Canonical odds resolver for BUS.
+
+    Given a list of (marketId, selectionId), return the
+    best-known odds using the BusRoute odds stack.
+
+    - Betfair API via fetch_live_odds
+    - No Scope
+    - No MarketMonitor
+    - No DB dependency
+    - Safe to call every tick
+
+    Returns:
+        dict[(marketId, selectionId)] = {
+            "px": float,
+            "back": float | None,
+            "lay": float | None,
+        }
+    """
+
+    odds_map = {}
+
+    for mid, sid in pairs:
+        try:
+            odds = fetch_live_odds(
+                session_token=session_token,
+                marketId=str(mid),
+                selectionId=str(sid),
+            ) or {}
+
+            back = odds.get("back")
+            lay  = odds.get("lay")
+
+            # Choose execution px
+            px = back or lay
+            if px is None:
+                continue
+
+            odds_map[(str(mid), str(sid))] = {
+                "px": float(px),
+                "back": back,
+                "lay": lay,
+            }
+
+        except Exception:
+            # Fail silent — BUS will simply not evaluate this runner
+            continue
+
+    return odds_map
+
+# engines/bus_route.py
+
+def build_route_ctx_map():
+    """
+    Build full CTX map for the current route.
+
+    - Uses existing context_builder.build_context()
+    - Builds CTXV7 ONCE per runner
+    - No odds refresh here (BUS does that per tick)
+    """
+
+    from engines.mastery.context_builder import build_context
+
+    ctx_map = {}
+
+    # build_context already knows scope + markets
+    base_ctx, meta = build_context(source="LIVE")
+
+    # IMPORTANT:
+    # build_context returns ONE ctx, but we need MANY
+    # So we iterate runners from BusRouteSnapshot
+
+    snapshot = BusRouteSnapshot()
+    snapshot.build_route()
+    snapshot.partition_into_bus_stops()
+
+    for mid, sid in snapshot.get_all_runners():
+        try:
+            from engines.mastery.context_builder import build_context_for_runner
+
+            ctx, _meta = build_context_for_runner(mid, sid, source="LIVE")
+
+
+            ctx_map[(mid, sid)] = ctx
+
+        except Exception:
+            continue  # fail-open
+
+    return ctx_map
+
+
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/api_tools.py
 # 🔎 ANCHOR: end of file (before __main__ or final EOF)
@@ -905,6 +1102,28 @@ if __name__ == "__main__":
         print("=== END LEGACY SNAPSHOT ===\n")
 
         # ------------------------------------------------------------------
+        # ✅ V7 BUS ROUTE CTX
+        # ------------------------------------------------------------------
+        print("\n=== BUS ROUTE CTX ===\n")
+        ctx_map = build_route_ctx_map()
+
+        # pick any runner from route
+        (mid, sid), ctx = next(iter(ctx_map.items()))
+
+        print("\n=== CTX PROOF ===")
+        print("marketId      :", ctx.get("marketId"))
+        print("selectionId   :", ctx.get("selectionId"))
+        print("px            :", ctx.get("px"))
+        print("odds          :", ctx.get("odds"))
+        print("band / fav    :", ctx.get("is_fav"), ctx.get("fav_rank"))
+        print("bias          :", ctx.get("bias"), ctx.get("bias_dir"))
+        print("slope_ppm     :", ctx.get("slope_ppm"))
+        print("oc_momentum   :", ctx.get("oc_momentum_ticks"))
+        print("legacy_parent :", ctx.get("legacy_parent_id"))
+        print("=================\n")
+        print("=== BUS ROUTE CTX ===\n")
+
+        # ------------------------------------------------------------------
         # ✅ V7 BUS ROUTE SNAPSHOT
         # ------------------------------------------------------------------
 
@@ -922,8 +1141,20 @@ if __name__ == "__main__":
                 print(" ", mid, sid)
 
 
-        print("=== END BUS SNAPSHOT ===\n")
+        print("=== END BUS LOOKUPS ===\n")
 
+        # ------------------------------------------------------------------
+        # ✅ V7 BUS ROUTE LOOKUPS
+        # ------------------------------------------------------------------
+
+        print("RISK legacy parents:")
+        for x in get_risk_legacy_parent_pairs(7)[:10]:
+            print(" ", x)
+
+        print("\nExploratory exclusions:")
+        for x in list(get_exploratory_active_parent_pairs(7))[:10]:
+            print(" ", x)
+        print("=== END BUS LOOKUPS ===\n")
 
     except Exception as e:
         print(f"❌ Error: {e}")
