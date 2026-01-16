@@ -122,6 +122,13 @@ def _placement_worker_loop():
                 # --------------------------------------------------
                 # Execute parent (ONLY side-effect in worker)
                 # --------------------------------------------------
+                # 🔒 RESERVE FIRST — INTENT-LEVEL GUARANTEE
+                from engines.live import bank_state
+                bank_state.on_parent_placed(
+                    engine=row["engine"],
+                    required_exposure=row["required_exposure"],
+                )
+
                 bet_id, parent_ref = place_parent_and_hedge(
                     market_id=row["marketId"],
                     selection_id=row["selectionId"],
@@ -141,13 +148,6 @@ def _placement_worker_loop():
                         "engine": row["engine"],
                     },
                 )
-
-                if bet_id:
-                    from engines.live import bank_state
-                    bank_state.on_parent_placed(
-                        engine=row["engine"],
-                        required_exposure=row["required_exposure"],  # 🔑 THIS is the fix
-                    )
 
 
                 # Loop immediately (one-by-one semantics)
