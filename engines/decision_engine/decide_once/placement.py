@@ -235,7 +235,9 @@ def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str, float]:
             return False, "invalid_stake_or_odds", 0.0
 
         # 🔑 FULL lifecycle exposure (parent + child)
-        required = round(stake * odds, 2)
+        required = float(plan.get("required_exposure", 0.0))
+        if required <= 0:
+            return False, "missing_required_exposure", 0.0
 
         available = bank_state.get_engine_available(engine)
         if available < required:
