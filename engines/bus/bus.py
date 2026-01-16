@@ -1394,13 +1394,16 @@ class DecisionBus:
 
                 # --------------------------------------------------
                 # REQUIRED EXPOSURE (AUTHORITATIVE — BUS OWNED)
+                # Full lifecycle exposure (parent + child)
                 # --------------------------------------------------
-                required_exposure = stake * odds   # full lifecycle
+                size = float(plan.get("size") or 0.0)
+                px   = float(plan.get("px") or 0.0)
 
+                required_exposure = 0.0
+                if size > 0 and px > 0:
+                    required_exposure = size * px
 
-                # Stamp explicitly for placement contract
                 plan["required_exposure"] = required_exposure
-
 
                 # ------------------------------------------------------------------
                 # STAKE ENRICHMENT (ENGINE-AWARE — SINGLE AUTHORITY)
