@@ -1392,6 +1392,25 @@ class DecisionBus:
                     plan["direction"] = exec_dir
                     plan_dir = exec_dir
 
+                # --------------------------------------------------
+                # REQUIRED EXPOSURE (AUTHORITATIVE — BUS OWNED)
+                # --------------------------------------------------
+                side = (plan.get("side") or "").upper()
+                size = float(plan.get("size") or 0.0)
+                px   = float(plan.get("px") or 0.0)
+
+                required_exposure = 0.0
+
+                if size > 0 and px > 0:
+                    if side == "LAY":
+                        required_exposure = size * (px - 1.0)
+                    elif side == "BACK":
+                        required_exposure = size
+
+                # Stamp explicitly for placement contract
+                plan["required_exposure"] = required_exposure
+
+
                 # ------------------------------------------------------------------
                 # STAKE ENRICHMENT (ENGINE-AWARE — SINGLE AUTHORITY)
                 #
