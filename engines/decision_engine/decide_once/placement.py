@@ -79,6 +79,7 @@ def _placement_worker_loop():
                    o.side,
                    o.entry_odds,
                    o.entry_stake,
+                   o.target_ticks,        -- ← THIS IS REQUIRED
                    o.engine,
                    o.source,
                    o.run_id,
@@ -87,8 +88,16 @@ def _placement_worker_loop():
                 FROM orders o
                 LEFT JOIN bets.bets b
                   ON b.marketId = o.marketId
+
                 WHERE o.role = 'PARENT'
-                  AND o.entry_status = 'QUEUED'
+                  AND (
+                        o.entry_status = 'QUEUED'
+                        OR (
+                            o.entry_status = 'PLACING'
+                            AND strftime('%s','now') - strftime('%s', o.opened_at) > 3
+                        )
+                      )
+
                 ORDER BY
                     CASE o.engine
                         WHEN 'MSC_INPLAY' THEN 1
@@ -122,49 +131,48 @@ def _placement_worker_loop():
                 # --------------------------------------------------
                 # Execute parent (ONLY side-effect in worker)
                 # --------------------------------------------------
-                # 🔒 RESERVE FIRST — INTENT-LEVEL GUARANTEE
-                from engines.live import bank_state
-                bank_state.on_parent_placed(
-                    engine=row["engine"],
-                    required_exposure=row["required_exposure"],
-                )
-
                 bet_id, parent_ref = place_parent_and_hedge(
+                    # --- execution identity (AUTHORITATIVE) ---
+                    _plan={
+                        "customerOrderRef": row["customerOrderRef"],   # 🔒 HARD ID
+                        "engine": row["engine"],                       # metadata only
+                        "target_ticks": row["target_ticks"],
+                        "required_exposure": row["required_exposure"],
+                    },
+                    _ctx={
+                        "customerOrderRef": row["customerOrderRef"],   # 🔒 duplicate on purpose
+                        "engine": row["engine"],                       # metadata only
+                        "run_id": row["run_id"],
+                    },
+
+                    # --- execution parameters (NO ID POWER) ---
                     market_id=row["marketId"],
                     selection_id=row["selectionId"],
                     side=row["side"],
                     entry_odds=row["entry_odds"],
                     stake=row["entry_stake"],
+                    hedge_ticks=row["target_ticks"],
                     source=row["source"],
                     run_id=row["run_id"],
                     parent_persistence="LAPSE",
-                    _name="PLACEMENT_WORKER",
-                    _plan={
-                        "customerOrderRef": row["customerOrderRef"],
-                        "engine": row["engine"],
-                    },
-                    _ctx={
-                        "customerOrderRef": row["customerOrderRef"],
-                        "engine": row["engine"],
-                    },
                 )
+
+                # --------------------------------------------------
+                # Reserve exposure ONLY after Betfair accepts
+                # --------------------------------------------------
+                if bet_id:
+                    from engines.live import bank_state
+                    bank_state.on_parent_placed(
+                        engine=row["engine"],
+                        required_exposure=row["required_exposure"],
+                    )
+
 
 
                 # Loop immediately (one-by-one semantics)
                 continue
 
             con.close()
-
-            # --------------------------------------------------
-            # 2️⃣ FALLBACK: in-memory queue (unchanged)
-            # --------------------------------------------------
-            name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
-            place_from_plan(name, plan, ctx)
-
-        except Exception:
-            traceback.print_exc()
-            time.sleep(0.5)
-
 
             # --------------------------------------------------
             # 2️⃣ FALLBACK: in-memory queue (unchanged)
@@ -277,6 +285,13 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
         start_placement_worker()
     except Exception as e:
         print(f"[PLACEMENT][WARN] worker start failed: {e}")
+
+    # --- tick normalisation (CANONICAL) ---
+    if "hedge_ticks" in plan and "target_ticks" not in plan:
+        plan["target_ticks"] = plan["hedge_ticks"]
+    elif "target_ticks" in plan and "hedge_ticks" not in plan:
+        plan["hedge_ticks"] = plan["target_ticks"]
+
 
     # ------------------------------------------------------------------
     # 🔑 MINIMAL CANONICALIZATION (SHAPE ONLY)
