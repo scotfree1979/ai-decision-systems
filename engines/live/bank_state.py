@@ -76,10 +76,35 @@ import time
 
 _REPORT_THREAD = None
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: get_engine_pot / get_engine_available / _bankstate_report_loop
+# 🧩 ACTION: Remove divisor from capital math, retain divisor for reporting only
+# 📆 PATCHED: 2026-01-16 — Decouple BankState capital from scope divisor
+#
+# RATIONALE:
+# - BUS now enforces market concurrency and routing
+# - Divisor no longer protects against any real failure mode
+# - Capital must reflect true pot availability
+# - Divisor is retained ONLY as a diagnostic signal
+#
+# INVARIANT:
+# - Pots mutate ONLY via realised P&L
+# - Availability = pot − used
+# - No scope-derived scaling of capital
+# ======================================================================================================
+# -------------------------------------------------------------------
+# OBSERVABILITY REPORT LOOP (READ-ONLY)
+# -------------------------------------------------------------------
+
 def _bankstate_report_loop(interval_s: int = 60):
     """
     Periodic read-only BankState report.
     Prints engine pots, used, available, and total open exposure.
+
+    NOTE:
+    - Divisor is reported for diagnostics ONLY
+    - It no longer affects any financial calculations
     """
     while True:
         try:
@@ -91,27 +116,26 @@ def _bankstate_report_loop(interval_s: int = 60):
                 print("\n============ V7 BANK STATE REPORT ============")
                 print(
                     f"[BANKSTATE][REPORT] t={now} "
-                    f"divisor={divisor} "
+                    f"divisor={divisor} (diagnostic) "
                     f"open={open_exp:.2f}"
                 )
 
                 for engine in sorted(_ENGINE_POTS.keys()):
                     pot   = _ENGINE_POTS.get(engine, 0.0)
                     used  = _ENGINE_USED.get(engine, 0.0)
-                    avail = get_engine_available(engine)
+                    avail = pot - used
 
                     print(
                         f"  {engine:<15} "
                         f"pot={pot:.2f} "
                         f"used={used:.2f} "
-                        f"avail={avail:.2f}"
+                        f"avail={_clamp(avail):.2f}"
                     )
                 print("=================================================\n")
         except Exception as e:
             print(f"[BankState][REPORT][WARN] {e}")
 
         time.sleep(interval_s)
-
 
 def start_bankstate_reporter(interval_s: int = 60):
     """
@@ -209,42 +233,69 @@ def _clamp(x: float) -> float:
 # Scope-aware capital divisor
 # -------------------------------------------------------------------
 
-_MAX_CONCURRENT_MARKETS = 8   # ← your chosen cap
+_MIN_DAILY_SPLIT = 10
+_MAX_CONCURRENT_MARKETS = 20  # or remove cap entirely
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: _effective_market_count
+# 🧩 ACTION: Replace heuristic divisor with scope-derived unique market count
+# 📆 PATCHED: 2026-01-16 — Divisor = distinct marketIds in scope
+#
+# RATIONALE:
+# - BUS owns routing, cadence, and duplication control
+# - BankState divisor is diagnostic only
+# - Scope is the authoritative source of "markets tradable right now"
+#
+# DEFINITION (LOCKED):
+#   divisor = COUNT(DISTINCT marketId IN scope_snapshot)
+#
+# NO:
+# - weighting
+# - floors
+# - caps
+# - heuristics
+# ======================================================================================================
 
 def _effective_market_count() -> int:
     """
-    Compute effective market concurrency using weighted liquidity pressure.
+    Diagnostic-only divisor.
 
-    Each market contributes fractional pressure based on how tradable it is.
-    This works consistently for early, peak, and late trading periods.
+    Returns the number of DISTINCT marketIds currently in scope.
     """
-    if _SIMULATION_MODE:
-        return _SIMULATION_DIVISOR
-
     try:
-        buckets = {
-            "in_play":  (_SCOPE_STATE.get("in_play", []) or [], 1.0),
-            "near20":   (_SCOPE_STATE.get("near20", []) or [], 0.7),
-            "near60":   (_SCOPE_STATE.get("near60", []) or [], 0.4),
-            "next5":    (_SCOPE_STATE.get("next5", []) or [], 0.2),
-        }
+        from engines.decision_engine.decide_once.scope import scope_snapshot
 
-        weighted_sum = 0.0
+        sc = scope_snapshot(inplay_window_min=15)
 
-        for markets, weight in buckets.values():
-            weighted_sum += len(markets) * weight
+        mids = set()
 
-        # Floor + cap
-        effective = int(round(weighted_sum))
+        # pre_near / pre_far: (mid, tto, name, off)
+        for row in sc.get("pre_near", []):
+            try:
+                mids.add(str(row[0]))
+            except Exception:
+                pass
 
-        if effective < 3:
-            return 3
+        for row in sc.get("pre_far", []):
+            try:
+                mids.add(str(row[0]))
+            except Exception:
+                pass
 
-        return min(effective, _MAX_CONCURRENT_MARKETS)
+        # in_play: (mid, elapsed)
+        for row in sc.get("in_play", []):
+            try:
+                mids.add(str(row[0]))
+            except Exception:
+                pass
+
+        return len(mids)
 
     except Exception:
-        # Fail-safe: never block trading
-        return 3
+        # Diagnostic only — never block
+        return 0
+
 
 
 from engines.config_paths import autoscalp_db
@@ -296,36 +347,39 @@ def init_from_budget_allocations(day: str | None = None):
 # READ API (USED BY ROUTER)
 # -------------------------------------------------------------------
 
-def get_engine_pot(engine: str) -> float:
-    """
-    Engine pot AFTER scope-aware concurrency scaling.
-    Source: BudgetManager allocations.
-    """
-    with _LOCK:
-        base_pot = _ENGINE_POTS.get(engine, 0.0)
-        divisor = _effective_market_count()
-        return _clamp(base_pot / float(divisor))
-
 
 def get_open_exposure() -> float:
     with _LOCK:
         return _clamp(_OPEN_EXPOSURE)
 
-def get_engine_available(engine: str) -> float:
+
+def get_engine_pot(engine: str) -> float:
     """
-    Available capital for this engine RIGHT NOW,
-    respecting scope-aware market concurrency.
+    Engine pot (raw, unscaled).
+
+    NOTE:
+    - Divisor no longer applies to capital
+    - Concurrency is enforced by BUS routing, not BankState
     """
     with _LOCK:
-        base_pot = _ENGINE_POTS.get(engine, 0.0)
+        return _clamp(_ENGINE_POTS.get(engine, 0.0))
 
-        # scope-aware divisor
-        divisor = _effective_market_count()
-        pot = _clamp(base_pot / float(divisor))
 
+def get_engine_available(engine: str) -> float:
+    """
+    Available capital for this engine RIGHT NOW.
+
+    Canonical rule:
+      available = pot − used
+
+    No scope, no divisor, no concurrency heuristics.
+    """
+    with _LOCK:
+        pot  = _ENGINE_POTS.get(engine, 0.0)
         used = _ENGINE_USED.get(engine, 0.0)
-
         return _clamp(pot - used)
+
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
@@ -346,21 +400,38 @@ def get_engine_available(engine: str) -> float:
 def on_parent_placed(
     *,
     engine: str,
-    required_exposure: float,
-    side: str | None = None,
+    parent_id: int,
     **_ignored,
 ) -> None:
     """
     Reserve FULL lifecycle exposure at placement time.
 
-    NOTE:
-    - `side` is accepted for backward compatibility
-    - BankState does NOT use side here
+    Contract:
+    - Placement already computed and persisted required_exposure
+    - BankState reads it from DB
+    - BankState mutates exposure ledger only
     """
 
     global _OPEN_EXPOSURE
 
-    amount = _clamp(required_exposure)
+    try:
+        from engines.config_paths import open_auto_db
+        con = open_auto_db(rw=False)
+        row = con.execute(
+            "SELECT required_exposure FROM orders WHERE id=?",
+            (int(parent_id),)
+        ).fetchone()
+        con.close()
+    except Exception:
+        return
+
+    if not row or row[0] is None:
+        # Hard invariant: parent exists but exposure missing
+        raise RuntimeError(
+            f"[BankState] invariant violation: required_exposure missing for parent_id={parent_id}"
+        )
+
+    amount = _clamp(row[0])
 
     with _LOCK:
         _OPEN_EXPOSURE += amount
@@ -368,7 +439,7 @@ def on_parent_placed(
 
         print(
             f"[BankState] +RESERVE engine={engine} "
-            f"total={amount:.2f} "
+            f"amount={amount:.2f} "
             f"open={_OPEN_EXPOSURE:.2f}"
         )
 

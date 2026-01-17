@@ -460,21 +460,20 @@ from gui.dashboard_data import kpi_tiles
 
 def compute_live_goals():
     """
-    Live GoalAdapter inputs (dashboard-aligned):
+    Live GoalAdapter inputs (DB-truth):
       • live_pnl        → dashboard 'today'
-      • win_rate        → dashboard win_pct_mkt (percent → ratio)
-      • matched_ratio   → existing matched logic (today)
+      • win_rate        → market-level PnL (today)
+      • matched_ratio   → today matched ratio
     """
 
-    # --- dashboard truth ---
+    # live pnl can still come from dashboard (fast + correct)
     kpis = kpi_tiles(source="LIVE")
-
     live_pnl = float(kpis.get("today", 0.0))
 
-    # dashboard provides percent (e.g. 33.3), convert to ratio
-    win_rate = float(kpis.get("win_pct_mkt", 0.0)) / 100.0
+    # ✅ canonical win rate (market-level)
+    stats_today = _trade_stats(0)
+    win_rate = float(stats_today.get("win_rate", 0.0))
 
-    # keep existing matched calculation (already correct ≈ 0.55 today)
     matched_ratio = _matched_ratio_today()
 
     return (
@@ -482,6 +481,7 @@ def compute_live_goals():
         win_rate,
         matched_ratio,
     )
+
 
 # === PATCH END =========================================================
 

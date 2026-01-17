@@ -157,28 +157,6 @@ def _placement_worker_loop():
                     parent_persistence="LAPSE",
                 )
 
-                # --------------------------------------------------
-                # Reserve exposure ONLY after Betfair accepts
-                # --------------------------------------------------
-                if bet_id:
-                    from engines.live import bank_state
-                    bank_state.on_parent_placed(
-                        engine=row["engine"],
-                        required_exposure=row["required_exposure"],
-                    )
-
-
-
-                # Loop immediately (one-by-one semantics)
-                continue
-
-            con.close()
-
-            # --------------------------------------------------
-            # 2️⃣ FALLBACK: in-memory queue (unchanged)
-            # --------------------------------------------------
-            name, plan, ctx = _PLACEMENT_EXEC_QUEUE.get()
-            place_from_plan(name, plan, ctx)
 
         except Exception:
             traceback.print_exc()
@@ -228,33 +206,13 @@ def _canon_ids(d):
 # ------------------------------------------------------------------------------
 # Public enqueue API (used by BUS / router adapters)
 # ------------------------------------------------------------------------------
-def placement_affordable(plan: dict, ctx: dict) -> tuple[bool, str, float]:
-    from engines.live import bank_state
+def placement_affordable(plan, ctx):
+    engine = plan["engine"]
+    required = compute_required_exposure(plan)
 
-    engine = ctx.get("engine")
-    if not engine:
-        raise RuntimeError("PLACEMENT INVARIANT VIOLATION: engine missing")
+    ok = bank_state.can_place(engine, required)
+    return ok, required
 
-    try:
-        stake = float(plan.get("size") or 0.0)
-        odds  = float(plan.get("px") or 0.0)
-
-        if stake <= 0 or odds <= 0:
-            return False, "invalid_stake_or_odds", 0.0
-
-        # 🔑 FULL lifecycle exposure (parent + child)
-        required = float(plan.get("required_exposure", 0.0))
-        if required <= 0:
-            return False, "missing_required_exposure", 0.0
-
-        available = bank_state.get_engine_available(engine)
-        if available < required:
-            return False, "insufficient_engine_budget", required
-
-        return True, "ok", required
-
-    except Exception as e:
-        return False, f"gate_error:{e}", 0.0
 
 # =====================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
@@ -307,12 +265,19 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
         print("[PLACEMENT][DROP] missing marketId/selectionId")
         return
 
-    # Engine (authoritative from BUS)
-    engine = plan.get("engine")
+    # --------------------------------------------------
+    # Engine is BUS-owned; ctx is authoritative
+    # --------------------------------------------------
+    engine = ctx.get("engine") or plan.get("engine")
     if not engine:
-        print("[PLACEMENT][DROP] missing engine")
-        return
-    plan["engine"] = str(engine)
+        raise RuntimeError(
+            "[PLACEMENT][INVARIANT] engine missing at placement boundary"
+        )
+
+    engine = str(engine)
+    plan["engine"] = engine
+    ctx["engine"] = engine
+
 
     # Letter / source (audit + DB)
     letter = (
@@ -338,22 +303,26 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     if not plan.get("customerOrderRef"):
         plan["customerOrderRef"] = f"{plan['letter']}-{uuid.uuid4().hex[:10]}"
 
-    engine = plan.get("engine") or ctx.get("engine")
+    # ✅ CORRECT (placement is passive)
+    engine = ctx.get("engine")
+
     if not engine:
-        print("[PLACEMENT][DROP] missing engine at placement boundary")
-        return
+        raise RuntimeError(
+            "[PLACEMENT] invariant violation: ctx.engine missing "
+            "(BUS must provide engine before enqueue)"
+        )
 
     plan["engine"] = engine
-    ctx["engine"] = engine
+
 
     # ------------------------------------------------------------------
     # 🔒 AFFORDABILITY GATE (THIS IS THE FIX)
     # ------------------------------------------------------------------
-    ok, _, required = placement_affordable(plan, ctx)
-    if not ok:
-        return
+    #ok, _, required = placement_affordable(plan, ctx)
+    #if not ok:
+    #    return
 
-    plan["required_exposure"] = required
+    #plan["required_exposure"] = required
     # ------------------------------------------------------------------
     # 🔑 DB-FIRST PARENT PRECLAIM (AUTHORITATIVE)
     # ------------------------------------------------------------------

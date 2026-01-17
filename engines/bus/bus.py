@@ -87,7 +87,7 @@ class EngineReportShim(dict):
 #   tick_seconds   = 6
 #   ticks_per_win  = 5
 #   plans_per_win  = 300
-#   plans_per_tick = 60
+#   plans_per_tick = 200
 # ======================================================================================================
 
 import time
