@@ -4106,6 +4106,18 @@ def place_parent_and_hedge(
     # Engine is a BankState/accounting concern handled upstream in placement.
     # Betfair execution must proceed regardless.
 
+    # --------------------------------------------------
+    # ROUTER GATE (FINAL AUTHORITY)
+    # --------------------------------------------------
+    if not bank_state.can_place(engine, required_exposure):
+        _orders_update_parent_failed_by_id(
+            parent_id,
+            "INSUFFICIENT_EXPOSURE_ROUTER"
+        )
+        ROUTER_METRICS["gate_blocked"] += 1
+        return None, parent_ref
+
+
 
     # 3) place parent -----------------------------------------------------------
     bf_parent_id, detail = None, {}
