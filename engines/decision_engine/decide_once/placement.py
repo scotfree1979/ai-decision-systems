@@ -12,6 +12,7 @@ from engines.decision_engine.decide_once.helpers import (
 from engines.config_paths import open_auto_db as _adb
 
 
+
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
 # 🔎 ANCHOR: top-level (module scope)
@@ -31,8 +32,11 @@ import traceback
 # This queue was previously owned by LiveRouter.
 # It is relocated here verbatim to restore correct execution ownership.
 # ------------------------------------------------------------------------------
+from engines.decision_engine.decide_once.placement_queues import (
+    PLACEMENT_INPUT_QUEUE, 
+    PLACEMENT_EXEC_QUEUE
+)
 
-_PLACEMENT_EXEC_QUEUE: "queue.Queue[tuple[str, dict, dict]]" = queue.Queue()
 
 
 # ------------------------------------------------------------------------------
@@ -41,126 +45,168 @@ _PLACEMENT_EXEC_QUEUE: "queue.Queue[tuple[str, dict, dict]]" = queue.Queue()
 # ======================================================================================================
 # 📍 TARGET: engines/decision_engine/decide_once/placement.py
 # 🔎 ANCHOR: def _placement_worker_loop():
-# 🧩 ACTION: ADD (DB-queue consumption before in-memory queue)
-# 📆 PATCHED: 2025-12-30 — Restore DB → Placement execution bridge
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-01-17 — Fix placement worker unreachable SELECT
 #
-# RATIONALE:
-# Parents are correctly inserted as entry_status='QUEUED'.
-# The placement worker must consume DB-queued parents one-by-one.
-# Without this, execution never begins.
+# ROOT CAUSE (PROVEN):
+# - placement worker filtered on `o.error IS NULL`
+# - QUEUED rows legitimately have error populated from prior attempts
+# - Result: ZERO rows ever selected → place_parent_and_hedge never called
+#
+# FIX (HARD RULE):
+# - Lifecycle authority is entry_status ONLY
+# - error is terminal metadata, NOT a selection gate
+# - Each parent is attempted ONCE
+#
+# INVARIANTS:
+# - QUEUED → PLACING → (PLACED | FAILED)
+# - FAILED / CANCELLED / MATCHED are never re-read
 # ======================================================================================================
+# placement.py (module scope)
+PLACEMENT_METRICS = {
+    "exec_taken": 0,
+    "router_called": 0,
+    "router_exception": 0,
+}
 
-def _placement_worker_loop():
-    from engines.live.live_router import place_parent_and_hedge
+def _placement_worker_loop(*, run_id: str, poll_sleep: float = 0.2):
+    """
+    Placement worker (DB-first, authoritative).
+
+    Responsibilities:
+    - Read QUEUED parents from DB (current run only)
+    - Order deterministically (route → bus_stop → engine → opened_at)
+    - Atomically claim one row (QUEUED → PLACING)
+    - Reload FULL ctx for that parent
+    - Call place_parent_and_hedge(parent_id, run_id, ctx)
+    """
+
+    import time
     from engines.config_paths import open_auto_db
-    import sqlite3, time, traceback
+
+
+
+
+    from engines.live.ctx_loader import load_ctx_for_parent  # helper that rebuilds full ctx
+
+    print(f"[PLACEMENT][WORKER] started (run_id={run_id})", flush=True)
 
     while True:
+        con = None
         try:
-            # --------------------------------------------------
-            # 1️⃣ DB-FIRST: consume ONE queued parent
-            # --------------------------------------------------
+            # Open DB writer (needed for atomic claim)
             con = open_auto_db(rw=True)
-            con.row_factory = sqlite3.Row
+ 
 
-            # Attach BETS DB (required for marketStartTime ordering)
-            try:
-                from engines.config_paths import bets_db
-                con.execute(f"ATTACH DATABASE '{bets_db()}' AS bets")
-            except Exception:
-                pass
-
+            # Select next executable parent (ORDERED)
             row = con.execute(
                 """
-                SELECT
-                   o.customerOrderRef,
-                   o.marketId,
-                   o.selectionId,
-                   o.side,
-                   o.entry_odds,
-                   o.entry_stake,
-                   o.target_ticks,        -- ← THIS IS REQUIRED
-                   o.engine,
-                   o.source,
-                   o.run_id,
-                   o.required_exposure
-
-                FROM orders o
-                LEFT JOIN bets.bets b
-                  ON b.marketId = o.marketId
-
-                WHERE o.role = 'PARENT'
-                  AND (
-                        o.entry_status = 'QUEUED'
-                        OR (
-                            o.entry_status = 'PLACING'
-                            AND strftime('%s','now') - strftime('%s', o.opened_at) > 3
-                        )
-                      )
-
+                SELECT id
+                FROM orders
+                WHERE
+                    role = 'PARENT'
+                    AND entry_status = 'QUEUED'
+                    AND run_id = ?
                 ORDER BY
-                    CASE o.engine
-                        WHEN 'MSC_INPLAY' THEN 1
-                        WHEN 'MSC_RISK' THEN 2
-                        WHEN 'LEGACY' THEN 3
-                        WHEN 'MSC_EXPLORATORY' THEN 4
-                        ELSE 9
-                    END,
-                    ABS(
-                        strftime('%s', b.marketStartTime) -
-                        strftime('%s', 'now')
-                    ) ASC,
-                    o.opened_at ASC
+                    route_id ASC,
+                    bus_stop ASC,
+                    CASE engine
+                        WHEN 'MSC_INPLAY'       THEN 1
+                        WHEN 'LEGACY'           THEN 2
+                        WHEN 'MSC_RISK'         THEN 3
+                        WHEN 'MSC_EXPLORATORY'  THEN 4
+                        ELSE 99
+                    END ASC,
+                    datetime(opened_at) ASC
                 LIMIT 1
-                """
+                """,
+                (str(run_id),)
             ).fetchone()
 
-            if row:
-                # Mark as PLACING immediately to avoid double-pick
-                con.execute(
-                    """
-                    UPDATE orders
-                       SET entry_status='PLACING'
-                     WHERE customerOrderRef=?
-                    """,
-                    (row["customerOrderRef"],)
-                )
+            if not row:
+                con.close()
+                time.sleep(poll_sleep)
+                continue
+
+            parent_id = int(row[0])
+
+            # Atomic claim
+            cur = con.execute(
+                """
+                UPDATE orders
+                   SET entry_status = 'PLACING'
+                 WHERE id = ?
+                   AND entry_status = 'QUEUED'
+                """,
+                (parent_id,)
+            )
+
+            if cur.rowcount != 1:
                 con.commit()
                 con.close()
+                continue
 
-                # --------------------------------------------------
-                # Execute parent (ONLY side-effect in worker)
-                # --------------------------------------------------
-                bet_id, parent_ref = place_parent_and_hedge(
-                    # --- execution identity (AUTHORITATIVE) ---
-                    _plan={
-                        "customerOrderRef": row["customerOrderRef"],   # 🔒 HARD ID
-                        "engine": row["engine"],                       # metadata only
-                        "target_ticks": row["target_ticks"],
-                        "required_exposure": row["required_exposure"],
-                    },
-                    _ctx={
-                        "customerOrderRef": row["customerOrderRef"],   # 🔒 duplicate on purpose
-                        "engine": row["engine"],                       # metadata only
-                        "run_id": row["run_id"],
-                    },
+            con.commit()
+            con.close()
 
-                    # --- execution parameters (NO ID POWER) ---
-                    market_id=row["marketId"],
-                    selection_id=row["selectionId"],
-                    side=row["side"],
-                    entry_odds=row["entry_odds"],
-                    stake=row["entry_stake"],
-                    hedge_ticks=row["target_ticks"],
-                    source=row["source"],
-                    run_id=row["run_id"],
-                    parent_persistence="LAPSE",
-                )
-
-
-        except Exception:
-            traceback.print_exc()
+        except Exception as e:
+            try:
+                if con:
+                    con.rollback()
+                    con.close()
+            except Exception:
+                pass
+            print(f"[PLACEMENT][ERR] DB failure: {e}", flush=True)
             time.sleep(0.5)
+            continue
+
+        # Reload FULL ctx and execute via router
+        try:
+            ctx = load_ctx_for_parent(parent_id)
+
+            con = open_auto_db(rw=False)
+            row = con.execute(
+                "SELECT customerOrderRef FROM orders WHERE id = ?",
+                (parent_id,)
+            ).fetchone()
+            con.close()
+
+            if not row or not row[0]:
+                raise RuntimeError(f"Missing customerOrderRef for parent_id={parent_id}")
+
+            parent_ref = row[0]
+
+            import engines.live.live_router as live_router
+
+            live_router.place_parent_and_hedge(
+                parent_ref=parent_ref,
+                run_id=run_id,
+                _ctx=ctx,
+            )
+
+        except Exception as e:
+            import traceback
+
+            print(
+                "\n[PLACEMENT][ERR] ROUTER EXECUTION FAILED\n"
+                f"parent_id={parent_id}\n"
+                f"exception_type={type(e).__name__}\n"
+                f"exception_msg={e}\n"
+                "---------------- TRACEBACK ----------------",
+                flush=True
+            )
+
+            traceback.print_exc()
+
+            # Optional but extremely useful: dump ctx snapshot safely
+            try:
+                print(
+                    "\n[PLACEMENT][CTX SNAPSHOT]\n"
+                    f"{json.dumps(ctx, default=str, indent=2)}\n",
+                    flush=True
+                )
+            except Exception:
+                print("[PLACEMENT][CTX SNAPSHOT FAILED]", flush=True)
 
 
 # ------------------------------------------------------------------------------
@@ -168,28 +214,31 @@ def _placement_worker_loop():
 # ------------------------------------------------------------------------------
 _PLACEMENT_WORKER_THREAD: threading.Thread | None = None
 
-
-def start_placement_worker():
+def start_placement_worker(*, run_id: str):
     """
     Start placement execution worker (idempotent).
-
-    This replaces the LiveRouter worker startup.
     """
+    print("[PLACEMENT][TRACE] start_placement_worker() CALLED", flush=True)
+
     global _PLACEMENT_WORKER_THREAD
 
-    if _PLACEMENT_WORKER_THREAD and _PLACEMENT_WORKER_THREAD.is_alive():
+    if any(
+        t.name == "PlacementWorker" and t.is_alive()
+        for t in threading.enumerate()
+    ):
         return
 
     t = threading.Thread(
         target=_placement_worker_loop,
+        kwargs={"run_id": str(run_id)},
         name="PlacementWorker",
         daemon=True,
     )
+
     t.start()
     _PLACEMENT_WORKER_THREAD = t
 
-    print("[PLACEMENT] execution worker started")
-
+    print(f"[PLACEMENT] execution worker started (run_id={run_id})")
 
 
 # ------------------------------------------------------------
@@ -228,36 +277,20 @@ def placement_affordable(plan, ctx):
 
 def enqueue_for_placement(name: str, plan: dict, ctx: dict):
     """
-    Placement enqueue (canonical boundary).
+    Placement enqueue (FINAL, MINIMAL).
 
-    CONTRACT:
-    - Shape-only canonicalization
-    - DB-first parent preclaim
-    - No enrichment, no gating, no decisions
+    Responsibility:
+    - Canonicalize shape
+    - Insert PARENT row with entry_status='QUEUED'
+    - NOTHING ELSE
     """
 
-    # ------------------------------------------------------------------
-    # Ensure worker is running (idempotent)
-    # ------------------------------------------------------------------
-    try:
-        start_placement_worker()
-    except Exception as e:
-        print(f"[PLACEMENT][WARN] worker start failed: {e}")
-
-    # --- tick normalisation (CANONICAL) ---
-    if "hedge_ticks" in plan and "target_ticks" not in plan:
-        plan["target_ticks"] = plan["hedge_ticks"]
-    elif "target_ticks" in plan and "hedge_ticks" not in plan:
-        plan["hedge_ticks"] = plan["target_ticks"]
-
-
-    # ------------------------------------------------------------------
-    # 🔑 MINIMAL CANONICALIZATION (SHAPE ONLY)
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
+    # Shape-only canonicalisation
+    # --------------------------------------------------
     plan = dict(plan or {})
     ctx  = dict(ctx or {})
 
-    # IDs
     plan["marketId"]    = plan.get("marketId")    or ctx.get("marketId")
     plan["selectionId"] = plan.get("selectionId") or ctx.get("selectionId")
 
@@ -265,75 +298,29 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
         print("[PLACEMENT][DROP] missing marketId/selectionId")
         return
 
-    # --------------------------------------------------
-    # Engine is BUS-owned; ctx is authoritative
-    # --------------------------------------------------
     engine = ctx.get("engine") or plan.get("engine")
     if not engine:
-        raise RuntimeError(
-            "[PLACEMENT][INVARIANT] engine missing at placement boundary"
-        )
+        raise RuntimeError("[PLACEMENT] invariant violation: engine missing")
 
     engine = str(engine)
     plan["engine"] = engine
-    ctx["engine"] = engine
+    ctx["engine"]  = engine
 
+    run_id = ctx.get("run_id")
+    if not run_id:
+        raise RuntimeError("[PLACEMENT] invariant violation: run_id missing")
 
-    # Letter / source (audit + DB)
-    letter = (
-        plan.get("letter")
-        or ctx.get("letter")
-        or plan["engine"][:1]
-    )
-    plan["letter"] = str(letter)[:1].upper()
-
-    # Direction → side
-    direction = str(plan.get("direction") or "LAY->BACK").upper()
-    plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
-
-    # px / size (shape only)
+    # --------------------------------------------------
+    # DB-FIRST INSERT (AUTHORITATIVE)
+    # --------------------------------------------------
     try:
-        plan["px"] = float(plan.get("px"))
-        plan["size"] = float(plan.get("size"))
-    except Exception:
-        print("[PLACEMENT][DROP] invalid px/size")
-        return
-
-    # customerOrderRef (stable identity)
-    if not plan.get("customerOrderRef"):
-        plan["customerOrderRef"] = f"{plan['letter']}-{uuid.uuid4().hex[:10]}"
-
-    # ✅ CORRECT (placement is passive)
-    engine = ctx.get("engine")
-
-    if not engine:
-        raise RuntimeError(
-            "[PLACEMENT] invariant violation: ctx.engine missing "
-            "(BUS must provide engine before enqueue)"
-        )
-
-    plan["engine"] = engine
-
-
-    # ------------------------------------------------------------------
-    # 🔒 AFFORDABILITY GATE (THIS IS THE FIX)
-    # ------------------------------------------------------------------
-    #ok, _, required = placement_affordable(plan, ctx)
-    #if not ok:
-    #    return
-
-    #plan["required_exposure"] = required
-    # ------------------------------------------------------------------
-    # 🔑 DB-FIRST PARENT PRECLAIM (AUTHORITATIVE)
-    # ------------------------------------------------------------------
-    try:
-        pending_id = _insert_pending_parent(
-            run_id=ctx.get("run_id"),
+        parent_id = _insert_pending_parent(
+            run_id=run_id,
             market_id=str(plan["marketId"]),
             selection_id=str(plan["selectionId"]),
             side=plan["side"],
-            entry_odds=plan["px"],
-            entry_stake=plan["size"],
+            entry_odds=plan.get("px"),
+            entry_stake=plan.get("size"),
             cor=plan["customerOrderRef"],
             engine=plan["engine"],
             source=plan["letter"],
@@ -341,38 +328,16 @@ def enqueue_for_placement(name: str, plan: dict, ctx: dict):
             plan=plan,
         )
 
-
-        if pending_id is None:
-            print("[PLACEMENT][DROP] parent preclaim failed")
+        if not parent_id:
+            print("[PLACEMENT][DROP] parent insert failed")
             return
 
-        plan["parent_id"] = pending_id
+        # For observability only (NOT execution)
+        plan["parent_id"] = parent_id
 
     except Exception as e:
-        print(f"[PLACEMENT][DROP] preclaim error: {e}")
+        print(f"[PLACEMENT][DROP] insert error: {e}")
         return
-
-    # ------------------------------------------------------------------
-    # NON-BLOCKING EXECUTION QUEUE
-    # ------------------------------------------------------------------
-    try:
-        _PLACEMENT_EXEC_QUEUE.put_nowait((name, plan, ctx))
-    except Exception as e:
-        print(f"[PLACEMENT][DROP] enqueue failed after preclaim: {e}")
-
-
-def _auto_db_writer(timeout: float = 8.0) -> sqlite3.Connection:
-    con = _adb(rw=True)
-    con.row_factory = sqlite3.Row
-    try:
-        con.execute("PRAGMA busy_timeout=8000;")
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA synchronous=NORMAL;")
-    except Exception:
-        pass
-    return con
-
-
 
 # ---------- tiny safe getters
 def _rget(row, key, default=None):
@@ -550,7 +515,7 @@ def _write_decision(*, run_id, mid, sid, outcome, why, letter,
     con = None
     try:
         # 🔁 Direct writer (avoids readonly DAL path)
-        con = _auto_db_writer()
+        con = _adb(ro=False)
         con.execute("""
             INSERT INTO decisions(
                 run_id, marketId, selectionId, decided_at,
@@ -647,7 +612,7 @@ def _insert_pending_parent(
     # -------------------------------
     # OPEN WRITER (CANONICAL AUTO DB)
     # -------------------------------
-    con = _auto_db_writer()
+    con = _adb(ro=False)
     cur = con.cursor()
 
     try:
@@ -677,6 +642,9 @@ def _insert_pending_parent(
                     entry_stake,
                     target_ticks,
                     required_exposure,
+                    route_id,
+                    bus_stop,
+                    tick_id,
                     entry_status,
                     role,
                     source,
@@ -686,7 +654,9 @@ def _insert_pending_parent(
                     opened_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', 'PARENT',
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?,
+                    'QUEUED', 'PARENT',
                     ?, ?, ?, ?, ?
                 )
                 """,
@@ -700,7 +670,10 @@ def _insert_pending_parent(
                     float(entry_odds),
                     float(entry_stake),
                     target_ticks,
-                    float(plan["required_exposure"]),
+                    required_exposure,
+                    plan.get("route_id"),
+                    plan.get("bus_stop"),
+                    plan.get("tick_id"),
                     str(letter),
                     str(engine),
                     str(stoploss_mode).upper(),
@@ -708,7 +681,6 @@ def _insert_pending_parent(
                     datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 )
             )
-
 
             pending_id = int(cur.lastrowid)
 
@@ -748,7 +720,7 @@ def _insert_pending_parent(
 
 
 def _promote_pending_to_queued(pending_id: int) -> None:
-    con = _auto_db_writer()
+    con = _adb(ro=False)
     try:
         con.execute(
             """
@@ -848,12 +820,7 @@ def place_from_plan(name: str, plan: dict, ctx: dict) -> Optional[int]:
     direction = str(plan.get("direction") or "LAY->BACK").upper()
     plan["side"] = "LAY" if direction.startswith("LAY") else "BACK"
 
-    # Affordability gate (shared)
-    ok, _, required = placement_affordable(plan, ctx)
-    if not ok:
-        return None
 
-    plan["required_exposure"] = required
 
     # 🔑 SINGLE ACTION
     enqueue_for_placement(name, plan, ctx)

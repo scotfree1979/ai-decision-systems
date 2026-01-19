@@ -3673,7 +3673,7 @@ def start_live_loop(*args, **kwargs):
     from engines.live.live_router import start_router_child_worker, _router_child_recovery_sweep
 
     
-    start_placement_worker()
+    start_placement_worker(run_id=run_id)
     _router_child_recovery_sweep()
     start_router_child_worker()
 
@@ -3734,6 +3734,13 @@ def start_live_loop(*args, **kwargs):
         _EXPOSURE_GUARDIAN.start()
     except Exception as e:
         print(f"[EXPOSURE-GUARDIAN] failed to start: {e}")
+
+    # ------------------------------------------------------------------
+    # 6H.1) AFTER BankState.init_bank_state()
+    # ------------------------------------------------------------------
+
+
+
 
     # ------------------------------------------------------------------
     # 6I) START BUS ROUTE LOOP

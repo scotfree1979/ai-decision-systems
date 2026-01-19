@@ -87,7 +87,7 @@ class EngineReportShim(dict):
 #   tick_seconds   = 6
 #   ticks_per_win  = 5
 #   plans_per_win  = 300
-#   plans_per_tick = 200
+#   plans_per_tick = 100
 # ======================================================================================================
 
 import time
@@ -100,7 +100,7 @@ class CadenceController:
         self.tick_seconds     = 6
         self.ticks_per_window = 5
         self.plans_per_window = 300
-        self.plans_per_tick   = 60
+        self.plans_per_tick   = 100
 
         # State
         self.window_start_ts = time.time()
@@ -1617,8 +1617,87 @@ class DecisionBus:
                 if not p.get("customerOrderRef"):
                     p["customerOrderRef"] = f"{p['engine'][:1]}-{uuid.uuid4().hex[:10]}"
 
+
+                # ==================================================
+                # 🔒 FINAL EXECUTION PAYLOAD SEAL (BUS AUTHORITY)
+                # ==================================================
+
+                # Identity (hard invariants)
+                if not p.get("marketId"):
+                    raise RuntimeError("[BUS] missing marketId at routing")
+                if not p.get("selectionId"):
+                    raise RuntimeError("[BUS] missing selectionId at routing")
+
+                # Engine (authoritative)
+                if not p.get("engine"):
+                    raise RuntimeError("[BUS] missing engine at routing")
                 ctx["engine"] = p["engine"]
+
+                # Run identity (MUST exist)
+                if not self.live_run_id:
+                    raise RuntimeError("[BUS] live_run_id not set")
+                ctx["run_id"] = self.live_run_id
+
+                # Execution ordering (DB-authoritative metadata)
+                p["route_id"] = self._route_id
+                p["bus_stop"] = self._bus_stop
+                p["tick_id"]  = self.tick_id
+
+                # Customer reference (idempotent)
+                if not p.get("customerOrderRef"):
+                    p["customerOrderRef"] = (
+                        f"{p['engine'][:1]}-{uuid.uuid4().hex[:10]}"
+                    )
+
+                # Price (execution truth — MUST already exist)
+                if "px" not in p or p["px"] is None:
+                    raise RuntimeError(
+                        f"[BUS] missing px for {p['marketId']}:{p['selectionId']}"
+                    )
+
+                # Stake (execution truth — MUST already exist)
+                if "size" not in p or p["size"] is None or p["size"] <= 0:
+                    raise RuntimeError(
+                        f"[BUS] missing/invalid size for {p['marketId']}:{p['selectionId']}"
+                    )
+
+                # Direction → Side (MANDATORY)
+                if not p.get("side"):
+                    direction = str(p.get("direction") or "").upper()
+                    if direction.startswith("LAY"):
+                        p["side"] = "LAY"
+                    elif direction.startswith("BACK"):
+                        p["side"] = "BACK"
+                    else:
+                        raise RuntimeError(
+                            f"[BUS] missing side/direction for "
+                            f"{p['marketId']}:{p['selectionId']}"
+                        )
+
+                # Hedge ticks (placement invariant)
+                if "target_ticks" not in p:
+                    raise RuntimeError(
+                        f"[BUS] missing target_ticks for "
+                        f"{p['marketId']}:{p['selectionId']}"
+                    )
+
+                # Required exposure (BUS-owned, already computed)
+                if "required_exposure" not in p:
+                    raise RuntimeError(
+                        f"[BUS] missing required_exposure for "
+                        f"{p['marketId']}:{p['selectionId']}"
+                    )
+
+                # Strategy letter (audit + DB)
+                if not p.get("letter"):
+                    p["letter"] = (p.get("engine") or "A")[0].upper()
+
+                # ==================================================
+                # 🚀 HANDOFF TO PLACEMENT (NO MORE MUTATION)
+                # ==================================================
                 enqueue_for_placement(p["engine"], p, ctx)
+
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py

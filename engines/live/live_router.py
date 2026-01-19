@@ -4776,6 +4776,3 @@ def start_router_child_worker():
 
 
     print("[ROUTER] child execution worker started")
-
-
-
