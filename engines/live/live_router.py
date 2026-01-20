@@ -363,12 +363,10 @@ def _release_matched_parent_exposure(parent_cor: str) -> None:
 
         # if no child, caller MUST be market-finished path
         # (we trust caller here by design)
+        parent_id = int(parent["id"])  # or fetched explicitly
+        
+        _release_parent_exposure_db(parent_id)
 
-        bank_state.on_parent_closed(
-            engine=parent["engine"],
-            entry_odds=float(parent["entry_odds"]),
-            entry_stake=float(parent["entry_stake"]),
-        )
 
         _q_retry(cur, """
             UPDATE orders
@@ -1749,6 +1747,7 @@ def _rehedge_loop(period_s: float = 10.0, default_ticks: int = 1):
             _sync_all_matches(limit=100)   # ← NEW: sweep stuck 'PLACED' to 'MATCHED'
             _finalize_children_and_release_exposure(limit=100)
             _sync_settlement_terminal_exposure(limit=200)
+            _release_exposure_for_matched_children(limit=200)
         except Exception as e:
             _log_event("ERROR", "live_router", f"sync_all_matches error: {e}")
 
@@ -2031,11 +2030,9 @@ def _release_unmatched_parent_exposure(parent_cor: str) -> None:
             return
 
         # 🔓 RELEASE RESERVED EXPOSURE
-        bank_state.on_parent_closed(
-            engine=engine,
-            entry_odds=entry_odds,
-            entry_stake=entry_stake,
-        )
+        parent_id = int(parent["id"])  # or fetched explicitly
+        _release_parent_exposure_db(parent_id)
+
 
         _log_event(
             "INFO",
@@ -2353,11 +2350,9 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                         """, (avg_odds, matched_size, child_id))
 
                         # 🔓 RELEASE BankState exposure IMMEDIATELY
-                        bank_state.on_parent_closed(
-                            engine=engine,
-                            entry_odds=float(r["entry_odds"]),
-                            entry_stake=float(r["entry_stake"]),
-                        )
+                        parent_id = int(parent["id"])  # or fetched explicitly
+                        _release_parent_exposure_db(parent_id)
+
 
                         _q_retry(cur, """
                             UPDATE orders
@@ -2394,6 +2389,211 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
             con.close()
         except Exception:
             pass
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: after _finalize_children_and_release_exposure
+# 🧩 ACTION: RELEASE exposure for MATCHED children (authoritative path)
+# 📆 PATCHED: 2026-03-21 — fix exposure leak on child MATCHED
+#
+# INVARIANT:
+#   CHILD MATCHED ⇒ exposure MUST be released immediately
+#   Settlement is only a safety net
+# ============================================================================
+
+def _release_exposure_for_matched_children(limit: int = 200) -> int:
+    released = 0
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        rows = _q_retry(cur, """
+            SELECT
+                p.id               AS parent_id,
+                p.customerOrderRef AS parent_ref,
+                p.engine,
+                p.entry_odds,
+                p.entry_stake
+            FROM orders p
+            JOIN orders c ON c.hedge_of = p.id
+            WHERE p.mode='LIVE'
+              AND p.role='PARENT'
+              AND UPPER(p.entry_status)='MATCHED'
+              AND UPPER(c.entry_status)='MATCHED'
+              AND COALESCE(p.exposure_released,0)=0
+            LIMIT ?
+        """, (int(limit),)).fetchall()
+
+        for r in rows:
+            try:
+                parent_id = int(r["parent_id"])  # or fetched explicitly
+                _release_parent_exposure_db(parent_id)
+
+
+                _q_retry(cur, """
+                    UPDATE orders
+                       SET exposure_released = 1,
+                           parent_closed = 1,
+                           closed_at = COALESCE(closed_at, datetime('now','utc'))
+                     WHERE id = ?
+                """, (int(r["parent_id"]),))
+
+                released += 1
+
+            except Exception as e:
+                _log_event(
+                    "ERROR",
+                    "bankstate",
+                    f"[EXPOSURE RELEASE FAILED] parent_ref={r['parent_ref']}: {e}"
+                )
+
+        con.commit()
+        return released
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+# === PATCH END ==============================================================
+
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _release_parent_exposure_db(parent_id: int):
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION WITH AUTHORITATIVE SCAN-DRIVEN RELEASE
+# 📆 PATCHED: 2026-01-20 — fix permanent exposure leak
+#
+# INVARIANT:
+#   Exposure release is DB-driven, not event-driven.
+#   This function is SAFE to call repeatedly.
+# ======================================================================
+
+def _release_parent_exposure_db(parent_id: int) -> bool:
+    """
+    Canonical exposure release.
+
+    Releases exposure IFF:
+      • parent is MATCHED
+      • exposure_released = 0
+      • AND (
+            a matched CHILD exists
+         OR market is past GRACE_MINUTES
+         OR exit_status is terminal
+        )
+
+    Returns True if release occurred.
+    Idempotent.
+    """
+
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        parent = _q_retry(cur, """
+            SELECT
+                id,
+                engine,
+                marketId,
+                entry_status,
+                exit_status,
+                required_exposure,
+                exposure_released
+            FROM orders
+            WHERE id = ?
+              AND role = 'PARENT'
+            LIMIT 1
+        """, (int(parent_id),)).fetchone()
+
+        if not parent:
+            return False
+
+        # Idempotency guard
+        if parent["exposure_released"]:
+            return False
+
+        if (parent["entry_status"] or "").upper() != "MATCHED":
+            return False
+
+        # --- child matched? ---
+        child_matched = _q_retry(cur, """
+            SELECT 1
+              FROM orders
+             WHERE hedge_of = ?
+               AND UPPER(entry_status) = 'MATCHED'
+             LIMIT 1
+        """, (int(parent_id),)).fetchone() is not None
+
+        # --- market past grace? ---
+        past_grace = False
+        try:
+            bdb = connect_db(ro=True)
+            bdb.row_factory = sqlite3.Row
+            row = _q_retry(bdb, """
+                SELECT
+                  CAST((julianday('now','utc') - julianday(marketStartTime))*1440 AS INTEGER)
+                  AS mins_after
+                FROM bets
+                WHERE marketId=?
+                LIMIT 1
+            """, (str(parent["marketId"]),)).fetchone()
+            bdb.close()
+            past_grace = bool(row and row["mins_after"] is not None and row["mins_after"] >= GRACE_MINUTES)
+        except Exception:
+            pass
+
+        terminal = (parent["exit_status"] or "").upper() in (
+            "SETTLED", "CANCELLED", "EXPIRED"
+        )
+
+        if not (child_matched or past_grace or terminal):
+            return False
+
+        amount = float(parent["required_exposure"] or 0.0)
+        if amount <= 0:
+            return False
+
+        # 🔓 RELEASE EXACT AMOUNT
+        bank_state.release_exact(
+            engine=parent["engine"],
+            amount=amount
+        )
+
+        _q_retry(cur, """
+            UPDATE orders
+               SET exposure_released = 1,
+                   exposure_released_amount = ?,
+                   parent_closed = 1,
+                   closed_at = COALESCE(closed_at, datetime('now','utc'))
+             WHERE id = ?
+        """, (amount, int(parent_id)))
+
+        con.commit()
+
+        _log_event(
+            "INFO",
+            "bankstate",
+            f"[EXPOSURE RELEASE] parent_id={parent_id} amount={amount:.2f}"
+        )
+
+        return True
+
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "bankstate",
+            f"[EXPOSURE RELEASE FAILED] parent_id={parent_id}: {e}"
+        )
+        return False
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
 
 
 def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
@@ -2771,11 +2971,9 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
             """, (pid,))
 
             # 🔓 RELEASE BankState exposure (single source of truth)
-            bank_state.on_parent_closed(
-                engine=parent["engine"],
-                entry_odds=float(parent["entry_odds"]),
-                entry_stake=float(parent["entry_stake"]),
-            )
+            parent_id = int(parent["id"])  # or fetched explicitly
+            _release_parent_exposure_db(parent_id)
+
 
             # Mark exposure as released (idempotent)
             _q_retry(cur, """
@@ -2856,11 +3054,9 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str,
             return
 
         # 🔐 BankState — release exposure
-        bank_state.on_parent_closed(
-            engine=p["engine"],
-            entry_odds=float(p["entry_odds"]),
-            entry_stake=float(p["entry_stake"]),
-        )
+        parent_id = int(parent["id"])  # or fetched explicitly
+        _release_parent_exposure_db(parent_id)
+
 
         # Compute realized PnL
         entry_side = p["side"].upper()
@@ -3391,11 +3587,9 @@ def _place_stoploss_child_now(
         fk  = int(parent["run_id"] or 0)
 
         # 🔐 RELEASE exposure (once)
-        bank_state.on_parent_closed(
-            engine=parent["engine"],
-            entry_odds=float(parent["entry_odds"]),
-            entry_stake=float(parent["entry_stake"]),
-        )
+        parent_id = int(parent["id"])  # or fetched explicitly
+        _release_parent_exposure_db(parent_id)
+
 
         app_key, token = _keys()
         cref = _ref("SL")
@@ -3809,11 +4003,9 @@ def _sync_settlement_terminal_exposure(limit: int = 200) -> int:
 
         for r in rows:
             try:
-                bank_state.on_parent_closed(
-                    engine=r["engine"],
-                    entry_odds=float(r["entry_odds"]),
-                    entry_stake=float(r["entry_stake"]),
-                )
+                parent_id = int(parent["id"])  # or fetched explicitly
+                _release_parent_exposure_db(parent_id)
+
 
                 _q_retry(cur, """
                     UPDATE orders
