@@ -4205,7 +4205,26 @@ def place_parent_and_hedge(
 # === PATCH END ==============================================================
 
     try:
-        # 1️⃣ Reserve FIRST
+
+
+        # --------------------------------------------------
+        # ROUTER TRACE — FINAL EXECUTION BOUNDARY
+        # --------------------------------------------------
+        _log_event(
+            "TRACE",
+            "live_router",
+            f"[ROUTER TRACE] placing parent "
+            f"ref={parent_ref} "
+            f"engine={engine} "
+            f"mid={market_id} sid={selection_id} "
+            f"side={side} odds={entry_odds} stake={stake} "
+            f"required_exposure={required_exposure}"
+        )
+
+        bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
+                                      float(entry_odds), float(stake), parent_ref,
+                                      persistence=parent_persistence)
+        # 1️⃣ Reserve After Bet Placed
         # --------------------------------------------------
         # ROUTER RESERVE — MUTATE ONLY AFTER APPROVAL
         # --------------------------------------------------
@@ -4213,9 +4232,6 @@ def place_parent_and_hedge(
             engine=engine,
             parent_id=parent_id,
         )
-        bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
-                                      float(entry_odds), float(stake), parent_ref,
-                                      persistence=parent_persistence)
         if bf_parent_id:
             _orders_update_parent_placed(parent_ref, bf_parent_id)
 
