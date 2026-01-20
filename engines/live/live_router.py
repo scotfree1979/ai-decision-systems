@@ -4191,8 +4191,16 @@ def place_parent_and_hedge(
 # 📆 PATCHED: 2026-01-08 — activate manual parent exposure bypass
 # ============================================================================
 
-    if _is_manual_parent(row):
-        return None, parent_ref
+    def _is_manual_parent(row) -> bool:
+        engine = str(row.get("engine") or "").upper()
+        source = str(row.get("source") or "").upper()
+
+        # ONLY manual if engine is explicitly missing
+        if not engine:
+            return True
+
+        return False
+
 
 # === PATCH END ==============================================================
 
