@@ -3999,7 +3999,24 @@ def place_parent_and_hedge(
         source = source or src_letter
 
     _log_db_path_once()
-    entry_odds = _round_odds(float(entry_odds))
+    if entry_odds is None:
+        val = None
+        if _plan:
+            val = (_plan.get("entry_odds")
+                   or _plan.get("px"))
+        if val is None and _ctx:
+            val = _ctx.get("entry_odds") or _ctx.get("px")
+
+        if val is None:
+            raise RuntimeError(
+                f"[ROUTER] entry_odds missing after normalization "
+                f"parent_ref={parent_ref}"
+            )
+
+        entry_odds = float(val)
+
+    entry_odds = _round_odds(entry_odds)
+
     # --- normalize hedge_ticks early (robust default = 1) ---
     try:
         hedge_ticks = _safe_int(
@@ -4106,15 +4123,61 @@ def place_parent_and_hedge(
     # Engine is a BankState/accounting concern handled upstream in placement.
     # Betfair execution must proceed regardless.
 
+    parent_id = int(row["id"])
+
     # --------------------------------------------------
-    # ROUTER GATE (FINAL AUTHORITY)
+    # LOAD required_exposure (DB FIRST)
+    # --------------------------------------------------
+    rx_row = _q_retry(
+        _orders_conn(),
+        """
+        SELECT required_exposure, entry_stake, entry_odds
+          FROM orders
+         WHERE id = ?
+        """,
+        (parent_id,)
+    ).fetchone()
+
+    if not rx_row:
+        raise RuntimeError(
+            f"[ROUTER][GATE] parent row missing id={parent_id}"
+        )
+
+    required_exposure = rx_row["required_exposure"]
+
+    # --------------------------------------------------
+    # BACKFILL exposure ONLY IF MISSING
+    # --------------------------------------------------
+    if required_exposure is None:
+        try:
+            entry_stake = float(rx_row["entry_stake"])
+            entry_odds  = float(rx_row["entry_odds"])
+        except Exception:
+            raise RuntimeError(
+                f"[ROUTER][GATE] cannot derive exposure "
+                f"id={parent_id} row={dict(rx_row)}"
+            )
+
+        required_exposure = entry_stake * entry_odds
+
+        _q_retry(
+            _orders_conn(),
+            """
+            UPDATE orders
+               SET required_exposure = ?
+             WHERE id = ?
+            """,
+            (required_exposure, parent_id)
+        )
+
+    # --------------------------------------------------
+    # ROUTER GATE — ASK BankState FIRST (NO MUTATION)
     # --------------------------------------------------
     if not bank_state.can_place(engine, required_exposure):
-        _orders_update_parent_failed_by_id(
-            parent_id,
+        _orders_update_parent_failed(
+            parent_ref,
             "INSUFFICIENT_EXPOSURE_ROUTER"
         )
-        ROUTER_METRICS["gate_blocked"] += 1
         return None, parent_ref
 
 
@@ -4135,11 +4198,12 @@ def place_parent_and_hedge(
 
     try:
         # 1️⃣ Reserve FIRST
+        # --------------------------------------------------
+        # ROUTER RESERVE — MUTATE ONLY AFTER APPROVAL
+        # --------------------------------------------------
         bank_state.on_parent_placed(
             engine=engine,
-            side=side,
-            entry_odds=float(entry_odds),
-            entry_stake=float(stake),
+            parent_id=parent_id,
         )
         bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
                                       float(entry_odds), float(stake), parent_ref,
