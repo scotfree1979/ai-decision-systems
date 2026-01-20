@@ -4112,6 +4112,7 @@ def place_parent_and_hedge(
 
 
     # 2) resolve Betfair creds
+    _log_event("INFO", "live_router", "[ROUTER] resolving Betfair credentials")
     app_key, token = _keys()
 
     engine = (
@@ -4180,9 +4181,60 @@ def place_parent_and_hedge(
         )
         return None, parent_ref
 
-
-
     # 3) place parent -----------------------------------------------------------
+    # --------------------------------------------------
+    # CANONICAL EXECUTION REHYDRATION (DB-FIRST)
+    # --------------------------------------------------
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+
+    row = _q_retry(
+        con,
+        """
+        SELECT
+            id,
+            marketId,
+            selectionId,
+            side,
+            entry_odds,
+            entry_stake,
+            target_ticks,
+            engine
+        FROM orders
+        WHERE customerOrderRef = ?
+          AND role = 'PARENT'
+        LIMIT 1
+        """,
+        (parent_ref,)
+    ).fetchone()
+
+    con.close()
+
+    if not row:
+        raise RuntimeError(
+            f"[ROUTER EXECUTION ERROR] parent not found ref={parent_ref}"
+        )
+
+    # 🔒 AUTHORITATIVE EXECUTION FIELDS (DB IS LAW)
+    parent_id    = int(row["id"])
+    market_id    = str(row["marketId"])
+    selection_id = str(row["selectionId"])
+    side         = str(row["side"]).upper()
+    entry_odds   = float(row["entry_odds"])
+    stake        = float(row["entry_stake"])
+    hedge_ticks  = int(row["target_ticks"] or 1)
+    engine       = str(row["engine"])
+
+    # Fail fast if anything is still broken
+    if not market_id or not selection_id or not side or stake <= 0 or entry_odds <= 0:
+        raise RuntimeError(
+            f"[ROUTER INVALID EXECUTION PAYLOAD] "
+            f"ref={parent_ref} mid={market_id} sid={selection_id} "
+            f"side={side} stake={stake} odds={entry_odds}"
+        )
+
+
+
     bf_parent_id, detail = None, {}
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -4210,16 +4262,7 @@ def place_parent_and_hedge(
         # --------------------------------------------------
         # ROUTER TRACE — FINAL EXECUTION BOUNDARY
         # --------------------------------------------------
-        _log_event(
-            "TRACE",
-            "live_router",
-            f"[ROUTER TRACE] placing parent "
-            f"ref={parent_ref} "
-            f"engine={engine} "
-            f"mid={market_id} sid={selection_id} "
-            f"side={side} odds={entry_odds} stake={stake} "
-            f"required_exposure={required_exposure}"
-        )
+
 
         bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
                                       float(entry_odds), float(stake), parent_ref,
