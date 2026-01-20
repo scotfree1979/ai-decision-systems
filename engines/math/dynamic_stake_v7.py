@@ -204,6 +204,35 @@ def calc_dynamic_stake(letter: str, phase: str = "PRE", bank: float | None = Non
 
 
 # --- Greening stake (unchanged) ---------------------------------------------
+# === PATCH START ============================================================
+# 📍 TARGET: engines/math/dynamic_stake_v7.py
+# 🔎 SEARCH: def calc_greenup_stake(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-20 — True 100% match greening (price-movement invariant)
+#
+# PURPOSE:
+# - Enforce tool-level 100% match invariant
+# - Guarantee equal P&L on WIN and LOSE when parent + child both match
+# - Profit derives ONLY from price movement (ticks), not distribution
+#
+# INVARIANT:
+#   For a fully matched parent + child:
+#     WIN_PNL == LOSE_PNL
+#
+# FORMULA (AUTHORITATIVE):
+#   • LAY → BACK later:
+#       child_stake = (parent_stake * parent_odds) / child_odds
+#
+#   • BACK → LAY lower:
+#       child_stake = (parent_stake * parent_odds) / child_odds
+#
+# NOTES:
+# - No runner count
+# - No redistribution
+# - Direction handled explicitly
+# - Rounding is LAST step
+# ============================================================================
+
 def calc_greenup_stake(
     parent_side: str,
     entry_odds: float,
@@ -211,28 +240,44 @@ def calc_greenup_stake(
     hedge_odds: float,
 ):
     """
-    True greening stake.
-    Produces flat P&L across the entire market when child fully matches.
+    Compute child stake such that:
+      • WIN P&L == LOSE P&L
+      • Profit comes solely from price movement
+      • Parent + child form a closed 100% match
     """
 
     try:
-        entry_odds = float(entry_odds)
-        hedge_odds = float(hedge_odds)
+        entry_odds   = float(entry_odds)
+        hedge_odds   = float(hedge_odds)
         parent_stake = float(parent_stake)
 
-        if parent_side.upper() == "LAY":
-            # LAY → BACK
+        # Safety
+        if entry_odds <= 0 or hedge_odds <= 0 or parent_stake <= 0:
+            return round(max(cfg.MIN_STAKE, parent_stake), 2)
+
+        side = parent_side.upper()
+
+        # --------------------------------------------------
+        # LAY first → BACK later (odds drift up)
+        # --------------------------------------------------
+        if side == "LAY":
             stake = (parent_stake * entry_odds) / hedge_odds
 
-        elif parent_side.upper() == "BACK":
-            # BACK → LAY
-            stake = (parent_stake * entry_odds) / max(hedge_odds - 1.0, 1e-9)
+        # --------------------------------------------------
+        # BACK first → LAY later (odds shorten)
+        # --------------------------------------------------
+        elif side == "BACK":
+            stake = (parent_stake * entry_odds) / hedge_odds
 
         else:
             return round(max(cfg.MIN_STAKE, parent_stake), 2)
 
+        # Final snap
         return round(max(cfg.MIN_STAKE, stake), 2)
 
     except Exception:
         return round(max(cfg.MIN_STAKE, parent_stake), 2)
+
+# === PATCH END ==============================================================
+
 

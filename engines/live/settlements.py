@@ -1617,11 +1617,28 @@ def reconcile_orders() -> Tuple[int,int]:
                 betId = row["betId"]
                 profit = row["profit"]
                 settled = row["settledDate"]
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: UPDATE orders
+# 🧩 ACTION: FORCE terminal SETTLED state on Betfair reconciliation
+# 📆 PATCHED: 2026-03-21 — settlement must always mark exit_status='SETTLED'
+#
+# INVARIANT:
+#   Betfair-cleared order ⇒ orders.exit_status = 'SETTLED'
+#   This is the ONLY authoritative settlement signal.
+#
+# EFFECT:
+# - Enables router terminal exposure release
+# - Enables book_state convergence
+# - Enables mastery / playbooks / KPIs
+# - Idempotent and safe to rerun
+# ============================================================================
+
                 o.execute("""
                     UPDATE orders
                        SET realized_pnl = ?,
                            net_pl       = ?,
-                           exit_status  = COALESCE(exit_status, 'SETTLED'),
+                           exit_status  = 'SETTLED',
                            closed_at    = COALESCE(closed_at, ?)
                      WHERE bf_bet_id = ?
                 """, (
@@ -1630,6 +1647,9 @@ def reconcile_orders() -> Tuple[int,int]:
                     settled,
                     betId
                 ))
+
+# === PATCH END ==============================================================
+
 
                 record_playbook_pattern(order_row=row, pnl_row=row, oc_snapshot=None)
 

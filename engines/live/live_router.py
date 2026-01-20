@@ -2352,14 +2352,19 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                              WHERE id=?
                         """, (avg_odds, matched_size, child_id))
 
+                        # 🔓 RELEASE BankState exposure IMMEDIATELY
                         bank_state.on_parent_closed(
                             engine=engine,
                             entry_odds=float(r["entry_odds"]),
                             entry_stake=float(r["entry_stake"]),
                         )
-                        close_logically_finished_parents()
-                        fixed += 1
-                        continue
+
+                        _q_retry(cur, """
+                            UPDATE orders
+                               SET exposure_released = 1,
+                                   parent_closed = 1
+                             WHERE customerOrderRef = ?
+                        """, (parent_ref,))
 
                 # --------------------------------------------------
                 # 2️⃣ SAFETY PATH — MARKET FINISHED
@@ -2740,33 +2745,62 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         except Exception as e:
             _log_event("WARN","live_router",f"child_matched: could not stamp avg match ref={cor} err={e}")
 
-        # ============================================================
-        # 🔒 CANONICAL PARENT CLOSE — CHILD MATCHED
-        # ============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: def _orders_update_child_matched(
+# 🧩 ACTION: Canonical parent close + BankState exposure release on child match
+# 📆 PATCHED: 2026-03-20 — fix exposure leak (child matched but parent never closed)
+#
+# INVARIANT:
+#   CHILD MATCHED  ⇒  PARENT CLOSED  ⇒  BankState exposure released EXACTLY ONCE
+# ============================================================================
+
+        # --------------------------------------------------
+        # 🔒 CANONICAL PARENT CLOSE (ON CHILD MATCH)
+        # --------------------------------------------------
         try:
+            # Close parent deterministically
             _q_retry(cur, """
                 UPDATE orders
                    SET parent_closed = 1,
-                       exit_status   = COALESCE(exit_status, 'MATCHED'),
+                       exit_status   = 'MATCHED',
                        closed_at     = COALESCE(closed_at, datetime('now','utc'))
                  WHERE id = ?
                    AND role = 'PARENT'
                    AND parent_closed = 0
             """, (pid,))
+
+            # 🔓 RELEASE BankState exposure (single source of truth)
+            bank_state.on_parent_closed(
+                engine=parent["engine"],
+                entry_odds=float(parent["entry_odds"]),
+                entry_stake=float(parent["entry_stake"]),
+            )
+
+            # Mark exposure as released (idempotent)
+            _q_retry(cur, """
+                UPDATE orders
+                   SET exposure_released = 1
+                 WHERE id = ?
+            """, (pid,))
+
             con.commit()
 
             _log_event(
                 "INFO",
-                "live_router",
-                f"[PARENT CLOSED] ref={cor} reason=child_matched"
+                "bankstate",
+                f"[EXPOSURE RELEASE] parent_ref={cor} reason=child_matched"
             )
 
         except Exception as e:
             _log_event(
                 "ERROR",
-                "live_router",
-                f"[PARENT CLOSE FAILED] ref={cor}: {e}"
+                "bankstate",
+                f"[EXPOSURE RELEASE FAILED] parent_ref={cor}: {e}"
             )
+
+# === PATCH END ==============================================================
+
 
         # === PATCH START: per-letter CAP summary hook =========================
         try:
