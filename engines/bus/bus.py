@@ -13,7 +13,7 @@ from engines.mastery.context_builder import build_context
 from engines.live.live_router import place_from_bus
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
-from engines.market_monitor.phase_clock import MarketPhaseClock
+
 from engines.live.overwatcher import evaluate_redistribution
 from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
 
@@ -675,8 +675,19 @@ class DecisionBus:
         if risc:
             for mid, sid in get_risk_legacy_parent_pairs():
                 ctx = self._route_ctx_map.get((mid, sid))
+
+                # 🔑 DB-first CTX guarantee for RISK
+                if not ctx:
+                    try:
+                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                        if ctx:
+                            self._route_ctx_map[(mid, sid)] = ctx
+                    except Exception:
+                        continue
+
                 if not ctx or ctx.get("px") is None:
                     continue
+
 
                 try:
                     r = risc.tick(ctx)
@@ -711,6 +722,16 @@ class DecisionBus:
 
             for mid, sid in inplay_pairs:
                 ctx = self._route_ctx_map.get((mid, sid))
+
+                # 🔑 DB-first CTX guarantee for INPLAY (mirror of RISK)
+                if not ctx:
+                    try:
+                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                        if ctx:
+                            self._route_ctx_map[(mid, sid)] = ctx
+                    except Exception:
+                        continue
+
                 if not ctx or ctx.get("px") is None:
                     continue
 
@@ -724,6 +745,7 @@ class DecisionBus:
                         lane_counts[3] += 1
                 except Exception:
                     _record_reason(engine_report, "MSC_INPLAY", "tick_error")
+
 
         # --------------------------------------------------
         # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)

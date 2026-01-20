@@ -213,7 +213,34 @@ def get_stop_ticks(entry_odds: float, default_ticks: int = 1) -> int:
             return ticks
     return default_ticks
 
-# engines/daily_config.py
+# === PATCH START ============================================================
+# 📍 TARGET: engines/daily_config.py
+# 🔎 SEARCH: BANK_PCT_PER_ENTRY
+# 🧩 ACTION: ADD ENGINE-LEVEL STAKE BOUNDS (FINAL)
+# 📆 PATCHED: 2026-03-20 — Engine economic envelopes
+#
+# PURPOSE:
+# - Enforce minimum viable trade size per engine
+# - Prevent liquidity impact via hard maximums
+# - Preserve pot-based monotonic growth
+# ============================================================================
+
+ENGINE_MIN = {
+    "LEGACY": 4.00,
+    "MSC_EXPLORATORY": 5.00,
+    "MSC_RISK": 6.00,
+    "MSC_INPLAY": 3.00,
+}
+
+ENGINE_MAX = {
+    "LEGACY": 10.00,
+    "MSC_EXPLORATORY": 15.00,
+    "MSC_RISK": 20.00,
+    "MSC_INPLAY": 10.00,
+}
+
+# === PATCH END ==============================================================
+
 # === PATCH START ============================================
 # 📍 TARGET: engines/daily_config.py
 # 🔎 SEARCH: def get_session_token

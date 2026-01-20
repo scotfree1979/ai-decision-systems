@@ -82,9 +82,6 @@ def compute_dynamic_stake(ctx: dict, engine: str) -> float:
     letter = (ctx.get("letter") or ctx.get("family") or "?").upper()
     phase  = "IP" if ctx.get("oc_phase", 0) >= 7 else "PRE"
 
-    # --------------------------------------------------
-    # Base sizing
-    # --------------------------------------------------
     base = BASE_MAP.get(letter, MIN_STAKE)
     smax = MAX_MAP.get(letter, base)
     mult = LETTER_MULT.get(letter, 1.0)
@@ -92,13 +89,9 @@ def compute_dynamic_stake(ctx: dict, engine: str) -> float:
     pot_static = bank_state.get_engine_pot(engine)
     avail_now  = bank_state.get_engine_available(engine)
 
-    # If nothing is available, still allow minimum snap
     if avail_now <= 0:
         avail_now = 0.0
 
-    # --------------------------------------------------
-    # Time / phase multipliers
-    # --------------------------------------------------
     mto = float(ctx.get("minutes_to_off", 120.0))
     ocp = int(ctx.get("oc_phase", 0))
 
@@ -115,9 +108,6 @@ def compute_dynamic_stake(ctx: dict, engine: str) -> float:
         0.80
     )
 
-    # --------------------------------------------------
-    # Exposure control
-    # --------------------------------------------------
     liab_frac = (pot_static - avail_now) / max(pot_static, 1e-9)
 
     exp_mult = (
@@ -127,34 +117,28 @@ def compute_dynamic_stake(ctx: dict, engine: str) -> float:
         1.00
     )
 
-    # --------------------------------------------------
-    # Raw stake computation
-    # --------------------------------------------------
+    # ----------------------------
+    # RAW STAKE
+    # ----------------------------
     stake = base * mult * time_mult * oc_mult * exp_mult
 
-    # Hard availability / letter / phase caps
-    stake = min(stake, avail_now)
     stake = min(stake, smax)
     stake = min(stake, HARD_CAP_PRE if phase == "PRE" else HARD_CAP_IP)
 
-    # --------------------------------------------------
-    # ENGINE-LEVEL FLOOR / CEILING (FINAL SNAP)
-    # --------------------------------------------------
-    try:
-        from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+    # ----------------------------
+    # FINAL ENGINE CLAMP (ONLY HERE)
+    # ----------------------------
+    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+    eng = engine.upper()
 
-        eng = engine.upper()
+    if eng in ENGINE_MIN:
+        stake = max(ENGINE_MIN[eng], stake)
 
-        if eng in ENGINE_MIN:
-            stake = max(ENGINE_MIN[eng], stake)
-
-        if eng in ENGINE_MAX:
-            stake = min(ENGINE_MAX[eng], stake)
-
-    except Exception:
-        pass
+    if eng in ENGINE_MAX:
+        stake = min(ENGINE_MAX[eng], stake)
 
     return round(max(MIN_STAKE, stake), 2)
+
 
 # === PATCH END ==============================================================
 
