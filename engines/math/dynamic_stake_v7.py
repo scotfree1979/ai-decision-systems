@@ -57,7 +57,7 @@ MAX_MAP = {
 # RISK dynamic stake — tick-distance scaling (AUTHORITATIVE)
 # ======================================================================
 
-from engines.price_math import ladder_ticks_between
+from engines.price_math import calculate_tick_distance as ladder_ticks_between
 
 def compute_risk_dynamic_stake(
     *,
