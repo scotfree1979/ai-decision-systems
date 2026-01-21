@@ -2418,6 +2418,13 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
             pass
 
 # === PATCH END ==============================================================
+def _record_release(reason: str, amount: float):
+    _EXPOSURE_RELEASE_COUNTS[reason] += 1
+    print(
+        f"[EXPOSURE][RELEASE] reason={reason} "
+        f"amount={amount:.2f} "
+        f"count={_EXPOSURE_RELEASE_COUNTS[reason]}"
+    )
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: def _release_parent_exposure_db(
@@ -2599,6 +2606,11 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         return True
 
 # === PATCH END ==============================================================
+        # module-level counters (router scope)
+        _EXPOSURE_RELEASE_COUNTS = defaultdict(int)
+
+        _record_release()
+
 
 
     finally:

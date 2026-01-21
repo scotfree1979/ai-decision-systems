@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 from typing import Dict, Set
 
 from engines.decision_engine.decide_once.scope import scope_snapshot
-from engines.live import bank_state
+from engines.live.live_router import _release_parent_exposure_db
+
 from engines.config_paths import open_auto_db, q_retry
 
-
+GRACE_MINUTES = 6
 # ───────────────────────────────────────────────────────────────
 # Exposure Guardian
 # ───────────────────────────────────────────────────────────────
@@ -86,55 +87,58 @@ class ExposureGuardian:
 #   ExposureGuardian is no longer a “panic cleaner”.
 #   It is the authoritative exposure lifecycle reconciler.
 # ======================================================================================================
-
     def _run_once(self):
-        now = datetime.now(timezone.utc)
-        stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        con = open_auto_db(rw=False)
+        con.row_factory = None
+        cur = con.cursor()
 
-        scope = scope_snapshot(inplay_window_min=15)
-        current_in_play: Set[str] = set()
-
-        for it in scope.get("in_play", []):
-            try:
-                mid, _elapsed = it
-                current_in_play.add(str(mid))
-            except Exception:
-                pass
-
-        # Determine which markets exited IN_PLAY
-        exited_markets: list[str] = []
-        for mid, last_bucket in list(self._seen_markets.items()):
-            if last_bucket == "IN_PLAY" and mid not in current_in_play:
-                exited_markets.append(mid)
-
-        # Update seen markets
-        for mid in current_in_play:
-            self._seen_markets[mid] = "IN_PLAY"
-
-        for mid in exited_markets:
-            self._seen_markets.pop(mid, None)
+        stamp = datetime.now(timezone.utc).isoformat()
 
         parents_checked = 0
         released = 0
         skipped = 0
         reasons: Dict[str, int] = {}
 
-        # Process exited markets (even if zero — diagnostics matter)
-        for mid in exited_markets:
-            p_checked, p_released, p_skipped, p_reasons = self._handle_market(mid)
-            parents_checked += p_checked
-            released += p_released
-            skipped += p_skipped
-            for k, v in p_reasons.items():
+        # -----------------------------------------------------------
+        # Identify markets that have exited scope (authoritative)
+        # -----------------------------------------------------------
+        rows = q_retry(cur, """
+            SELECT DISTINCT p.marketId
+            FROM orders p
+            WHERE p.role='PARENT'
+              AND p.required_exposure IS NOT NULL
+              AND p.required_exposure > 0
+              AND (
+                   p.exit_status IN ('SETTLED','CANCELLED','EXPIRED')
+                OR p.marketId IN (
+                       SELECT marketId
+                       FROM bets
+                       WHERE datetime(marketStartTime)
+                             < datetime('now','utc', ?)
+                   )
+              )
+        """, (f"-{GRACE_MINUTES} minutes",)).fetchall()
+
+        con.close()
+
+        # -----------------------------------------------------------
+        # Reconcile exposure per finished market
+        # -----------------------------------------------------------
+        for (market_id,) in rows:
+            pc, r, s, rs = self._handle_market(str(market_id))
+            parents_checked += pc
+            released += r
+            skipped += s
+            for k, v in rs.items():
                 reasons[k] = reasons.get(k, 0) + v
 
         self._print_report(
             stamp,
-            markets_left=len(exited_markets),
+            markets_left=len(rows),
             parents_checked=parents_checked,
             released=released,
             skipped=skipped,
-            reasons=reasons
+            reasons=reasons,
         )
 
 
@@ -155,9 +159,8 @@ class ExposureGuardian:
 #   • Parents already released are counted as SKIPPED (healthy)
 #   • Guardian only RELEASES when invariant is violated
 # ======================================================================================================
-
     def _handle_market(self, market_id: str):
-        con = open_auto_db(rw=True)
+        con = open_auto_db(rw=False)
         con.row_factory = None
         cur = con.cursor()
 
@@ -166,47 +169,39 @@ class ExposureGuardian:
         skipped = 0
         reasons: Dict[str, int] = {}
 
+        # -----------------------------------------------------------
+        # Scan ALL parents on this market that ever carried exposure
+        # -----------------------------------------------------------
         rows = q_retry(cur, """
             SELECT
-              id,
-              customerOrderRef,
-              engine,
-              required_exposure,
-              COALESCE(exposure_released, 0)
+                id,
+                customerOrderRef
             FROM orders
-            WHERE marketId=?
-              AND role='PARENT'
+            WHERE marketId = ?
+              AND role = 'PARENT'
               AND required_exposure IS NOT NULL
               AND required_exposure > 0
         """, (str(market_id),)).fetchall()
 
-        for (pid, cor, engine, required, exposure_released) in rows:
+        con.close()
+
+        for (pid, cor) in rows:
             parents_checked += 1
 
-            # Already released → healthy
-            if exposure_released:
-                skipped += 1
-                reasons["already_released"] = reasons.get("already_released", 0) + 1
-                continue
-
             try:
-                # Authoritative forced release
-                bank_state.release_parent(int(pid))
+                # Canonical, DB-first, idempotent exposure release
+                released_now = _release_parent_exposure_db(int(pid))
 
-                q_retry(cur, """
-                    UPDATE orders
-                       SET exposure_released=1,
-                           exposure_released_at=datetime('now','utc'),
-                           exposure_release_reason='GUARDIAN_MARKET_FINISHED',
-                           exit_status=COALESCE(exit_status, 'FORCED_RELEASE'),
-                           closed_at=COALESCE(closed_at, datetime('now','utc'))
-                     WHERE id=?
-                """, (int(pid),))
-
-                released += 1
-                reasons["forced_release_finished_market"] = (
-                    reasons.get("forced_release_finished_market", 0) + 1
-                )
+                if released_now:
+                    released += 1
+                    reasons["forced_release"] = (
+                        reasons.get("forced_release", 0) + 1
+                    )
+                else:
+                    skipped += 1
+                    reasons["already_released_or_not_eligible"] = (
+                        reasons.get("already_released_or_not_eligible", 0) + 1
+                    )
 
             except Exception as e:
                 skipped += 1
@@ -216,91 +211,9 @@ class ExposureGuardian:
                     f"market={market_id} cor={cor}: {e}"
                 )
 
-        con.commit()
-        con.close()
-
         return parents_checked, released, skipped, reasons
 
 
-# ======================================================================================================
-# 📍 TARGET: engines/exposure/exposure_guardian.py
-# 🔎 ANCHOR: def _handle_market(self, market_id: str):
-# 🧩 ACTION: ADD final invariant enforcement (finished market ⇒ zero exposure)
-# 📆 PATCHED: 2026-01-10 — Final exposure invariant (market truth > DB truth)
-#
-# PURPOSE:
-#   Enforce the non-negotiable rule:
-#     If a market is finished, it must carry ZERO exposure.
-#
-#   This is a LAST-LINE SAFETY NET.
-#   It does NOT replace settlement, cancels, or hedge logic.
-#   It only fires when all other mechanisms failed.
-#
-# ARCHITECTURAL RULE:
-#   Market lifecycle is authoritative over order state.
-# ======================================================================================================
-
-        # -----------------------------------------------------------
-        # FINAL INVARIANT:
-        #   Finished market ⇒ zero exposure (regardless of DB state)
-        # -----------------------------------------------------------
-        rows = q_retry(cur, """
-            SELECT
-              p.id,
-              p.customerOrderRef,
-              p.engine,
-              p.entry_odds,
-              p.entry_stake
-            FROM orders p
-            WHERE p.marketId=?
-              AND p.role='PARENT'
-              AND (p.exit_status IS NULL OR UPPER(p.exit_status)<>'MATCHED')
-              AND COALESCE(p.exposure_released,0)=0
-        """, (str(market_id),)).fetchall()
-
-        for (pid, cor, engine, odds, stake) in rows:
-            parents_checked += 1
-
-            # Guard: nothing to release
-            if not stake or stake <= 0:
-                skipped += 1
-                reasons["no_stake_final"] = reasons.get("no_stake_final", 0) + 1
-                continue
-
-            try:
-                # Force-release exposure (idempotent by design)
-                bank_state.on_parent_closed(
-                    engine=str(engine),
-                    entry_odds=float(odds),
-                    entry_stake=float(stake),
-                )
-
-                q_retry(cur, """
-                    UPDATE orders
-                       SET exit_status='FORCED_RELEASE',
-                           closed_at=datetime('now','utc'),
-                           exposure_released=1
-                     WHERE id=?
-                """, (int(pid),))
-
-                released += 1
-                reasons["forced_release_finished_market"] = (
-                    reasons.get("forced_release_finished_market", 0) + 1
-                )
-
-            except Exception as e:
-                skipped += 1
-                reasons["forced_release_error"] = reasons.get("forced_release_error", 0) + 1
-                print(
-                    f"[EXPOSURE-GUARDIAN][WARN] forced release failed "
-                    f"market={market_id} cor={cor}: {e}"
-                )
-
-
-        con.commit()
-        con.close()
-
-        return parents_checked, released, skipped, reasons
 
     # -----------------------------------------------------------
     # Reporting
