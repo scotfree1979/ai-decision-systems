@@ -1439,25 +1439,25 @@ class DecisionBus:
 
                 if engine == "MSC_RISK":
 
-                from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
+                    from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
 
-                parent_px = ctx.get("legacy_entry_odds") or ctx.get("entry_odds")
-                current_px = ctx.get("px")
+                    parent_px = ctx.get("legacy_entry_odds") or ctx.get("entry_odds")
+                    current_px = ctx.get("px")
 
-                if not parent_px or not current_px:
-                    plan["_bus_block"] = "risk_missing_px"
-                    tick_ctx["plans_route_failed"].append(
-                        (plan, "risk_missing_px")
+                    if not parent_px or not current_px:
+                        plan["_bus_block"] = "risk_missing_px"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "risk_missing_px")
+                        )
+                        continue  # 🔴 DO NOT ROUTE
+
+                    stake = compute_risk_dynamic_stake(
+                        parent_px=float(parent_px),
+                        current_px=float(current_px),
                     )
-                    continue  # 🔴 DO NOT ROUTE
 
-                stake = compute_risk_dynamic_stake(
-                    parent_px=float(parent_px),
-                    current_px=float(current_px),
-                )
-
-                plan["size"] = stake
-                plan["_stake_source"] = "risk_dynamic"
+                    plan["size"] = stake
+                    plan["_stake_source"] = "risk_dynamic"
 
 
                 else:
