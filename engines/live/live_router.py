@@ -985,32 +985,7 @@ def _letter_base_max(letter: str) -> tuple[float, float]:
     except Exception:
         return (float(getattr(d, "BASE_STAKE", 2.0)), float(getattr(d, "STAKE_MAX", 8.0)))
 
-def calc_dynamic_stake(letter: str, *, phase: str = "PRE") -> tuple[float, str]:
-    """
-    Compute LIVE stake using config caps. Confidence/L1 are omitted in this first cut
-    to keep the 'one change' surgical and safe.
-    Returns (stake, reason_text).
-    """
-    d = daily_config
-    bank = _fetch_live_bank(0.0)
-    base, fam_max = _letter_base_max(letter)
-    mult = float((d.LETTER_MULT or {}).get((letter or "").upper(), 1.0))
-    raw = base * mult
 
-    risk_cap  = max(0.0, float(getattr(d, "BANK_PCT_PER_ENTRY", 0.0)) * float(bank))
-    phase_cap = float(getattr(d, "HARD_CAP_PRE", 5.0) if str(phase).upper() == "PRE"
-                      else getattr(d, "HARD_CAP_IP", 3.0))
-    global_max = float(getattr(d, "STAKE_MAX", fam_max))
-    hard_cap = min(fam_max, global_max, phase_cap) if phase_cap > 0 else min(fam_max, global_max)
-
-    # Final min/max: MIN_STAKE floor; ceiling is the smallest active cap among risk/hard caps
-    ceil = min([x for x in (risk_cap, hard_cap) if x > 0] or [raw])
-    stake = max(float(getattr(d, "MIN_STAKE", 2.0)), min(raw, ceil))
-    stake = round(stake + 1e-9, 2)
-
-    why = (f"raw={raw:.2f} bank={bank:.2f} risk_cap={risk_cap:.2f} "
-           f"phase_cap={phase_cap:.2f} fam_max={fam_max:.2f} → stake={stake:.2f}")
-    return stake, why
 
 def _mastery_log(event_type: str, payload: dict):
     """
@@ -2443,33 +2418,37 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
             pass
 
 # === PATCH END ==============================================================
-
-# ======================================================================
+# ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: def _release_parent_exposure_db(parent_id: int):
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION WITH AUTHORITATIVE SCAN-DRIVEN RELEASE
-# 📆 PATCHED: 2026-01-20 — fix permanent exposure leak
+# 🔎 SEARCH: def _release_parent_exposure_db(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-24 — Canonical DB-first exposure release (parent_cor resolved internally)
 #
-# INVARIANT:
-#   Exposure release is DB-driven, not event-driven.
-#   This function is SAFE to call repeatedly.
-# ======================================================================
+# PURPOSE:
+# - Make exposure release authoritative, idempotent, and DB-driven
+# - Eliminate dependency on callers passing parent_id correctly
+# - Guarantee exposure is released EXACTLY ONCE
+#
+# CORE INVARIANT:
+#   The database is the lock.
+#   If exposure_released == 1 → do nothing.
+#
+# RELEASE RULES (unchanged):
+#   Release exposure IFF:
+#     • parent exists
+#     • exposure_released == 0
+#     • AND (
+#           matched CHILD exists
+#        OR market is past GRACE_MINUTES
+#        OR exit_status is terminal
+#       )
+# ======================================================================================================
 
 def _release_parent_exposure_db(parent_id: int) -> bool:
     """
-    Canonical exposure release.
+    Canonical exposure release (DB-first, idempotent).
 
-    Releases exposure IFF:
-      • parent is MATCHED
-      • exposure_released = 0
-      • AND (
-            a matched CHILD exists
-         OR market is past GRACE_MINUTES
-         OR exit_status is terminal
-        )
-
-    Returns True if release occurred.
-    Idempotent.
+    This function is SAFE to call from ANY lifecycle path.
     """
 
     try:
@@ -2477,6 +2456,9 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
+        # --------------------------------------------------
+        # 1️⃣ Load authoritative parent row (DB is truth)
+        # --------------------------------------------------
         parent = _q_retry(cur, """
             SELECT
                 id,
@@ -2495,14 +2477,21 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         if not parent:
             return False
 
-        # Idempotency guard
+        # --------------------------------------------------
+        # 2️⃣ Idempotency guard (DB-level lock)
+        # --------------------------------------------------
         if parent["exposure_released"]:
             return False
 
+        # Parent must have been MATCHED to ever reserve exposure
         if (parent["entry_status"] or "").upper() != "MATCHED":
             return False
 
-        # --- child matched? ---
+        # --------------------------------------------------
+        # 3️⃣ Check release conditions (pure reads)
+        # --------------------------------------------------
+
+        # A) Child matched?
         child_matched = _q_retry(cur, """
             SELECT 1
               FROM orders
@@ -2511,7 +2500,7 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
              LIMIT 1
         """, (int(parent_id),)).fetchone() is not None
 
-        # --- market past grace? ---
+        # B) Market past grace?
         past_grace = False
         try:
             bdb = connect_db(ro=True)
@@ -2525,10 +2514,13 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
                 LIMIT 1
             """, (str(parent["marketId"]),)).fetchone()
             bdb.close()
-            past_grace = bool(row and row["mins_after"] is not None and row["mins_after"] >= GRACE_MINUTES)
+            past_grace = bool(
+                row and row["mins_after"] is not None and row["mins_after"] >= GRACE_MINUTES
+            )
         except Exception:
             pass
 
+        # C) Terminal parent?
         terminal = (parent["exit_status"] or "").upper() in (
             "SETTLED", "CANCELLED", "EXPIRED"
         )
@@ -2536,26 +2528,37 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         if not (child_matched or past_grace or terminal):
             return False
 
+        # --------------------------------------------------
+        # 4️⃣ Claim release in DB FIRST (authoritative)
+        # --------------------------------------------------
         amount = float(parent["required_exposure"] or 0.0)
         if amount <= 0:
             return False
 
-        # 🔓 RELEASE EXACT AMOUNT
-        bank_state.release_exact(
-            engine=parent["engine"],
-            amount=amount
-        )
-
-        _q_retry(cur, """
+        res = _q_retry(cur, """
             UPDATE orders
                SET exposure_released = 1,
                    exposure_released_amount = ?,
                    parent_closed = 1,
                    closed_at = COALESCE(closed_at, datetime('now','utc'))
              WHERE id = ?
+               AND exposure_released = 0
         """, (amount, int(parent_id)))
 
+        if res.rowcount == 0:
+            # Another path already released
+            con.commit()
+            return False
+
         con.commit()
+
+        # --------------------------------------------------
+        # 5️⃣ Mutate BankState AFTER DB ownership is secured
+        # --------------------------------------------------
+        bank_state.release_exact(
+            engine=parent["engine"],
+            amount=amount
+        )
 
         _log_event(
             "INFO",
@@ -2578,8 +2581,6 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
             con.close()
         except Exception:
             pass
-
-
 
 def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
     """

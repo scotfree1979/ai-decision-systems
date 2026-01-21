@@ -239,6 +239,36 @@ ENGINE_MAX = {
     "MSC_INPLAY": 10.00,
 }
 
+
+def _apply_bus_stake_gate(*, engine: str, stake: float) -> float:
+    """
+    FINAL stake authority.
+
+    This is the LAST mutation of plan["size"] before routing.
+    No odds logic. No phase logic. No scaling.
+
+    If this is wrong, BUS is wrong.
+    """
+
+    if stake is None or stake <= 0:
+        raise RuntimeError("BUS invariant violated: stake <= 0")
+
+    min_stake = ENGINE_MIN_STAKE.get(engine)
+    max_stake = ENGINE_MAX_STAKE.get(engine)
+
+    if min_stake is None or max_stake is None:
+        raise RuntimeError(
+            f"BUS invariant violated: missing stake caps for engine={engine}"
+        )
+
+    if stake < min_stake:
+        return float(min_stake)
+
+    if stake > max_stake:
+        return float(max_stake)
+
+    return float(stake)
+
 # === PATCH END ==============================================================
 
 # === PATCH START ============================================

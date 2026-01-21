@@ -1481,21 +1481,29 @@ class DecisionBus:
                         try:
                             pot = get_engine_available(engine)
 
-                            stake, stake_meta = compute_dynamic_stake(
+                            raw_stake, stake_meta = compute_dynamic_stake(
                                 engine=engine,
                                 px=px,
                                 pot=pot,
                                 ctx=ctx,
                             )
 
-                            # Hard guarantee — size must be valid
-                            if not stake or stake <= 0:
+                            # Hard guarantee — dynamic calc must return something
+                            if not raw_stake or raw_stake <= 0:
                                 plan["_bus_block"] = "dynamic_stake_zero"
                                 tick_ctx["plans_route_failed"].append(
                                     (plan, "dynamic_stake_zero")
                                 )
                                 _record_reason(engine_report, engine, "dynamic_stake_zero")
                                 continue  # 🔴 DO NOT ROUTE
+
+                            # --------------------------------------------------
+                            # 🔒 FINAL BUS STAKE GATE (ABSOLUTE MIN / MAX)
+                            # --------------------------------------------------
+                            stake = _apply_bus_stake_gate(
+                                engine=engine,
+                                stake=float(raw_stake),
+                            )
 
                             plan["size"] = float(stake)
                             plan["_stake_source"] = "dynamic"
@@ -1506,9 +1514,8 @@ class DecisionBus:
                             tick_ctx["plans_route_failed"].append(
                                 (plan, f"dynamic_stake_error:{e}")
                             )
-                            _record_reason(engine, "dynamic_stake_error")
+                            _record_reason(engine_report, engine, "dynamic_stake_error")
                             continue  # 🔴 DO NOT ROUTE
-
 
             
                 # --- BUS MUST NEVER BLOCK EXECUTION ---
