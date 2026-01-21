@@ -696,12 +696,13 @@ class DecisionBus:
 
         from engines.bus_route import get_risk_legacy_parent_pairs
 
+        engine_report["MSC_RISK"]["evaluated"] = True
         risc = self.engines.get("MSC_RISK")
+
         if risc:
             for mid, sid in get_risk_legacy_parent_pairs():
                 ctx = self._route_ctx_map.get((mid, sid))
 
-                # 🔑 DB-first CTX guarantee for RISK
                 if not ctx:
                     try:
                         ctx = self._build_ctx_for_market(base_ctx, mid, sid)
@@ -712,7 +713,6 @@ class DecisionBus:
 
                 if not ctx or ctx.get("px") is None:
                     continue
-
 
                 try:
                     r = risc.tick(ctx)
@@ -725,6 +725,7 @@ class DecisionBus:
                 except Exception:
                     _record_reason(engine_report, "MSC_RISK", "tick_error")
 
+
         # --------------------------------------------------
         # 🟥 LANE 3 — MSC_INPLAY (HELPER-DRIVEN)
         # --------------------------------------------------
@@ -732,45 +733,48 @@ class DecisionBus:
 
         from engines.bus_route import get_v7_inplay_snapshot
 
+        engine_report["MSC_INPLAY"]["evaluated"] = True
         inplay = self.engines.get("MSC_INPLAY")
+
         if inplay:
-            seen_markets = set()
-            inplay_pairs = set()
+            seen = set()
 
-            for mid, _ in self._route_ctx_map.keys():
-                if mid in seen_markets:
+            # DB snapshot already encodes in-play scope
+            for market_id, _ in set(
+                (r["marketId"], r["selectionId"])
+                for mid, _ in self._route_ctx_map.keys()
+                for r in (get_v7_inplay_snapshot(mid) or [])
+            ):
+                if market_id in seen:
                     continue
-                seen_markets.add(mid)
+                seen.add(market_id)
 
-                for r in get_v7_inplay_snapshot(mid) or []:
-                    inplay_pairs.add((mid, str(r["selectionId"])))
+                for r in get_v7_inplay_snapshot(market_id):
+                    mid = r["marketId"]
+                    sid = str(r["selectionId"])
 
-            for mid, sid in inplay_pairs:
-                ctx = self._route_ctx_map.get((mid, sid))
+                    ctx = self._route_ctx_map.get((mid, sid))
+                    if not ctx:
+                        try:
+                            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                            if ctx:
+                                self._route_ctx_map[(mid, sid)] = ctx
+                        except Exception:
+                            continue
 
-                # 🔑 DB-first CTX guarantee for INPLAY (mirror of RISK)
-                if not ctx:
-                    try:
-                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                        if ctx:
-                            self._route_ctx_map[(mid, sid)] = ctx
-                    except Exception:
+                    if not ctx or ctx.get("px") is None:
                         continue
 
-                if not ctx or ctx.get("px") is None:
-                    continue
-
-                try:
-                    r = inplay.tick(ctx)
-                    if r and r.get("enter"):
-                        plan = dict(r)
-                        plan["engine"] = "MSC_INPLAY"
-                        plans.append(("MSC_INPLAY", plan, ctx))
-                        engine_report["MSC_INPLAY"]["fired"] += 1
-                        lane_counts[3] += 1
-                except Exception:
-                    _record_reason(engine_report, "MSC_INPLAY", "tick_error")
-
+                    try:
+                        p = inplay.tick(ctx)
+                        if p and p.get("enter"):
+                            plan = dict(p)
+                            plan["engine"] = "MSC_INPLAY"
+                            plans.append(("MSC_INPLAY", plan, ctx))
+                            engine_report["MSC_INPLAY"]["fired"] += 1
+                            lane_counts[3] += 1
+                    except Exception:
+                        _record_reason(engine_report, "MSC_INPLAY", "tick_error")
 
         # --------------------------------------------------
         # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)
@@ -1451,6 +1455,23 @@ class DecisionBus:
                     required_exposure = size * px
 
                 plan["required_exposure"] = required_exposure
+
+                # ==================================================
+                # 🔒 FINAL BUS STAKE AUTHORITY (ALL ENGINES)
+                # ==================================================
+                engine = plan.get("engine")
+                size   = float(plan.get("size") or 0.0)
+
+                if engine and size > 0:
+                    gated = _apply_bus_stake_gate(
+                        engine=engine,
+                        stake=size,
+                    )
+
+                    if gated != size:
+                        plan["_bus_note"] = "stake_gated"
+                        plan["size"] = gated
+
 
                 # ------------------------------------------------------------------
                 # STAKE ENRICHMENT (ENGINE-AWARE — SINGLE AUTHORITY)
