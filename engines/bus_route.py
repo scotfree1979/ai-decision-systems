@@ -84,14 +84,41 @@ class BusRouteSnapshot:
         self.route_id = 0
         self.runner_pool = []
         self.bus_stops = {}
+        self.ctx_map = {}  # (marketId, selectionId) -> ctx
 
     def build_route(self):
         self.route_id += 1
-        self.runner_pool = _build_runner_pool()
+        self.runner_pool = list(get_root_ctx_runner_pairs())
 
         if not self.runner_pool:
             self.bus_stops = {}
+            self.ctx_map = {}
             return
+
+        # --------------------------------------------------
+        # BUILD CTX ONCE (AUTHORITATIVE, TIME-OWNED HERE)
+        # --------------------------------------------------
+        from engines.mastery.context_builder import build_context, build_context_for_runner
+
+        base_ctx, _meta = build_context(source="LIVE")
+
+        ctx_map = {}
+        for mid, sid in self.runner_pool:
+            try:
+                ctx, _ = build_context_for_runner(mid, sid, source="LIVE")
+                ctx_map[(mid, sid)] = ctx
+            except Exception:
+                continue  # fail-open
+
+        self.ctx_map = ctx_map
+        self.partition_into_bus_stops()
+
+    def get_ctx_map(self):
+        """
+        Authoritative CTX map for the entire route.
+        BUS must consume this directly.
+        """
+        return self.ctx_map
 
 
     def get_bus_stop_pairs(self, tick: int):
@@ -124,6 +151,57 @@ class BusRouteSnapshot:
 
     def get_all_runners(self):
         return self.runner_pool
+
+# ============================================================================
+# CANONICAL ROOT CTX RUNNER SET
+# ============================================================================
+def get_root_ctx_runner_pairs():
+    """
+    Authoritative union of ALL (marketId, selectionId) pairs
+    required by any BUS lane.
+
+    This is the ONLY helper BUS should use to decide which
+    runners must have CTX built.
+
+    Includes:
+      • Route runners (scope + MarketMonitor)
+      • RISK legacy parents (DB-first)
+      • IN-PLAY runners (DB-first snapshot)
+
+    No filtering.
+    No execution logic.
+    No CTX building.
+    """
+
+    # 1️⃣ Route runners (LEGACY / EXPLORATORY)
+    route_pairs = set(_build_runner_pool())
+
+    # 2️⃣ RISK parents (DB-first)
+    try:
+        risk_pairs = set(get_risk_legacy_parent_pairs())
+    except Exception:
+        risk_pairs = set()
+
+    # 3️⃣ IN-PLAY runners (DB-first snapshot)
+    inplay_pairs = set()
+    try:
+        from engines.decision_engine.decide_once.scope import scope_snapshot
+
+        scope = scope_snapshot(inplay_window_min=15)
+        inplay_markets = scope.get("in_play", []) or []
+
+        for mid, _ in inplay_markets:
+            snap = get_v7_inplay_snapshot(str(mid)) or []
+            for r in snap:
+                inplay_pairs.add(
+                    (str(r["marketId"]), str(r["selectionId"]))
+                )
+    except Exception:
+        pass
+
+    # 🔒 FINAL UNION (authoritative)
+    return route_pairs | risk_pairs | inplay_pairs
+
 
 # ============================================================================
 # RISK ELIGIBILITY — LEGACY PARENTS WITHOUT MATCHED CHILD
@@ -819,47 +897,6 @@ def get_runner_odds_map(
 
     return odds_map
 
-# engines/bus_route.py
-
-def build_route_ctx_map():
-    """
-    Build full CTX map for the current route.
-
-    - Uses existing context_builder.build_context()
-    - Builds CTXV7 ONCE per runner
-    - No odds refresh here (BUS does that per tick)
-    """
-
-    from engines.mastery.context_builder import build_context
-
-    ctx_map = {}
-
-    # build_context already knows scope + markets
-    base_ctx, meta = build_context(source="LIVE")
-
-    # IMPORTANT:
-    # build_context returns ONE ctx, but we need MANY
-    # So we iterate runners from BusRouteSnapshot
-
-    snapshot = BusRouteSnapshot()
-    snapshot.build_route()
-    snapshot.partition_into_bus_stops()
-
-    for mid, sid in snapshot.get_all_runners():
-        try:
-            from engines.mastery.context_builder import build_context_for_runner
-
-            ctx, _meta = build_context_for_runner(mid, sid, source="LIVE")
-
-
-            ctx_map[(mid, sid)] = ctx
-
-        except Exception:
-            continue  # fail-open
-
-    return ctx_map
-
-
 
 
 # ======================================================================================================
@@ -891,7 +928,8 @@ def start_bus_loop():
     BUS._route_snapshot.build_route()
     BUS._route_snapshot.partition_into_bus_stops()
 
-    BUS._route_ctx_map = {}
+    BUS._route_ctx_map = BUS._route_snapshot.get_ctx_map()
+
 
     print("[BUS_ROUTE] route initialised (no loop)")
 

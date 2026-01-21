@@ -1195,12 +1195,7 @@ class DecisionBus:
             self._bus_stop = 1
             self._route_id += 1
 
-        # ===============================================================
-        # 3️⃣ ROUTE / BUS CTX V7
-        # ===============================================================
-        if self._bus_stop == 1 or not self._route_ctx_map:
-            from engines.bus_route import build_route_ctx_map
-            self._route_ctx_map = build_route_ctx_map()
+
 
 
         # ===============================================================
@@ -1230,26 +1225,6 @@ class DecisionBus:
 # - Restores correct plan generation flow
 # ======================================================================================================
 
-        # ===============================================================
-        # 5️⃣ BUILD ROUTE-LEVEL CTX MAP (AUTHORITATIVE)
-        # ===============================================================
-        #
-        # IMPORTANT:
-        # - Runner identity comes ONLY from BusRouteSnapshot
-        # - BUS does NOT filter, discover, or recompute mids/sids
-        # - CTX is keyed once per route and reused across ticks
-        #
-        # ===============================================================
-
-        # Initialise map if missing or new route
-        if not self._route_ctx_map or self._bus_stop == 1:
-
-            self._route_ctx_map = {}
-
-            for mid, sid in self._route_snapshot.get_all_runners():
-                ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                if ctx:
-                    self._route_ctx_map[(mid, sid)] = ctx
 
         # ===============================================================
         # 6️⃣ LEGACY BUS STOP SLICE (ROUTE-PROVIDED)
