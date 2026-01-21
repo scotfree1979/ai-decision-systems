@@ -53,95 +53,135 @@ MAX_MAP = {
 # ======================================================================
 # Compute dynamic stake with REAL inputs
 # ======================================================================
+# ======================================================================
+# RISK dynamic stake — tick-distance scaling (AUTHORITATIVE)
+# ======================================================================
+
+from engines.price_math import ladder_ticks_between
+
+def compute_risk_dynamic_stake(
+    *,
+    parent_px: float,
+    current_px: float,
+    engine: str = "MSC_RISK",
+) -> float:
+    """
+    Risk stake scales with absolute tick distance from parent entry price.
+    Direction is irrelevant.
+    """
+
+    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+
+    # Safety
+    if parent_px <= 0 or current_px <= 0:
+        return float(ENGINE_MIN.get(engine, 2.0))
+
+    # Tick distance (absolute)
+    ticks_away = abs(
+        ladder_ticks_between(parent_px, current_px)
+    )
+
+    # Normalisation domain (fixed)
+    MAX_TICKS = ladder_ticks_between(1.5, 12.0)
+    if MAX_TICKS <= 0:
+        return float(ENGINE_MIN.get(engine, 2.0))
+
+    pressure = min(1.0, ticks_away / MAX_TICKS)
+
+    lo = float(ENGINE_MIN.get(engine, 2.0))
+    hi = float(ENGINE_MAX.get(engine, lo))
+
+    stake = lo + pressure * (hi - lo)
+    return round(stake, 2)
+
 # ======================================================================================================
 # 📍 TARGET: engines/math/dynamic_stake_v7.py
 # 🔎 SEARCH: def compute_dynamic_stake(
 # 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-03-10 — Engine min/max clamping (final, authoritative)
+# 📆 PATCHED: 2026-03-22 — Final envelope-based dynamic stake (authoritative)
 #
 # PURPOSE:
-# - Enforce per-engine minimum & maximum stakes
-# - Guarantee engines can always fire at least once
-# - Allow aggression to scale naturally with pot growth
-#
-# RULE:
-#   final_stake = clamp(
-#       computed_stake,
-#       ENGINE_MIN[engine],
-#       ENGINE_MAX[engine]
-#   )
+# - Size PARENT stakes only
+# - Use engine-level min/max as a hard envelope
+# - Scale linearly inside the envelope using confidence signals
+# - NEVER use bank %, available balance, or exposure
 #
 # INVARIANTS:
-# - Exposure logic remains intact
-# - Bank availability respected
-# - HARD_CAP_PRE / HARD_CAP_IP still apply
-# - Clamp is LAST step before return
+# - stake >= ENGINE_MIN[engine]
+# - stake <= ENGINE_MAX[engine]
+# - monotonic, deterministic, snap-clamped
 # ======================================================================================================
 
-def compute_dynamic_stake(ctx: dict, engine: str) -> float:
-    letter = (ctx.get("letter") or ctx.get("family") or "?").upper()
-    phase  = "IP" if ctx.get("oc_phase", 0) >= 7 else "PRE"
+def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
+    """
+    Final Dynamic Stake v7.
 
-    base = BASE_MAP.get(letter, MIN_STAKE)
-    smax = MAX_MAP.get(letter, base)
-    mult = LETTER_MULT.get(letter, 1.0)
+    Stake is determined as:
+        ENGINE_MIN + confidence * (ENGINE_MAX - ENGINE_MIN)
 
-    pot_static = bank_state.get_engine_pot(engine)
-    avail_now  = bank_state.get_engine_available(engine)
+    Confidence is derived from existing signals (letters, phase),
+    NOT from bank or exposure.
 
-    if avail_now <= 0:
-        avail_now = 0.0
+    Returns a rounded stake (2dp), always within engine envelope.
+    """
 
-    mto = float(ctx.get("minutes_to_off", 120.0))
-    ocp = int(ctx.get("oc_phase", 0))
+    from engines.daily_config import ENGINE_MIN, ENGINE_MAX, LETTER_MULT
 
-    time_mult = (
-        1.20 if mto > 60 else
-        1.00 if mto > 20 else
-        0.80 if mto > 5  else
-        0.60
-    )
-
-    oc_mult = (
-        1.20 if ocp < 3 else
-        1.00 if ocp < 6 else
-        0.80
-    )
-
-    liab_frac = (pot_static - avail_now) / max(pot_static, 1e-9)
-
-    exp_mult = (
-        0.25 if liab_frac > 0.75 else
-        0.50 if liab_frac > 0.50 else
-        0.75 if liab_frac > 0.25 else
-        1.00
-    )
-
-    # ----------------------------
-    # RAW STAKE
-    # ----------------------------
-    stake = base * mult * time_mult * oc_mult * exp_mult
-
-    stake = min(stake, smax)
-    stake = min(stake, HARD_CAP_PRE if phase == "PRE" else HARD_CAP_IP)
-
-    # ----------------------------
-    # FINAL ENGINE CLAMP (ONLY HERE)
-    # ----------------------------
-    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+    # --------------------------------------------------
+    # 1️⃣ Engine envelope (HARD LIMITS)
+    # --------------------------------------------------
     eng = engine.upper()
 
-    if eng in ENGINE_MIN:
-        stake = max(ENGINE_MIN[eng], stake)
+    min_stake = float(ENGINE_MIN.get(eng, 2.0))
+    max_stake = float(ENGINE_MAX.get(eng, min_stake))
 
-    if eng in ENGINE_MAX:
-        stake = min(ENGINE_MAX[eng], stake)
+    # Safety: broken config should never collapse stake
+    if max_stake < min_stake:
+        max_stake = min_stake
 
-    return round(max(MIN_STAKE, stake), 2)
+    # --------------------------------------------------
+    # 2️⃣ Confidence score (dimensionless)
+    # --------------------------------------------------
+    # Base confidence
+    confidence = 1.0
 
+    # Letter-based conviction (primary signal)
+    letter = (ctx.get("letter") or ctx.get("source") or "")[:1].upper()
+    confidence *= float(LETTER_MULT.get(letter, 1.0))
 
-# === PATCH END ==============================================================
+    # Optional: time / phase signals (kept gentle by design)
+    mto = ctx.get("minutes_to_off")
+    if isinstance(mto, (int, float)):
+        if mto > 60:
+            confidence *= 1.05
+        elif mto < 10:
+            confidence *= 0.95
 
+    ocp = ctx.get("oc_phase")
+    if isinstance(ocp, int):
+        if ocp < 3:
+            confidence *= 1.05
+        elif ocp > 6:
+            confidence *= 0.95
+
+    # Normalise confidence into a sane band
+    # (we only care about where we sit inside the envelope)
+    confidence = max(0.0, min(confidence, 1.25))
+
+    # --------------------------------------------------
+    # 3️⃣ Linear interpolation inside envelope
+    # --------------------------------------------------
+    stake = min_stake + confidence * (max_stake - min_stake)
+
+    # --------------------------------------------------
+    # 4️⃣ HARD SNAP (final authority)
+    # --------------------------------------------------
+    if stake < min_stake:
+        stake = min_stake
+    elif stake > max_stake:
+        stake = max_stake
+
+    return round(float(stake), 2)
 
 
 # === PATCH END ================================================================
@@ -188,80 +228,59 @@ def calc_dynamic_stake(letter: str, phase: str = "PRE", bank: float | None = Non
 
 
 # --- Greening stake (unchanged) ---------------------------------------------
-# === PATCH START ============================================================
+# ======================================================================================================
 # 📍 TARGET: engines/math/dynamic_stake_v7.py
 # 🔎 SEARCH: def calc_greenup_stake(
 # 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-03-20 — True 100% match greening (price-movement invariant)
+# 📆 PATCHED: 2026-03-22 — Canonical green-up sizing (pure, invariant-only)
 #
 # PURPOSE:
-# - Enforce tool-level 100% match invariant
-# - Guarantee equal P&L on WIN and LOSE when parent + child both match
-# - Profit derives ONLY from price movement (ticks), not distribution
+# - Compute CHILD hedge stake such that:
+#       WIN_PNL == LOSE_PNL
+# - Profit derives ONLY from price movement (ticks)
+# - Direction is handled by CALLER (side selection), not math
 #
-# INVARIANT:
-#   For a fully matched parent + child:
-#     WIN_PNL == LOSE_PNL
+# MATHEMATICAL INVARIANT (FINAL):
+#   child_stake = (parent_stake * parent_odds) / child_odds
 #
-# FORMULA (AUTHORITATIVE):
-#   • LAY → BACK later:
-#       child_stake = (parent_stake * parent_odds) / child_odds
-#
-#   • BACK → LAY lower:
-#       child_stake = (parent_stake * parent_odds) / child_odds
+# ASSUMPTIONS (NOW GUARANTEED UPSTREAM):
+# - parent_stake >= ENGINE_MIN (≥ £3)
+# - hedge_odds > 0
+# - parent_odds > 0
 #
 # NOTES:
-# - No runner count
-# - No redistribution
-# - Direction handled explicitly
-# - Rounding is LAST step
-# ============================================================================
+# - No Betfair minimum enforcement here
+# - No defensive fallbacks
+# - Rounding is applied LAST
+# ======================================================================================================
 
 def calc_greenup_stake(
     parent_side: str,
     entry_odds: float,
     parent_stake: float,
     hedge_odds: float,
-):
+) -> float:
     """
-    Compute child stake such that:
-      • WIN P&L == LOSE P&L
-      • Profit comes solely from price movement
-      • Parent + child form a closed 100% match
+    Canonical green-up calculation.
+
+    Guarantees:
+      • WIN PnL == LOSE PnL
+      • Profit scales with tick distance
+      • Works identically for:
+            - LAY → BACK
+            - BACK → LAY
     """
 
-    try:
-        entry_odds   = float(entry_odds)
-        hedge_odds   = float(hedge_odds)
-        parent_stake = float(parent_stake)
+    # All validation is upstream — math only lives here
+    entry_odds   = float(entry_odds)
+    hedge_odds   = float(hedge_odds)
+    parent_stake = float(parent_stake)
 
-        # Safety
-        if entry_odds <= 0 or hedge_odds <= 0 or parent_stake <= 0:
-            return round(max(cfg.MIN_STAKE, parent_stake), 2)
+    stake = (parent_stake * entry_odds) / hedge_odds
 
-        side = parent_side.upper()
-
-        # --------------------------------------------------
-        # LAY first → BACK later (odds drift up)
-        # --------------------------------------------------
-        if side == "LAY":
-            stake = (parent_stake * entry_odds) / hedge_odds
-
-        # --------------------------------------------------
-        # BACK first → LAY later (odds shorten)
-        # --------------------------------------------------
-        elif side == "BACK":
-            stake = (parent_stake * entry_odds) / hedge_odds
-
-        else:
-            return round(max(cfg.MIN_STAKE, parent_stake), 2)
-
-        # Final snap
-        return round(max(cfg.MIN_STAKE, stake), 2)
-
-    except Exception:
-        return round(max(cfg.MIN_STAKE, parent_stake), 2)
+    return round(stake, 2)
 
 # === PATCH END ==============================================================
+
 
 

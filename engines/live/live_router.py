@@ -1328,21 +1328,6 @@ def _round_odds(odds: float) -> float:
 
 
 
-def calc_greenup_stake(parent_side: str, entry_odds: float, parent_stake: float, hedge_odds: float) -> float:
-    """
-    Green-up stake to equalise profit across outcomes (pre-commission):
-      S_hedge = S_parent * entry_odds / hedge_odds
-    Works for both LAY→BACK and BACK→LAY.
-    Enforce Betfair min stake (£2) and round to 2dp.
-    """
-    try:
-        s = float(parent_stake) * float(entry_odds) / float(hedge_odds)
-        s = max(2.0, s)
-        return round(s + 1e-9, 2)
-    except Exception:
-        # fallback: keep parent stake if anything goes wrong
-        return round(max(2.0, float(parent_stake)), 2)
-
 def _ref(prefix: str) -> str:
     return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{random.randint(100,999)}"
 
