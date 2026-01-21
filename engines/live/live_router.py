@@ -2552,29 +2552,54 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
 
         con.commit()
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _release_parent_exposure_db(parent_id: int) -> bool:
+# 🧩 ACTION: FIX BankState mutation on exposure release
+# 📆 PATCHED: 2026-01-21 — bind DB release to BankState invariant
+#
+# INVARIANT:
+# - DB release claims ownership first
+# - EXACTLY ONE BankState release call follows
+# - Engine + parent_id are the ONLY required inputs
+# ============================================================================
+
         # --------------------------------------------------
         # 5️⃣ Mutate BankState AFTER DB ownership is secured
         # --------------------------------------------------
-        bank_state.release_exact(
-            engine=parent["engine"],
-            amount=amount
-        )
+        try:
+            engine = parent["engine"]
+
+            if child_matched:
+                # Child matched ⇒ lifecycle complete
+                bank_state.on_child_matched(
+                    engine=engine,
+                    parent_id=int(parent_id),
+                )
+            else:
+                # Terminal / grace / market-finished
+                bank_state.on_parent_closed(
+                    engine=engine,
+                    parent_id=int(parent_id),
+                )
+
+        except Exception as e:
+            _log_event(
+                "ERROR",
+                "bankstate",
+                f"[BANKSTATE RELEASE FAILED] parent_id={parent_id}: {e}"
+            )
 
         _log_event(
             "INFO",
             "bankstate",
-            f"[EXPOSURE RELEASE] parent_id={parent_id} amount={amount:.2f}"
+            f"[EXPOSURE RELEASE] parent_id={parent_id} engine={parent['engine']}"
         )
 
         return True
 
-    except Exception as e:
-        _log_event(
-            "ERROR",
-            "bankstate",
-            f"[EXPOSURE RELEASE FAILED] parent_id={parent_id}: {e}"
-        )
-        return False
+# === PATCH END ==============================================================
+
 
     finally:
         try:

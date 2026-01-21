@@ -37,6 +37,31 @@ def _market_ready(st: dict) -> bool:
             return True
     return False
 
+def _apply_bus_stake_gate(*, engine: str, stake: float) -> float:
+    """
+    FINAL stake authority.
+
+    This is the LAST mutation of plan["size"] before routing.
+    No odds logic. No phase logic. No scaling.
+
+    If this is wrong, BUS is wrong.
+    """
+
+    if stake is None or stake <= 0:
+        raise RuntimeError("BUS invariant violated: stake <= 0")
+
+    min_stake = ENGINE_MIN[engine]
+    max_stake = ENGINE_MAX[engine]
+
+    if stake < min_stake:
+        return float(min_stake)
+
+    if stake > max_stake:
+        return float(max_stake)
+
+    return float(stake)
+
+
 # ======================================================================================================
 # BUS DIAGNOSTICS SHIM — FINAL
 # ======================================================================================================
@@ -1437,11 +1462,14 @@ class DecisionBus:
                 # ------------------------------------------------------------------
                 engine = plan.get("engine")
 
+                # ==================================================
+                # MSC_RISK — mechanical sizing (engine-owned logic)
+                # ==================================================
                 if engine == "MSC_RISK":
 
                     from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
 
-                    parent_px = ctx.get("legacy_entry_odds") or ctx.get("entry_odds")
+                    parent_px  = ctx.get("legacy_entry_odds") or ctx.get("entry_odds")
                     current_px = ctx.get("px")
 
                     if not parent_px or not current_px:
@@ -1451,17 +1479,32 @@ class DecisionBus:
                         )
                         continue  # 🔴 DO NOT ROUTE
 
-                    stake = compute_risk_dynamic_stake(
+                    raw_stake = compute_risk_dynamic_stake(
                         parent_px=float(parent_px),
                         current_px=float(current_px),
                     )
 
-                    plan["size"] = stake
+                    if not raw_stake or raw_stake <= 0:
+                        plan["_bus_block"] = "risk_stake_zero"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "risk_stake_zero")
+                        )
+                        continue  # 🔴 DO NOT ROUTE
+
+                    # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)
+                    stake = _apply_bus_stake_gate(
+                        engine=engine,
+                        stake=float(raw_stake),
+                    )
+
+                    plan["size"] = float(stake)
                     plan["_stake_source"] = "risk_dynamic"
 
-
+                # ==================================================
+                # ALL OTHER ENGINES — dynamic stake + BUS authority
+                # ==================================================
                 else:
-                    # All other engines use dynamic stake
+
                     from engines.live.bank_state import get_engine_available
                     from engines.math.dynamic_stake_v7 import compute_dynamic_stake
 
@@ -1469,53 +1512,39 @@ class DecisionBus:
 
                         px = float(plan.get("px") or 0.0)
 
-                        # Guard: cannot compute stake without these
                         if not engine or px <= 0:
                             plan["_bus_block"] = "dynamic_stake_missing_inputs"
                             tick_ctx["plans_route_failed"].append(
                                 (plan, "dynamic_stake_missing_inputs")
                             )
-                            _record_reason(engine_report, engine, "dynamic_stake_zero")
                             continue  # 🔴 DO NOT ROUTE
 
-                        try:
-                            pot = get_engine_available(engine)
+                        pot = get_engine_available(engine)
 
-                            raw_stake, stake_meta = compute_dynamic_stake(
-                                engine=engine,
-                                px=px,
-                                pot=pot,
-                                ctx=ctx,
-                            )
+                        raw_stake, stake_meta = compute_dynamic_stake(
+                            engine=engine,
+                            px=px,
+                            pot=pot,
+                            ctx=ctx,
+                        )
 
-                            # Hard guarantee — dynamic calc must return something
-                            if not raw_stake or raw_stake <= 0:
-                                plan["_bus_block"] = "dynamic_stake_zero"
-                                tick_ctx["plans_route_failed"].append(
-                                    (plan, "dynamic_stake_zero")
-                                )
-                                _record_reason(engine_report, engine, "dynamic_stake_zero")
-                                continue  # 🔴 DO NOT ROUTE
-
-                            # --------------------------------------------------
-                            # 🔒 FINAL BUS STAKE GATE (ABSOLUTE MIN / MAX)
-                            # --------------------------------------------------
-                            stake = _apply_bus_stake_gate(
-                                engine=engine,
-                                stake=float(raw_stake),
-                            )
-
-                            plan["size"] = float(stake)
-                            plan["_stake_source"] = "dynamic"
-                            plan["_stake_meta"] = stake_meta
-
-                        except Exception as e:
-                            plan["_bus_block"] = "dynamic_stake_error"
+                        if not raw_stake or raw_stake <= 0:
+                            plan["_bus_block"] = "dynamic_stake_zero"
                             tick_ctx["plans_route_failed"].append(
-                                (plan, f"dynamic_stake_error:{e}")
+                                (plan, "dynamic_stake_zero")
                             )
-                            _record_reason(engine_report, engine, "dynamic_stake_error")
                             continue  # 🔴 DO NOT ROUTE
+
+                        # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)
+                        stake = _apply_bus_stake_gate(
+                            engine=engine,
+                            stake=float(raw_stake),
+                        )
+
+                        plan["size"] = float(stake)
+                        plan["_stake_source"] = "dynamic"
+                        plan["_stake_meta"] = stake_meta
+
 
             
                 # --- BUS MUST NEVER BLOCK EXECUTION ---
