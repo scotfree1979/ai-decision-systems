@@ -99,6 +99,71 @@ class ExposureGuardian:
         skipped = 0
         reasons: Dict[str, int] = {}
 
+# ======================================================================================================
+# 📍 TARGET: engines/exposure/exposure_guardian.py
+# 🔎 ANCHOR: def _run_once(self):
+# 🧩 ACTION: ADD unmatched parent timeout release (5-minute rule)
+# 📆 PATCHED: 2026-03-25 — Release exposure for UNMATCHED parents older than 5 minutes
+#
+# PURPOSE:
+# - Prevent exposure being trapped on parents that never matched
+# - Recycle capital deterministically
+#
+# RULE:
+# - LIVE parent
+# - entry_status IN (QUEUED, PLACED)
+# - NOT MATCHED
+# - opened_at <= now - 5 minutes
+# - exposure_released = 0
+#
+# SAFETY:
+# - DB-first
+# - Idempotent
+# - MATCHED parents are explicitly excluded
+# ======================================================================================================
+
+        # -----------------------------------------------------------
+        # UNMATCHED PARENT TIMEOUT (5-MINUTE RULE)
+        # -----------------------------------------------------------
+        con_u = open_auto_db(rw=True)
+        cur_u = con_u.cursor()
+
+        rows = q_retry(cur_u, """
+            SELECT
+                id,
+                customerOrderRef
+            FROM orders
+            WHERE mode='LIVE'
+              AND role='PARENT'
+              AND UPPER(COALESCE(entry_status,'')) IN ('PLACED')
+              AND datetime(opened_at) <= datetime('now','utc','-5 minutes')
+              AND COALESCE(exposure_released,0) = 0
+        """).fetchall()
+
+        for pid, cor in rows:
+            try:
+                # 1️⃣ Cancel parent (DB-authoritative)
+                q_retry(cur_u, """
+                    UPDATE orders
+                       SET entry_status='CANCELLED',
+                           exit_status='EXPIRED',
+                           closed_at=datetime('now','utc')
+                     WHERE id=?
+                       AND UPPER(COALESCE(entry_status,'')) != 'MATCHED'
+                """, (int(pid),))
+
+                # 2️⃣ Release exposure (idempotent, DB-locked)
+                _release_parent_exposure_db(int(pid))
+
+            except Exception as e:
+                print(
+                    f"[EXPOSURE-GUARDIAN][WARN] "
+                    f"unmatched timeout release failed parent_ref={cor}: {e}"
+                )
+
+        con_u.commit()
+        con_u.close()
+
         # -----------------------------------------------------------
         # Identify markets that have exited scope (authoritative)
         # -----------------------------------------------------------
@@ -140,7 +205,6 @@ class ExposureGuardian:
             skipped=skipped,
             reasons=reasons,
         )
-
 
     # -----------------------------------------------------------
     # Market handler
