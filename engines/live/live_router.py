@@ -277,6 +277,142 @@ def _router_child_worker_loop():
         # Prevent tight loop
         time.sleep(1.0)
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: place_parent_and_hedge / router helpers
+# 🧩 ACTION: ADD stop-loss execution worker (authoritative)
+# 📆 PATCHED: 2026-01-22 — Implement STOPLOSS child lifecycle (create → chase → match → cancel hedge)
+#
+# CONTRACT (CALLED BY OVERWATCHER):
+#   process_stoploss(payload: dict)
+#
+# PAYLOAD:
+#   {
+#     marketId,
+#     selectionId,
+#     entry_side,        # parent side
+#     entry_stake,
+#     current_odds,
+#     stop_loss_px,
+#     ts
+#   }
+#
+# BEHAVIOUR:
+#   1) Insert STOPLOSS child (DB-first)
+#   2) Place on Betfair
+#   3) If missed → cancel + reprice + re-submit
+#   4) When matched → cancel active HEDGE child
+# ======================================================================================================
+
+def process_stoploss(payload: dict, *, max_chase_ticks: int = 3, poll_s: float = 1.0) -> None:
+    """
+    Execute a STOPLOSS child order with price chasing.
+    """
+
+    market_id    = str(payload["marketId"])
+    selection_id = str(payload["selectionId"])
+    entry_side   = payload["entry_side"].upper()
+    stake        = float(payload["entry_stake"])
+    stop_px      = float(payload["stop_loss_px"])
+
+    # STOPLOSS is ALWAYS opposite side
+    stop_side = "BACK" if entry_side == "LAY" else "LAY"
+
+    # --------------------------------------------------
+    # Resolve parent
+    # --------------------------------------------------
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    parent = con.execute("""
+        SELECT id, customerOrderRef
+          FROM orders
+         WHERE role='PARENT'
+           AND marketId=?
+           AND selectionId=?
+           AND entry_status='matched'
+           AND exit_status IS NULL
+         ORDER BY opened_at DESC
+         LIMIT 1
+    """, (market_id, selection_id)).fetchone()
+    con.close()
+
+    if not parent:
+        return
+
+    parent_id  = int(parent["id"])
+    parent_cor = parent["customerOrderRef"]
+
+    app_key, token = _keys()
+
+    # --------------------------------------------------
+    # Price chase loop
+    # --------------------------------------------------
+    chase = 0
+    bet_id = None
+    odds   = stop_px
+
+    while chase <= max_chase_ticks:
+
+        # ---- place STOPLOSS child ----
+        cref = _ref("STOPLOSS")
+        bet_id, _ = _place(
+            app_key=app_key,
+            token=token,
+            parent_ref=cref,
+        )
+
+        if bet_id:
+            # insert child row
+            _orders_insert_child_live(
+                parent_cor=parent_cor,
+                market_id=market_id,
+                selection_id=selection_id,
+                side=stop_side,
+                odds=odds,
+                stake=stake,
+                bet_id=bet_id,
+                source="STOPLOSS"
+            )
+
+            # ---- poll for match ----
+            if _poll_matched(app_key, token, bet_id, timeout_s=10, interval_s=poll_s):
+                break  # MATCHED
+
+        # ---- missed → cancel + reprice ----
+        if bet_id:
+            try:
+                _cancel(app_key, token, bet_id)
+            except Exception:
+                pass
+
+        chase += 1
+
+        # walk further in adverse direction
+        if entry_side == "LAY":
+            odds = pm.walk_ticks(odds, 1, direction="up")
+        else:
+            odds = pm.walk_ticks(odds, 1, direction="down")
+
+        odds = _round_odds(odds, parent_id=parent_id)
+
+    # --------------------------------------------------
+    # Cancel active HEDGE child (DB + Betfair)
+    # --------------------------------------------------
+    _cancel_active_hedge_child(parent_id)
+
+    # --------------------------------------------------
+    # Mark parent terminated by stoploss
+    # --------------------------------------------------
+    con = _orders_conn()
+    con.execute("""
+        UPDATE orders
+           SET stoploss_triggered=1,
+               exit_kind='STOPLOSS'
+         WHERE id=?
+    """, (parent_id,))
+    con.commit()
+    con.close()
+
+
 def _enforce_child_price_separation(
     *,
     engine: str,

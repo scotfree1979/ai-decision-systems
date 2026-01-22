@@ -12,6 +12,7 @@ from typing import List, Tuple
 from collections import defaultdict
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.market_monitor.monitor import get_market_state
+from engines.micro_scalper_v7.v7_snapshot_helper import get_v7_inplay_snapshot
 
 
 
@@ -105,13 +106,36 @@ class BusRouteSnapshot:
         ctx_map = {}
         for mid, sid in self.runner_pool:
             try:
+                # --------------------------------------------------
+                # BUILD FULL CTX FOR INPLAY (AUTHORITATIVE, TIME-OWNED HERE)
+                # --------------------------------------------------
                 ctx, _ = build_context_for_runner(mid, sid, source="LIVE")
+                snap = get_v7_inplay_snapshot(mid)
+
+                if snap:
+                    by_sid = {str(r["selectionId"]): r for r in snap}
+                    intel = by_sid.get(str(sid))
+                    if intel:
+                        ctx.update({
+                            "fav_rank": intel.get("fav_rank"),
+                            "success": intel.get("success"),
+                            "weight": intel.get("weight"),
+                            "drift_pct": intel.get("drift_pct"),
+                            "actual_drift_pct": intel.get("actual_drift_pct"),
+                            "reversal_flag": intel.get("reversal_flag"),
+                            "mto_minutes": intel.get("mto_minutes"),
+                            "pos_inplay": intel.get("pos_inplay"),
+                            "drift_ratio": intel.get("drift_ratio"),
+                        })
+
+
                 ctx_map[(mid, sid)] = ctx
             except Exception:
                 continue  # fail-open
 
         self.ctx_map = ctx_map
         self.partition_into_bus_stops()
+
 
     def get_ctx_map(self):
         """
@@ -1153,7 +1177,10 @@ if __name__ == "__main__":
         # ✅ V7 BUS ROUTE CTX
         # ------------------------------------------------------------------
         print("\n=== BUS ROUTE CTX ===\n")
-        ctx_map = build_route_ctx_map()
+        snap = BusRouteSnapshot()
+        snap.build_route()
+        ctx_map = snap.get_ctx_map()
+
 
         # pick any runner from route
         (mid, sid), ctx = next(iter(ctx_map.items()))

@@ -3,7 +3,7 @@
 import time, threading, sqlite3, json
 from datetime import datetime, timezone
 from engines.config_paths import open_auto_db
-from engines.live.live_router import _cancel, _keys, _orders_conn, _process_stoploss_now
+from engines.live.live_router import _cancel, _keys, _orders_conn, process_stoploss
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
@@ -236,7 +236,7 @@ def enforce_msc_exploratory_stoploss():
         if not hit:
             continue
 
-        _process_stoploss_now({
+        process_stoploss({
             "marketId": mid,
             "selectionId": sid,
             "entry_side": p["side"],
@@ -307,7 +307,7 @@ def enforce_parent_stoploss_px():
         if not hit:
             continue
 
-        _process_stoploss_now({
+        process_stoploss({
             "marketId": mid,
             "selectionId": sid,
             "entry_side": side,

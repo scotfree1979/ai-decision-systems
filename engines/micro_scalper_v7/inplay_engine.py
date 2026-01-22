@@ -30,53 +30,52 @@ class InPlayEngine:
         mid = ctx.get("marketId")
         sid = ctx.get("selectionId")
 
-        snap = get_v7_inplay_snapshot(mid, sid)
-        if not snap:
-            return self._no_signal("intel_missing")
+        odds = ctx.get("px")
+        fav_rank = ctx.get("fav_rank")
+        drift_ratio = ctx.get("drift_ratio")
+        pos_inplay = ctx.get("pos_inplay")
+        reversal_flag = ctx.get("reversal_flag")
+        mto = ctx.get("mto_minutes")
 
-        odds = snap["odds"]
-        fav_rank = snap["fav_rank"]
-        win_prob = snap["win_prob"]
-        race_q   = snap["race_quartile"]
-
-        # ---- hard filters ------------------------------------------------
         if odds is None:
             return self._no_signal("odds_unavailable")
 
         if odds > self.ODDS_MAX:
             return self._no_signal("odds_too_high")
 
-        if fav_rank == 1 and snap["is_leading"]:
+        # Direction intelligence (canonical)
+        dec = compute_msc_decision(ctx)
+        if not dec:
+            return self._no_signal("decision_missing")
+
+        win_prob = dec.get("win_prob")
+        direction = dec.get("direction")
+ 
+        if win_prob is None or direction is None:
+            return self._no_signal("decision_incomplete")
+
+        # Favourite protection
+        if fav_rank == 1 and pos_inplay == 1:
             return self._no_signal("favourite_leading")
 
-        if race_q in ("Q1", "Q4"):
-            return self._no_signal("race_phase_invalid")
-
-        # ---- anchor logic ------------------------------------------------
+        # Anchor logic
         key = (mid, sid)
         prev = self.last_odds.get(key)
         self.last_odds[key] = odds
 
-        # below anchor → monitor
         if odds < self.SWEETSPOT:
-            return self._no_signal("below_anchor_monitoring")
+            return self._no_signal("below_anchor")
 
-        # observation zone
-        if self.SWEETSPOT < odds <= self.ODDS_MAX:
-            if prev is None:
-                return self._no_signal("observation_zone")
+        if prev is None:
+            return self._no_signal("first_touch")
 
-            # CROSS UP through 7
-            if prev < self.SWEETSPOT and odds >= self.SWEETSPOT:
-                if win_prob < 0.25:
-                    return self._emit_plan(odds)
-                return self._no_signal("anchor_cross_fav_filtered")
-
-            # CROSS DOWN then UP (reversal)
-            if prev > self.SWEETSPOT and odds >= self.SWEETSPOT:
-                return self._no_signal("observation_zone")
+        # Collapse entry
+        if prev < self.SWEETSPOT and odds >= self.SWEETSPOT:
+            if direction == "LAY->BACK" and win_prob < 0.25:
+                return self._emit_plan(odds)
 
         return self._no_signal("no_signal")
+
 
     # ------------------------------------------------------------------
 

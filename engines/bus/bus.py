@@ -16,6 +16,22 @@ from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_st
 
 from engines.live.overwatcher import evaluate_redistribution
 from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _apply_bus_stake_gate(
+# 📆 PATCHED: 2026-01-22 — import ENGINE_MIN / ENGINE_MAX from daily_config
+#
+# WHY:
+# - BUS now owns final stake authority
+# - ENGINE_MIN / ENGINE_MAX were referenced but never defined
+# - daily_config is the canonical source of engine stake bounds
+# ======================================================================
+
+from engines import daily_config
+
+ENGINE_MIN = daily_config.ENGINE_MIN
+ENGINE_MAX = daily_config.ENGINE_MAX
+
 
 from engines.bus_route import (
     build_full_cycle,
