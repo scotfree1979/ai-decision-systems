@@ -2620,15 +2620,35 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         if not parent:
             return False
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _release_parent_exposure_db(parent_id: int) -> bool:
+# 🧩 ACTION: FIX release guard — allow release for PLACED parents
+# 📆 PATCHED: 2026-01-22 — fix permanent exposure lock
+#
+# RATIONALE:
+# - Exposure is RESERVED at PLACED (not MATCHED)
+# - Release must NOT depend on entry_status
+# - DB required_exposure is the single source of truth
+#
+# INVARIANT:
+#   If required_exposure > 0 AND exposure_released == 0,
+#   release is allowed when any terminal condition is met.
+# ======================================================================================================
+
         # --------------------------------------------------
-        # 2️⃣ Idempotency guard (DB-level lock)
+        # ❌ REMOVE THIS INVALID GUARD
         # --------------------------------------------------
-        if parent["exposure_released"]:
+        # if (parent["entry_status"] or "").upper() != "MATCHED":
+        #     return False
+
+        # --------------------------------------------------
+        # ✅ REPLACE WITH RESERVATION-BASED GUARD
+        # --------------------------------------------------
+        amount = float(parent["required_exposure"] or 0.0)
+        if amount <= 0.0:
             return False
 
-        # Parent must have been MATCHED to ever reserve exposure
-        if (parent["entry_status"] or "").upper() != "MATCHED":
-            return False
 
         # --------------------------------------------------
         # 3️⃣ Check release conditions (pure reads)
