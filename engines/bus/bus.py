@@ -1422,45 +1422,27 @@ class DecisionBus:
                 # REQUIRED EXPOSURE (AUTHORITATIVE — BUS OWNED)
                 # Full lifecycle exposure (parent + child)
                 # --------------------------------------------------
-                size = float(plan.get("size") or 0.0)
-                px   = float(plan.get("px") or 0.0)
 
-                required_exposure = 0.0
-                if size > 0 and px > 0:
-                    required_exposure = size * px
+                # 🔥 BUS IS AUTHORITATIVE — DROP ANY UPSTREAM STAKE
+                plan.pop("size", None)
 
-                plan["required_exposure"] = required_exposure
-
-                # ==================================================
-                # 🔒 FINAL BUS STAKE AUTHORITY (ALL ENGINES)
-                # ==================================================
                 engine = plan.get("engine")
-                size   = float(plan.get("size") or 0.0)
+                px = float(plan.get("px") or 0.0)
 
-                if engine and size > 0:
-                    gated = _apply_bus_stake_gate(
-                        engine=engine,
-                        stake=size,
+                if not engine or px <= 0:
+                    plan["_bus_block"] = "missing_engine_or_px"
+                    tick_ctx["plans_route_failed"].append(
+                        (plan, "missing_engine_or_px")
                     )
+                    continue  # 🔴 DO NOT ROUTE
 
-                    if gated != size:
-                        plan["_bus_note"] = "stake_gated"
-                        plan["size"] = gated
+                # --------------------------------------------------
+                # STAKE COMPUTATION — BUS OWNED (ALL ENGINES)
+                # --------------------------------------------------
 
-
-                # ------------------------------------------------------------------
-                # STAKE ENRICHMENT (ENGINE-AWARE — SINGLE AUTHORITY)
-                #
-                # Rules:
-                # - MSC_RISK computes stake mechanically inside the engine
-                # - BUS must respect RISK stake and never override it
-                # - All other engines use dynamic stake
-                # ------------------------------------------------------------------
-                engine = plan.get("engine")
-
-                # ==================================================
-                # MSC_RISK — mechanical sizing (engine-owned logic)
-                # ==================================================
+                # --------------------------------------------------
+                # MSC_RISK — mechanical sizing (BUS-owned)
+                # --------------------------------------------------
                 if engine == "MSC_RISK":
 
                     from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
@@ -1478,69 +1460,70 @@ class DecisionBus:
                     raw_stake = compute_risk_dynamic_stake(
                         parent_px=float(parent_px),
                         current_px=float(current_px),
-                    )
-
-                    if not raw_stake or raw_stake <= 0:
-                        plan["_bus_block"] = "risk_stake_zero"
-                        tick_ctx["plans_route_failed"].append(
-                            (plan, "risk_stake_zero")
-                        )
-                        continue  # 🔴 DO NOT ROUTE
-
-                    # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)
-                    stake = _apply_bus_stake_gate(
                         engine=engine,
-                        stake=float(raw_stake),
                     )
 
-                    plan["size"] = float(stake)
-                    plan["_stake_source"] = "risk_dynamic"
+                # --------------------------------------------------
+                # MSC_INPLAY — momentum / position sizing (BUS-owned)
+                # --------------------------------------------------
+                elif engine == "MSC_INPLAY":
 
-                # ==================================================
-                # ALL OTHER ENGINES — dynamic stake + BUS authority
-                # ==================================================
+                    from engines.math.dynamic_stake_v7 import compute_inplay_dynamic_stake
+
+                    raw_stake = compute_inplay_dynamic_stake(
+                        ctx=ctx,
+                        engine=engine,
+                    )
+
+                # --------------------------------------------------
+                # MSC_EXPLORATORY — conviction-weighted sizing (BUS-owned)
+                # --------------------------------------------------
+                elif engine == "MSC_EXPLORATORY":
+
+                    from engines.math.dynamic_stake_v7 import compute_exploratory_dynamic_stake
+
+                    raw_stake = compute_exploratory_dynamic_stake(
+                        ctx=ctx,
+                        engine=engine,
+                    )
+
+                # --------------------------------------------------
+                # LEGACY + FALLBACK — envelope-based dynamic stake
+                # --------------------------------------------------
                 else:
-
-                    from engines.live.bank_state import get_engine_available
                     from engines.math.dynamic_stake_v7 import compute_dynamic_stake
 
-                    if "size" not in plan or plan.get("size") in (None, 0):
+                    raw_stake = compute_dynamic_stake(
+                        engine=engine,
+                        ctx=ctx,
+                    )
 
-                        px = float(plan.get("px") or 0.0)
+                # --------------------------------------------------
+                # HARD VALIDATION
+                # --------------------------------------------------
+                if not raw_stake or raw_stake <= 0:
+                    plan["_bus_block"] = "stake_zero"
+                    tick_ctx["plans_route_failed"].append(
+                        (plan, "stake_zero")
+                    )
+                    continue  # 🔴 DO NOT ROUTE
 
-                        if not engine or px <= 0:
-                            plan["_bus_block"] = "dynamic_stake_missing_inputs"
-                            tick_ctx["plans_route_failed"].append(
-                                (plan, "dynamic_stake_missing_inputs")
-                            )
-                            continue  # 🔴 DO NOT ROUTE
 
-                        pot = get_engine_available(engine)
+                # ==================================================
+                # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)
+                # ==================================================
+                stake = _apply_bus_stake_gate(
+                    engine=engine,
+                    stake=float(raw_stake),
+                )
 
-                        raw_stake, stake_meta = compute_dynamic_stake(
-                            engine=engine,
-                            px=px,
-                            pot=pot,
-                            ctx=ctx,
-                        )
+                plan["size"] = float(stake)
+                plan["_stake_source"] = "BUS"
 
-                        if not raw_stake or raw_stake <= 0:
-                            plan["_bus_block"] = "dynamic_stake_zero"
-                            tick_ctx["plans_route_failed"].append(
-                                (plan, "dynamic_stake_zero")
-                            )
-                            continue  # 🔴 DO NOT ROUTE
-
-                        # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)
-                        stake = _apply_bus_stake_gate(
-                            engine=engine,
-                            stake=float(raw_stake),
-                        )
-
-                        plan["size"] = float(stake)
-                        plan["_stake_source"] = "dynamic"
-                        plan["_stake_meta"] = stake_meta
-
+                # --------------------------------------------------
+                # REQUIRED EXPOSURE (POST-STAKE, FINAL)
+                # --------------------------------------------------
+                plan["required_exposure"] = float(stake) * px
 
             
                 # --- BUS MUST NEVER BLOCK EXECUTION ---
@@ -1667,6 +1650,11 @@ class DecisionBus:
                     print(f"  {reason:<22} : {count}")
 
             print("────────────────────────────────────────────────────────\n")
+
+            if plan.get("size") is None or plan["size"] <= 0:
+                raise RuntimeError(
+                    f"[BUS] stake invariant violated: engine={engine} plan={plan}"
+                )
 
             # ==================================================
             # PHASE 3 — ROUTING (BEGINS)

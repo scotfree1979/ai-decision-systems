@@ -49,10 +49,106 @@ MAX_MAP = {
     "E": STAKE_MAX_E, "K": STAKE_MAX_K,
 }
 
+def _fetch_v7_intel(ctx: dict) -> dict:
+    """
+    DB-first v7 intelligence fetch.
+    Fail-open: returns {} if unavailable.
+    """
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+
+    if not mid or not sid:
+        return {}
+
+    try:
+        from engines.micro_scalper_v7.v7_snapshot_helper import get_v7_snapshot
+        snap = get_v7_snapshot(str(mid), str(sid))
+        return snap or {}
+    except Exception:
+        return {}
+
 
 # ======================================================================
 # Compute dynamic stake with REAL inputs
 # ======================================================================
+# ======================================================================
+# EXPLORATORY dynamic stake — signal-weighted conviction (AUTHORITATIVE)
+# ======================================================================
+
+def compute_exploratory_dynamic_stake(*, ctx: dict, engine="MSC_EXPLORATORY") -> float:
+    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+
+    lo = float(ENGINE_MIN.get(engine, 2.0))
+    hi = float(ENGINE_MAX.get(engine, lo))
+
+    intel = _fetch_v7_intel(ctx)
+
+    # --- signals (fail-open) ---
+    success   = intel.get("success")
+    weight    = intel.get("weight")
+    fav_rank  = intel.get("fav_rank")
+    drift_pct = intel.get("actual_drift_pct") or intel.get("drift_pct")
+
+    conf = 0.5  # baseline
+
+    if isinstance(success, (int, float)):
+        conf *= max(0.5, min(1.2, float(success)))
+
+    if isinstance(weight, (int, float)):
+        conf *= max(0.7, min(1.3, float(weight)))
+
+    if isinstance(fav_rank, int) and fav_rank > 0:
+        conf *= max(0.6, min(1.3, 1.3 / fav_rank))
+
+    if isinstance(drift_pct, (int, float)):
+        conf *= max(0.7, min(1.0, 1.0 - abs(drift_pct) / 20.0))
+
+    conf = max(0.0, min(conf, 1.0))
+    stake = lo + conf * (hi - lo)
+    return round(stake, 2)
+
+
+
+# ======================================================================
+# IN-PLAY dynamic stake — momentum & position driven (AUTHORITATIVE)
+# ======================================================================
+
+def compute_inplay_dynamic_stake(*, ctx: dict, engine="MSC_INPLAY") -> float:
+    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+
+    lo = float(ENGINE_MIN.get(engine, 2.0))
+    hi = float(ENGINE_MAX.get(engine, lo))
+
+    intel = _fetch_v7_intel(ctx)
+
+    drift_ratio   = intel.get("drift_ratio")
+    reversal_flag = bool(intel.get("reversal_flag"))
+    pos_inplay    = intel.get("pos_inplay")
+    success       = intel.get("success")
+    fav_rank      = intel.get("fav_rank")
+
+    conf = 0.5
+
+    if isinstance(drift_ratio, (int, float)):
+        conf *= max(0.7, min(1.4, abs(drift_ratio)))
+
+    if reversal_flag:
+        conf *= 1.15
+
+    if isinstance(pos_inplay, int):
+        conf *= max(0.6, min(1.3, 1.3 / (pos_inplay + 1)))
+
+    if isinstance(success, (int, float)):
+        conf *= max(0.7, min(1.3, float(success)))
+
+    if fav_rank == 1:
+        conf *= 1.1
+
+    conf = max(0.0, min(conf, 1.0))
+    stake = lo + conf * (hi - lo)
+    return round(stake, 2)
+
+
 # ======================================================================
 # RISK dynamic stake — tick-distance scaling (AUTHORITATIVE)
 # ======================================================================
