@@ -137,9 +137,9 @@ from collections import deque
 class CadenceController:
     def __init__(self):
         # Locked parameters
-        self.window_seconds   = 30
-        self.tick_seconds     = 6
-        self.ticks_per_window = 5
+        self.window_seconds   = 60
+        self.tick_seconds     = 3
+        self.ticks_per_window = 10
         self.plans_per_window = 300
         self.plans_per_tick   = 100
 
