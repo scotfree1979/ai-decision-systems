@@ -3,7 +3,7 @@
 import time, threading, sqlite3, json
 from datetime import datetime, timezone
 from engines.config_paths import open_auto_db
-from engines.live.live_router import _cancel, _keys, _orders_conn
+from engines.live.live_router import _cancel, _keys, _orders_conn, _process_stoploss_now
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/overwatcher.py
@@ -77,24 +77,33 @@ from engines.live.stoploss_engine import StopLossEngine, ParentState
 
 MSC_STOPLOSS = StopLossEngine()  # provides SLEQ + baseline
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 ANCHOR: def _compute_msc_stop_px(
+# 🧩 ACTION: REPLACE stop-loss direction logic (explicit adverse direction)
+# 📆 PATCHED: 2026-01-22 — Correct MSC_EXPLORATORY stop direction (rule-accurate)
+#
+# RULE (CANONICAL):
+#   Lay first  → adverse move = UP   → stop ABOVE entry
+#   Back first → adverse move = DOWN → stop BELOW entry
+# ======================================================================================================
 def _compute_msc_stop_px(entry_odds: float, side: str, sleq: float) -> float:
-    """
-    Compute stop-loss price using:
-      - baseline tick distance
-      - expanded / contracted by SLEQ
-    """
-    BASE_TICKS = 4          # baseline (configurable)
+    BASE_TICKS = 4
     MIN_TICKS  = 2
     MAX_TICKS  = 10
 
-    # SLEQ expected ~0.5–1.5 (example)
     ticks = int(round(BASE_TICKS * sleq))
     ticks = max(MIN_TICKS, min(MAX_TICKS, ticks))
 
-    if side.upper() == "LAY":
-        return walk_ticks(entry_odds, +ticks)
+    side = side.upper()
+
+    if side == "LAY":
+        # adverse = odds UP
+        return walk_ticks(entry_odds, ticks, direction="up")
     else:
-        return walk_ticks(entry_odds, -ticks)
+        # BACK → adverse = odds DOWN
+        return walk_ticks(entry_odds, ticks, direction="down")
+
 
 def evaluate_redistribution(ctx: dict) -> dict:
     """
@@ -284,6 +293,14 @@ def enforce_parent_stoploss_px():
             continue
 
         side = p["side"].upper()
+
+        if side == "LAY":
+            hit = px >= stop_px   # adverse: odds drift UP
+        else:
+            hit = px <= stop_px   # adverse: odds drift DOWN
+
+        if not hit:
+            continue
         sl = float(p["stop_loss_px"])
 
         hit = (side == "LAY" and px >= sl) or (side == "BACK" and px <= sl)
@@ -655,6 +672,14 @@ def enforce_legacy_boundaries_and_trailing():
         mid = str(p["marketId"])
         sid = str(p["selectionId"])
         side = p["side"].upper()
+
+        if side == "LAY":
+            hit = px >= stop_px   # adverse: odds drift UP
+        else:
+            hit = px <= stop_px   # adverse: odds drift DOWN
+
+        if not hit:
+            continue
 
         ltp = px_map.get((mid, sid))
         if ltp is None:
