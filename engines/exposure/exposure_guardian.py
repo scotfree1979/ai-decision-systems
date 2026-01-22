@@ -167,10 +167,25 @@ class ExposureGuardian:
         # -----------------------------------------------------------
         # Identify markets that have exited scope (authoritative)
         # -----------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/exposure/exposure_guardian.py
+# 🔎 ANCHOR: Identify markets that have exited scope (authoritative)
+# 🧩 ACTION: REPLACE QUERY (today-only + placed-only)
+# 📆 PATCHED: 2026-01-22 — Scope guardian to TODAY + PLACED parents only
+#
+# WHY:
+# - Historical parents must NEVER be reprocessed
+# - Only PLACED parents can reserve exposure
+# - Prevents false "already released" skips
+# ======================================================================================================
+
         rows = q_retry(cur, """
             SELECT DISTINCT p.marketId
             FROM orders p
-            WHERE p.role='PARENT'
+            WHERE p.mode = 'LIVE'
+              AND p.role = 'PARENT'
+              AND UPPER(p.entry_status) IN ('PLACED','MATCHED')
+              AND date(p.opened_at) = date('now','utc')
               AND p.required_exposure IS NOT NULL
               AND p.required_exposure > 0
               AND (
@@ -183,6 +198,7 @@ class ExposureGuardian:
                    )
               )
         """, (f"-{GRACE_MINUTES} minutes",)).fetchall()
+
 
         con.close()
 
@@ -233,38 +249,64 @@ class ExposureGuardian:
         skipped = 0
         reasons: Dict[str, int] = {}
 
+
+
         # -----------------------------------------------------------
         # Scan ALL parents on this market that ever carried exposure
         # -----------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/exposure/exposure_guardian.py
+# 🔎 ANCHOR: Scan ALL parents on this market that ever carried exposure
+# 🧩 ACTION: REPLACE QUERY (today-only + placed-only)
+# 📆 PATCHED: 2026-01-22 — Only scan parents that could still hold exposure
+# ======================================================================================================
+
         rows = q_retry(cur, """
             SELECT
                 id,
                 customerOrderRef
             FROM orders
             WHERE marketId = ?
+              AND mode = 'LIVE'
               AND role = 'PARENT'
+              AND UPPER(entry_status) IN ('PLACED','MATCHED')
+              AND date(opened_at) = date('now','utc')
               AND required_exposure IS NOT NULL
               AND required_exposure > 0
         """, (str(market_id),)).fetchall()
+
 
         con.close()
 
         for (pid, cor) in rows:
             parents_checked += 1
 
-            try:
-                # Canonical, DB-first, idempotent exposure release
-                released_now = _release_parent_exposure_db(int(pid))
+# ======================================================================================================
+# 📍 TARGET: engines/exposure/exposure_guardian.py
+# 🔎 ANCHOR: inside for (pid, cor) in rows:
+# 🧩 ACTION: REPLACE release logic (BankState is final authority)
+# 📆 PATCHED: 2026-01-22 — Guardian enforces zero exposure invariant
+#
+# INVARIANT:
+# - Finished market ⇒ BankState exposure MUST be zero
+# - DB flags are advisory only
+# ======================================================================================================
 
-                if released_now:
+            try:
+                from engines.live.bank_state import get_parent_exposure
+
+                bank_exposure = float(get_parent_exposure(int(pid)) or 0.0)
+
+                if bank_exposure > 0:
+                    _release_parent_exposure_db(int(pid))
                     released += 1
-                    reasons["forced_release"] = (
-                        reasons.get("forced_release", 0) + 1
+                    reasons["forced_bankstate_release"] = (
+                        reasons.get("forced_bankstate_release", 0) + 1
                     )
                 else:
                     skipped += 1
-                    reasons["already_released_or_not_eligible"] = (
-                        reasons.get("already_released_or_not_eligible", 0) + 1
+                    reasons["already_clear"] = (
+                        reasons.get("already_clear", 0) + 1
                     )
 
             except Exception as e:
@@ -274,6 +316,7 @@ class ExposureGuardian:
                     f"[EXPOSURE-GUARDIAN][WARN] release failed "
                     f"market={market_id} cor={cor}: {e}"
                 )
+
 
         return parents_checked, released, skipped, reasons
 
