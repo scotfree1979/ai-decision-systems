@@ -1667,10 +1667,15 @@ class DecisionBus:
 
             print("────────────────────────────────────────────────────────\n")
 
-            if plan.get("size") is None or plan["size"] <= 0:
-                raise RuntimeError(
-                    f"[BUS] stake invariant violated: engine={engine} plan={plan}"
-                )
+            # --------------------------------------------------
+            # STAKE INVARIANT CHECK (SAFE)
+            # --------------------------------------------------
+            for _p in tick_ctx["plans_enriched"]:
+                if _p.get("size") is None or _p["size"] <= 0:
+                    raise RuntimeError(
+                        f"[BUS] stake invariant violated: plan={_p}"
+                    )
+
 
             # ==================================================
             # PHASE 3 — ROUTING (BEGINS)
