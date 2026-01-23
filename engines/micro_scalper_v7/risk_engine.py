@@ -140,13 +140,38 @@ class RiskEngine:
         if oc_phase is not None and int(oc_phase) >= 6:
             return self._terminate_oc6(ctx)
 
-        if not state["attached"]:
-            state["attached"] = True
-            return self._initial_shadow(state, px, entry_ticks, stop_ticks, stake_mult, ctx)
+        # --------------------------------------------------
+        # FIRST ATTACH — START CYCLE ONLY AFTER PRICE MOVES
+        # --------------------------------------------------
+        if not state["cycle_active"]:
 
+            # Do NOT start cycle at parent anchor price
+            if px == state["entry_px"]:
+                 return None
+
+            # Start cycle on first price away from anchor
+            state["cycle_active"] = True
+            state["attached"] = True
+
+            return self._initial_shadow(
+                state,
+                px,
+                entry_ticks,
+                stop_ticks,
+                stake_mult,
+                ctx,
+            )
+
+        # --------------------------------------------------
+        # ACTIVE PLAN DOES NOT BLOCK FURTHER SCALPING
+        # --------------------------------------------------
+        # RISC may emit multiple parent plans per legacy parent
+        # (one per price level). Placement/BankState enforce exposure.
+        # --------------------------------------------------
         if state["active_plan"]:
             self._monitor(state, px)
-            return None
+            # DO NOT return here
+
 
         return self._scalp_tick(state, px, entry_ticks, stop_ticks, stake_mult, ctx)
 
@@ -154,37 +179,62 @@ class RiskEngine:
     # INITIAL SHADOW
     # ======================================================
     def _initial_shadow(self, state, px, entry_ticks, stop_ticks, stake_mult, ctx):
-        from engines.price_math import get_tick_size, walk_ticks
+        from engines.price_math import walk_ticks
 
-        tick = get_tick_size(px)
-        entry_px = state["entry_px"]
+        entry_px   = state["entry_px"]
         entry_side = state["entry_side"]
 
-        direction = "LAY" if entry_side == "LAY" else "BACK"
-        exec_px = entry_px + tick if direction == "LAY" else entry_px - tick
-        if exec_px == entry_px:
-            exec_px = entry_px + tick if direction == "LAY" else entry_px - tick
+        # --------------------------------------------------
+        # AUTHORITATIVE INITIAL SHADOW RULE
+        # --------------------------------------------------
+        # Trade at CURRENT price, not parent ± tick
+        # Parent price itself is never tradable
+        # --------------------------------------------------
+        if px == entry_px:
+            return None
+
+        # Direction rule:
+        # price ABOVE parent → BACK->LAY
+        # price BELOW parent → LAY->BACK
+        if px > entry_px:
+            direction = "BACK"
+            plan_dir  = "BACK->LAY"
+            sl_dir    = "up"
+        else:
+            direction = "LAY"
+            plan_dir  = "LAY->BACK"
+            sl_dir    = "down"
 
         size = self._stake(ctx, stake_mult, entry_ticks)
-        stop_loss_px = walk_ticks(exec_px, 3, "up" if direction == "LAY" else "down")
+
+        stop_loss_px = walk_ticks(px, 3, sl_dir)
 
         plan = {
             "enter": True,
             "role": "PARENT",
             "engine": "MSC_RISK",
             "parent_id": ctx.get("legacy_parent_id"),
-            "direction": "BACK->LAY" if direction == "BACK" else "LAY->BACK",
+            "direction": plan_dir,
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
             "size": size,
-            "px": exec_px,
-            "stop_loss_px": stop_loss_px,
+            "px": px,
+            "stop_loss_px": float(stop_loss_px),
             "why": "risk_initial_shadow",
         }
 
+        # --------------------------------------------------
+        # CYCLE STATE (CRITICAL)
+        # --------------------------------------------------
         state["active_plan"] = plan
         state["last_px"] = px
+        state["cycle_active"] = True
+
+        # Mark ACTUAL traded price
+        state["used_prices"].add(px)
+
         return plan
+
 
     # ======================================================
     # SCALP TICK
@@ -194,30 +244,63 @@ class RiskEngine:
         entry_px = state["entry_px"]
         entry_side = state["entry_side"]
 
+        # --------------------------------------------------
+        # PRICE ELIGIBILITY (AUTHORITATIVE)
+        # --------------------------------------------------
         if px == entry_px:
             return None
 
         if px in state["used_prices"]:
             return None
+
         state["used_prices"].add(px)
 
-        moving_favour = (
-            entry_side == "LAY" and px < entry_px
-        ) or (
-            entry_side == "BACK" and px > entry_px
-        )
 
-        direction = (
-            "LAY" if entry_side == "LAY" else "BACK"
-        ) if moving_favour else (
-            "BACK" if entry_side == "LAY" else "LAY"
-        )
+        if px > entry_px:
+            # price ABOVE parent
+            direction = "BACK"
+        elif px < entry_px:
+            # price BELOW parent
+            direction = "LAY"
+        else:
+            return None  # exactly parent PX
+
 
         size = self._stake(ctx, stake_mult, entry_ticks)
         self._record_px_use(ctx, px, "UP" if px > entry_px else "DOWN")
 
-        return self._open_new(direction, px, entry_ticks, stop_ticks, size,
-                              "risk_stack" if moving_favour else "risk_hedge")
+        # --------------------------------------------------
+        # DIRECTION + REASON (PARENT-RELATIVE, AUTHORITATIVE)
+        # --------------------------------------------------
+        entry_px   = state["entry_px"]
+        entry_side = state["entry_side"]
+
+        if entry_side == "LAY":
+            if px < entry_px:
+                direction = "BACK"   # favourable
+                reason = "risk_stack"
+            else:
+                direction = "LAY"    # adverse
+                reason = "risk_hedge"
+        else:  # BACK parent
+            if px > entry_px:
+                direction = "LAY"    # favourable
+                reason = "risk_stack"
+            else:
+                direction = "BACK"   # adverse
+                reason = "risk_hedge"
+
+        return self._open_new(
+            direction,
+            px,
+            entry_ticks,
+            stop_ticks,
+            size,
+            reason,
+            ctx,
+        )
+
+
 
     # ======================================================
     # MONITOR
@@ -225,24 +308,34 @@ class RiskEngine:
     def _monitor(self, state, px):
         state["last_px"] = px
 
+
     # ======================================================
-    # OPEN NEW CHILD
+    # OPEN NEW RISK PARENT (per-legacy-parent)
     # ======================================================
-    def _open_new(self, direction, px, entry_ticks, stop_ticks, size, reason):
+    def _open_new(self, direction, px, entry_ticks, stop_ticks, size, reason, ctx):
         from engines.price_math import walk_ticks
 
-        stop_loss_px = walk_ticks(px, 3, "up" if direction == "LAY" else "down")
+        pid = ctx.get("legacy_parent_id")
+        if pid is None:
+            return None
+
+        stop_loss_px = walk_ticks(
+            float(px),
+            3,
+            "up" if direction == "LAY" else "down"
+        )
 
         return {
             "enter": True,
-            "role": "PARENT",
+            "role": "PARENT",          # ✅ parent-only, as requested
             "engine": "MSC_RISK",
+            "parent_id": pid,
             "direction": "BACK->LAY" if direction == "BACK" else "LAY->BACK",
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
             "size": size,
-            "px": px,
-            "stop_loss_px": stop_loss_px,
+            "px": float(px),
+            "stop_loss_px": float(stop_loss_px),
             "why": reason,
         }
 
