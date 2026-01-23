@@ -95,6 +95,14 @@ class BusRouteSnapshot:
             self.bus_stops = {}
             self.ctx_map = {}
             return
+        # --------------------------------------------------
+        # Resolve session token ONCE for the entire route
+        # --------------------------------------------------
+        session_token = (
+            os.getenv("SESSION_TOKEN")
+            or os.getenv("BETFAIR_SESSION_TOKEN")
+        )
+
 
         # --------------------------------------------------
         # BUILD CTX ONCE (AUTHORITATIVE, TIME-OWNED HERE)
@@ -110,6 +118,50 @@ class BusRouteSnapshot:
                 # BUILD FULL CTX FOR INPLAY (AUTHORITATIVE, TIME-OWNED HERE)
                 # --------------------------------------------------
                 ctx, _ = build_context_for_runner(mid, sid, source="LIVE")
+                # --------------------------------------------------
+                # 🔧 HYDRATE CTX — EXECUTION & RISK CRITICAL FIELDS
+                # --------------------------------------------------
+
+                # 1️⃣ Inject live odds / px (BUS is authority)
+                odds_map = get_runner_odds_map(
+                    [(mid, sid)],
+                    session_token=session_token,
+                )
+
+                odds_info = odds_map.get((str(mid), str(sid)))
+
+                if odds_info:
+                    ctx["px"] = odds_info.get("px")
+                    ctx["odds"] = odds_info.get("px")
+                    ctx["back"] = odds_info.get("back")
+                    ctx["lay"]  = odds_info.get("lay")
+                else:
+                    ctx["px"] = None
+                    ctx["odds"] = None
+
+                # 2️⃣ Inject LEGACY parent binding (RISK authority)
+                legacy_parents = get_legacy_parent_odds_snapshot(
+                    session_token=session_token
+                )
+
+
+                parent = next(
+                    (
+                        p for p in legacy_parents
+                        if str(p["marketId"]) == str(mid)
+                        and str(p["selectionId"]) == str(sid)
+                    ),
+                    None,
+                )
+
+                if parent:
+                    ctx["legacy_parent_id"]   = parent["parent_id"]
+                    ctx["legacy_entry_odds"]  = parent["entry_odds"]
+                    ctx["legacy_entry_side"]  = parent["side"]
+                    ctx["legacy_entry_stake"] = parent.get("entry_stake")
+                else:
+                    ctx["legacy_parent_id"] = None
+
                 snap = get_v7_inplay_snapshot(mid)
 
                 if snap:
@@ -230,14 +282,18 @@ def get_root_ctx_runner_pairs():
 # ============================================================================
 # RISK ELIGIBILITY — LEGACY PARENTS WITHOUT MATCHED CHILD
 # ============================================================================
-def get_risk_legacy_parent_pairs(days_back: int = 7):
+def get_risk_legacy_parent_pairs():
     """
-    Authoritative RISK lookup.
+    Authoritative RISK lookup (PRODUCTION).
 
-    Returns all (marketId, selectionId) for LEGACY parents that:
-    - are MATCHED
-    - have NO matched child
-    - occurred within the last `days_back` days (UTC)
+    Returns (marketId, selectionId) for LEGACY parents that:
+      - are PLACED (reserve has happened)
+      - were opened today (UTC)
+      - have NOT had release yet
+      - have NO matched child
+
+    These represent LIVE reserved exposure that still
+    requires MSC_RISK supervision.
 
     DB-only. No scope. No monitor. No odds.
     """
@@ -260,13 +316,11 @@ def get_risk_legacy_parent_pairs(days_back: int = 7):
              AND UPPER(c.exit_status) = 'MATCHED'
             WHERE p.engine = 'LEGACY'
               AND p.role = 'PARENT'
-              AND UPPER(p.entry_status) = 'MATCHED'
+              AND UPPER(p.entry_status) = 'PLACED'
               AND c.id IS NULL
-              AND date(p.opened_at) >= date('now','utc', ?)
-            """,
-            (f"-{int(days_back)} days",),
+              AND date(p.opened_at) = date('now','utc')
+            """
         ).fetchall()
-
     finally:
         con.close()
 
@@ -275,6 +329,7 @@ def get_risk_legacy_parent_pairs(days_back: int = 7):
         for r in rows
         if r["marketId"] and r["selectionId"]
     ]
+
 
 # ============================================================================
 # EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS
@@ -341,7 +396,10 @@ def build_bus_route_tick(rotation: RunnerRotation):
         plans.append(("LEGACY", mid, sid))
 
     # RISK — only if legacy parents exist
-    legacy_parents = get_legacy_parent_odds_snapshot()
+    legacy_parents = get_legacy_parent_odds_snapshot(
+        session_token=session_token
+    )
+
 
     legacy_runner_set = {
         (p["marketId"], p["selectionId"])
@@ -1223,11 +1281,11 @@ if __name__ == "__main__":
         # ------------------------------------------------------------------
 
         print("RISK legacy parents:")
-        for x in get_risk_legacy_parent_pairs(7)[:10]:
+        for x in get_risk_legacy_parent_pairs()[:10]:
             print(" ", x)
 
         print("\nExploratory exclusions:")
-        for x in list(get_exploratory_active_parent_pairs(7))[:10]:
+        for x in list(get_exploratory_active_parent_pairs())[:10]:
             print(" ", x)
         print("=== END BUS LOOKUPS ===\n")
 
