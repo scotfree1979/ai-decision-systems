@@ -1265,6 +1265,19 @@ class DecisionBus:
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
 
+        # --------------------------------------------------
+        # 🔁 CRITICAL: REFRESH DYNAMIC ODDS BEFORE ENGINE EVAL
+        # --------------------------------------------------
+        dt = self._route_snapshot.refresh_ctx_dynamic_fields()
+        self._ctx_refresh_times.append(dt)
+
+        print(
+            f"[BUS][CTX_REFRESH][PRE] "
+            f"tick={self.tick_id} "
+            f"runners={len(self._route_snapshot.ctx_map)} "
+            f"dt={dt:.4f}s"
+        )
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
