@@ -359,16 +359,14 @@ def get_root_ctx_runner_pairs():
 
 def get_risk_legacy_parent_pairs():
     """
-    Shadowbit eligibility (AUTHORITATIVE).
+    Shadowbet eligibility (AUTHORITATIVE).
 
     Returns (marketId, selectionId) for ANY runner that has
     at least one LEGACY parent today (UTC), provided the
-    market has NOT yet gone in-play.
+    market start time is MORE than 3 minutes from now.
 
     DB-first.
-    No lifecycle logic.
-    No odds.
-    No exposure semantics.
+    Bets DB is the time authority.
     """
 
     from engines.config_paths import auto_conn
@@ -378,22 +376,35 @@ def get_risk_legacy_parent_pairs():
     con.row_factory = sqlite3.Row
 
     try:
+        # 🔑 THIS IS THE MISSING PIECE
+        con.execute("ATTACH DATABASE 'data/bets.db' AS bets")
+
         rows = con.execute(
             """
             SELECT DISTINCT
                 p.marketId,
                 p.selectionId
             FROM orders p
-            JOIN bets b
+            JOIN bets.bets b
               ON b.marketId = p.marketId
             WHERE p.engine = 'LEGACY'
               AND p.role = 'PARENT'
-              AND UPPER(p.entry_status) IN ('PLACED', 'MATCHED')
+              AND UPPER(p.entry_status) IN ('PLACED','MATCHED')
               AND date(p.opened_at) = date('now','utc')
-              AND julianday('now','utc') < julianday(b.marketStartTime) - (3.0 / 1440.0)
+
+              -- market has NOT started
+              AND julianday(b.marketStartTime) > julianday('now','utc')
+
+              -- more than 3 minutes to off
+              AND (julianday(b.marketStartTime) - julianday('now','utc')) > (3.0 / 1440.0)
             """
         ).fetchall()
+
     finally:
+        try:
+            con.execute("DETACH DATABASE bets")
+        except Exception:
+            pass
         con.close()
 
     return [
@@ -406,14 +417,12 @@ def get_risk_legacy_parent_pairs():
 # ============================================================================
 # EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS
 # ============================================================================
-def get_exploratory_active_parent_pairs(days_back: int = 7):
+def get_exploratory_active_parent_pairs():
     """
     Returns (marketId, selectionId) where MSC_EXPLORATORY has
-    a MATCHED parent with NO matched child.
+    a MATCHED parent TODAY (UTC) with NO matched child.
 
     Used to EXCLUDE runners from exploratory re-entry.
-
-    DB-only. No scope. No monitor.
     """
 
     from engines.config_paths import auto_conn
@@ -435,12 +444,10 @@ def get_exploratory_active_parent_pairs(days_back: int = 7):
             WHERE p.engine = 'MSC_EXPLORATORY'
               AND p.role = 'PARENT'
               AND UPPER(p.entry_status) = 'MATCHED'
+              AND date(p.opened_at) = date('now','utc')
               AND c.id IS NULL
-              AND date(p.opened_at) >= date('now','utc', ?)
-            """,
-            (f"-{int(days_back)} days",),
+            """
         ).fetchall()
-
     finally:
         con.close()
 
@@ -449,7 +456,6 @@ def get_exploratory_active_parent_pairs(days_back: int = 7):
         for r in rows
         if r["marketId"] and r["selectionId"]
     }
-
 
 
 def build_bus_route_tick(rotation: RunnerRotation):
