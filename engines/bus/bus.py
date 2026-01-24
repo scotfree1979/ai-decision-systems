@@ -1269,6 +1269,9 @@ class DecisionBus:
         # 🔁 CRITICAL: REFRESH DYNAMIC ODDS BEFORE ENGINE EVAL
         # --------------------------------------------------
         dt = self._route_snapshot.refresh_ctx_dynamic_fields()
+        # 🔗 CRITICAL: bind refreshed CTX map to BUS execution view
+        self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
         self._ctx_refresh_times.append(dt)
 
         print(
