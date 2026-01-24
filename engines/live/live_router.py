@@ -3161,7 +3161,7 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
 
             from engines.shadow_confidence import record
 
-            direction = "DRIFT" if plan["side"] == "BACK" else "STEAM".
+            direction = "DRIFT" if plan["side"] == "BACK" else "STEAM"
             n = record(plan["marketId"], plan["selectionId"], plan.get("engine"), direction)
 
             print(f"[SHADOW][CONF] {(plan['marketId'], plan['selectionId'], plan.get('engine'))} {direction}={n}")

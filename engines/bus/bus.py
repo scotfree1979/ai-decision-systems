@@ -740,7 +740,10 @@ class DecisionBus:
                     except Exception:
                         continue
 
-                if not ctx or ctx.get("px") is None:
+                if not ctx:
+                    continue
+                if ctx.get("px") is None:
+                    print(f"[BUS][DROP] no px mid={mid} sid={sid}")
                     continue
 
                 try:
@@ -1252,10 +1255,8 @@ class DecisionBus:
         if risk_confidence:
             print(f"[BUS][RISK][CONF] runners={len(risk_confidence)}")
 
-
-
         # ===============================================================
-        # 4️⃣ ROUTE SNAPSHOT (AUTHORITATIVE, ONCE PER ROUTE)
+        # 4️⃣ ROUTE SNAPSHOT + PRE-ENGINE ODDS REFRESH (AUTHORITATIVE)
         # ===============================================================
         if self._bus_stop == 1 or self._route_snapshot is None:
             from engines.bus_route import BusRouteSnapshot
@@ -1263,6 +1264,7 @@ class DecisionBus:
             self._route_snapshot = BusRouteSnapshot()
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -2165,18 +2167,7 @@ class DecisionBus:
             print("────────────────────────────────────────────────────────")
 
             print("\nTIMING")
-            # --------------------------------------------------
-            # CTX DYNAMIC REFRESH TIMING (DIAGNOSTIC ONLY)
-            # --------------------------------------------------
-            dt = self._route_snapshot.refresh_ctx_dynamic_fields()
-            self._ctx_refresh_times.append(dt)
-
-            print(
-                f"[BUS][CTX_REFRESH] "
-                f"tick={self.tick_id} "
-                f"runners={len(self._route_snapshot.ctx_map)} "
-                f"dt={dt:.4f}s"
-            )
+ 
 
             if len(self._ctx_refresh_times) >= 10:
                 avg = sum(self._ctx_refresh_times[-10:]) / 10

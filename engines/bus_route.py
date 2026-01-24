@@ -34,10 +34,11 @@ TICKS_PER_CYCLE = 10
 # Per-tick allocation
 ROUTE_SPLIT = {
     "LEGACY": 7,
-    "RISK": 15,
-    "INPLAY": 5,
-    "EXPLORATORY": 3,
+    "MSC_RISK": 15,
+    "MSC_INPLAY": 5,
+    "MSC_EXPLORATORY": 3,
 }
+
 
 
 def _build_runner_pool():
