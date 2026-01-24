@@ -1585,8 +1585,7 @@ class DecisionBus:
                         continue  # 🔴 DO NOT ROUTE
 
                     raw_stake = compute_risk_dynamic_stake(
-                        parent_px=float(parent_px),
-                        current_px=float(current_px),
+                        ctx=ctx,
                         engine=engine,
                     )
 
