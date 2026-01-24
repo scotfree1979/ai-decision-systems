@@ -33,11 +33,12 @@ TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
 ROUTE_SPLIT = {
-    "LEGACY": 2,          # 2 runners → 16 plans (8 letters)
-    "RISK": 7,            # defensive parents
-    "EXPLORATORY": 5,     # always-on accumulator
-    "INPLAY": 2,          # priority but narrow
+    "LEGACY": 7,
+    "RISK": 15,
+    "INPLAY": 5,
+    "EXPLORATORY": 3,
 }
+
 
 def _build_runner_pool():
     """
@@ -87,6 +88,22 @@ class BusRouteSnapshot:
         self.bus_stops = {}
         self.ctx_map = {}  # (marketId, selectionId) -> ctx
 
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus_route.py
+    # 🧩 ACTION: HYBRID — CTX reuse + dynamic refresh separation
+    # 📆 PATCHED: 2026-01-24 — CTX built once per route, reused per tick
+    #
+    # PRESERVES:
+    # - legacy parent binding
+    # - v7 in-play enrichment
+    # - full CTX shape
+    #
+    # CHANGES:
+    # - CTX is built ONCE per (mid, sid)
+    # - dynamic fields (px/odds) are cleared here
+    # - BUS becomes sole refresher of dynamic data
+    # ======================================================================================================
+
     def build_route(self):
         self.route_id += 1
         self.runner_pool = list(get_root_ctx_runner_pairs())
@@ -95,6 +112,7 @@ class BusRouteSnapshot:
             self.bus_stops = {}
             self.ctx_map = {}
             return
+
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
         # --------------------------------------------------
@@ -103,47 +121,46 @@ class BusRouteSnapshot:
             or os.getenv("BETFAIR_SESSION_TOKEN")
         )
 
-
         # --------------------------------------------------
-        # BUILD CTX ONCE (AUTHORITATIVE, TIME-OWNED HERE)
+        # BUILD / REUSE CTX (AUTHORITATIVE, STATIC HERE)
         # --------------------------------------------------
         from engines.mastery.context_builder import build_context, build_context_for_runner
 
         base_ctx, _meta = build_context(source="LIVE")
 
-        ctx_map = {}
+        # ⛓️ Preserve existing CTX map if present
+        ctx_map = dict(self.ctx_map) if self.ctx_map else {}
+
+        # --------------------------------------------------
+        # Build CTX ONLY for unseen runners
+        # --------------------------------------------------
         for mid, sid in self.runner_pool:
+            key = (mid, sid)
+
+            # 🔒 REUSE — do NOT rebuild CTX
+            if key in ctx_map:
+                continue
+
             try:
                 # --------------------------------------------------
-                # BUILD FULL CTX FOR INPLAY (AUTHORITATIVE, TIME-OWNED HERE)
+                # BUILD FULL STATIC CTX (ONCE PER ROUTE)
                 # --------------------------------------------------
                 ctx, _ = build_context_for_runner(mid, sid, source="LIVE")
+
                 # --------------------------------------------------
-                # 🔧 HYDRATE CTX — EXECUTION & RISK CRITICAL FIELDS
+                # 🔧 DYNAMIC FIELDS — CLEARED HERE (BUS OWNS REFRESH)
                 # --------------------------------------------------
+                ctx["px"]   = None
+                ctx["odds"] = None
+                ctx["back"] = None
+                ctx["lay"]  = None
 
-                # 1️⃣ Inject live odds / px (BUS is authority)
-                odds_map = get_runner_odds_map(
-                    [(mid, sid)],
-                    session_token=session_token,
-                )
-
-                odds_info = odds_map.get((str(mid), str(sid)))
-
-                if odds_info:
-                    ctx["px"] = odds_info.get("px")
-                    ctx["odds"] = odds_info.get("px")
-                    ctx["back"] = odds_info.get("back")
-                    ctx["lay"]  = odds_info.get("lay")
-                else:
-                    ctx["px"] = None
-                    ctx["odds"] = None
-
-                # 2️⃣ Inject LEGACY parent binding (RISK authority)
+                # --------------------------------------------------
+                # LEGACY parent binding (STATIC FOR ROUTE)
+                # --------------------------------------------------
                 legacy_parents = get_legacy_parent_odds_snapshot(
                     session_token=session_token
                 )
-
 
                 parent = next(
                     (
@@ -162,6 +179,9 @@ class BusRouteSnapshot:
                 else:
                     ctx["legacy_parent_id"] = None
 
+                # --------------------------------------------------
+                # V7 IN-PLAY INTEL (STATIC SNAPSHOT PER ROUTE)
+                # --------------------------------------------------
                 snap = get_v7_inplay_snapshot(mid)
 
                 if snap:
@@ -180,13 +200,48 @@ class BusRouteSnapshot:
                             "drift_ratio": intel.get("drift_ratio"),
                         })
 
+                ctx_map[key] = ctx
 
-                ctx_map[(mid, sid)] = ctx
             except Exception:
-                continue  # fail-open
+                continue  # fail-open (route must never die)
 
         self.ctx_map = ctx_map
         self.partition_into_bus_stops()
+
+
+    # ======================================================================================================
+    # 📍 TARGET: engines/bus_route.py
+    # 🧩 ACTION: ADD — dynamic CTX refresh (BUS-called)
+    # 📆 PATCHED: 2026-01-24 — odds-only refresh + timing probe
+    #
+    # PURPOSE:
+    # - Refresh ONLY dynamic fields
+    # - Measure real per-tick cost
+    # ======================================================================================================
+
+    def refresh_ctx_dynamic_fields(self):
+        """
+        Refresh px / odds / back / lay only.
+        Returns elapsed time (seconds).
+        """
+        import time
+        from engines.bus_route import get_runner_odds_map
+
+        t0 = time.time()
+
+        odds_map = get_runner_odds_map(list(self.ctx_map.keys()))
+
+        for (mid, sid), odds in odds_map.items():
+            ctx = self.ctx_map.get((mid, sid))
+            if not ctx:
+                continue
+
+            ctx["px"]   = odds["px"]
+            ctx["odds"] = odds["px"]
+            ctx["back"] = odds.get("back")
+            ctx["lay"]  = odds.get("lay")
+
+        return time.time() - t0
 
 
     def get_ctx_map(self):
@@ -282,20 +337,37 @@ def get_root_ctx_runner_pairs():
 # ============================================================================
 # RISK ELIGIBILITY — LEGACY PARENTS WITHOUT MATCHED CHILD
 # ============================================================================
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_risk_legacy_parent_pairs():
+# 🧩 ACTION: REPLACE — redefine Shadowbit eligibility (LEGACY shadow followers)
+# 📆 PATCHED: 2026-01-23 — Shadowbit eligibility made lifecycle-agnostic
+#
+# RATIONALE:
+# - Shadowbit is NOT a risk hedge
+# - Every LEGACY parent spawns a Shadowbit
+# - Shadowbit lifecycle is market-time based, not parent-state based
+#
+# NEW INVARIANT:
+# - Any LEGACY parent (PLACED or MATCHED) qualifies
+# - Shadowbit remains active until market goes in-play
+# - No child / release / exposure semantics here
+#
+# BUS remains the sole authority on stake, exposure, and routing.
+# ======================================================================================================
+
 def get_risk_legacy_parent_pairs():
     """
-    Authoritative RISK lookup (PRODUCTION).
+    Shadowbit eligibility (AUTHORITATIVE).
 
-    Returns (marketId, selectionId) for LEGACY parents that:
-      - are PLACED (reserve has happened)
-      - were opened today (UTC)
-      - have NOT had release yet
-      - have NO matched child
+    Returns (marketId, selectionId) for ANY runner that has
+    at least one LEGACY parent today (UTC), provided the
+    market has NOT yet gone in-play.
 
-    These represent LIVE reserved exposure that still
-    requires MSC_RISK supervision.
-
-    DB-only. No scope. No monitor. No odds.
+    DB-first.
+    No lifecycle logic.
+    No odds.
+    No exposure semantics.
     """
 
     from engines.config_paths import auto_conn
@@ -311,14 +383,13 @@ def get_risk_legacy_parent_pairs():
                 p.marketId,
                 p.selectionId
             FROM orders p
-            LEFT JOIN orders c
-              ON c.hedge_of = p.id
-             AND UPPER(c.exit_status) = 'MATCHED'
+            JOIN bets b
+              ON b.marketId = p.marketId
             WHERE p.engine = 'LEGACY'
               AND p.role = 'PARENT'
-              AND UPPER(p.entry_status) = 'PLACED'
-              AND c.id IS NULL
+              AND UPPER(p.entry_status) IN ('PLACED', 'MATCHED')
               AND date(p.opened_at) = date('now','utc')
+              AND julianday('now','utc') < julianday(b.marketStartTime) - (3.0 / 1440.0)
             """
         ).fetchall()
     finally:

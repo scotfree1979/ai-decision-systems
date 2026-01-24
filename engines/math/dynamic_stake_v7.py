@@ -78,35 +78,32 @@ def _fetch_v7_intel(ctx: dict) -> dict:
 def compute_exploratory_dynamic_stake(*, ctx: dict, engine="MSC_EXPLORATORY") -> float:
     from engines.daily_config import ENGINE_MIN, ENGINE_MAX
 
-    lo = float(ENGINE_MIN.get(engine, 2.0))
-    hi = float(ENGINE_MAX.get(engine, lo))
+    lo = float(ENGINE_MIN[engine])
+    hi = float(ENGINE_MAX[engine])
 
-    intel = _fetch_v7_intel(ctx)
+    raw_conf = float(ctx.get("risk_confidence", 0.0))
 
-    # --- signals (fail-open) ---
-    success   = intel.get("success")
-    weight    = intel.get("weight")
-    fav_rank  = intel.get("fav_rank")
-    drift_pct = intel.get("actual_drift_pct") or intel.get("drift_pct")
+    CONF_START = 50
+    CONF_FULL  = 100
+    STEP_COUNT = 5
 
-    conf = 0.5  # baseline
+    # Flat until proof exists
+    if raw_conf < CONF_START:
+        return round(lo, 2)
 
-    if isinstance(success, (int, float)):
-        conf *= max(0.5, min(1.2, float(success)))
+    raw_conf = min(raw_conf, CONF_FULL)
 
-    if isinstance(weight, (int, float)):
-        conf *= max(0.7, min(1.3, float(weight)))
+    conf_range = CONF_FULL - CONF_START
+    conf_per_step = conf_range / STEP_COUNT
+    step = int((raw_conf - CONF_START) // conf_per_step) + 1
+    step = min(step, STEP_COUNT)
 
-    if isinstance(fav_rank, int) and fav_rank > 0:
-        conf *= max(0.6, min(1.3, 1.3 / fav_rank))
+    # Exploratory is capped at 60% of envelope
+    max_cap = lo + 0.6 * (hi - lo)
+    step_size = (max_cap - lo) / STEP_COUNT
 
-    if isinstance(drift_pct, (int, float)):
-        conf *= max(0.7, min(1.0, 1.0 - abs(drift_pct) / 20.0))
-
-    conf = max(0.0, min(conf, 1.0))
-    stake = lo + conf * (hi - lo)
+    stake = lo + step * step_size
     return round(stake, 2)
-
 
 
 # ======================================================================
@@ -155,40 +152,40 @@ def compute_inplay_dynamic_stake(*, ctx: dict, engine="MSC_INPLAY") -> float:
 
 from engines.price_math import calculate_tick_distance as ladder_ticks_between
 
-def compute_risk_dynamic_stake(
-    *,
-    parent_px: float,
-    current_px: float,
-    engine: str = "MSC_RISK",
-) -> float:
-    """
-    Risk stake scales with absolute tick distance from parent entry price.
-    Direction is irrelevant.
-    """
-
+def compute_risk_dynamic_stake(*, ctx: dict, engine="MSC_RISK") -> float:
     from engines.daily_config import ENGINE_MIN, ENGINE_MAX
 
-    # Safety
-    if parent_px <= 0 or current_px <= 0:
-        return float(ENGINE_MIN.get(engine, 2.0))
+    lo = float(ENGINE_MIN[engine])
+    hi = float(ENGINE_MAX[engine])
 
-    # Tick distance (absolute)
-    ticks_away = abs(
-        ladder_ticks_between(parent_px, current_px)
-    )
+    # Confidence from BUS (already execution-truthful)
+    raw_conf = float(ctx.get("risk_confidence", 0.0))
 
-    # Normalisation domain (fixed)
-    MAX_TICKS = ladder_ticks_between(1.5, 12.0)
-    if MAX_TICKS <= 0:
-        return float(ENGINE_MIN.get(engine, 2.0))
+    # ---- ladder parameters ----
+    STEP_COUNT = 5
+    CONF_START = 50
+    CONF_FULL  = 100
 
-    pressure = min(1.0, ticks_away / MAX_TICKS)
+    # Base stake until confidence threshold
+    if raw_conf < CONF_START:
+        return round(lo, 2)
 
-    lo = float(ENGINE_MIN.get(engine, 2.0))
-    hi = float(ENGINE_MAX.get(engine, lo))
+    # Clamp confidence
+    raw_conf = min(raw_conf, CONF_FULL)
 
-    stake = lo + pressure * (hi - lo)
+    # Map confidence → step
+    conf_range = CONF_FULL - CONF_START          # 50
+    conf_per_step = conf_range / STEP_COUNT      # 10
+
+    step = int((raw_conf - CONF_START) // conf_per_step) + 1
+    step = min(step, STEP_COUNT)
+
+    # Compute stake
+    step_size = (hi - lo) / STEP_COUNT
+    stake = lo + step * step_size
+
     return round(stake, 2)
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/math/dynamic_stake_v7.py
@@ -216,7 +213,7 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         ENGINE_MIN + confidence * (ENGINE_MAX - ENGINE_MIN)
 
     Confidence is derived from existing signals (letters, phase),
-    NOT from bank or exposure.
+    with LEGACY borrowing proof from risk_confidence.
 
     Returns a rounded stake (2dp), always within engine envelope.
     """
@@ -236,9 +233,34 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         max_stake = min_stake
 
     # --------------------------------------------------
-    # 2️⃣ Confidence score (dimensionless)
+    # 2️⃣ LEGACY — borrow confidence from RISK
     # --------------------------------------------------
-    # Base confidence
+    if eng == "LEGACY":
+        raw_conf = float(ctx.get("risk_confidence", 0.0))
+
+        CONF_START = 50
+        CONF_FULL  = 100
+
+        # No proof → minimum stake only
+        if raw_conf < CONF_START:
+            return round(min_stake, 2)
+
+        # Clamp confidence
+        raw_conf = min(raw_conf, CONF_FULL)
+
+        # Legacy is capped at 50% of its envelope
+        cap = min_stake + 0.5 * (max_stake - min_stake)
+
+        # Linear ramp between CONF_START → CONF_FULL
+        step = (raw_conf - CONF_START) / (CONF_FULL - CONF_START)
+        step = max(0.0, min(step, 1.0))
+
+        stake = min_stake + step * (cap - min_stake)
+        return round(stake, 2)
+
+    # --------------------------------------------------
+    # 3️⃣ Default confidence score (dimensionless)
+    # --------------------------------------------------
     confidence = 1.0
 
     # Letter-based conviction (primary signal)
@@ -260,17 +282,16 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         elif ocp > 6:
             confidence *= 0.95
 
-    # Normalise confidence into a sane band
-    # (we only care about where we sit inside the envelope)
+    # Normalise confidence into sane band
     confidence = max(0.0, min(confidence, 1.25))
 
     # --------------------------------------------------
-    # 3️⃣ Linear interpolation inside envelope
+    # 4️⃣ Linear interpolation inside envelope
     # --------------------------------------------------
     stake = min_stake + confidence * (max_stake - min_stake)
 
     # --------------------------------------------------
-    # 4️⃣ HARD SNAP (final authority)
+    # 5️⃣ HARD SNAP (final authority)
     # --------------------------------------------------
     if stake < min_stake:
         stake = min_stake

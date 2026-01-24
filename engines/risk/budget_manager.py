@@ -83,26 +83,41 @@ _profit_tracker = {
 
 def _collect_pnl_today():
     """
-    Return per-engine TODAY pnl using dashboard truth.
-    Uses the same source as GoalAdapter (kpi_tiles).
+    Canonical realised P&L per engine for TODAY (UTC),
+    using Betfair-cleared settlements (dashboard truth).
     """
-    try:
-        from gui.dashboard_data import kpi_tiles
+    import sqlite3
+    from engines.config_paths import settlements_db_path
 
-        # dashboard aggregates by engine internally
-        kpis = kpi_tiles(source="LIVE")
+    out = {}
 
-        # expected keys: pnl_<ENGINE>
-        out = {}
-        for eng in ENGINES:
-            key = f"pnl_{eng.lower()}"
-            out[eng] = float(kpis.get(key, 0.0))
+    con = sqlite3.connect(settlements_db_path())
+    con.row_factory = sqlite3.Row
 
-        return out
+    # Attach autoscalp DB to resolve engine
+    con.execute("ATTACH DATABASE 'data/autoscalp_gui.db' AS auto")
 
-    except Exception:
-        # hard safety: never break report
-        return {eng: 0.0 for eng in ENGINES}
+    rows = con.execute("""
+        SELECT
+            o.engine AS engine,
+            ROUND(SUM(c.profit), 2) AS pnl
+        FROM bf_cleared_orders c
+        JOIN auto.orders o
+          ON (
+               o.customerOrderRef = c.customerOrderRef
+               OR o.betId = c.betId
+             )
+        WHERE date(c.settledDate) = date('now','utc')
+          AND o.engine IS NOT NULL
+        GROUP BY o.engine
+    """).fetchall()
+
+    for r in rows:
+        out[r["engine"]] = float(r["pnl"] or 0.0)
+
+    con.close()
+    return out
+
 
 
 # 📍 TARGET: engines/risk/budget_manager.py — add v7 budget table schema

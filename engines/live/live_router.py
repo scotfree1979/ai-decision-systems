@@ -1848,6 +1848,7 @@ def _rehedge_loop(period_s: float = 10.0, default_ticks: int = 1):
             _log_event("ERROR", "live_router", f"sync_all_matches error: {e}")
 
         try:
+            _recycle_stale_unmatched_parents(limit=50, max_age_min=5)
             _sweep_close_finished_markets(grace_min=15)
         except Exception as e:
             _log_event("ERROR", "live_router", f"sweep loop error: {e}")
@@ -2694,9 +2695,7 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         # --------------------------------------------------
         # 4️⃣ Claim release in DB FIRST (authoritative)
         # --------------------------------------------------
-        amount = float(parent["required_exposure"] or 0.0)
-        if amount <= 0:
-            return False
+
 
         res = _q_retry(cur, """
             UPDATE orders
@@ -3152,6 +3151,22 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
             # 🔓 RELEASE BankState exposure (single source of truth)
             parent_id = int(parent["id"])  # or fetched explicitly
             _release_parent_exposure_db(parent_id)
+
+            # ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: child exit_status == 'MATCHED'
+# 🧩 ACTION: ADD — Shadow confidence counter (execution-truth only)
+# 📆 PATCHED: 2026-01-24 — Shadow pattern accounting v1
+# ======================================================================================================
+
+            from engines.shadow_confidence import record
+
+            direction = "DRIFT" if plan["side"] == "BACK" else "STEAM".
+            n = record(plan["marketId"], plan["selectionId"], plan.get("engine"), direction)
+
+            print(f"[SHADOW][CONF] {(plan['marketId'], plan['selectionId'], plan.get('engine'))} {direction}={n}")
+
+
 
 
             # Mark exposure as released (idempotent)
@@ -5062,6 +5077,88 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
 
     return fixed
 
+def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -> int:
+    """
+    Cancel + release exposure for parents that were PLACED
+    but never MATCHED within max_age_min minutes.
+
+    DB-first. Idempotent. Safe to run every tick.
+    """
+    fixed = 0
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        rows = _q_retry(cur, """
+            SELECT
+                p.id,
+                p.customerOrderRef
+            FROM orders p
+            WHERE p.mode='LIVE'
+              AND p.role='PARENT'
+              AND UPPER(p.entry_status)='PLACED'
+              AND datetime(p.opened_at) <= datetime('now','utc', ?)
+            ORDER BY p.opened_at ASC
+            LIMIT ?
+        """, (f"-{int(max_age_min)} minutes", int(limit))).fetchall()
+
+        for r in rows:
+            try:
+                cor = str(r["customerOrderRef"])
+
+                # 1️⃣ Cancel on Betfair (best effort)
+                try:
+                    row = _q_retry(cur, """
+                        SELECT entry_bet_id
+                          FROM orders
+                         WHERE id=?
+                         LIMIT 1
+                    """, (int(r["id"]),)).fetchone()
+
+                    if row and row["entry_bet_id"]:
+                        app_key, token = _keys()
+                        _cancel(app_key, token, str(row["entry_bet_id"]))
+                except Exception:
+                    pass  # never block recycle
+
+                # 2️⃣ Mark CANCELLED in DB
+                _q_retry(cur, """
+                    UPDATE orders
+                       SET entry_status='CANCELLED',
+                           closed_at=datetime('now','utc'),
+                           error='recycle_timeout'
+                     WHERE id=?
+                       AND UPPER(entry_status)='PLACED'
+                """, (int(r["id"]),))
+
+                con.commit()
+
+                # 3️⃣ Release exposure (authoritative)
+                _release_unmatched_parent_exposure(cor)
+
+                _log_event(
+                    "INFO",
+                    "live_router",
+                    f"[RECYCLE] cancelled stale parent ref={cor}"
+                )
+
+                fixed += 1
+
+            except Exception as e:
+                _log_event(
+                    "ERROR",
+                    "live_router",
+                    f"recycle failed ref={r['customerOrderRef']}: {e}"
+                )
+
+        return fixed
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📍 TARGET: engines/live/live_router.py

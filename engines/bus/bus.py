@@ -16,6 +16,17 @@ from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_st
 
 from engines.live.overwatcher import evaluate_redistribution
 from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
+from engines.bus_route import PLANS_PER_TICK
+try:
+    from engines.bus_route import ROUTE_SPLIT
+except Exception:
+    ROUTE_SPLIT = {
+        "LEGACY": 0,
+        "MSC_RISK": 0,
+        "MSC_INPLAY": 0,
+        "MSC_EXPLORATORY": 0,
+    }
+
 # ======================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: def _apply_bus_stake_gate(
@@ -141,12 +152,13 @@ class CadenceController:
         self.tick_seconds     = 3
         self.ticks_per_window = 10
         self.plans_per_window = 300
-        self.plans_per_tick   = 100
+        self.plans_per_tick   = 30
 
         # State
         self.window_start_ts = time.time()
         self.tick_index = 0
         self.queue = deque()
+        self._ctx_refresh_times = []
 
     def _roll_window_if_needed(self):
         now = time.time()
@@ -401,6 +413,7 @@ class DecisionBus:
         self._route_id = 1
         self._bus_stop = 0
         self._cadence = CadenceController()
+        self._ctx_refresh_times = []
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus.__init__
@@ -1211,6 +1224,33 @@ class DecisionBus:
             self._bus_stop = 1
             self._route_id += 1
 
+        # --------------------------------------------------
+        # 🧠 RISK CONFIDENCE (READ-ONLY, PHASE 2)
+        # --------------------------------------------------
+        from engines.shadow_confidence import get as _get_shadow_conf
+
+        risk_confidence = {}
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+            rec = _get_shadow_conf(mid, sid, "MSC_RISK")
+
+            drift = rec.get("DRIFT", 0)
+            steam = rec.get("STEAM", 0)
+
+            if drift or steam:
+                risk_confidence[(mid, sid)] = {
+                    "drift": drift,
+                    "steam": steam,
+                    "net": drift - steam,
+                    "direction": "DRIFT" if drift >= steam else "STEAM",
+                }
+
+        # Persist for diagnostics / future use
+        tick_ctx["risk_confidence"] = risk_confidence
+
+        # Diagnostic only
+        if risk_confidence:
+            print(f"[BUS][RISK][CONF] runners={len(risk_confidence)}")
 
 
 
@@ -1321,6 +1361,86 @@ class DecisionBus:
 
             plans.append((eng, plan, ctx))
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def tick(self):
+# 🧩 ACTION: INSERT — engine-aware slot enforcement (legacy by source, others by engine)
+# 📆 PATCHED: 2026-01-23 — BUS slot adapter v2 (correct legacy letter semantics)
+#
+# PURPOSE:
+# - Enforce per-tick slot quotas from ROUTE_SPLIT
+# - LEGACY: one source/letter per runner
+# - MSC_*: one plan per runner per engine
+# - Preserve engine intelligence and emission order
+# - Allow cadence to recycle overflow naturally
+#
+# INVARIANTS:
+# - No engine logic modified
+# - No plan scoring or ranking
+# - Cross-engine overlap allowed
+# - Hard cap = PLANS_PER_TICK
+# ======================================================================================================
+
+        # ===============================================================
+        # 7.5️⃣ SLOT ADMISSION — ENGINE-AWARE (LEGACY ≠ MSC)
+        # ===============================================================
+        from engines.bus_route import ROUTE_SPLIT, PLANS_PER_TICK
+
+        slot_budget = dict(ROUTE_SPLIT)
+
+        # Seen keys per engine
+        slot_seen = {
+            "LEGACY": set(),            # (source, mid, sid)
+            "MSC_RISK": set(),          # (mid, sid)
+            "MSC_INPLAY": set(),        # (mid, sid)
+            "MSC_EXPLORATORY": set(),   # (mid, sid)
+        }
+
+        slotted_plans = []
+
+        for eng, plan, ctx in plans:
+            # Hard global cap
+            if len(slotted_plans) >= PLANS_PER_TICK:
+                break
+
+            if slot_budget.get(eng, 0) <= 0:
+                continue
+
+            mid = plan.get("marketId")
+            sid = plan.get("selectionId")
+            if not mid or not sid:
+                continue
+
+            # -------------------------------
+            # Slot identity rules
+            # -------------------------------
+            if eng == "LEGACY":
+                # One LETTER (source) per runner per tick
+                source = (
+                    plan.get("source")
+                    or plan.get("letter")
+                    or ""
+                )
+                source = str(source).upper()[:1]
+                slot_key = (source, mid, sid)
+            else:
+                # One runner per engine per tick
+                slot_key = (mid, sid)
+
+            if slot_key in slot_seen[eng]:
+                continue
+
+            # -------------------------------
+            # Admit slot
+            # -------------------------------
+            slot_seen[eng].add(slot_key)
+            slot_budget[eng] -= 1
+            slotted_plans.append((eng, plan, ctx))
+
+        # Replace downstream plan list with slot-admitted plans only
+        plans = slotted_plans
+
+
         # ==================================================
         # PHASE 1 REPORT — ANALYSIS
         # ==================================================
@@ -1376,6 +1496,7 @@ class DecisionBus:
             # ENGINE OUTCOME BINDING (reporting)
             # ------------------------------------
             tick_ctx["engine_outcomes"] = engine_report
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -1524,6 +1645,133 @@ class DecisionBus:
                     )
                     continue  # 🔴 DO NOT ROUTE
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: market_cutoff_5min
+# 🧩 ACTION: REPLACE — engine-aware market-time cutoff adapter (v1.4)
+# 📆 PATCHED: 2026-01-23 — Engine-specific execution cutoff
+#
+# RATIONALE:
+# - INPLAY must remain unrestricted
+# - RISK (shadow bets) may operate closer to off
+# - LEGACY + EXPLORATORY must stop earlier
+#
+# ENGINE RULES:
+#   • MSC_INPLAY      → no cutoff
+#   • MSC_RISK        → block ≤ 2 minutes
+#   • LEGACY          → block ≤ 5 minutes
+#   • MSC_EXPLORATORY → block ≤ 5 minutes
+#
+# BUS is the final execution authority.
+# ======================================================================================================
+
+                # --------------------------------------------------
+                # ⏱️ MARKET START TIME CUTOFF (ENGINE-AWARE)
+                # --------------------------------------------------
+                try:
+                    from engines.config_paths import open_auto_db
+
+                    con = open_auto_db(rw=False)
+                    row = con.execute(
+                        """
+                        SELECT
+                            julianday(b.marketStartTime) - julianday('now','utc')
+                        FROM bets b
+                        WHERE b.marketId = ?
+                        LIMIT 1
+                        """,
+                        (plan.get("marketId"),),
+                    ).fetchone()
+
+                    if row and row[0] is not None:
+                        minutes_to_off = float(row[0]) * 1440.0
+                        plan["_minutes_to_off"] = round(minutes_to_off, 2)
+
+                        engine = plan.get("engine")
+
+                        # INPLAY — never blocked here
+                        if engine == "MSC_INPLAY":
+                            pass
+
+                        # RISK — allowed until 2 minutes to off
+                        elif engine == "MSC_RISK":
+                            if minutes_to_off <= 2.0:
+                                plan["_bus_block"] = "market_cutoff_risk_2min"
+                                tick_ctx["plans_route_failed"].append(
+                                    (plan, "market_cutoff_risk_2min")
+                                )
+                                _record_reason(
+                                    engine_report,
+                                    engine,
+                                    "market_cutoff_risk_2min",
+                                )
+                                continue  # 🔴 DO NOT ROUTE
+
+                        # LEGACY + EXPLORATORY — stop at 5 minutes
+                        else:
+                            if minutes_to_off <= 5.0:
+                                plan["_bus_block"] = "market_cutoff_5min"
+                                tick_ctx["plans_route_failed"].append(
+                                    (plan, "market_cutoff_5min")
+                                )
+                                _record_reason(
+                                    engine_report,
+                                    engine,
+                                    "market_cutoff_5min",
+                                )
+                                continue  # 🔴 DO NOT ROUTE
+
+                except Exception:
+                    # BUS must fail-open, never deadlock
+                    pass
+                finally:
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
+                # --------------------------------------------------
+                # 🎚️ STAKE REPORTING (BUS AUTHORITY)
+                # --------------------------------------------------
+
+                if engine in ("LEGACY", "MSC_EXPLORATORY", "MSC_RISK"):
+                    print(
+                        f"[BUS][STAKE] "
+                        f"engine={engine} "
+                        f"mid={plan.get('marketId')} "
+                        f"sid={plan.get('selectionId')} "
+                        f"conf={ctx.get('risk_confidence')} "
+                        f"raw={raw_stake:.2f}"
+                    )
+
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # --------------------------------------------------
+# 🔎 SEARCH: # HARD VALIDATION
+# 🧩 ACTION: INSERT (pre–_apply_bus_stake_gate)
+# 📆 PATCHED: 2026-01-23 — High-odds stake dampening
+#
+# RATIONALE:
+# - Large losses originated from high-odds executions
+# - Odds > 8 exhibit nonlinear downside risk
+# - Dampening belongs in BUS (final sizing authority)
+#
+# INVARIANT:
+# - Applies to ALL engines uniformly
+# - Executes AFTER raw stake computation
+# - Executes BEFORE final BUS stake gate
+# ======================================================================================================
+
+                # --------------------------------------------------
+                # 🎚️ HIGH-ODDS STAKE DAMPENING (BUS AUTHORITY)
+                # --------------------------------------------------
+                if px > 8.0:
+                    raw_stake = float(raw_stake) * 0.5
+                    plan["_bus_note"] = "high_odds_half_stake"
+                    _record_reason(engine_report, engine, "high_odds_half_stake")
+
+
 
                 # ==================================================
                 # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)
@@ -1664,6 +1912,14 @@ class DecisionBus:
                 print("\nBLOCKED (BUS)")
                 for reason, count in blocked.items():
                     print(f"  {reason:<22} : {count}")
+            print("────────────────────────────────────────────────────────\n")
+
+            # --------------------------------------------------
+            # Diagnostic only (no execution impact)
+            # --------------------------------------------------
+            print("\nCONFIDENCE")
+            if risk_confidence:
+                print(f"[BUS][RISK][CONF] {len(risk_confidence)} runners")
 
             print("────────────────────────────────────────────────────────\n")
 
@@ -1908,7 +2164,25 @@ class DecisionBus:
 
             print("────────────────────────────────────────────────────────")
 
+            print("\nTIMING")
+            # --------------------------------------------------
+            # CTX DYNAMIC REFRESH TIMING (DIAGNOSTIC ONLY)
+            # --------------------------------------------------
+            dt = self._route_snapshot.refresh_ctx_dynamic_fields()
+            self._ctx_refresh_times.append(dt)
 
+            print(
+                f"[BUS][CTX_REFRESH] "
+                f"tick={self.tick_id} "
+                f"runners={len(self._route_snapshot.ctx_map)} "
+                f"dt={dt:.4f}s"
+            )
+
+            if len(self._ctx_refresh_times) >= 10:
+                avg = sum(self._ctx_refresh_times[-10:]) / 10
+                print(f"[BUS][CTX_REFRESH][AVG10] {avg:.4f}s")
+
+            print("────────────────────────────────────────────────────────")
 
 
         finally:
