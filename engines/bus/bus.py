@@ -1415,48 +1415,20 @@ class DecisionBus:
         }
 
         slotted_plans = []
+        unslotted_plans = []
 
         for eng, plan, ctx in plans:
-            # Hard global cap
-            if len(slotted_plans) >= PLANS_PER_TICK:
-                break
 
-            if slot_budget.get(eng, 0) <= 0:
-                continue
-
-            mid = plan.get("marketId")
-            sid = plan.get("selectionId")
-            if not mid or not sid:
-                continue
-
-            # -------------------------------
-            # Slot identity rules
-            # -------------------------------
-            if eng == "LEGACY":
-                # One LETTER (source) per runner per tick
-                source = (
-                    plan.get("source")
-                    or plan.get("letter")
-                    or ""
-                )
-                source = str(source).upper()[:1]
-                slot_key = (source, mid, sid)
+            # hard global cap still enforced later by cadence
+            if slot_budget.get(eng, 0) > 0:
+                slotted_plans.append((eng, plan, ctx))
+                slot_budget[eng] -= 1
             else:
-                # One runner per engine per tick
-                slot_key = (mid, sid)
+                unslotted_plans.append((eng, plan, ctx))
 
-            if slot_key in slot_seen[eng]:
-                continue
-
-            # -------------------------------
-            # Admit slot
-            # -------------------------------
-            slot_seen[eng].add(slot_key)
-            slot_budget[eng] -= 1
-            slotted_plans.append((eng, plan, ctx))
-
-        # Replace downstream plan list with slot-admitted plans only
-        plans = slotted_plans
+        # 🔑 CRITICAL FIX:
+        # Always forward something to cadence
+        plans = slotted_plans or unslotted_plans
 
 
         # ==================================================
