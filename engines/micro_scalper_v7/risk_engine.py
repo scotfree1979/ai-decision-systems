@@ -145,13 +145,13 @@ class RiskEngine:
         # --------------------------------------------------
         if not state["cycle_active"]:
 
-            # Do NOT start cycle at parent anchor price
-            if px == state["entry_px"]:
-                 return None
-
-            # Start cycle on first price away from anchor
             state["cycle_active"] = True
             state["attached"] = True
+            state["last_px"] = px
+
+            # EntryPX is NOT tradable, but cycle is now alive
+            if px == state["entry_px"]:
+                return None
 
             return self._initial_shadow(
                 state,

@@ -160,28 +160,51 @@ _profit_tracker = {
 #  PROFIT TRACKING (reads from orders)
 # ============================================================
 
-def _collect_pnl_today() -> Dict[str, float]:
+def _collect_pnl_today():
     """
-    Aggregate realized pnl per engine for the current UTC day.
+    Realised P&L by engine (dashboard-truth).
+    Source:
+      - settlements.db (money)
+      - autoscalp_gui.db (engine attribution)
+    Scope:
+      - today (UTC)
     """
-    con = _auto_conn(rw=False)
+    import sqlite3
+    import datetime
+    from pathlib import Path
+
+    SETTLEMENTS_DB = Path("data/settlements.db")
+    AUTOSCALP_DB   = Path("data/autoscalp_gui.db")
+
+    day = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    con = sqlite3.connect(SETTLEMENTS_DB)
     con.row_factory = sqlite3.Row
 
-    rows = con.execute("""
-        SELECT engine, SUM(COALESCE(net_pl,0)) AS pnl
-          FROM orders
-         WHERE date(opened_at)=date('now','utc')
-         GROUP BY engine
-    """).fetchall()
+    # Attach autoscalp for engine attribution
+    con.execute(f"ATTACH DATABASE '{AUTOSCALP_DB}' AS auto")
+
+    sql = """
+    SELECT
+        COALESCE(a.engine, 'UNATTRIBUTED') AS engine,
+        SUM(COALESCE(s.profit,0.0) - COALESCE(s.commission,0.0)) AS pnl
+    FROM bf_cleared_orders s
+    LEFT JOIN auto.orders a
+      ON a.customerOrderRef = s.customerOrderRef
+    WHERE s.settledDate IS NOT NULL
+      AND date(datetime(s.settledDate,'utc')) = ?
+    GROUP BY 1
+    """
+
+    rows = con.execute(sql, (day,)).fetchall()
     con.close()
 
-    out = {e: 0.0 for e in ENGINES}
+    # Build dict with float values
+    out = {}
     for r in rows:
-        e = (r["engine"] or "").upper()
-        if e in out:
-            out[e] = float(r["pnl"] or 0.0)
-    return out
+        out[r["engine"]] = float(r["pnl"] or 0.0)
 
+    return out
 
 # ============================================================
 #  REBALANCING ENGINE (midnight or on-demand)

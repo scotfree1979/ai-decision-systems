@@ -27,8 +27,8 @@ _session.mount("http://", _adapter)
 # BUS ROUTE CONFIG (LOCKED)
 # ============================================================
 
-PLANS_PER_TICK = 30
-CYCLE_SIZE = 300          # parents per full cycle
+PLANS_PER_TICK = 35
+CYCLE_SIZE = 350          # parents per full cycle
 TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
@@ -37,6 +37,7 @@ ROUTE_SPLIT = {
     "MSC_RISK": 15,
     "MSC_INPLAY": 5,
     "MSC_EXPLORATORY": 3,
+    "OVERWATCHER": 5,
 }
 
 
@@ -308,11 +309,16 @@ def get_root_ctx_runner_pairs():
     # 1️⃣ Route runners (LEGACY / EXPLORATORY)
     route_pairs = set(_build_runner_pool())
 
-    # 2️⃣ RISK parents (DB-first)
+    # 2️⃣ RISK parents (DB-first, NORMALISED TO RUNNERS)
     try:
-        risk_pairs = set(get_risk_legacy_parent_pairs())
+        risk_pairs = {
+            (mid, sid)
+            for (mid, sid, _parent_id, _anchor_px)
+            in get_risk_legacy_parent_pairs()
+        }
     except Exception:
         risk_pairs = set()
+
 
     # 3️⃣ IN-PLAY runners (DB-first snapshot)
     inplay_pairs = set()
@@ -359,14 +365,18 @@ def get_root_ctx_runner_pairs():
 
 def get_risk_legacy_parent_pairs():
     """
-    Shadowbet eligibility (AUTHORITATIVE).
+    Shadowbet eligibility (AUTHORITATIVE, CYCLE-AWARE).
 
-    Returns (marketId, selectionId) for ANY runner that has
-    at least one LEGACY parent today (UTC), provided the
-    market start time is MORE than 3 minutes from now.
+    Returns (marketId, selectionId, parent_id, anchor_px) for
+    EACH DISTINCT LEGACY PARENT × PRICE ANCHOR combination.
+
+    This allows MULTIPLE RISK cycles per LEGACY parent as the
+    market moves, instead of collapsing everything to one
+    runner-level opportunity.
 
     DB-first.
     Bets DB is the time authority.
+    No schema changes.
     """
 
     from engines.config_paths import auto_conn
@@ -376,14 +386,15 @@ def get_risk_legacy_parent_pairs():
     con.row_factory = sqlite3.Row
 
     try:
-        # 🔑 THIS IS THE MISSING PIECE
         con.execute("ATTACH DATABASE 'data/bets.db' AS bets")
 
         rows = con.execute(
             """
-            SELECT DISTINCT
-                p.marketId,
-                p.selectionId
+            SELECT
+                p.id          AS parent_id,
+                p.marketId    AS marketId,
+                p.selectionId AS selectionId,
+                p.entry_odds  AS anchor_px
             FROM orders p
             JOIN bets.bets b
               ON b.marketId = p.marketId
@@ -407,12 +418,20 @@ def get_risk_legacy_parent_pairs():
             pass
         con.close()
 
+    # 🔑 EXPAND TO PER-PARENT PER-ANCHOR CYCLES
     return [
-        (str(r["marketId"]), str(r["selectionId"]))
+        (
+            str(r["marketId"]),
+            str(r["selectionId"]),
+            int(r["parent_id"]),
+            float(r["anchor_px"]),
+        )
         for r in rows
-        if r["marketId"] and r["selectionId"]
+        if r["marketId"]
+        and r["selectionId"]
+        and r["parent_id"] is not None
+        and r["anchor_px"] is not None
     ]
-
 
 # ============================================================================
 # EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS
@@ -456,6 +475,151 @@ def get_exploratory_active_parent_pairs():
         for r in rows
         if r["marketId"] and r["selectionId"]
     }
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🧩 ACTION: ADD helper — STOPLOSS eligibility surface
+# 📆 PATCHED: 2026-01-25 — unify LEGACY + EXPLORATORY parents for Overwatcher
+#
+# PURPOSE:
+# - Provide a canonical STOPLOSS surface
+# - Include ALL parent types that can bleed
+# - No lifecycle or child semantics
+# - Time-gated only
+# ======================================================================================================
+
+def get_stoploss_parent_pairs():
+    """
+    STOPLOSS eligibility (AUTHORITATIVE).
+
+    Returns (marketId, selectionId) for ANY runner that has:
+      • a LEGACY parent (PLACED or MATCHED today), OR
+      • an MSC_EXPLORATORY parent (MATCHED today)
+
+    Constraints:
+      • Market not started
+      • > 3 minutes to off
+      • DB-first
+      • No child / exposure / lifecycle logic
+    """
+
+    from engines.config_paths import auto_conn
+    import sqlite3
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        # Attach BETS DB for market time authority
+        con.execute("ATTACH DATABASE 'data/bets.db' AS bets")
+
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                p.marketId,
+                p.selectionId
+            FROM orders p
+            JOIN bets.bets b
+              ON b.marketId = p.marketId
+            WHERE
+                (
+                    -- LEGACY parents (PLACED or MATCHED)
+                    (
+                        p.engine = 'LEGACY'
+                        AND p.role = 'PARENT'
+                        AND UPPER(p.entry_status) IN ('PLACED','MATCHED')
+                    )
+                    OR
+                    -- EXPLORATORY parents (MATCHED only)
+                    (
+                        p.engine = 'MSC_EXPLORATORY'
+                        AND p.role = 'PARENT'
+                        AND UPPER(p.entry_status) = 'MATCHED'
+                    )
+                )
+                AND date(p.opened_at) = date('now','utc')
+
+                -- market has NOT started
+                AND julianday(b.marketStartTime) > julianday('now','utc')
+
+                -- more than 3 minutes to off
+                AND (julianday(b.marketStartTime) - julianday('now','utc')) > (3.0 / 1440.0)
+            """
+        ).fetchall()
+
+    finally:
+        try:
+            con.execute("DETACH DATABASE bets")
+        except Exception:
+            pass
+        con.close()
+
+    return [
+        (str(r["marketId"]), str(r["selectionId"]))
+        for r in rows
+        if r["marketId"] and r["selectionId"]
+    ]
+
+def get_stoploss_parent_surfaces():
+    """
+    STOPLOSS execution surface (EXTENSION).
+
+    Builds on get_stoploss_parent_pairs() and enriches each
+    (marketId, selectionId) with parent execution fields.
+
+    Does NOT change eligibility logic.
+    Does NOT alter existing helpers.
+    """
+
+    from engines.config_paths import auto_conn
+    import sqlite3
+
+    pairs = set(get_stoploss_parent_pairs())
+    if not pairs:
+        return []
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        rows = con.execute("""
+            SELECT
+                p.id            AS parent_id,
+                p.engine        AS engine,
+                p.marketId,
+                p.selectionId,
+                p.side,
+                p.entry_odds,
+                p.entry_stake,
+                p.stop_ticks
+            FROM orders p
+            WHERE p.role = 'PARENT'
+              AND UPPER(p.entry_status) = 'MATCHED'
+              AND p.stop_ticks IS NOT NULL
+              AND date(p.opened_at) = date('now','utc')
+        """).fetchall()
+    finally:
+        con.close()
+
+    out = []
+
+    for r in rows:
+        key = (str(r["marketId"]), str(r["selectionId"]))
+        if key not in pairs:
+            continue
+
+        out.append({
+            "parent_id":   int(r["parent_id"]),
+            "engine":      r["engine"],
+            "marketId":    key[0],
+            "selectionId": key[1],
+            "side":        r["side"],
+            "entry_odds":  float(r["entry_odds"]),
+            "entry_stake": float(r["entry_stake"]),
+            "stop_ticks":  int(r["stop_ticks"]),
+        })
+
+    return out
 
 
 def build_bus_route_tick(rotation: RunnerRotation):

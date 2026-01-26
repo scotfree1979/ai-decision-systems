@@ -25,6 +25,7 @@ except Exception:
         "MSC_RISK": 0,
         "MSC_INPLAY": 0,
         "MSC_EXPLORATORY": 0,
+        "OVERWATCHER": 0,
     }
 
 # ======================================================================
@@ -151,8 +152,8 @@ class CadenceController:
         self.window_seconds   = 60
         self.tick_seconds     = 3
         self.ticks_per_window = 10
-        self.plans_per_window = 300
-        self.plans_per_tick   = 30
+        self.plans_per_window = 350
+        self.plans_per_tick   = 35
 
         # State
         self.window_start_ts = time.time()
@@ -639,7 +640,7 @@ class DecisionBus:
         """
 
         plans = []
-        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
 
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
@@ -729,7 +730,8 @@ class DecisionBus:
         risc = self.engines.get("MSC_RISK")
 
         if risc:
-            for mid, sid in get_risk_legacy_parent_pairs():
+            for mid, sid, parent_id, anchor_px in get_risk_legacy_parent_pairs():
+
                 ctx = self._route_ctx_map.get((mid, sid))
 
                 if not ctx:
@@ -745,6 +747,14 @@ class DecisionBus:
                 if ctx.get("px") is None:
                     print(f"[BUS][DROP] no px mid={mid} sid={sid}")
                     continue
+
+                # --------------------------------------------------
+                # RISK CYCLE IDENTITY (AUTHORITATIVE)
+                # Each LEGACY parent × anchor_px is a distinct cycle
+                # --------------------------------------------------
+                ctx["risk_parent_id"] = parent_id
+                ctx["risk_anchor_px"] = anchor_px
+
 
                 try:
                     r = risc.tick(ctx)
@@ -834,7 +844,93 @@ class DecisionBus:
                 except Exception:
                     _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
 
+        # --------------------------------------------------
+        # 🟥 LANE 5 — OVERWATCHER (STOPLOSS)
+        # --------------------------------------------------
+        engine_report["OVERWATCHER"]["evaluated"] = True
+
+        from engines.price_math import walk_ticks
+        from engines.bus_route import get_stoploss_parent_surfaces
+
+        overwatcher = self.engines.get("OVERWATCHER")
+
+        if overwatcher:
+            for p in get_stoploss_parent_surfaces():
+                mid = p["marketId"]
+                sid = p["selectionId"]
+
+                ctx = self._route_ctx_map.get((mid, sid))
+
+                if not ctx:
+                    try:
+                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
+                        if ctx:
+                            self._route_ctx_map[(mid, sid)] = ctx
+                    except Exception:
+                        continue
+
+                if not ctx:
+                    continue
+
+                px = ctx.get("px")
+                if px is None:
+                    continue
+
+                # 🔑 authoritative parent fields from helper
+                entry_odds  = p["entry_odds"]
+                stop_ticks  = p["stop_ticks"]
+                side        = p["side"].upper()
+                entry_stake = p["entry_stake"]
+
+                # Must have full stop-loss inputs
+                if not entry_odds or not stop_ticks or not side:
+                    continue
+
+
+                # --------------------------------------------------
+                # STOPLOSS DIRECTION — CANONICAL TRADING TRUTH
+                #
+                # LAY first  → profit on DRIFT (px ↑)
+                #            → stop-loss on STEAM (px ↓)
+                #
+                # BACK first → profit on STEAM (px ↓)
+                #            → stop-loss on DRIFT (px ↑)
+                # --------------------------------------------------
+
+                if side == "LAY":
+                    # Stop-loss BELOW entry
+                    stop_px = walk_ticks(entry_odds, stop_ticks, direction="down")
+                    hit = px <= stop_px
+                    exit_side = "BACK"
+
+                else:  # BACK
+                    # Stop-loss ABOVE entry
+                    stop_px = walk_ticks(entry_odds, stop_ticks, direction="up")
+                    hit = px >= stop_px
+                    exit_side = "LAY"
+
+                if not hit:
+                    continue
+
+                # Emit STOPLOSS child plan
+                plan = {
+                    "engine": "OVERWATCHER",
+                    "role": "CHILD",
+                    "exit_kind": "STOPLOSS",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "side": exit_side,
+                    "px": px,
+                    "size": entry_stake,
+                }
+
+                plans.append(("OVERWATCHER", plan, ctx))
+                engine_report["OVERWATCHER"]["fired"] += 1
+                lane_counts[5] += 1
+
+
         return plans, lane_counts
+
 
 
 
@@ -1160,6 +1256,66 @@ class DecisionBus:
         except Exception as e:
             _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
 
+        # ============================
+        # OVERWATCHER (STOPLOSS)
+        # ============================
+        try:
+            eng = self.engines.get("OVERWATCHER")
+            if eng:
+                from engines.price_math import walk_ticks
+
+                entry_odds  = ctx.get("entry_odds")
+                stop_ticks  = ctx.get("stop_ticks")
+                side        = ctx.get("side")
+                px          = ctx.get("px")
+                entry_stake = ctx.get("entry_stake")
+
+                # Must have full stop-loss inputs
+                if not entry_odds or not stop_ticks or not side or px is None:
+                    _record(
+                        "OVERWATCHER",
+                        evaluated=True,
+                        fired=False,
+                        why="missing_stop_inputs",
+                    )
+                else:
+                    side = side.upper()
+
+                    if side == "LAY":
+                        stop_px = walk_ticks(entry_odds, stop_ticks, direction="up")
+                        hit = px >= stop_px
+                        exit_side = "BACK"
+                    else:
+                        stop_px = walk_ticks(entry_odds, stop_ticks, direction="down")
+                        hit = px <= stop_px
+                        exit_side = "LAY"
+
+                    if not hit:
+                        _record(
+                            "OVERWATCHER",
+                            evaluated=True,
+                            fired=False,
+                            why="stop_not_hit",
+                        )
+                    else:
+                        plan = {
+                            "engine": "OVERWATCHER",
+                            "role": "CHILD",
+                            "exit_kind": "STOPLOSS",
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "side": exit_side,
+                            "px": px,
+                            "size": entry_stake,
+                        }
+
+                        plans.append(("OVERWATCHER", plan, ctx))
+                        _record("OVERWATCHER", evaluated=True, fired=True)
+
+        except Exception as e:
+            _record("OVERWATCHER", evaluated=False, fired=False, why=str(e))
+
+
         # ✅ RETURN MUST BE HERE (same indent as `plans = []`)
         return plans
     # ======================================================================
@@ -1255,6 +1411,26 @@ class DecisionBus:
         if risk_confidence:
             print(f"[BUS][RISK][CONF] runners={len(risk_confidence)}")
 
+        # --------------------------------------------------
+        # 🔑 BIND NUMERIC RISK CONFIDENCE TO CTX (AUTHORITATIVE)
+        # --------------------------------------------------
+        for (mid, sid), ctx in self._route_ctx_map.items():
+            rc = risk_confidence.get((mid, sid))
+            if not rc:
+                ctx["risk_confidence"] = 0.0
+                continue
+
+            # Simple linear confidence score (deterministic)
+            # 50 = neutral, >50 = positive edge, <50 = negative edge
+            ctx["risk_confidence"] = max(
+                0.0,
+                min(
+                    100.0,
+                    50.0 + (rc["net"] * 10.0)
+                )
+            )
+
+
         # ===============================================================
         # 4️⃣ ROUTE SNAPSHOT + PRE-ENGINE ODDS REFRESH (AUTHORITATIVE)
         # ===============================================================
@@ -1329,6 +1505,16 @@ class DecisionBus:
             bus_stop_pairs=legacy_slice,
             engine_report=engine_report,
         )
+
+        # --------------------------------------------------
+        # STOPLOSS VISIBILITY — DIAGNOSTIC ONLY
+        # --------------------------------------------------
+        if lane_counts.get(5, 0) > 0:
+            print(
+                f"[BUS][STOPLOSS] generated={lane_counts[5]} "
+                f"plans this tick"
+            )
+
 
 
         all_runners = self._route_snapshot.get_all_runners() or []
@@ -1412,6 +1598,7 @@ class DecisionBus:
             "MSC_RISK": set(),          # (mid, sid)
             "MSC_INPLAY": set(),        # (mid, sid)
             "MSC_EXPLORATORY": set(),   # (mid, sid)
+            "OVERWATCHER": set(),       # (mid, sid)
         }
 
         slotted_plans = []
@@ -1612,6 +1799,26 @@ class DecisionBus:
                         ctx=ctx,
                         engine=engine,
                     )
+                # --------------------------------------------------
+                # OVERWATCHER — STOPLOSS (BUS-owned, FIXED STAKE)
+                # --------------------------------------------------
+                elif engine == "OVERWATCHER":
+
+                    # STOPLOSS is a CHILD exit.
+                    # Stake must flatten parent exposure, not be recomputed.
+
+                    parent_stake = ctx.get("entry_stake")
+
+                    if not parent_stake or parent_stake <= 0:
+                        plan["_bus_block"] = "overwatcher_missing_entry_stake"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "overwatcher_missing_entry_stake")
+                        )
+                        continue  # 🔴 DO NOT ROUTE
+
+                    # BUS authority: enforce stake = parent entry stake
+                    raw_stake = float(parent_stake)
+
 
                 # --------------------------------------------------
                 # LEGACY + FALLBACK — envelope-based dynamic stake
@@ -1623,6 +1830,7 @@ class DecisionBus:
                         engine=engine,
                         ctx=ctx,
                     )
+
 
                 # --------------------------------------------------
                 # HARD VALIDATION
@@ -2064,7 +2272,7 @@ class DecisionBus:
             print(f"  Lane 2 (MSC_RISK)       : {lane_counts[2]}")
             print(f"  Lane 3 (MSC_INPLAY)     : {lane_counts[3]}")
             print(f"  Lane 4 (MSC_EXPLORATORY): {lane_counts[4]}")
-
+            print(f"  Lane 5 (OVERWATCHDER)   : {lane_counts[5]}")
 
             if "dup_blocked_by_engine" in tick_ctx:
                 print("\nDUPLICATES BLOCKED")
