@@ -482,6 +482,9 @@ class DecisionBus:
         self._cadence = CadenceController()
         self._ctx_refresh_times = []
         self._optional_intel_cache = {}
+  
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus.__init__
@@ -545,6 +548,162 @@ class DecisionBus:
         self._cadence = CadenceController()
         self._route_id = 1          # starts at Route #1
         self._bus_stop = 0          # increments per tick, resets at 10
+
+    # ======================================================================
+    # LANE 6 — DB CORRECTNESS (CHILD + RISK GAP ENFORCEMENT)
+    # ======================================================================
+
+    def _lane6_db_correctness(self):
+        """
+        Final safety lane.
+
+        Guarantees:
+        1) No MATCHED parent exists without a CHILD
+        2) No risk cycle is skipped when price moves and LEGACY parent exists
+        """
+
+        from engines.config_paths import open_auto_db
+        from engines.live.live_router import (
+            _ensure_child_queued_for_matched_parent,
+        )
+        from engines.bus_route import get_risk_legacy_parent_pairs
+
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        # --------------------------------------------------
+        # 1️⃣ CHILD GUARANTEE — ALL ENGINES
+        # --------------------------------------------------
+        from engines.live.child_rescue import ensure_single_child_for_parent
+
+        lane6_fired = 0
+
+        parents = con.execute("""
+            SELECT
+                p.id            AS parent_id,
+                p.engine        AS engine,
+                p.marketId      AS marketId,
+                p.selectionId   AS selectionId,
+                p.side          AS side,
+                p.entry_odds    AS entry_odds,
+                p.entry_stake   AS entry_stake
+            FROM orders p
+            WHERE p.mode = 'LIVE'
+              AND p.role = 'PARENT'
+              AND UPPER(p.entry_status) = 'MATCHED'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM orders c
+                  WHERE c.hedge_of = p.id
+                    AND c.role = 'CHILD'
+              )
+        """).fetchall()
+
+        for p in parents:
+            try:
+                # Canonical hedge direction
+                exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
+
+                result = ensure_single_child_for_parent(
+                    parent_id=p["parent_id"],
+                    marketId=p["marketId"],
+                    selectionId=p["selectionId"],
+                    side=exit_side,
+                    px=None,                    # ignored
+                    stake=p["entry_stake"],
+                    exit_kind="RESCUE",
+                    lane=6,
+                    engine=p["engine"],
+                    reason="lane6_missing_child",
+                )
+
+                if result in ("CREATED", "REPLACED", "DEDUPED"):
+                    lane6_fired += 1
+                    engine_report["DB_CORRECTNESS"]["reasons"]["child_rescue"] += 1
+
+                    print(
+                        f"[LANE6][CHILD] "
+                        f"engine={p['engine']} "
+                        f"mid={p['marketId']} "
+                        f"sid={p['selectionId']} "
+                        f"action={result}"
+                    )
+
+            except Exception as e:
+                print(
+                    f"[LANE6][CHILD-ERR] "
+                    f"parent_id={p['parent_id']} err={e}"
+                )
+
+        # --------------------------------------------------
+        # 2️⃣ RISK GAP FILL — MSC_RISK ONLY
+        # --------------------------------------------------
+        # Helper returns: (mid, sid, legacy_parent_id, anchor_px)
+        risk_cycles = get_risk_legacy_parent_pairs()
+
+        for mid, sid, legacy_pid, anchor_px in risk_cycles:
+
+            # Does a MSC_RISK parent already exist for this cycle?
+            row = con.execute("""
+                SELECT 1
+                FROM orders
+                WHERE mode='LIVE'
+                  AND engine='MSC_RISK'
+                  AND role='PARENT'
+                  AND marketId=?
+                  AND selectionId=?
+                  AND ABS(entry_odds - ?) < 0.0001
+                  AND UPPER(entry_status) IN ('PLACED','MATCHED')
+                LIMIT 1
+            """, (str(mid), str(sid), float(anchor_px))).fetchone()
+
+            if row:
+                continue  # cycle already covered
+
+            # Build CTX from route snapshot (authoritative)
+            ctx = self._route_ctx_map.get((mid, sid))
+            if not ctx:
+                continue
+
+            ctx = dict(ctx)
+            ctx["risk_parent_id"] = legacy_pid
+            ctx["risk_anchor_px"] = anchor_px
+
+            try:
+                plan = {
+                    "enter": True,
+                    "engine": "MSC_RISK",
+                    "role": "PARENT",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "px": hedge_px,          # ✅ USE COMPUTED PX
+                    "direction": "LAY->BACK",
+                    "why": "lane6_risk_gap_fill",
+                }
+
+                # Send directly to placement via BUS routing path
+                from engines.decision_engine.decide_once.placement import enqueue_for_placement
+
+                self._cadence.enqueue([("MSC_RISK", plan, ctx)])
+
+
+                print(
+                    f"[LANE6][RISK-FILL] "
+                    f"mid={mid} sid={sid} px={anchor_px}"
+                )
+
+            except Exception as e:
+                print(
+                    f"[LANE6][RISK-ERR] "
+                    f"mid={mid} sid={sid} px={anchor_px} err={e}"
+                )
+
+        return lane6_fired
+
+        con.close()
+
 
 # ======================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -759,7 +918,7 @@ class DecisionBus:
         """
 
         plans = []
-        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
 
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
@@ -1061,20 +1220,24 @@ class DecisionBus:
                     continue
 
                 # Emit STOPLOSS child plan
-                plan = {
-                    "engine": "OVERWATCHER",
-                    "role": "CHILD",
-                    "exit_kind": "STOPLOSS",
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "side": exit_side,
-                    "px": px,
-                    "size": entry_stake,
-                }
+                from engines.live.child_rescue import ensure_single_child_for_parent
 
-                plans.append(("OVERWATCHER", plan, ctx))
+                ensure_single_child_for_parent(
+                    parent_id=p["parent_id"],
+                    marketId=mid,
+                    selectionId=sid,
+                    side=exit_side,
+                    px=px,
+                    stake=entry_stake,
+                    exit_kind="STOPLOSS",
+                    lane=5,
+                    engine="OVERWATCHER",
+                    reason="overwatcher_stoploss",
+                )
+
                 engine_report["OVERWATCHER"]["fired"] += 1
                 lane_counts[5] += 1
+
 
 
         return plans, lane_counts
@@ -1454,7 +1617,7 @@ class DecisionBus:
                             "marketId": mid,
                             "selectionId": sid,
                             "side": exit_side,
-                            "px": px,
+                            "px": hedge_px,          # ✅ USE COMPUTED PX
                             "size": entry_stake,
                         }
 
@@ -1467,6 +1630,8 @@ class DecisionBus:
 
         # ✅ RETURN MUST BE HERE (same indent as `plans = []`)
         return plans
+
+
     # ======================================================================
     # analytics_report() — unchanged
     # ======================================================================
@@ -1504,6 +1669,171 @@ class DecisionBus:
         print("────────────────────────────────────────────────")
 
     # ======================================================================
+    # PHASE 0 — LIVE DB TRUTH (REPORT ONLY)
+    # ======================================================================
+
+    def _phase0_report_db_truth(self):
+        """
+        Phase 0: DB-first live truth.
+        Reports ALL markets with live parents, ordered by time-to-off.
+        No mutation. No engine logic.
+        """
+
+        from engines.config_paths import connect_db, open_auto_db
+        from datetime import datetime, timezone
+        import sqlite3
+
+        now = datetime.now(timezone.utc)
+
+        # --------------------------------------------------
+        # 1️⃣ Load all LIVE parents
+        # --------------------------------------------------
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        parents = con.execute("""
+            SELECT
+                id,
+                engine,
+                marketId,
+                selectionId,
+                entry_odds
+            FROM orders
+            WHERE mode='LIVE'
+              AND role='PARENT'
+              AND UPPER(entry_status)='MATCHED'
+              AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
+        """).fetchall()
+
+        if not parents:
+            con.close()
+            return  # nothing to report
+
+        # --------------------------------------------------
+        # 2️⃣ Group parents by market
+        # --------------------------------------------------
+        by_market = {}
+        for p in parents:
+            by_market.setdefault(p["marketId"], []).append(p)
+
+        # --------------------------------------------------
+        # 3️⃣ Resolve market metadata (bets.db)
+        # --------------------------------------------------
+        bdb = connect_db(ro=True)
+        bdb.row_factory = sqlite3.Row
+
+        market_meta = {}
+        for mid in by_market.keys():
+            row = bdb.execute("""
+                SELECT marketName, marketStartTime
+                FROM bets
+                WHERE marketId=?
+                LIMIT 1
+            """, (str(mid),)).fetchone()
+
+            if not row:
+                continue
+
+            off = datetime.fromisoformat(
+                row["marketStartTime"].replace("Z", "+00:00")
+            )
+            secs = (off - now).total_seconds()
+
+            market_meta[mid] = {
+                "name": row["marketName"],
+                "off": off,
+                "secs": secs,
+            }
+
+        bdb.close()
+        con.close()
+
+        # --------------------------------------------------
+        # 4️⃣ Order markets by time-to-off
+        # --------------------------------------------------
+        ordered = sorted(
+            market_meta.items(),
+            key=lambda x: x[1]["secs"]
+        )
+
+        print("\n================ BUS PHASE 0 — LIVE DB STATE =================")
+        print(f"[{now.strftime('%H:%M:%S')} UTC] markets={len(ordered)}\n")
+
+        total_parents = 0
+        total_children = 0
+        missing_children = 0
+        engines_missing = set()
+
+        # --------------------------------------------------
+        # 5️⃣ Per-market breakdown
+        # --------------------------------------------------
+        for mid, meta in ordered:
+            mins = int(meta["secs"] // 60)
+            secs = int(meta["secs"] % 60)
+
+            print(f"MARKET: {meta['name']}")
+            print(f"  off_in: {mins:02d}:{secs:02d}\n")
+
+            # parent rows for this market
+            rows = by_market[mid]
+
+            # group by engine → runner → px
+            tree = {}
+            for r in rows:
+                eng = r["engine"]
+                sid = r["selectionId"]
+                px  = round(float(r["entry_odds"]), 2)
+                tree.setdefault(eng, {}).setdefault(sid, {}).setdefault(px, []).append(r["id"])
+
+            # load children map once
+            con = open_auto_db(rw=False)
+            con.row_factory = sqlite3.Row
+            child_rows = con.execute("""
+                SELECT hedge_of
+                FROM orders
+                WHERE role='CHILD'
+            """).fetchall()
+            con.close()
+
+            has_child = {c["hedge_of"] for c in child_rows}
+
+            for eng, runners in tree.items():
+                print(f"  {eng}")
+                for sid, pxs in runners.items():
+                    for px, pids in pxs.items():
+                        parents_n = len(pids)
+                        children_n = sum(1 for pid in pids if pid in has_child)
+
+                        total_parents += parents_n
+                        total_children += children_n
+
+                        status = "OK"
+                        if children_n < parents_n:
+                            missing_children += (parents_n - children_n)
+                            engines_missing.add(eng)
+                            status = "⚠ MISSING CHILD"
+
+                        print(
+                            f"    Runner {sid} @ px={px:<4} "
+                            f"parents={parents_n}  children={children_n}  {status}"
+                        )
+                print()
+
+            print("-------------------------------------------------------------\n")
+
+        # --------------------------------------------------
+        # 6️⃣ Summary
+        # --------------------------------------------------
+        print("SUMMARY")
+        print(f"  total_markets        : {len(ordered)}")
+        print(f"  total_parents        : {total_parents}")
+        print(f"  total_children       : {total_children}")
+        print(f"  missing_children     : {missing_children}")
+        print(f"  engines_affected     : {', '.join(sorted(engines_missing)) or 'none'}")
+        print("=============================================================\n")
+
+
+    # ======================================================================
     # TICK — authoritative BUS lifecycle (route → ctx → lanes)
     # ======================================================================
     def tick(self):
@@ -1511,6 +1841,11 @@ class DecisionBus:
         # 0️⃣ BUS IDENTITY
         # ===============================================================
         self.tick_id += 1
+
+        # ==================================================
+        # PHASE 0 — LIVE DB TRUTH (READ-ONLY)
+        # ==================================================
+        self._phase0_report_db_truth()
 
         # ===============================================================
         # 1️⃣ DIAGNOSTICS (non-fatal, never blocks)
@@ -1654,6 +1989,13 @@ class DecisionBus:
             bus_stop_pairs=legacy_slice,
             engine_report=engine_report,
         )
+
+        # ==================================================
+        # 🟥 LANE 6 — DB CORRECTNESS (FINAL SAFETY)
+        # ==================================================
+        lane6_hits = self._lane6_db_correctness()
+        lane_counts[6] += lane6_hits
+
 
         # --------------------------------------------------
         # STOPLOSS VISIBILITY — DIAGNOSTIC ONLY
@@ -2422,6 +2764,7 @@ class DecisionBus:
             print(f"  Lane 3 (MSC_INPLAY)     : {lane_counts[3]}")
             print(f"  Lane 4 (MSC_EXPLORATORY): {lane_counts[4]}")
             print(f"  Lane 5 (OVERWATCHDER)   : {lane_counts[5]}")
+            print(f"  Lane 6 (DB CORRECTNESS) : {lane_counts[6]}")
 
             if "dup_blocked_by_engine" in tick_ctx:
                 print("\nDUPLICATES BLOCKED")
