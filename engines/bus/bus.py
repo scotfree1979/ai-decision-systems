@@ -242,6 +242,72 @@ def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
 
     return ctxs
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_root_ctx_runner_pairs():
+# 🧩 ACTION: ADD time-gated IN-PLAY eligibility (BUS authority)
+# 📆 PATCHED: 2026-01-26 — MSC_INPLAY time gate moved to BUS
+# ==============================================================================
+
+# ----------------------------------------------------------------------
+# CONFIG — IN-PLAY TIME WINDOW (SAFE DEFAULTS)
+# ----------------------------------------------------------------------
+INPLAY_PRE_OFF_MINUTES  = None   # None = no pre-off gate (debug mode)
+INPLAY_POST_OFF_MINUTES = None   # None = no post-off gate (debug mode)
+
+
+def _is_inplay_time_window(market_id: str) -> bool:
+    """
+    BUS authority: determine if a market is eligible for MSC_INPLAY
+    based on time-to-off / time-since-off.
+
+    NOTE:
+    - If gates are None → always True (debug / development mode)
+    - Bets DB is the time authority
+    """
+
+    if INPLAY_PRE_OFF_MINUTES is None and INPLAY_POST_OFF_MINUTES is None:
+        return True
+
+    from engines.config_paths import connect_db
+    from datetime import datetime, timezone
+    import sqlite3
+
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+
+    try:
+        row = con.execute(
+            """
+            SELECT off_at_utc
+            FROM markets_schedule
+            WHERE marketId = ?
+            LIMIT 1
+            """,
+            (str(market_id),)
+        ).fetchone()
+    finally:
+        con.close()
+
+    if not row or not row["off_at_utc"]:
+        return False
+
+    now = datetime.now(timezone.utc)
+    off = datetime.fromisoformat(row["off_at_utc"].replace("Z", "+00:00"))
+
+    delta_min = (off - now).total_seconds() / 60.0
+
+    # PRE-OFF window
+    if INPLAY_PRE_OFF_MINUTES is not None:
+        if delta_min > INPLAY_PRE_OFF_MINUTES:
+            return False
+
+    # POST-OFF window
+    if INPLAY_POST_OFF_MINUTES is not None:
+        if delta_min < -INPLAY_POST_OFF_MINUTES:
+            return False
+
+    return True
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -415,6 +481,7 @@ class DecisionBus:
         self._bus_stop = 0
         self._cadence = CadenceController()
         self._ctx_refresh_times = []
+        self._optional_intel_cache = {}
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus.__init__
@@ -478,6 +545,58 @@ class DecisionBus:
         self._cadence = CadenceController()
         self._route_id = 1          # starts at Route #1
         self._bus_stop = 0          # increments per tick, resets at 10
+
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🧩 ACTION: ADD method to DecisionBus
+# 📆 PATCHED: 2026-03-XX — Optional intel broker
+# ======================================================================
+
+    def _get_optional_intel(self, *, engine: str, ctx: dict) -> dict | None:
+        """
+        Optional intelligence broker.
+
+        Engines may request additional market-level analytics.
+        BUS decides whether to supply them.
+
+        Returns:
+            dict to be merged into ctx, or None
+        """
+
+        req = ctx.get("_request_intel")
+        if not req:
+            return None
+
+        intel_type = req.get("type")
+        if intel_type != "INPLAY_MARKET_PROFILE":
+            return None
+
+        # First implementation: MSC_INPLAY only
+        if engine != "MSC_INPLAY":
+            return None
+
+        mid = ctx.get("marketId")
+        sid = ctx.get("selectionId")
+        if not mid or not sid:
+            return None
+
+        market_blob = self._optional_intel_cache.get(str(mid))
+        if not market_blob:
+            return None
+
+        row = market_blob.get(str(sid))
+        if not row:
+            return None
+
+        # Explicit, namespaced fields only
+        return {
+            "inplay_rank_base_px": row.get("rank_base_px"),
+            "inplay_rank_ticks":   row.get("rank_ticks"),
+            "inplay_rank_pnl":     row.get("rank_pnl"),
+            "inplay_move_class":   row.get("move_class"),
+            "inplay_pnl_if_win":   row.get("pnl_if_win"),
+        }
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -660,6 +779,7 @@ class DecisionBus:
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
 
+
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
         # --------------------------------------------------
@@ -767,56 +887,84 @@ class DecisionBus:
                 except Exception:
                     _record_reason(engine_report, "MSC_RISK", "tick_error")
 
-
         # --------------------------------------------------
-        # 🟥 LANE 3 — MSC_INPLAY (HELPER-DRIVEN)
+        # 🟥 LANE 3 — MSC_INPLAY (BUS-ROUTED + SNAPSHOT-ENRICHED)
         # --------------------------------------------------
         engine_report["MSC_INPLAY"]["evaluated"] = True
 
         from engines.bus_route import get_v7_inplay_snapshot
 
-        engine_report["MSC_INPLAY"]["evaluated"] = True
         inplay = self.engines.get("MSC_INPLAY")
+        if not inplay:
+            return
 
-        if inplay:
-            seen = set()
+        # Group BUS runners by marketId (BUS is the selector)
+        by_market = {}
+        for (mid, sid) in self._route_ctx_map.keys():
+            by_market.setdefault(mid, []).append(str(sid))
 
-            # DB snapshot already encodes in-play scope
-            for market_id, _ in set(
-                (r["marketId"], r["selectionId"])
-                for mid, _ in self._route_ctx_map.keys()
-                for r in (get_v7_inplay_snapshot(mid) or [])
-            ):
-                if market_id in seen:
+        for mid, sids in by_market.items():
+
+            # Snapshot is enrichment only (NOT a selector)
+            snap = get_v7_inplay_snapshot(mid) or []
+            snap_by_sid = {str(r["selectionId"]): r for r in snap}
+
+            for sid in sids:
+                ctx = self._route_ctx_map.get((mid, sid))
+                if not ctx:
                     continue
-                seen.add(market_id)
 
-                for r in get_v7_inplay_snapshot(market_id):
-                    mid = r["marketId"]
-                    sid = str(r["selectionId"])
+                # --------------------------------------------------
+                # Snapshot enrichment (pre-engine)
+                # --------------------------------------------------
+                intel = snap_by_sid.get(sid)
+                if intel:
+                    ctx.update({
+                        "fav_rank":           intel.get("fav_rank"),
+                        "success":            intel.get("success"),
+                        "weight":             intel.get("weight"),
+                        "drift_ratio":        intel.get("drift_ratio"),
+                        "drift_pct":          intel.get("drift_pct"),
+                        "actual_drift_pct":   intel.get("actual_drift_pct"),
+                        "reversal_flag":      intel.get("reversal_flag"),
+                        "mto_minutes":        intel.get("mto_minutes"),
+                        "pos_inplay":         intel.get("pos_inplay"),
+                    })
 
-                    ctx = self._route_ctx_map.get((mid, sid))
-                    if not ctx:
-                        try:
-                            ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                            if ctx:
-                                self._route_ctx_map[(mid, sid)] = ctx
-                        except Exception:
-                            continue
+                # Must have live odds (BUS dynamic refresh responsibility)
+                if ctx.get("px") is None:
+                    continue
 
-                    if not ctx or ctx.get("px") is None:
-                        continue
+                # --------------------------------------------------
+                # OPTIONAL INTEL — ENGINE REQUESTED (BEFORE tick)
+                # --------------------------------------------------
+                if ctx.get("_request_intel"):
+                    opt = self._get_optional_intel(
+                        engine="MSC_INPLAY",
+                        ctx=ctx,
+                    )
+                    if opt:
+                        ctx.update(opt)
 
-                    try:
-                        p = inplay.tick(ctx)
-                        if p and p.get("enter"):
-                            plan = dict(p)
-                            plan["engine"] = "MSC_INPLAY"
-                            plans.append(("MSC_INPLAY", plan, ctx))
-                            engine_report["MSC_INPLAY"]["fired"] += 1
-                            lane_counts[3] += 1
-                    except Exception:
-                        _record_reason(engine_report, "MSC_INPLAY", "tick_error")
+                # --------------------------------------------------
+                # SINGLE engine evaluation (NO double-tick)
+                # --------------------------------------------------
+                try:
+                    p = inplay.tick(ctx)
+                    if p and p.get("enter"):
+                        plan = dict(p)
+                        plan["engine"] = "MSC_INPLAY"
+                        plans.append(("MSC_INPLAY", plan, ctx))
+                        engine_report["MSC_INPLAY"]["fired"] += 1
+                        lane_counts[3] += 1
+                except Exception:
+                    _record_reason(
+                        engine_report,
+                        "MSC_INPLAY",
+                        "tick_error",
+                    )
+
+
 
         # --------------------------------------------------
         # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)
@@ -1186,6 +1334,7 @@ class DecisionBus:
             if why:
                 reasons = eng.setdefault("reasons", {})
                 reasons[why] = reasons.get(why, 0) + 1
+
         # ============================
         # MSC Exploratory
         # ============================

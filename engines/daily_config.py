@@ -229,14 +229,14 @@ ENGINE_MIN = {
     "LEGACY": 4.00,
     "MSC_EXPLORATORY": 5.00,
     "MSC_RISK": 6.00,
-    "MSC_INPLAY": 3.00,
+    "MSC_INPLAY": 2.00,
 }
 
 ENGINE_MAX = {
     "LEGACY": 10.00,
     "MSC_EXPLORATORY": 15.00,
     "MSC_RISK": 20.00,
-    "MSC_INPLAY": 10.00,
+    "MSC_INPLAY": 14.00,
 }
 
 

@@ -111,39 +111,41 @@ def compute_exploratory_dynamic_stake(*, ctx: dict, engine="MSC_EXPLORATORY") ->
 # ======================================================================
 
 def compute_inplay_dynamic_stake(*, ctx: dict, engine="MSC_INPLAY") -> float:
-    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+    """
+    MSC_INPLAY stake is HARD-CODED and PX-based.
+    No confidence scaling. No envelopes.
+    """
 
-    lo = float(ENGINE_MIN.get(engine, 2.0))
-    hi = float(ENGINE_MAX.get(engine, lo))
+    px = float(ctx.get("px") or 0.0)
+    direction = ctx.get("direction")
 
-    intel = _fetch_v7_intel(ctx)
+    # Defensive default
+    if px <= 0:
+        return 2.0
 
-    drift_ratio   = intel.get("drift_ratio")
-    reversal_flag = bool(intel.get("reversal_flag"))
-    pos_inplay    = intel.get("pos_inplay")
-    success       = intel.get("success")
-    fav_rank      = intel.get("fav_rank")
+    # --------------------------------------------------
+    # BACK protection — always £2
+    # --------------------------------------------------
+    if direction == "BACK->LAY":
+        return 2.0
 
-    conf = 0.5
+    # --------------------------------------------------
+    # LAY ladder — PX buckets
+    # --------------------------------------------------
+    if px >= 12.0:
+        return 14.0
+    elif px >= 10.0:
+        return 9.0
+    elif px >= 9.0:
+        return 7.0
+    elif px >= 8.0:
+        return 5.0
+    elif px >= 7.0:
+        return 3.0
 
-    if isinstance(drift_ratio, (int, float)):
-        conf *= max(0.7, min(1.4, abs(drift_ratio)))
+    # Below ladder → no bet
+    return 2.0
 
-    if reversal_flag:
-        conf *= 1.15
-
-    if isinstance(pos_inplay, int):
-        conf *= max(0.6, min(1.3, 1.3 / (pos_inplay + 1)))
-
-    if isinstance(success, (int, float)):
-        conf *= max(0.7, min(1.3, float(success)))
-
-    if fav_rank == 1:
-        conf *= 1.1
-
-    conf = max(0.0, min(conf, 1.0))
-    stake = lo + conf * (hi - lo)
-    return round(stake, 2)
 
 
 # ======================================================================

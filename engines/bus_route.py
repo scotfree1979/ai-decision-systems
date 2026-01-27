@@ -938,16 +938,23 @@ from datetime import datetime, timezone
 #
 # ============================================================================
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/v7_snapshot_helper.py
+# 🔎 SEARCH: def get_v7_inplay_snapshot(market_id: str):
+# 🛠 ACTION: UPGRADE — widen in-play surface to ALL parent runners (DB-first)
+# 📆 PATCHED: 2026-01-26 — MSC_INPLAY visibility fixed (parent-anchored snapshot)
+# ==============================================================================
+
 def get_v7_inplay_snapshot(market_id: str):
     """
     DB-first, schema-truthful snapshot of ALL runners in a market
-    for MSC_INPLAY decisioning.
+    relevant to MSC_INPLAY decisioning.
 
-    • Uses inbound_oc_cache for odds (RISC-consistent)
-    • Uses v_mastery_intel_v7 for intelligence
-    • Uses v7_race_position_inferred for in-play position
-    • No assumptions
-    • No execution logic
+    UPGRADE:
+    - Anchor visibility on *orders* (parents today), not inbound_oc_cache
+    - inbound_oc_cache / intel / position are enrichments, not gates
+    - No execution logic
+    - No time gating (handled upstream)
     """
 
     from engines.config_paths import auto_conn
@@ -958,15 +965,25 @@ def get_v7_inplay_snapshot(market_id: str):
     con.row_factory = sqlite3.Row
 
     try:
-        rows = con.execute("""
+        rows = con.execute(
+            """
+            WITH parent_runners AS (
+                SELECT DISTINCT
+                    p.marketId,
+                    p.selectionId
+                FROM orders p
+                WHERE p.role = 'PARENT'
+                  AND date(p.opened_at) = date('now','utc')
+                  AND p.marketId = ?
+            )
             SELECT
-                oc.marketId,
-                oc.selectionId,
+                pr.marketId,
+                pr.selectionId,
 
-                -- === ODDS (RISC CANONICAL) ===
+                -- === ODDS (BEST AVAILABLE, NON-GATING) ===
                 COALESCE(oc.oc1, oc.anchor_odd)        AS odds,
 
-                -- === V7 INTELLIGENCE ===
+                -- === V7 INTELLIGENCE (OPTIONAL) ===
                 mi.fav_rank_entry                      AS fav_rank,
                 mi.success                             AS success,
                 mi.weight                              AS weight,
@@ -975,26 +992,30 @@ def get_v7_inplay_snapshot(market_id: str):
                 mi.reversal_flag                       AS reversal_flag,
                 mi.mto_minutes                         AS mto_minutes,
 
-                -- === IN-PLAY POSITION ===
+                -- === IN-PLAY POSITION (OPTIONAL) ===
                 pos.pos_inplay                         AS pos_inplay,
                 pos.anchor_odd                         AS anchor_odd,
                 pos.drift_ratio                        AS drift_ratio
 
-            FROM inbound_oc_cache oc
+            FROM parent_runners pr
+
+            LEFT JOIN inbound_oc_cache oc
+                   ON oc.marketId = pr.marketId
+                  AND oc.selectionId = pr.selectionId
 
             LEFT JOIN v_mastery_intel_v7 mi
-                   ON mi.marketId = oc.marketId
-                  AND mi.selectionId = oc.selectionId
+                   ON mi.marketId = pr.marketId
+                  AND mi.selectionId = pr.selectionId
                   AND mi.mode = 'LIVE'
 
             LEFT JOIN v7_race_position_inferred pos
-                   ON pos.marketId = oc.marketId
-                  AND pos.selectionId = oc.selectionId
-
-            WHERE oc.marketId = ?
+                   ON pos.marketId = pr.marketId
+                  AND pos.selectionId = pr.selectionId
 
             ORDER BY odds ASC
-        """, (str(market_id),)).fetchall()
+            """,
+            (str(market_id),),
+        ).fetchall()
 
     finally:
         con.close()
@@ -1005,7 +1026,7 @@ def get_v7_inplay_snapshot(market_id: str):
     for r in rows:
         mto = r["mto_minutes"]
 
-        # Derive race quartile (purely diagnostic)
+        # Diagnostic race quartile (unchanged)
         if mto is None:
             race_quartile = None
         elif mto > 45:
@@ -1022,7 +1043,7 @@ def get_v7_inplay_snapshot(market_id: str):
             "marketId": r["marketId"],
             "selectionId": r["selectionId"],
 
-            # odds
+            # odds (may be None — engine decides)
             "odds": r["odds"],
 
             # intelligence
@@ -1050,6 +1071,9 @@ def get_v7_inplay_snapshot(market_id: str):
         })
 
     return snapshot
+
+# === PATCH END ==============================================================
+
 
 # ============================================================================
 # LEGACY SNAPSHOT HELPER (CANONICAL, DB-FIRST)

@@ -18,77 +18,151 @@ from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 from engines.mastery.event_sink import emit
 from engines.micro_scalper_v7.v7_snapshot_helper import get_v7_inplay_snapshot
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 ACTION: Replace entire file
+# 📆 PATCHED: 2026-03-XX — In-Play Ladder Engine (Drift Harvest + Steam Protection)
+# ==============================================================================
+
+
+
 class InPlayEngine:
+    """
+    MSC_INPLAY — ladder-based in-play loss harvester.
+
+    Responsibilities:
+    - Harvest guaranteed losers via DRIFT → LAY ladder
+    - Protect exposure via STEAM → BACK ladder
+    - No stake sizing (BUS-owned)
+    - No lifecycle logic (BUS-owned)
+    """
+
     SWEETSPOT = 7.0
     ODDS_MAX  = 12.0
 
+    LAY_LEVELS  = [7.0, 8.0, 9.0, 10.0, 12.0]
+    BACK_LEVELS = [5.0, 4.0, 3.0]
+
     def __init__(self):
         self.state = InPlaySubState.IDLE
-        self.last_odds = {}   # (mid, sid) -> last odds
+
+        # price memory
+        self.last_odds: dict[tuple, float] = {}
+
+        # ladder state
+        self.lay_fired:  dict[tuple, set] = {}   # (mid,sid) -> {levels}
+        self.back_fired: dict[tuple, set] = {}   # (mid,sid) -> {levels}
+
+    # ------------------------------------------------------------------
 
     def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         mid = ctx.get("marketId")
         sid = ctx.get("selectionId")
+        key = (mid, sid)
 
         odds = ctx.get("px")
-        fav_rank = ctx.get("fav_rank")
-        drift_ratio = ctx.get("drift_ratio")
-        pos_inplay = ctx.get("pos_inplay")
-        reversal_flag = ctx.get("reversal_flag")
-        mto = ctx.get("mto_minutes")
-
-        if odds is None:
+        if odds is None or odds <= 0:
             return self._no_signal("odds_unavailable")
 
         if odds > self.ODDS_MAX:
             return self._no_signal("odds_too_high")
 
-        # Direction intelligence (canonical)
+        # protect favourite leader
+        if ctx.get("fav_rank") == 1 and ctx.get("pos_inplay") == 1:
+            return self._no_signal("favourite_leading")
+
+        # must be past race midpoint
+        if ctx.get("pos_inplay") is not None and ctx.get("pos_inplay") < 2:
+            return self._no_signal("early_in_play")
+
+        # decision intelligence
         dec = compute_msc_decision(ctx)
         if not dec:
             return self._no_signal("decision_missing")
 
-        win_prob = dec.get("win_prob")
+        win_prob  = dec.get("win_prob")
         direction = dec.get("direction")
- 
         if win_prob is None or direction is None:
             return self._no_signal("decision_incomplete")
 
-        # Favourite protection
-        if fav_rank == 1 and pos_inplay == 1:
-            return self._no_signal("favourite_leading")
-
-        # Anchor logic
-        key = (mid, sid)
+        # rolling price memory
         prev = self.last_odds.get(key)
         self.last_odds[key] = odds
-
-        if odds < self.SWEETSPOT:
-            return self._no_signal("below_anchor")
 
         if prev is None:
             return self._no_signal("first_touch")
 
-        # Collapse entry
-        if prev < self.SWEETSPOT and odds >= self.SWEETSPOT:
-            if direction == "LAY->BACK" and win_prob < 0.25:
-                return self._emit_plan(odds)
+        # initialise ladder memory
+        self.lay_fired.setdefault(key, set())
+        self.back_fired.setdefault(key, set())
+
+        move_class   = ctx.get("inplay_move_class")
+        base_rank    = ctx.get("inplay_rank_base_px")
+        pnl_if_win   = ctx.get("inplay_pnl_if_win")
+
+        # ==============================================================
+        # 🟥 DRIFT → LAY LADDER (primary)
+        # ==============================================================
+
+        if (
+            move_class
+            and move_class.startswith("DRIFT")
+            and direction == "LAY->BACK"
+            and win_prob < 0.40
+            and base_rank is not None
+            and base_rank <= 6      # came from prominence
+        ):
+            for lvl in self.LAY_LEVELS:
+                if odds >= lvl and lvl not in self.lay_fired[key]:
+                    self.lay_fired[key].add(lvl)
+                    return self._emit_lay(ctx, odds, lvl)
+
+        # ==============================================================
+        # 🟦 STEAM → BACK PROTECTION (exposure only)
+        # ==============================================================
+
+        if (
+            move_class
+            and move_class.startswith("STEAM")
+            and base_rank is not None
+            and base_rank > self.SWEETSPOT   # came from outside
+            and pnl_if_win is not None
+            and pnl_if_win < 0               # we lose if it wins
+        ):
+            for lvl in self.BACK_LEVELS:
+                if odds <= lvl and lvl not in self.back_fired[key]:
+                    self.back_fired[key].add(lvl)
+                    return self._emit_back(ctx, odds, lvl)
 
         return self._no_signal("no_signal")
 
-
+    # ------------------------------------------------------------------
+    # PLAN EMITTERS
     # ------------------------------------------------------------------
 
-    def _emit_plan(self, odds: float) -> Dict[str, Any]:
+    def _emit_lay(self, ctx: Dict[str, Any], odds: float, lvl: float) -> Dict[str, Any]:
         return {
             "enter": True,
             "engine": "MSC_INPLAY",
-            "source": "V",
+            "role": "PARENT",
             "direction": "LAY->BACK",
             "px": odds,
             "target_ticks": 50,
-            "why": "inplay_anchor_cross",
+            "why": f"inplay_drift_lay_{lvl}",
         }
+
+    def _emit_back(self, ctx: Dict[str, Any], odds: float, lvl: float) -> Dict[str, Any]:
+        return {
+            "enter": True,
+            "engine": "MSC_INPLAY",
+            "role": "PARENT",
+            "direction": "BACK->LAY",
+            "px": odds,
+            "target_ticks": 50,
+            "why": f"inplay_steam_protect_{lvl}",
+        }
+
+    # ------------------------------------------------------------------
 
     def _no_signal(self, reason: str) -> Dict[str, Any]:
         payload = {
@@ -102,92 +176,8 @@ class InPlayEngine:
         except Exception:
             pass
         return payload
-        return payload
-
-
-    # ----------------------------------------------------------------------
-    # INTERNAL LOGIC — ENTRY
-    # ----------------------------------------------------------------------
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
-# 🔎 SEARCH: def _try_open(self, ctx, m):
-# 🛠 ACTION: Replace entire _try_open() with ticks-to-50 parent plan
-# 📆 PATCHED: 2025-12-06 — In-Play MSC Engine uses parent-plan routed to lanes
-# ==============================================================================
-
-    def _try_open(self, ctx: Dict[str, Any], m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-            """
-            Decide whether to open an in-play micro-LAY.
-            """
-
-            mid = ctx.get("marketId")
-            sid = str(ctx.get("selectionId"))
-
-            st = get_market_state(mid) or {}
-            rn = (st.get("runners") or {}).get(sid) or {}
-
-            current = rn.get("px") or ctx.get("px")
-            if not current or current <= 0:
-                return None
-
-
-            # Must be in sweetspot
-            if current < self.SWEETSPOT_MIN_ODDS:
-                return None
-
-            # Collapse detection from direction engine
-            dec = compute_msc_decision(ctx)
-            win_prob = dec["win_prob"]
-            direction = dec["direction"]   # BACK->LAY or LAY->BACK
-
-            # In-play collapse = strong loser → direction must be LAY->BACK
-            if direction != "LAY->BACK":
-                return None
-
-            # Confidence threshold
-            if win_prob > 0.40:
-                return None
-
-            # Must have enough guaranteed profit to keep runner ≥ 0
-            stake_limit = self._max_allowed_stake(ctx)
-            if stake_limit <= 0:
-                return None
-
-            stake = min(2.0, stake_limit)
-
-            # --------------------------------------------------------------
-            # Compute ticks required to place hedge at target ODDS = 50.0
-            # --------------------------------------------------------------
-            try:
-                from engines.price_math import ticks_between
-                hedge_target_odds = 50.0
-                ticks_to_hedge = ticks_between(float(current), float(hedge_target_odds))
-                ticks_to_hedge = max(1, int(ticks_to_hedge))
-            except Exception:
-                ticks_to_hedge = 50   # safe fallback
-
-            # --------------------------------------------------------------
-            # Emit MSC_IP *PARENT* plan routed through lanes/run_all
-            # --------------------------------------------------------------
-            plan = {
-                "enter": True,
-                "role": "PARENT",
-                "family": "MSC_IP",
-                "source": "V",                     # ← HARD-CODED FOR MSC-INPLAY
-                "engine": "MSC_INPLAY",            # ← DB bucket
-                "subtype": "LAYDOWN",
-                # expose implied execution direction
-                "direction": "LAY->BACK",
-                "target_ticks": ticks_to_hedge,
-                "size": stake,
-                "px": current,
-                "why": "inplay_collapse_to_50",
-            }
-
-            self.active_plan = plan
-            self.entry_px = current
-            self.state = InPlaySubState.MONITOR
-            return plan
 
 # === PATCH END ==============================================================
+
+
 
