@@ -621,6 +621,7 @@ class DecisionBus:
 
                 if result in ("CREATED", "REPLACED", "DEDUPED"):
                     lane6_fired += 1
+                    engine_report["DB_CORRECTNESS"]
                     engine_report["DB_CORRECTNESS"]["reasons"]["child_rescue"] += 1
 
                     print(
@@ -678,7 +679,7 @@ class DecisionBus:
                     "role": "PARENT",
                     "marketId": mid,
                     "selectionId": sid,
-                    "px": hedge_px,          # ✅ USE COMPUTED PX
+                    "px": float(anchor_px),   # ✅ THIS IS THE PX
                     "direction": "LAY->BACK",
                     "why": "lane6_risk_gap_fill",
                 }
@@ -1525,48 +1526,35 @@ class DecisionBus:
         # ============================
         # MSC In-Play
         # ============================
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: inside _run_engines_for_tick → MSC In-Play section
-# 🧩 ACTION: REPLACE in_play gate logic
-# 📆 PATCHED: 2026-01-02 — fix MSC_INPLAY scope contract
-# ======================================================================================================
-
         try:
             eng = self.engines.get("MSC_INPLAY")
             if eng:
 
-                # Correct authority: MarketPhaseClock via ctx
-                if not ctx.get("in_play", False):
+                # BUS no longer gates in-play.
+                # Helper + engine decide eligibility.
+                p = eng.tick(ctx)
+
+                if p is None:
                     _record(
                         "MSC_INPLAY",
                         evaluated=True,
                         fired=False,
-                        why="not_in_play",
+                        why="no_plan",
                     )
+                elif p.get("enter"):
+                    p["engine"] = "MSC_INPLAY"
+                    _record("MSC_INPLAY", evaluated=True, fired=True)
+                    plans.append(("MSC_INPLAY", p, ctx))
                 else:
-                    p = eng.tick(ctx)
-
-                    if p is None:
-                        _record(
-                            "MSC_INPLAY",
-                            evaluated=True,
-                            fired=False,
-                            why="no_plan",
-                        )
-                    elif p.get("enter"):
-                        p["engine"] = "MSC_INPLAY"
-                        _record("MSC_INPLAY", evaluated=True, fired=True)
-                        plans.append(("MSC_INPLAY", p, ctx))
-                    else:
-                        _record(
-                            "MSC_INPLAY",
-                            evaluated=True,
-                            fired=False,
-                            why=p.get("reason") or p.get("why") or "note",
-                        )
+                    _record(
+                        "MSC_INPLAY",
+                        evaluated=True,
+                        fired=False,
+                        why=p.get("reason") or p.get("why") or "note",
+                    )
         except Exception as e:
             _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
+
 
         # ============================
         # OVERWATCHER (STOPLOSS)
@@ -1617,7 +1605,7 @@ class DecisionBus:
                             "marketId": mid,
                             "selectionId": sid,
                             "side": exit_side,
-                            "px": hedge_px,          # ✅ USE COMPUTED PX
+                            "px": px,          # ✅ USE LIVE PX
                             "size": entry_stake,
                         }
 
@@ -1703,6 +1691,8 @@ class DecisionBus:
               AND role='PARENT'
               AND UPPER(entry_status)='MATCHED'
               AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
+              AND date(COALESCE(opened_at, datetime('now','utc'))) = date('now','utc')
+
         """).fetchall()
 
         if not parents:
@@ -1725,7 +1715,10 @@ class DecisionBus:
         market_meta = {}
         for mid in by_market.keys():
             row = bdb.execute("""
-                SELECT marketName, marketStartTime
+                SELECT
+                    horse_name,
+                    event_name,
+                    marketStartTime
                 FROM bets
                 WHERE marketId=?
                 LIMIT 1
@@ -1739,11 +1732,21 @@ class DecisionBus:
             )
             secs = (off - now).total_seconds()
 
+            # --------------------------------------------------
+            # ⛔ PHASE-0 CUTOFF — FINISHED MARKETS
+            # Exclude markets ≥ 6 minutes AFTER off
+            # --------------------------------------------------
+            if secs <= -360:
+                continue
+
+
             market_meta[mid] = {
-                "name": row["marketName"],
+                "horse": row["horse_name"],
+                "event": row["event_name"],
                 "off": off,
                 "secs": secs,
             }
+
 
         bdb.close()
         con.close()
@@ -1771,7 +1774,8 @@ class DecisionBus:
             mins = int(meta["secs"] // 60)
             secs = int(meta["secs"] % 60)
 
-            print(f"MARKET: {meta['name']}")
+            print(f"MARKET: {meta['horse']} @ {meta['event']}")
+
             print(f"  off_in: {mins:02d}:{secs:02d}\n")
 
             # parent rows for this market
@@ -1792,6 +1796,7 @@ class DecisionBus:
                 SELECT hedge_of
                 FROM orders
                 WHERE role='CHILD'
+                  AND UPPER(entry_status) IN ('PLACED','MATCHED')
             """).fetchall()
             con.close()
 
@@ -2047,7 +2052,7 @@ class DecisionBus:
         plans = []
         for eng, plan, ctx in generated_plans:
             plan = dict(plan)
-
+            engine = plan.get("engine")   # ✅ MOVE THIS UP
             upstream_pid = plan.get("plan_id")
             if upstream_pid:
                 plan["plan_id"] = f"{bus_exec_id}-{upstream_pid}"
@@ -2197,13 +2202,22 @@ class DecisionBus:
 
             for eng, plan, ctx in plans:
 
-
+                
                 # --------------------------------------------------
                 # Execution enrichment (ONLY missing execution fields)
                 # --------------------------------------------------
                 plan.setdefault("marketId", ctx.get("marketId"))
                 plan.setdefault("selectionId", ctx.get("selectionId"))
                 plan.setdefault("px", ctx.get("px"))
+
+                if engine == "MSC_INPLAY" and not ctx.get("legacy_parent_id"):
+                    plan["_bus_block"] = "inplay_no_parent_context"
+                    tick_ctx["plans_route_failed"].append(
+                        (plan, "inplay_no_parent_context")
+                    )
+                    _record_reason(engine_report, engine, "inplay_no_parent_context")
+                    continue
+
 
                 # --------------------------------------------------
                 # Direction check (execution truth)

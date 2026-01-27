@@ -137,7 +137,7 @@ class BusRouteSnapshot:
         # Build CTX ONLY for unseen runners
         # --------------------------------------------------
         for mid, sid in self.runner_pool:
-            key = (mid, sid)
+            key = (str(mid), str(sid))
 
             # 🔒 REUSE — do NOT rebuild CTX
             if key in ctx_map:
@@ -152,10 +152,13 @@ class BusRouteSnapshot:
                 # --------------------------------------------------
                 # 🔧 DYNAMIC FIELDS — CLEARED HERE (BUS OWNS REFRESH)
                 # --------------------------------------------------
-                ctx["px"]   = None
-                ctx["odds"] = None
-                ctx["back"] = None
-                ctx["lay"]  = None
+                # 🔧 DYNAMIC FIELDS — PRESERVE SNAPSHOT ODDS
+                # Do NOT clear odds here.
+                # BUS refresh will overwrite when Betfair returns data.
+                ctx.setdefault("px",   ctx.get("odds"))
+                ctx.setdefault("odds", ctx.get("odds"))
+                ctx.setdefault("back", None)
+                ctx.setdefault("lay",  None)
 
                 # --------------------------------------------------
                 # LEGACY parent binding (STATIC FOR ROUTE)

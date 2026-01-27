@@ -40,13 +40,13 @@ def ensure_single_child_for_parent(
             """
             SELECT
                 id,
-                created_at,
+                opened_at,
                 entry_odds
             FROM orders
             WHERE role = 'CHILD'
               AND hedge_of = ?
               AND (exit_status IS NULL OR UPPER(exit_status) <> 'MATCHED')
-            ORDER BY created_at DESC
+            ORDER BY id DESC
             """,
             (parent_id,),
         ).fetchall()
@@ -98,6 +98,10 @@ def ensure_single_child_for_parent(
     else:
         raise RuntimeError(f"invalid lane={lane}")
 
+    # PX authority resolved by lane
+    final_px = hedge_px
+
+
     # --------------------------------------------------
     # CASE A — no child → create
     # --------------------------------------------------
@@ -109,7 +113,7 @@ def ensure_single_child_for_parent(
             "marketId": marketId,
             "selectionId": selectionId,
             "side": side,
-            "px": px,
+            "px": final_px,
             "size": stake,
             "hedge_of": parent_id,
             "why": reason,
@@ -122,11 +126,15 @@ def ensure_single_child_for_parent(
     # --------------------------------------------------
     if len(rows) == 1:
         child = rows[0]
-        created_ts = child["created_at"]
-
-        # Grace window → do nothing
-        if created_ts and (now - created_ts) < GRACE_SECONDS:
-            return "SKIPPED_GRACE"
+        opened_at = child["opened_at"]
+        if opened_at:
+            try:
+                from datetime import datetime
+                ts = datetime.fromisoformat(opened_at.replace("Z", "+00:00")).timestamp()
+                if (now - ts) < GRACE_SECONDS:
+                    return "SKIPPED_GRACE"
+            except Exception:
+                pass
 
         # Replace existing child
         _cancel_child(child["id"], reason="child_replace")
@@ -138,7 +146,7 @@ def ensure_single_child_for_parent(
             "marketId": marketId,
             "selectionId": selectionId,
             "side": side,
-            "px": px,
+            "px": final_px,
             "size": stake,
             "hedge_of": parent_id,
             "why": reason,
