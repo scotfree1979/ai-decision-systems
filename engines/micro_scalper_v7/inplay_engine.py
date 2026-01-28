@@ -18,6 +18,13 @@ from engines.micro_scalper_v7.event_receiver import get_engine_outcomes
 from engines.mastery.event_sink import emit
 from engines.micro_scalper_v7.v7_snapshot_helper import get_v7_inplay_snapshot
 
+def _to_int(val):
+    try:
+        return int(val)
+    except Exception:
+        return None
+
+
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
 # 🔎 ACTION: Replace entire file
@@ -108,10 +115,10 @@ class InPlayEngine:
             move_class
             and move_class.startswith("DRIFT")
             and direction == "LAY->BACK"
-            and win_prob < 0.40
-            and base_rank is not None
-            and base_rank <= 6      # came from prominence
+            and isinstance(win_prob, (int, float)) and win_prob < 0.40
+            and isinstance(base_rank, (int, float)) and base_rank <= 6
         ):
+
             for lvl in self.LAY_LEVELS:
                 if odds >= lvl and lvl not in self.lay_fired[key]:
                     self.lay_fired[key].add(lvl)
@@ -127,7 +134,7 @@ class InPlayEngine:
             and base_rank is not None
             and base_rank > self.SWEETSPOT   # came from outside
             and pnl_if_win is not None
-            and pnl_if_win < 0               # we lose if it wins
+            and isinstance(pnl_if_win, (int, float)) and pnl_if_win < 0 # we lose if it wins
         ):
             for lvl in self.BACK_LEVELS:
                 if odds <= lvl and lvl not in self.back_fired[key]:

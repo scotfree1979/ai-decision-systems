@@ -1046,32 +1046,33 @@ def get_v7_inplay_snapshot(market_id: str):
             "marketId": r["marketId"],
             "selectionId": r["selectionId"],
 
-            # odds (may be None — engine decides)
-            "odds": r["odds"],
+            # odds (engine decides if None is acceptable)
+            "odds": float(r["odds"]) if r["odds"] is not None else None,
 
-            # intelligence
-            "fav_rank": r["fav_rank"],
-            "is_favourite": (r["fav_rank"] == 1),
-            "success": r["success"],
-            "weight": r["weight"],
+            # intelligence (TYPE NORMALISED)
+            "fav_rank": int(r["fav_rank"]) if r["fav_rank"] is not None else None,
+            "is_favourite": int(r["fav_rank"]) == 1 if r["fav_rank"] is not None else False,
+            "success": float(r["success"]) if r["success"] is not None else None,
+            "weight": float(r["weight"]) if r["weight"] is not None else None,
 
-            # drift / collapse
-            "anchor_odd": r["anchor_odd"],
-            "drift_ratio": r["drift_ratio"],
-            "drift_pct": r["drift_pct"],
-            "actual_drift_pct": r["actual_drift_pct"],
+            # drift / collapse (TYPE NORMALISED)
+            "anchor_odd": float(r["anchor_odd"]) if r["anchor_odd"] is not None else None,
+            "drift_ratio": float(r["drift_ratio"]) if r["drift_ratio"] is not None else None,
+            "drift_pct": float(r["drift_pct"]) if r["drift_pct"] is not None else None,
+            "actual_drift_pct": float(r["actual_drift_pct"]) if r["actual_drift_pct"] is not None else None,
             "reversal_flag": bool(r["reversal_flag"]),
 
-            # timing
-            "mto_minutes": mto,
+            # timing (TYPE NORMALISED)
+            "mto_minutes": float(mto) if mto is not None else None,
             "race_quartile": race_quartile,
 
-            # in-play position
-            "pos_inplay": r["pos_inplay"],
+            # in-play position (TYPE NORMALISED)
+            "pos_inplay": int(r["pos_inplay"]) if r["pos_inplay"] is not None else None,
 
             # diagnostics
             "ts_utc": now_utc,
         })
+
 
     return snapshot
 

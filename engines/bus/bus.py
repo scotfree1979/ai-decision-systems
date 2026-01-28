@@ -234,7 +234,8 @@ def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
     ctxs = {}
 
     for mid, sid in runner_pairs:
-        ctx = self._route_ctx_map.get((mid, sid))
+        ctx = dict(self._route_ctx_map.get((mid, sid)))
+
 
         if not ctx:
             continue
@@ -552,6 +553,18 @@ class DecisionBus:
     # ======================================================================
     # LANE 6 — DB CORRECTNESS (CHILD + RISK GAP ENFORCEMENT)
     # ======================================================================
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _lane6_db_correctness(self):
+# 🛠 ACTION: REPLACE FUNCTION BODY (return plans instead of executing)
+# 📆 PATCHED: 2026-03-19 — Lane 6 emits repair plans (engine-style)
+#
+# WHY:
+# - Lane 6 must behave like an engine
+# - It detects invariant violations and EMITS plans
+# - BUS owns sizing, run_id, cadence, and placement
+# - Fixes: missing run_id, missing size, cadence breakage
+# ======================================================================
 
     def _lane6_db_correctness(self):
         """
@@ -560,150 +573,118 @@ class DecisionBus:
         Guarantees:
         1) No MATCHED parent exists without a CHILD
         2) No risk cycle is skipped when price moves and LEGACY parent exists
+
+        IMPORTANT:
+        - NO execution here
+        - NO placement
+        - NO sizing
+        - RETURNS plans for BUS to handle
         """
 
         from engines.config_paths import open_auto_db
-        from engines.live.live_router import (
-            _ensure_child_queued_for_matched_parent,
-        )
         from engines.bus_route import get_risk_legacy_parent_pairs
-
         import sqlite3
+
+        repair_plans = []
 
         con = open_auto_db(rw=False)
         con.row_factory = sqlite3.Row
 
-        # --------------------------------------------------
-        # 1️⃣ CHILD GUARANTEE — ALL ENGINES
-        # --------------------------------------------------
-        from engines.live.child_rescue import ensure_single_child_for_parent
+        try:
+            # --------------------------------------------------
+            # 1️⃣ CHILD GUARANTEE — ALL ENGINES
+            # --------------------------------------------------
+            parents = con.execute("""
+                SELECT
+                    p.id            AS parent_id,
+                    p.engine        AS engine,
+                    p.marketId      AS marketId,
+                    p.selectionId   AS selectionId,
+                    p.side          AS side,
+                    p.entry_stake   AS entry_stake
+                FROM orders p
+                WHERE p.mode = 'LIVE'
+                  AND p.role = 'PARENT'
+                  AND UPPER(p.entry_status) = 'MATCHED'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM orders c
+                      WHERE c.hedge_of = p.id
+                        AND c.role = 'CHILD'
+                  )
+            """).fetchall()
 
-        lane6_fired = 0
+            for p in parents:
+                ctx = self._route_ctx_map.get((p["marketId"], p["selectionId"]))
+                if not ctx:
+                    continue
 
-        parents = con.execute("""
-            SELECT
-                p.id            AS parent_id,
-                p.engine        AS engine,
-                p.marketId      AS marketId,
-                p.selectionId   AS selectionId,
-                p.side          AS side,
-                p.entry_odds    AS entry_odds,
-                p.entry_stake   AS entry_stake
-            FROM orders p
-            WHERE p.mode = 'LIVE'
-              AND p.role = 'PARENT'
-              AND UPPER(p.entry_status) = 'MATCHED'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM orders c
-                  WHERE c.hedge_of = p.id
-                    AND c.role = 'CHILD'
-              )
-        """).fetchall()
-
-        for p in parents:
-            try:
-                # Canonical hedge direction
                 exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
 
-                result = ensure_single_child_for_parent(
-                    parent_id=p["parent_id"],
-                    marketId=p["marketId"],
-                    selectionId=p["selectionId"],
-                    side=exit_side,
-                    px=None,                    # ignored
-                    stake=p["entry_stake"],
-                    exit_kind="RESCUE",
-                    lane=6,
-                    engine=p["engine"],
-                    reason="lane6_missing_child",
-                )
+                repair_plans.append((
+                    "OVERWATCHER",
+                    {
+                        "enter": True,
+                        "engine": "OVERWATCHER",
+                        "role": "CHILD",
+                        "exit_kind": "RESCUE",
+                        "marketId": p["marketId"],
+                        "selectionId": p["selectionId"],
+                        "side": exit_side,
+                        "px": ctx.get("px"),
+                        "why": "lane6_missing_child",
+                    },
+                    ctx,
+                ))
 
-                if result in ("CREATED", "REPLACED", "DEDUPED"):
-                    lane6_fired += 1
-                    engine_report["DB_CORRECTNESS"]
-                    engine_report["DB_CORRECTNESS"]["reasons"]["child_rescue"] += 1
+            # --------------------------------------------------
+            # 2️⃣ RISK GAP FILL — MSC_RISK ONLY
+            # --------------------------------------------------
+            for mid, sid, legacy_pid, anchor_px in get_risk_legacy_parent_pairs():
 
-                    print(
-                        f"[LANE6][CHILD] "
-                        f"engine={p['engine']} "
-                        f"mid={p['marketId']} "
-                        f"sid={p['selectionId']} "
-                        f"action={result}"
-                    )
+                row = con.execute("""
+                    SELECT 1
+                    FROM orders
+                    WHERE mode='LIVE'
+                      AND engine='MSC_RISK'
+                      AND role='PARENT'
+                      AND marketId=?
+                      AND selectionId=?
+                      AND ABS(entry_odds - ?) < 0.0001
+                      AND UPPER(entry_status) IN ('PLACED','MATCHED')
+                    LIMIT 1
+                """, (str(mid), str(sid), float(anchor_px))).fetchone()
 
-            except Exception as e:
-                print(
-                    f"[LANE6][CHILD-ERR] "
-                    f"parent_id={p['parent_id']} err={e}"
-                )
+                if row:
+                    continue
 
-        # --------------------------------------------------
-        # 2️⃣ RISK GAP FILL — MSC_RISK ONLY
-        # --------------------------------------------------
-        # Helper returns: (mid, sid, legacy_parent_id, anchor_px)
-        risk_cycles = get_risk_legacy_parent_pairs()
+                ctx = self._route_ctx_map.get((mid, sid))
+                if not ctx:
+                    continue
 
-        for mid, sid, legacy_pid, anchor_px in risk_cycles:
+                ctx = dict(ctx)
+                ctx["risk_parent_id"] = legacy_pid
+                ctx["risk_anchor_px"] = anchor_px
 
-            # Does a MSC_RISK parent already exist for this cycle?
-            row = con.execute("""
-                SELECT 1
-                FROM orders
-                WHERE mode='LIVE'
-                  AND engine='MSC_RISK'
-                  AND role='PARENT'
-                  AND marketId=?
-                  AND selectionId=?
-                  AND ABS(entry_odds - ?) < 0.0001
-                  AND UPPER(entry_status) IN ('PLACED','MATCHED')
-                LIMIT 1
-            """, (str(mid), str(sid), float(anchor_px))).fetchone()
+                repair_plans.append((
+                    "MSC_RISK",
+                    {
+                        "enter": True,
+                        "engine": "MSC_RISK",
+                        "role": "PARENT",
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "px": float(anchor_px),
+                        "direction": "LAY->BACK",
+                        "why": "lane6_risk_gap_fill",
+                    },
+                    ctx,
+                ))
 
-            if row:
-                continue  # cycle already covered
+        finally:
+            con.close()
 
-            # Build CTX from route snapshot (authoritative)
-            ctx = self._route_ctx_map.get((mid, sid))
-            if not ctx:
-                continue
-
-            ctx = dict(ctx)
-            ctx["risk_parent_id"] = legacy_pid
-            ctx["risk_anchor_px"] = anchor_px
-
-            try:
-                plan = {
-                    "enter": True,
-                    "engine": "MSC_RISK",
-                    "role": "PARENT",
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "px": float(anchor_px),   # ✅ THIS IS THE PX
-                    "direction": "LAY->BACK",
-                    "why": "lane6_risk_gap_fill",
-                }
-
-                # Send directly to placement via BUS routing path
-                from engines.decision_engine.decide_once.placement import enqueue_for_placement
-
-                self._cadence.enqueue([("MSC_RISK", plan, ctx)])
-
-
-                print(
-                    f"[LANE6][RISK-FILL] "
-                    f"mid={mid} sid={sid} px={anchor_px}"
-                )
-
-            except Exception as e:
-                print(
-                    f"[LANE6][RISK-ERR] "
-                    f"mid={mid} sid={sid} px={anchor_px} err={e}"
-                )
-
-        return lane6_fired
-
-        con.close()
+        return repair_plans
 
 
 # ======================================================================
@@ -1089,6 +1070,10 @@ class DecisionBus:
                         "reversal_flag":      intel.get("reversal_flag"),
                         "mto_minutes":        intel.get("mto_minutes"),
                         "pos_inplay":         intel.get("pos_inplay"),
+                        # 🔑 REQUIRED BY InPlayEngine (THIS WAS MISSING)
+                        "inplay_move_class":      intel.get("move"),
+                        "inplay_rank_base_px":    intel.get("base_px"),
+                        "inplay_pnl_if_win":      intel.get("pnl_if_win"),
                     })
 
                 # Must have live odds (BUS dynamic refresh responsibility)
@@ -1995,11 +1980,26 @@ class DecisionBus:
             engine_report=engine_report,
         )
 
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: lane6_hits = self._lane6_db_correctness()
+# 🛠 ACTION: REPLACE WITH PLAN MERGE
+# 📆 PATCHED: 2026-03-19 — Lane 6 unified with engine plan flow
+#
+# WHY:
+# - Lane 6 emits plans, not counts
+# - BUS must treat them exactly like engine output
+# ======================================================================
+
         # ==================================================
-        # 🟥 LANE 6 — DB CORRECTNESS (FINAL SAFETY)
+        # 🟥 LANE 6 — DB CORRECTNESS (ENGINE-STYLE)
         # ==================================================
-        lane6_hits = self._lane6_db_correctness()
-        lane_counts[6] += lane6_hits
+        lane6_plans = self._lane6_db_correctness()
+
+        if lane6_plans:
+            generated_plans.extend(lane6_plans)
+            lane_counts[6] += len(lane6_plans)
+
 
 
         # --------------------------------------------------
