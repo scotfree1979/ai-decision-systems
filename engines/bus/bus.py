@@ -28,6 +28,13 @@ except Exception:
         "OVERWATCHER": 0,
     }
 
+PROMINENCE_MAP = {
+    "FRONT": 3,
+    "PROMINENT": 2,
+    "MIDFIELD": 1,
+    "HELD_UP": 0,
+}
+
 # ======================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: def _apply_bus_stake_gate(
@@ -919,6 +926,14 @@ class DecisionBus:
             ctx["odds"] = odds["px"]
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
+
+        # --------------------------------------------------
+        # PROMINENCE NORMALISATION (BUS AUTHORITY)
+        # --------------------------------------------------
+        prom = ctx.get("prominence")
+
+        if isinstance(prom, str):
+            ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
 
 
         # --------------------------------------------------
