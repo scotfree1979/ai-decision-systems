@@ -291,6 +291,21 @@ class BusRouteSnapshot:
 # ============================================================================
 # CANONICAL ROOT CTX RUNNER SET
 # ============================================================================
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_root_ctx_runner_pairs():
+# 🧩 ACTION: REPLACE FUNCTION BODY
+# 📆 PATCHED: 2026-01-29 — Ensure RISK + INPLAY runners are always included in route snapshot
+#
+# WHY:
+# - BUS refreshes PX ONLY for runners present in BusRouteSnapshot
+# - MSC_RISK and MSC_INPLAY may emit (mid, sid) pairs not present in scope runner pool
+# - Missing inclusion caused PX to never refresh, leading to false risk_missing_px
+#
+# INVARIANT ENFORCED:
+# - If an engine can evaluate a runner, that runner MUST be in the route snapshot
+# ======================================================================================================
+
 def get_root_ctx_runner_pairs():
     """
     Authoritative union of ALL (marketId, selectionId) pairs
@@ -309,21 +324,25 @@ def get_root_ctx_runner_pairs():
     No CTX building.
     """
 
+    # ------------------------------------------------------------------
     # 1️⃣ Route runners (LEGACY / EXPLORATORY)
+    # ------------------------------------------------------------------
     route_pairs = set(_build_runner_pool())
 
-    # 2️⃣ RISK parents (DB-first, NORMALISED TO RUNNERS)
+    # ------------------------------------------------------------------
+    # 2️⃣ RISK runners — LEGACY parent × anchor cycles (DB-first)
+    # ------------------------------------------------------------------
+    risk_pairs = set()
     try:
-        risk_pairs = {
-            (mid, sid)
-            for (mid, sid, _parent_id, _anchor_px)
-            in get_risk_legacy_parent_pairs()
-        }
+        for mid, sid, _parent_id, _anchor_px in get_risk_legacy_parent_pairs():
+            if mid and sid:
+                risk_pairs.add((str(mid), str(sid)))
     except Exception:
-        risk_pairs = set()
+        pass
 
-
-    # 3️⃣ IN-PLAY runners (DB-first snapshot)
+    # ------------------------------------------------------------------
+    # 3️⃣ IN-PLAY runners — DB-first snapshot (authoritative for MSC_INPLAY)
+    # ------------------------------------------------------------------
     inplay_pairs = set()
     try:
         from engines.decision_engine.decide_once.scope import scope_snapshot
@@ -334,14 +353,18 @@ def get_root_ctx_runner_pairs():
         for mid, _ in inplay_markets:
             snap = get_v7_inplay_snapshot(str(mid)) or []
             for r in snap:
-                inplay_pairs.add(
-                    (str(r["marketId"]), str(r["selectionId"]))
-                )
+                mid2 = r.get("marketId")
+                sid2 = r.get("selectionId")
+                if mid2 and sid2:
+                    inplay_pairs.add((str(mid2), str(sid2)))
     except Exception:
         pass
 
-    # 🔒 FINAL UNION (authoritative)
+    # ------------------------------------------------------------------
+    # 🔒 FINAL AUTHORITATIVE UNION
+    # ------------------------------------------------------------------
     return route_pairs | risk_pairs | inplay_pairs
+
 
 
 # ============================================================================
