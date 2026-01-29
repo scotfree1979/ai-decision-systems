@@ -3614,10 +3614,11 @@ def start_live_loop(*args, **kwargs):
         print(f"[blueprints] warn: {e}")
 
     try:
-        from engines.settlement.loop import _start_settlement_loop
-        _start_settlement_loop(period_s=300)
-    except Exception:
-        pass
+        from engines.live.settlements import start_settlement_loop
+        start_settlement_loop(period_s=300)
+    except Exception as e:
+        print(f"[settlements] warn: {e}")
+
 
     # disable old paths
     global F_ENABLE_STRATS

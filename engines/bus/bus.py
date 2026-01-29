@@ -669,6 +669,13 @@ class DecisionBus:
                 if not ctx:
                     continue
 
+                # --------------------------------------------------
+                # PROMINENCE NORMALISATION (BUS AUTHORITY)
+                # --------------------------------------------------
+                prom = ctx.get("prominence")
+                if isinstance(prom, str):
+                    ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+
                 ctx = dict(ctx)
                 ctx["risk_parent_id"] = legacy_pid
                 ctx["risk_anchor_px"] = anchor_px
@@ -927,14 +934,6 @@ class DecisionBus:
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
 
-        # --------------------------------------------------
-        # PROMINENCE NORMALISATION (BUS AUTHORITY)
-        # --------------------------------------------------
-        prom = ctx.get("prominence")
-
-        if isinstance(prom, str):
-            ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
-
 
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
@@ -979,6 +978,13 @@ class DecisionBus:
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx or ctx.get("px") is None:
                 continue
+
+            # --------------------------------------------------
+            # PROMINENCE NORMALISATION (BUS AUTHORITY)
+            # --------------------------------------------------
+            prom = ctx.get("prominence")
+            if isinstance(prom, str):
+                ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
 
             for letter in self.ALLOWED_LEGACY_LETTERS:
                 ctx_l = dict(ctx)
@@ -1070,6 +1076,13 @@ class DecisionBus:
                 if not ctx:
                     continue
 
+                # --------------------------------------------------
+                # PROMINENCE NORMALISATION (BUS AUTHORITY)
+                # --------------------------------------------------
+                prom = ctx.get("prominence")
+                if isinstance(prom, str):
+                    ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+   
                 # --------------------------------------------------
                 # Snapshot enrichment (pre-engine)
                 # --------------------------------------------------
@@ -1177,8 +1190,12 @@ class DecisionBus:
                     except Exception:
                         continue
 
-                if not ctx:
-                    continue
+                # --------------------------------------------------
+                # PROMINENCE NORMALISATION (BUS AUTHORITY)
+                # --------------------------------------------------
+                prom = ctx.get("prominence")
+                if isinstance(prom, str):
+                    ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
 
                 px = ctx.get("px")
                 if px is None:
@@ -2043,6 +2060,13 @@ class DecisionBus:
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
                 continue
+
+            # --------------------------------------------------
+            # PROMINENCE NORMALISATION (BUS AUTHORITY)
+            # --------------------------------------------------
+            prom = ctx.get("prominence")
+            if isinstance(prom, str):
+                ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
 
             try:
                 redist = evaluate_redistribution(ctx)
