@@ -35,6 +35,49 @@ from datetime import datetime, timedelta, timezone
 import urllib.request, urllib.error
 from engines.live import bank_state
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Settlements Live loop
+# ──────────────────────────────────────────────────────────────────────────────
+
+import threading
+
+
+def _run_2e_once(*, since_days: int | None = None):
+    if since_days is not None:
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        from_iso = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_iso   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        from_iso = None
+        to_iso = None
+
+    # EXACT same calls as main()
+    fetch_cleared_orders_api(from_iso, to_iso)
+    reconcile_orders()
+
+    # metadata fetch stays the same
+    with connect_db(settlements_db_path()) as con:
+        mkt_ids = [r["marketId"] for r in con.execute(
+            "SELECT DISTINCT marketId FROM bf_cleared_orders WHERE marketId IS NOT NULL"
+        )]
+
+    if mkt_ids:
+        fetch_market_metadata_api(mkt_ids[:200])
+
+def start_settlement_loop(period_s: int = 300):
+    def _loop():
+        while True:
+            try:
+                _run_2e_once(since_days=2)
+            except Exception as e:
+                print(f"[settlements][ERR] live loop failed: {e}")
+            time.sleep(period_s)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
 
 
 # 📍 engines/live/settlements.py
@@ -2321,14 +2364,17 @@ def _run_single_settlement_cycle():
     rebuild_kpi_tiles(source="LIVE")
 
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py (append below start_settlement_daemon)
-# 📆 PATCHED: 2025-11-04Z — Continuous winners/form updater
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ============================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def start_winners_daemon(
+# 🧩 ACTION: Make winners processing idempotent
+# 📆 PATCHED: 2026-01-30
+# ============================================================
+
 def start_winners_daemon(interval_s: int = 5):
     """
     Background loop that extracts winners from bf_market_book.resultJson.
-    Schema-safe: does NOT assume runner-level columns.
+    Each CLOSED market is processed exactly once.
     """
 
     def _loop():
@@ -2340,6 +2386,7 @@ def start_winners_daemon(interval_s: int = 5):
                         FROM bf_market_book
                         WHERE status='CLOSED'
                           AND resultJson IS NOT NULL
+                          AND COALESCE(winners_processed,0)=0
                     """).fetchall()
 
                 if not rows:
@@ -2354,12 +2401,10 @@ def start_winners_daemon(interval_s: int = 5):
                         except Exception:
                             continue
 
-                        # Betfair resultJson = list of runners
                         for runner in data:
                             sid = runner.get("selectionId")
                             status = runner.get("status")
 
-                            # Winner = ACTIVE runner with WINNER status
                             if not sid or status not in ("WINNER", "PLACED"):
                                 continue
 
@@ -2387,9 +2432,16 @@ def start_winners_daemon(interval_s: int = 5):
                                     last_seen = datetime('now','utc')
                             """, (mid, str(sid)))
 
+                        # ✅ MARK MARKET AS PROCESSED
+                        con.execute("""
+                            UPDATE bf_market_book
+                               SET winners_processed=1
+                             WHERE marketId=?
+                        """, (mid,))
+
                     con.commit()
 
-                print(f"[winners-daemon] processed {len(rows)} closed markets")
+                print(f"[winners-daemon] processed {len(rows)} new closed markets")
 
             except Exception as e:
                 print(f"[winners-daemon] warn: {e}")
@@ -2399,6 +2451,7 @@ def start_winners_daemon(interval_s: int = 5):
     t = threading.Thread(target=_loop, name="WinnersDaemon", daemon=True)
     t.start()
     print(f"[winners-daemon] started (interval={interval_s}s)")
+
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/settlements.py (__main__ guard)
@@ -2486,7 +2539,7 @@ if __name__ == "__main__":
 # 📆 PATCHED: 2025-11-04Z — auto-start River + Winners daemons
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     try:
-        start_all_settlement_services()
+        start_settlement_loop()
 
         
     except Exception as e:
