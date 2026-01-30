@@ -353,29 +353,18 @@ def process_stoploss(payload: dict, *, max_chase_ticks: int = 3, poll_s: float =
     while chase <= max_chase_ticks:
 
         # ---- place STOPLOSS child ----
-        cref = _ref("STOPLOSS")
-        bet_id, _ = _place(
-            app_key=app_key,
-            token=token,
-            parent_ref=cref,
+        # 🔁 STOPLOSS must enqueue, not place
+        child_id = _place_stoploss_child_now(
+            parent_cor=parent_cor,
+            market_id=market_id,
+            selection_id=selection_id,
+            exit_side=stop_side,
+            exit_odds=odds,
+            parent_stake=stake,
         )
 
-        if bet_id:
-            # insert child row
-            _orders_insert_child_live(
-                parent_cor=parent_cor,
-                market_id=market_id,
-                selection_id=selection_id,
-                side=stop_side,
-                odds=odds,
-                stake=stake,
-                bet_id=bet_id,
-                source="STOPLOSS"
-            )
-
-            # ---- poll for match ----
-            if _poll_matched(app_key, token, bet_id, timeout_s=10, interval_s=poll_s):
-                break  # MATCHED
+        if child_id:
+            break
 
         # ---- missed → cancel + reprice ----
         if bet_id:
@@ -3784,23 +3773,10 @@ def _place_stoploss_child_now(
         parent_id = int(parent["id"])  # or fetched explicitly
         _release_parent_exposure_db(parent_id)
 
+        # 🔁 STOPLOSS must NOT place directly — enqueue child instead
+        child_id = _orders_insert_child_queued(parent_cor)
 
-        app_key, token = _keys()
-        cref = _ref("SL")
-
-        bet_id, _ = _place(
-            app_key,
-            token,
-            market_id,
-            selection_id,
-            exit_side,
-            float(exit_odds),
-            float(parent_stake),
-            cref,
-            persistence="LAPSE"
-        )
-
-        if not bet_id:
+        if not child_id:
             return None
 
         _q_retry(cur, """

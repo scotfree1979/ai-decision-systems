@@ -28,12 +28,58 @@ except Exception:
         "OVERWATCHER": 0,
     }
 
-PROMINENCE_MAP = {
-    "FRONT": 3,
-    "PROMINENT": 2,
-    "MIDFIELD": 1,
-    "HELD_UP": 0,
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside CTX preparation (right after ctx is loaded from route)
+# 📆 PATCHED: 2026-01-29 — Normalize MarketMonitor enums to BUS-safe ints
+# ============================================================================
+
+# ============================================================
+# Canonical numeric enum normalisation (BUS authority)
+# ============================================================
+
+_BAND_MAP = {
+    "LEADING":  3,   # strongest / best position
+    "ACTIVE":   2,
+    "PASSIVE":  1,
+    "IGNORED":  0,
+    "UNKNOWN": -1,
 }
+
+# PROMINENCE is positional / tactical.
+# LEADING is valid here and MUST be mapped.
+_PROMINENCE_MAP = {
+    "LEADING":    3,   # 🔑 critical fix
+    "FRONT":      3,
+    "PROMINENT":  2,
+    "MIDFIELD":   1,
+    "HELD_UP":    0,
+}
+
+def _normalize_ctx_enums(ctx: dict) -> None:
+    """
+    Normalize all enum-like CTX fields to integers.
+
+    HARD GUARANTEES:
+    - Never raises
+    - Never leaves strings behind
+    - Idempotent
+    - BUS-only authority
+    """
+
+    # --------------------
+    # Band (market monitor)
+    # --------------------
+    band = ctx.get("band")
+    if isinstance(band, str):
+        ctx["band"] = _BAND_MAP.get(band.upper(), -1)
+
+    # --------------------
+    # Prominence (position / running style)
+    # --------------------
+    prom = ctx.get("prominence")
+    if isinstance(prom, str):
+        ctx["prominence"] = _PROMINENCE_MAP.get(prom.upper(), 1)
 
 # ======================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -628,21 +674,21 @@ class DecisionBus:
 
                 exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
 
-                repair_plans.append((
-                    "OVERWATCHER",
-                    {
-                        "enter": True,
-                        "engine": "OVERWATCHER",
-                        "role": "CHILD",
-                        "exit_kind": "RESCUE",
-                        "marketId": p["marketId"],
-                        "selectionId": p["selectionId"],
-                        "side": exit_side,
-                        "px": ctx.get("px"),
-                        "why": "lane6_missing_child",
-                    },
-                    ctx,
-                ))
+                from engines.live.child_rescue import ensure_single_child_for_parent
+
+                ensure_single_child_for_parent(
+                    parent_id   = int(p["parent_id"]),
+                    marketId    = p["marketId"],
+                    selectionId = p["selectionId"],
+                    side        = exit_side,
+                    px          = ctx.get("px"),
+                    stake       = float(p["entry_stake"]),
+                    exit_kind   = "RESCUE",
+                    lane        = 6,
+                    engine      = "OVERWATCHER",
+                    reason      = "lane6_missing_child",
+                )
+
 
             # --------------------------------------------------
             # 2️⃣ RISK GAP FILL — MSC_RISK ONLY
@@ -672,9 +718,8 @@ class DecisionBus:
                 # --------------------------------------------------
                 # PROMINENCE NORMALISATION (BUS AUTHORITY)
                 # --------------------------------------------------
-                prom = ctx.get("prominence")
-                if isinstance(prom, str):
-                    ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+                _normalize_ctx_enums(ctx)
+
 
                 ctx = dict(ctx)
                 ctx["risk_parent_id"] = legacy_pid
@@ -982,9 +1027,8 @@ class DecisionBus:
             # --------------------------------------------------
             # PROMINENCE NORMALISATION (BUS AUTHORITY)
             # --------------------------------------------------
-            prom = ctx.get("prominence")
-            if isinstance(prom, str):
-                ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+            _normalize_ctx_enums(ctx)
+
 
             for letter in self.ALLOWED_LEGACY_LETTERS:
                 ctx_l = dict(ctx)
@@ -1079,9 +1123,8 @@ class DecisionBus:
                 # --------------------------------------------------
                 # PROMINENCE NORMALISATION (BUS AUTHORITY)
                 # --------------------------------------------------
-                prom = ctx.get("prominence")
-                if isinstance(prom, str):
-                    ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+                _normalize_ctx_enums(ctx)
+
    
                 # --------------------------------------------------
                 # Snapshot enrichment (pre-engine)
@@ -1193,9 +1236,8 @@ class DecisionBus:
                 # --------------------------------------------------
                 # PROMINENCE NORMALISATION (BUS AUTHORITY)
                 # --------------------------------------------------
-                prom = ctx.get("prominence")
-                if isinstance(prom, str):
-                    ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+                _normalize_ctx_enums(ctx)
+
 
                 px = ctx.get("px")
                 if px is None:
@@ -1954,6 +1996,13 @@ class DecisionBus:
         # 🔗 CRITICAL: bind refreshed CTX map to BUS execution view
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
 
+        # ------------------------------------------------------------------
+        # 🔒 HARD INVARIANT: normalize ALL route CTX enums ONCE per tick
+        # ------------------------------------------------------------------
+        for ctx in self._route_ctx_map.values():
+            _normalize_ctx_enums(ctx)
+
+
         self._ctx_refresh_times.append(dt)
 
         print(
@@ -2064,9 +2113,8 @@ class DecisionBus:
             # --------------------------------------------------
             # PROMINENCE NORMALISATION (BUS AUTHORITY)
             # --------------------------------------------------
-            prom = ctx.get("prominence")
-            if isinstance(prom, str):
-                ctx["prominence"] = PROMINENCE_MAP.get(prom.upper(), 1)
+            _normalize_ctx_enums(ctx)
+
 
             try:
                 redist = evaluate_redistribution(ctx)
@@ -2241,6 +2289,16 @@ class DecisionBus:
 
             for eng, plan, ctx in plans:
 
+                # ------------------------------------------------------------------
+                # 🔒 CRITICAL: RE-BIND CTX TO ROUTE SNAPSHOT (AUTHORITATIVE)
+                # ------------------------------------------------------------------
+                mid = plan.get("marketId") or ctx.get("marketId")
+                sid = plan.get("selectionId") or ctx.get("selectionId")
+
+                if mid and sid:
+                    route_ctx = self._route_ctx_map.get((mid, sid))
+                    if route_ctx:
+                        ctx = route_ctx
                 
                 # --------------------------------------------------
                 # Execution enrichment (ONLY missing execution fields)
@@ -2746,12 +2804,14 @@ class DecisionBus:
                             f"{p['marketId']}:{p['selectionId']}"
                         )
 
-                # Hedge ticks (placement invariant)
-                if "target_ticks" not in p:
-                    raise RuntimeError(
-                        f"[BUS] missing target_ticks for "
-                        f"{p['marketId']}:{p['selectionId']}"
-                    )
+                # Hedge ticks invariant — PARENT ONLY
+                if p.get("role") != "CHILD":
+                    if "target_ticks" not in p:
+                        raise RuntimeError(
+                            f"[BUS] missing target_ticks for "
+                            f"{p['marketId']}:{p['selectionId']}"
+                        )
+
 
                 # Required exposure (BUS-owned, already computed)
                 if "required_exposure" not in p:
