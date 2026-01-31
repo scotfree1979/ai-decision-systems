@@ -3875,127 +3875,135 @@ def _place_stoploss_child_now(
 
 
 
-def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
-    """
-    Belt-and-braces closer:
-      - For markets with off_at_utc <= now - grace_min, cancel any LIVE QUEUED/PLACED entries.
-      - For those markets, mark still-open parents as SETTLED (so they stop counting as 'open risk').
-    Returns (n_cancelled, n_settled).
-    """
-    try:
-        # 1) Which markets are FINISHED — Phase-0 authoritative logic
-        from datetime import datetime, timezone
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _sweep_close_finished_markets(
+# 🧩 ACTION: REPLACE FUNCTION BODY
+# 📆 PATCHED: 2026-01-31 — Phase-0-aligned one-shot market sweep
+#
+# RULES (CANONICAL):
+#   1) TODAY ONLY — markets with LIVE parents opened today (UTC)
+#   2) TIME GATE  — sweep only if (now - off_at) >= 360 seconds
+#   3) ONE-SHOT   — never sweep a market twice (exposure_released guard)
+# ======================================================================
 
+def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
+    """
+    Phase-0 aligned sweep.
+
+    Cancels unmatched parents and settles matched parents
+    ONLY for markets that:
+      • have LIVE parents opened today (UTC)
+      • are ≥ 6 minutes past off
+      • have NOT already been swept
+
+    Returns (n_cancelled, n_settled)
+    """
+
+    try:
+        from datetime import datetime, timezone
+        import sqlite3
+        from engines.config_paths import open_auto_db, connect_db
 
         now = datetime.now(timezone.utc)
 
-        bdb = connect_db(ro=True)
-        bdb.row_factory = sqlite3.Row
+        # --------------------------------------------------
+        # 1️⃣ Identify TODAY markets with LIVE parents
+        # --------------------------------------------------
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
 
-        rows = []
-        for r in _q_retry(bdb, """
-            SELECT marketId, marketStartTime
-            FROM bets
-            WHERE marketStartTime IS NOT NULL
-        """).fetchall():
+        rows = con.execute("""
+            SELECT DISTINCT
+                p.marketId,
+                b.marketStartTime
+            FROM orders p
+            JOIN bets b ON b.marketId = p.marketId
+            WHERE p.mode='LIVE'
+              AND p.role='PARENT'
+              AND date(p.opened_at)=date('now','utc')
+              AND COALESCE(p.exposure_released,0)=0
+        """).fetchall()
 
-            off = datetime.fromisoformat(
-                r["marketStartTime"].replace("Z", "+00:00")
-            )
+        con.close()
+
+        if not rows:
+            return (0, 0)
+
+        # --------------------------------------------------
+        # 2️⃣ Apply −360s time gate (Phase-0 rule)
+        # --------------------------------------------------
+        sweep_mids = []
+
+        for r in rows:
+            try:
+                off = datetime.fromisoformat(
+                    r["marketStartTime"].replace("Z", "+00:00")
+                )
+            except Exception:
+                continue
 
             secs = (off - now).total_seconds()
 
-            # ✅ EXACT Phase-0 rule:
-            # market finished only if ≥ 6 minutes AFTER off
+            # EXACT RULE: market finished only if ≥ 6 min AFTER off
             if secs <= -360:
-                rows.append({"marketId": r["marketId"]})
+                sweep_mids.append(str(r["marketId"]))
 
-        bdb.close()
-
-        mids = [str(r["marketId"]) for r in rows] if rows else []
-        if not mids:
+        if not sweep_mids:
             return (0, 0)
 
-        # 2) cancel unmatched entries; 3) settle open parents
-        con = _orders_conn(); con.row_factory = sqlite3.Row
-        qph = ",".join("?" * len(mids))
+        # --------------------------------------------------
+        # 3️⃣ One-shot sweep (DB-authoritative)
+        # --------------------------------------------------
+        con = open_auto_db(rw=True)
+        con.row_factory = sqlite3.Row
+        qph = ",".join("?" * len(sweep_mids))
 
-        # 2) CANCEL QUEUED/PLACED
-        n_cancel = _q_retry(con, f"""
-            UPDATE orders SET
-                entry_status='CANCELLED',
-                closed_at=COALESCE(closed_at, datetime('now','utc')),
-                mode='LIVE'
-            WHERE mode='LIVE'
-              AND marketId IN ({qph})
-              AND UPPER(COALESCE(entry_status,'')) IN ('QUEUED','PLACED')
-        """, tuple(mids)).rowcount
+        # A) CANCEL unmatched parents
+        n_cancel = con.execute(f"""
+            UPDATE orders
+               SET entry_status='CANCELLED',
+                   closed_at=COALESCE(closed_at, datetime('now','utc'))
+             WHERE mode='LIVE'
+               AND role='PARENT'
+               AND marketId IN ({qph})
+               AND UPPER(COALESCE(entry_status,'')) IN ('QUEUED','PLACED')
+               AND COALESCE(exposure_released,0)=0
+        """, tuple(sweep_mids)).rowcount
 
-        # 3) SETTLE OPEN PARENTS
-        n_settle = _q_retry(con, f"""
-            UPDATE orders SET
-                exit_status='SETTLED',
-                closed_at=COALESCE(closed_at, datetime('now','utc')),
-                mode='LIVE'
-            WHERE mode='LIVE'
-              AND marketId IN ({qph})
-              AND COALESCE(role, CASE WHEN hedge_of IS NULL OR hedge_of='' THEN 'PARENT' ELSE 'CHILD' END)='PARENT'
-              AND UPPER(COALESCE(entry_status,''))='MATCHED'
-              AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
-        """, tuple(mids)).rowcount
+        # B) SETTLE matched parents
+        n_settle = con.execute(f"""
+            UPDATE orders
+               SET exit_status='SETTLED',
+                   closed_at=COALESCE(closed_at, datetime('now','utc')),
+                   exposure_released=1
+             WHERE mode='LIVE'
+               AND role='PARENT'
+               AND marketId IN ({qph})
+               AND UPPER(COALESCE(entry_status,''))='MATCHED'
+               AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
+        """, tuple(sweep_mids)).rowcount
 
-        con.commit(); con.close()
+        con.commit()
+        con.close()
 
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: "AUTO_SETTLED"
-# 📆 PATCHED: 2026-02-10 — Settlement EventSync C: AUTO_SETTLED
-# ============================================================================
-
-        # -----------------------------------------------------------------
-        # EVENTSYNC: C — AUTO-SETTLED PARENTS
-        # -----------------------------------------------------------------
-        if n_settle:
-            try:
-                con2 = _orders_conn(); con2.row_factory = sqlite3.Row
-                rows2 = _q_retry(con2, f"""
-                    SELECT customerOrderRef AS cor, marketId, selectionId,
-                           exit_odds, exit_stake, realized_pnl
-                      FROM orders
-                     WHERE mode='LIVE'
-                       AND marketId IN ({qph})
-                       AND UPPER(exit_status)='SETTLED'
-                """, tuple(mids)).fetchall()
-                con2.close()
-
-                for r2 in rows2:
-                    _emit_settlement_router_event(
-                        "AUTO_SETTLED",
-                        cor=r2["cor"],
-                        market_id=r2["marketId"],
-                        selection_id=r2["selectionId"],
-                        exit_odds=r2["exit_odds"],
-                        exit_stake=r2["exit_stake"],
-                        realized=r2["realized_pnl"],
-                    )
-            except Exception as e:
-                _log_event("WARN","live_router",f"AUTO_SETTLED EventSync failed: {e}")
-
-# === PATCH END ==============================================================
-
-
-            _log_event(
-                "INFO", "live_router",
-                f"_sweep_close_finished_markets: cancelled={n_cancel} "
-                f"settled={n_settle} mids={len(mids)}"
-            )
+        _log_event(
+            "INFO",
+            "live_router",
+            f"_sweep_close_finished_markets: "
+            f"cancelled={n_cancel} settled={n_settle} markets={len(sweep_mids)}"
+        )
 
         return (int(n_cancel or 0), int(n_settle or 0))
 
     except Exception as e:
-        _log_event("ERROR", "live_router", f"sweep_close_finished_markets error: {e}")
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"sweep_close_finished_markets error: {e}"
+        )
         return (0, 0)
+
 
 
 

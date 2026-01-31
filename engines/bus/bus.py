@@ -983,7 +983,13 @@ class DecisionBus:
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
 
-
+        # 🔒 HARD BUS INVARIANT
+        # Do not evaluate ANY engine without execution price
+        self._route_ctx_map = {
+            (mid, sid): ctx
+            for (mid, sid), ctx in self._route_ctx_map.items()
+            if ctx.get("px") is not None
+        }
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
         # --------------------------------------------------

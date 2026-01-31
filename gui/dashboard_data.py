@@ -82,6 +82,10 @@ def get_dashboard_markets(con):
     """
     return _df(con, q)
 
+def rebuild_kpi_tiles(*, source="LIVE"):
+    return kpi_tiles(source=source)
+
+
 # === PATCH START ===
 # 📍 TARGET: gui/dashboard_data.py:update_live_matched_odds
 # 📆 PATCHED: 2025-10-18Z — replace bad import with direct Betfair JSON-RPC call

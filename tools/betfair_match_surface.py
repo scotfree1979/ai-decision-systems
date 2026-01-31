@@ -135,6 +135,71 @@ def query_bet_match_surface(*, bet_id: str, app_key: str, token: str) -> dict:
     # this is literally the same logic you already wrote,
     # just scoped to one bet_id and returning a dict
 
+def get_direction_confidence(marketId: str, selectionId: str) -> float:
+    """
+    Return directional confidence for a runner based on
+    completed parent→child hedge cycles.
+
+    Confidence is derived from imbalance between:
+      - LAY->BACK cycles (drift)
+      - BACK->LAY cycles (steam)
+
+    Returns:
+        0.0 → no confirmation / choppy
+        1.0 → fully one-sided trend
+    """
+
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+
+    con = sqlite3.connect(autoscalp_db())
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    rows = cur.execute(
+        """
+        SELECT
+            p.id            AS parent_id,
+            p.side          AS parent_side,
+            c.side          AS child_side
+        FROM orders p
+        JOIN orders c
+          ON c.hedge_of = p.id
+        WHERE p.role = 'PARENT'
+          AND c.role = 'CHILD'
+          AND p.marketId = ?
+          AND p.selectionId = ?
+          AND p.entry_status = 'MATCHED'
+          AND c.entry_status = 'MATCHED'
+          AND c.exit_kind = 'HEDGE'
+          AND date(p.opened_at) = date('now','utc')
+        """,
+        (marketId, selectionId)
+    ).fetchall()
+
+    con.close()
+
+    if not rows:
+        return 0.0
+
+    n_lb = 0  # LAY -> BACK
+    n_bl = 0  # BACK -> LAY
+
+    for r in rows:
+        p_side = (r["parent_side"] or "").upper()
+        c_side = (r["child_side"] or "").upper()
+
+        if p_side == "LAY" and c_side == "BACK":
+            n_lb += 1
+        elif p_side == "BACK" and c_side == "LAY":
+            n_bl += 1
+
+    total = n_lb + n_bl
+    if total == 0:
+        return 0.0
+
+    imbalance_ratio = abs(n_lb - n_bl) / total
+    return round(min(1.0, imbalance_ratio), 3)
 
 
 # --------------------------------------------------
