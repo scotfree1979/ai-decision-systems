@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import urllib.request, urllib.error
 from engines.live import bank_state
+from engines.live.live_router import _release_parent_exposure_db
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Settlements Live loop
@@ -294,7 +295,7 @@ def close_settled_markets() -> int:
     closed = 0
 
     from engines.config_paths import auto_conn as _auto_conn
-    from engines.live import bank_state   # ← ADD
+
 
     with connect_db(set_db) as s:
         o = _auto_conn(rw=True)
@@ -363,7 +364,7 @@ def close_settled_markets() -> int:
 # 📆 PATCHED: 2025-12-31 — force cancel + release exposure
 # ======================================================================
 
-from engines.live import bank_state
+
 from engines.config_paths import auto_conn as _auto_conn
 import sqlite3
 
@@ -374,19 +375,16 @@ def force_cancel_all_for_settled_markets() -> int:
     For every market that is CLOSED:
       - cancel ALL parents
       - cancel ALL children
-      - release ALL reserved exposure via BankState
 
-    This guarantees:
-      • zero open orders
-      • zero reserved exposure
-      • budget unblocked
+    NOTE:
+    Exposure release is handled by router lifecycle and settlement reconciliation.
     """
 
     released = 0
     cancelled = 0
 
     from engines.config_paths import auto_conn
-    from engines.live import bank_state
+ 
     import sqlite3
 
     # AUTO DB (orders)
@@ -1677,6 +1675,20 @@ def reconcile_orders() -> Tuple[int,int]:
 # - Idempotent and safe to rerun
 # ============================================================================
 
+                # 📍 TARGET: engines/live/settlements.py
+                # 🔎 CONTEXT: inside reconcile_orders() → for row in bf_cleared_orders
+                # 🛠 ACTION:
+                #   - Mark SETTLED only if entry_status == MATCHED
+                #   - Delegate exposure release to router
+                #   - Emit settlement event ONLY if DB mutation occurred
+                #
+                # INVARIANTS:
+                # - settlements NEVER marks MATCHED
+                # - settlements NEVER touches BankState lifecycle
+                # - settlements ONLY stamps SETTLED
+                # - router owns exposure release (_release_parent_exposure_db)
+                # ======================================================================================================
+
                 o.execute("""
                     UPDATE orders
                        SET realized_pnl = ?,
@@ -1684,6 +1696,7 @@ def reconcile_orders() -> Tuple[int,int]:
                            exit_status  = 'SETTLED',
                            closed_at    = COALESCE(closed_at, ?)
                      WHERE bf_bet_id = ?
+                       AND UPPER(entry_status) = 'MATCHED'
                 """, (
                     profit,
                     profit,
@@ -1691,42 +1704,49 @@ def reconcile_orders() -> Tuple[int,int]:
                     betId
                 ))
 
-# === PATCH END ==============================================================
-
-
-                record_playbook_pattern(order_row=row, pnl_row=row, oc_snapshot=None)
-
-                # ======================================================================
-                # 📍 PATCH 2 — EventSync for final Betfair settlement
-                # 🔎 SEARCH: "o.execute("""UPDATE orders"
-                # 📆 PATCHED: 2026-02-10
-                # ======================================================================
-
-                try:
-                    _emit_settlement_event("order_settled", {
-                        "betId": betId,
-                        "marketId": row["marketId"],
-                        "selectionId": row["selectionId"],
-                        "profit": float(profit or 0.0),
-                        "commission": row["commission"],
-                        "settled_at": row["settledDate"],
-                    })
-                except Exception as e:
-                    print(f"[EventSync][settlement] emit failed for betId={betId}: {e}")
-
-
+                # Continue only if a row was actually settled
                 if o.total_changes:
-                    updated += 1
 
+                    # --------------------------------------------------
+                    # Delegate exposure release to router (idempotent)
+                    # --------------------------------------------------
                     try:
-                        from engines.mastery import mastery_policy as mp
-                        mp.record_outcome(
-                            str(betId),
-                            {"marketId": row["marketId"], "selectionId": row["selectionId"]},
-                            {"realized_pnl": float(profit or 0.0)}
-                        )
+                        prow = o.execute("""
+                            SELECT id
+                              FROM orders
+                             WHERE bf_bet_id = ?
+                               AND role = 'PARENT'
+                               AND exit_status = 'SETTLED'
+                             LIMIT 1
+                        """, (betId,)).fetchone()
+
+                        if prow:
+                            _release_parent_exposure_db(int(prow["id"]))
+
                     except Exception as e:
-                        print(f"[SETTLE] mastery warn: {e}")
+                        print(
+                            f"[settlements][WARN] router exposure delegate failed "
+                            f"betId={betId}: {e}"
+                        )
+
+                    # --------------------------------------------------
+                    # Emit final settlement event (DB-confirmed)
+                    # --------------------------------------------------
+                    try:
+                        _emit_settlement_event("order_settled", {
+                            "betId": betId,
+                            "marketId": row["marketId"],
+                            "selectionId": row["selectionId"],
+                            "profit": float(profit or 0.0),
+                            "commission": row["commission"],
+                            "settled_at": row["settledDate"],
+                        })
+                    except Exception as e:
+                        print(
+                            f"[EventSync][settlement] emit failed "
+                            f"betId={betId}: {e}"
+                        )
+
 
             # Compute runner-day rollups
             s.execute("""
@@ -1872,7 +1892,7 @@ def record_playbook_pattern(order_row, pnl_row, oc_snapshot=None):
         con.close()
     except Exception as e:
         try:
-            _q_retry(__settle_conn(), "INSERT INTO events(ts,level,source,message) VALUES(datetime('now','utc'),'ERROR','playbook',?)",
+            _q_retry(_settle_conn(), "INSERT INTO events(ts,level,source,message) VALUES(datetime('now','utc'),'ERROR','playbook',?)",
                      (f"record_playbook_pattern error: {e}",))
         except Exception:
             pass

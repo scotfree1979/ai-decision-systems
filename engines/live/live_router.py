@@ -936,65 +936,87 @@ def _router_child_recovery_sweep():
 
     con.close()
 
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ^def _sync_parent_matches
-#    INSERT this helper just below the existing _sync_parent_matches/_sync_hedge_matches
-# 📆 PATCHED: 2025-10-03T12:15Z
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔎 SEARCH: def _sync_all_matches(limit: int = 100) -> int:
+# 🛠 ACTION: REPLACE FUNCTION BODY
+# 📆 PATCHED: 2026-03-26 — Enforce canonical MATCHED handler (no direct SQL)
+#
+# WHY:
+# - MATCHED parents MUST go through _orders_update_parent_matched()
+# - Direct SQL MATCHED writes bypass child creation (root cause)
+# - This makes MATCHED a single-writer invariant
+# ======================================================================================================
+
 def _sync_all_matches(limit: int = 100) -> int:
     """
-    Sweep both PARENTS and CHILDREN stuck in PLACED state and flip to MATCHED if
-    Betfair shows sizeMatched > 0. Also stamps entry_matched_odds/stake.
-    Returns count of rows flipped.
+    Sweep PARENTS stuck in PLACED state and reconcile MATCHED status
+    using the canonical parent-matched handler.
+
+    IMPORTANT:
+    - This function MUST NOT write entry_status='MATCHED' directly
+    - All MATCHED transitions delegate to _orders_update_parent_matched()
     """
+
     fixed = 0
+
     try:
-        con = _orders_conn(); con.row_factory = sqlite3.Row
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
         cur = con.cursor()
+
         rows = _q_retry(cur, """
-            SELECT id, customerOrderRef, entry_bet_id, role
+            SELECT
+                customerOrderRef,
+                entry_bet_id
               FROM orders
              WHERE mode='LIVE'
+               AND role='PARENT'
                AND entry_status='PLACED'
                AND entry_bet_id IS NOT NULL
              ORDER BY opened_at DESC
              LIMIT ?
-        """, (limit,)).fetchall()
+        """, (int(limit),)).fetchall()
+
         con.close()
+
     except Exception as e:
         _log_event("ERROR", "live_router", f"sync_all_matches fetch failed: {e}")
         return 0
 
-    if not rows: return 0
+    if not rows:
+        return 0
 
     for r in rows:
         try:
-            bid = str(r["entry_bet_id"])
-            status = get_bet_status(bid)
-            if status == "EXECUTION_COMPLETE":
-                app_key, token = _keys()
-                avg_odds, matched_size = _fetch_avg_match(app_key, token, bid)
-                con2 = _orders_conn(); cur2 = con2.cursor()
-                _q_retry(cur2, """
-                    UPDATE orders
-                       SET entry_status='MATCHED',
-                           entry_matched_odds=COALESCE(entry_matched_odds, ?),
-                           entry_matched_stake=COALESCE(entry_matched_stake, ?)
-                     WHERE id=?
-                """, (avg_odds if avg_odds>0 else None,
-                      matched_size if matched_size>0 else None,
-                      int(r["id"])))
-                con2.commit(); con2.close()
-                _log_event("INFO","live_router",
-                           f"[SYNC-ALL] flipped {r['role']} ref={r['customerOrderRef']} to MATCHED")
-                fixed += 1
+            bet_id = str(r["entry_bet_id"])
+            status = get_bet_status(bet_id)
+
+            if status != "EXECUTION_COMPLETE":
+                continue
+
+            parent_cor = str(r["customerOrderRef"])
+
+            # 🔒 CANONICAL MATCHED HANDLER (guarantees CHILD)
+            _orders_update_parent_matched(parent_cor, bet_id)
+
+            _log_event(
+                "INFO",
+                "live_router",
+                f"[SYNC-ALL] parent matched via canonical handler ref={parent_cor}"
+            )
+
+            fixed += 1
+
         except Exception as e:
-            _log_event("ERROR", "live_router",
-                       f"sync_all_matches error ref={r['customerOrderRef']}: {e}")
+            _log_event(
+                "ERROR",
+                "live_router",
+                f"sync_all_matches error ref={r['customerOrderRef']}: {e}"
+            )
+
     return fixed
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DB helpers (AutoScalp GUI DB, WAL, retries)
