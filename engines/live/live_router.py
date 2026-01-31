@@ -3861,15 +3861,33 @@ def _sweep_close_finished_markets(grace_min: int = 15) -> tuple[int, int]:
     Returns (n_cancelled, n_settled).
     """
     try:
-        # 1) Which markets are 'finished' (bets.db schedule, UTC)
+        # 1) Which markets are FINISHED — Phase-0 authoritative logic
+        from datetime import datetime, timezone
+
+
+        now = datetime.now(timezone.utc)
+
         bdb = connect_db(ro=True)
         bdb.row_factory = sqlite3.Row
-        rows = _q_retry(bdb,
-            "SELECT marketId FROM markets_schedule "
-            "WHERE datetime(off_at_utc) <= datetime('now','utc', ?) "
-            "AND date(off_at_utc)=date('now','utc')",
-            (f"+{int(grace_min)} minutes",)
-        ).fetchall()
+
+        rows = []
+        for r in _q_retry(bdb, """
+            SELECT marketId, marketStartTime
+            FROM bets
+            WHERE marketStartTime IS NOT NULL
+        """).fetchall():
+
+            off = datetime.fromisoformat(
+                r["marketStartTime"].replace("Z", "+00:00")
+            )
+
+            secs = (off - now).total_seconds()
+
+            # ✅ EXACT Phase-0 rule:
+            # market finished only if ≥ 6 minutes AFTER off
+            if secs <= -360:
+                rows.append({"marketId": r["marketId"]})
+
         bdb.close()
 
         mids = [str(r["marketId"]) for r in rows] if rows else []

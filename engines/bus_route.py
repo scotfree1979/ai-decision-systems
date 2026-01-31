@@ -40,6 +40,65 @@ ROUTE_SPLIT = {
     "OVERWATCHER": 5,
 }
 
+def _order_runner_pool_by_market_time(pairs):
+    """
+    Reorder (marketId, selectionId) pairs so that:
+    - All runners from the same market are contiguous
+    - Markets are ordered by earliest marketStartTime first
+    """
+
+    from engines.config_paths import connect_db
+    import sqlite3
+    from datetime import datetime, timezone
+
+    if not pairs:
+        return []
+
+    # Group runners by market
+    by_market = {}
+    for mid, sid in pairs:
+        by_market.setdefault(str(mid), []).append((str(mid), str(sid)))
+
+    # Load market start times (authoritative: bets.db)
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+
+    market_times = {}
+    try:
+        for mid in by_market.keys():
+            row = con.execute(
+                """
+                SELECT marketStartTime
+                FROM bets
+                WHERE marketId = ?
+                LIMIT 1
+                """,
+                (mid,),
+            ).fetchone()
+
+            if row and row["marketStartTime"]:
+                off = datetime.fromisoformat(
+                    row["marketStartTime"].replace("Z", "+00:00")
+                )
+                market_times[mid] = off
+            else:
+                # Push unknown markets to the end safely
+                market_times[mid] = datetime.max.replace(tzinfo=timezone.utc)
+    finally:
+        con.close()
+
+    # Sort markets by off time
+    ordered_markets = sorted(
+        market_times.items(),
+        key=lambda x: x[1]
+    )
+
+    # Flatten runners market-by-market
+    ordered_pairs = []
+    for mid, _off in ordered_markets:
+        ordered_pairs.extend(by_market.get(mid, []))
+
+    return ordered_pairs
 
 
 def _build_runner_pool():
@@ -108,7 +167,9 @@ class BusRouteSnapshot:
 
     def build_route(self):
         self.route_id += 1
-        self.runner_pool = list(get_root_ctx_runner_pairs())
+        raw_pairs = list(get_root_ctx_runner_pairs())
+        self.runner_pool = _order_runner_pool_by_market_time(raw_pairs)
+
 
         if not self.runner_pool:
             self.bus_stops = {}

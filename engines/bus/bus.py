@@ -672,6 +672,10 @@ class DecisionBus:
                 if not ctx:
                     continue
 
+                ctx_l = dict(ctx)
+                _normalize_ctx_enums(ctx_l)
+
+
                 exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
 
                 from engines.live.child_rescue import ensure_single_child_for_parent
@@ -681,7 +685,7 @@ class DecisionBus:
                     marketId    = p["marketId"],
                     selectionId = p["selectionId"],
                     side        = exit_side,
-                    px          = ctx.get("px"),
+                    px          = ctx_l.get("px"),
                     stake       = float(p["entry_stake"]),
                     exit_kind   = "RESCUE",
                     lane        = 6,
@@ -1032,6 +1036,7 @@ class DecisionBus:
 
             for letter in self.ALLOWED_LEGACY_LETTERS:
                 ctx_l = dict(ctx)
+                _normalize_ctx_enums(ctx_l)
                 ctx_l["letter"] = letter
 
                 try:
@@ -1078,20 +1083,26 @@ class DecisionBus:
                 # RISK CYCLE IDENTITY (AUTHORITATIVE)
                 # Each LEGACY parent × anchor_px is a distinct cycle
                 # --------------------------------------------------
-                ctx["risk_parent_id"] = parent_id
-                ctx["risk_anchor_px"] = anchor_px
+                ctx_l = dict(ctx)
+                ctx_l["risk_parent_id"] = parent_id
+                ctx_l["risk_anchor_px"] = anchor_px
 
+                # --------------------------------------------------
+                # PROMINENCE NORMALISATION (BUS AUTHORITY)
+                # --------------------------------------------------
+                _normalize_ctx_enums(ctx_l)
 
                 try:
-                    r = risc.tick(ctx)
+                    r = risc.tick(ctx_l)
                     if r and r.get("enter"):
                         plan = dict(r)
                         plan["engine"] = "MSC_RISK"
-                        plans.append(("MSC_RISK", plan, ctx))
+                        plans.append(("MSC_RISK", plan, ctx_l))
                         engine_report["MSC_RISK"]["fired"] += 1
                         lane_counts[2] += 1
                 except Exception:
                     _record_reason(engine_report, "MSC_RISK", "tick_error")
+
 
         # --------------------------------------------------
         # 🟥 LANE 3 — MSC_INPLAY (BUS-ROUTED + SNAPSHOT-ENRICHED)
@@ -1120,65 +1131,56 @@ class DecisionBus:
                 if not ctx:
                     continue
 
-                # --------------------------------------------------
-                # PROMINENCE NORMALISATION (BUS AUTHORITY)
-                # --------------------------------------------------
-                _normalize_ctx_enums(ctx)
+                ctx_l = dict(ctx)
 
-   
+
                 # --------------------------------------------------
                 # Snapshot enrichment (pre-engine)
                 # --------------------------------------------------
                 intel = snap_by_sid.get(sid)
                 if intel:
-                    ctx.update({
-                        "fav_rank":           intel.get("fav_rank"),
-                        "success":            intel.get("success"),
-                        "weight":             intel.get("weight"),
-                        "drift_ratio":        intel.get("drift_ratio"),
-                        "drift_pct":          intel.get("drift_pct"),
-                        "actual_drift_pct":   intel.get("actual_drift_pct"),
-                        "reversal_flag":      intel.get("reversal_flag"),
-                        "mto_minutes":        intel.get("mto_minutes"),
-                        "pos_inplay":         intel.get("pos_inplay"),
-                        # 🔑 REQUIRED BY InPlayEngine (THIS WAS MISSING)
-                        "inplay_move_class":      intel.get("move"),
-                        "inplay_rank_base_px":    intel.get("base_px"),
-                        "inplay_pnl_if_win":      intel.get("pnl_if_win"),
+                    ctx_l.update({
+                        "fav_rank":            intel.get("fav_rank"),
+                        "success":             intel.get("success"),
+                        "weight":              intel.get("weight"),
+                        "drift_ratio":         intel.get("drift_ratio"),
+                        "drift_pct":           intel.get("drift_pct"),
+                        "actual_drift_pct":    intel.get("actual_drift_pct"),
+                        "reversal_flag":       intel.get("reversal_flag"),
+                        "mto_minutes":         intel.get("mto_minutes"),
+                        "pos_inplay":          intel.get("pos_inplay"),
+                        "inplay_move_class":   intel.get("move"),
+                        "inplay_rank_base_px": intel.get("base_px"),
+                        "inplay_pnl_if_win":   intel.get("pnl_if_win"),
                     })
 
-                # Must have live odds (BUS dynamic refresh responsibility)
-                if ctx.get("px") is None:
-                    continue
-
                 # --------------------------------------------------
-                # OPTIONAL INTEL — ENGINE REQUESTED (BEFORE tick)
+                # OPTIONAL INTEL — ENGINE REQUESTED
                 # --------------------------------------------------
-                if ctx.get("_request_intel"):
+                if ctx_l.get("_request_intel"):
                     opt = self._get_optional_intel(
                         engine="MSC_INPLAY",
-                        ctx=ctx,
+                        ctx=ctx_l,
                     )
                     if opt:
-                        ctx.update(opt)
+                        ctx_l.update(opt)
 
                 # --------------------------------------------------
-                # SINGLE engine evaluation (NO double-tick)
+                # PROMINENCE NORMALISATION (BUS AUTHORITY)
                 # --------------------------------------------------
+                _normalize_ctx_enums(ctx_l)
+
                 try:
-                    p = inplay.tick(ctx)
+                    p = inplay.tick(ctx_l)
                     if p and p.get("enter"):
                         plan = dict(p)
                         plan["engine"] = "MSC_INPLAY"
-                        plans.append(("MSC_INPLAY", plan, ctx))
+                        plans.append(("MSC_INPLAY", plan, ctx_l))
                         engine_report["MSC_INPLAY"]["fired"] += 1
                         lane_counts[3] += 1
                 except Exception:
-                    _record_reason(
-                        engine_report,
-                        "MSC_INPLAY",
-                        "tick_error",
-                    )
+                    _record_reason(engine_report, "MSC_INPLAY", "tick_error")
+
 
 
 
@@ -1190,19 +1192,27 @@ class DecisionBus:
         from engines.bus_route import get_exploratory_active_parent_pairs
 
         exclusions = get_exploratory_active_parent_pairs()
-
+ 
         exp = self.engines.get("MSC_EXPLORATORY")
+
         if exp:
             for (mid, sid), ctx in self._route_ctx_map.items():
                 if (mid, sid) in exclusions or ctx.get("px") is None:
                     continue
 
+                ctx_l = dict(ctx)
+
+                # --------------------------------------------------
+                # PROMINENCE NORMALISATION (BUS AUTHORITY)
+                # --------------------------------------------------
+                _normalize_ctx_enums(ctx_l)
+
                 try:
-                    r = exp.tick(ctx)
+                    r = exp.tick(ctx_l)
                     if r and r.get("enter"):
                         plan = dict(r)
                         plan["engine"] = "MSC_EXPLORATORY"
-                        plans.append(("MSC_EXPLORATORY", plan, ctx))
+                        plans.append(("MSC_EXPLORATORY", plan, ctx_l))
                         engine_report["MSC_EXPLORATORY"]["fired"] += 1
                         lane_counts[4] += 1
                 except Exception:
@@ -1233,15 +1243,17 @@ class DecisionBus:
                     except Exception:
                         continue
 
+                ctx_l = dict(ctx)
+
                 # --------------------------------------------------
                 # PROMINENCE NORMALISATION (BUS AUTHORITY)
                 # --------------------------------------------------
-                _normalize_ctx_enums(ctx)
+                _normalize_ctx_enums(ctx_l)
 
-
-                px = ctx.get("px")
+                px = ctx_l.get("px")
                 if px is None:
                     continue
+
 
                 # 🔑 authoritative parent fields from helper
                 entry_odds  = p["entry_odds"]
