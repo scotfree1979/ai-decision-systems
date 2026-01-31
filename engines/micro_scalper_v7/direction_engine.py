@@ -21,6 +21,76 @@ Produces:
 
 from typing import Dict, Any
 import math
+# Market reality (direction)
+from tools.betfair_runner_trend_surface import get_runner_trend
+
+# Execution reality (confidence)
+from tools.betfair_match_surface import get_direction_confidence
+
+# ─────────────────────────────────────────────────────────────
+# BETFAIR DIRECTION AND CONFIDENCE HELPERS
+# ─────────────────────────────────────────────────────────────
+
+
+def resolve_direction(ctx: Dict[str, Any], fallback: str) -> str:
+    """
+    Final direction authority.
+
+    Priority:
+      1) Betfair Runner Trend Surface
+      2) MSC feature belief (fallback only)
+    """
+
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+
+    if not mid or not sid:
+        return fallback
+
+    trend = get_runner_trend(mid, sid)
+
+    trend_dir  = trend["direction"]
+    trend_conf = float(trend.get("confidence", 0.0))
+
+    # If market has meaningfully moved, trust it
+    if trend_conf >= 0.15:
+        return trend_dir
+
+    return fallback
+
+def resolve_mode(
+    *,
+    base_mode: str,
+    win_prob: float,
+    ctx: Dict[str, Any],
+) -> str:
+    """
+    Mode governor.
+
+    Match surface does NOT change direction.
+    It changes how confident we act (mode).
+    """
+
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+
+    if not mid or not sid:
+        return base_mode
+
+    conf = get_direction_confidence(mid, sid)
+    # Expected: 0.0 → 1.0 (based on matched fraction, volume, consistency)
+
+    # Strong confirmation → push aggressive
+    if conf >= 0.65:
+        return "AGGRESSIVE"
+
+    # Weak confirmation → pull conservative
+    if conf <= 0.25:
+        return "CONSERVATIVE"
+
+    # Otherwise keep MSC-derived mode
+    return base_mode
+
 
 # ─────────────────────────────────────────────────────────────
 # SAFE HELPERS
@@ -173,10 +243,26 @@ def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
         }
     """
     win_prob = compute_win_probability(ctx)
-    direction = compute_direction(win_prob, ctx)
-    mode = compute_mode(win_prob, ctx)
+
+    # 1️⃣ MSC belief
+    belief_direction = compute_direction(win_prob, ctx)
+
+    # 2️⃣ Market reality overrides belief
+    direction = resolve_direction(ctx, belief_direction)
+
+    # 3️⃣ MSC base mode
+    base_mode = compute_mode(win_prob, ctx)
+
+    # 4️⃣ Match surface governs confidence → mode
+    mode = resolve_mode(
+        base_mode=base_mode,
+        win_prob=win_prob,
+        ctx=ctx,
+    )
+
     entry_ticks = compute_entry_ticks(mode)
-    stop_ticks = compute_stop_ticks(mode, ctx)
+    stop_ticks  = compute_stop_ticks(mode, ctx)
+
 
     return {
         "win_prob": win_prob,
