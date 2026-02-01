@@ -67,20 +67,53 @@ class InPlayEngine:
         sid = ctx.get("selectionId")
         key = (mid, sid)
 
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: odds = ctx.get("px")
+# 🧩 ACTION: ADD CONTROLLED BETFAIR PX + MACRO TREND FALLBACK
+# 📆 PATCHED: 2026-03-22 — Pattern B (engine-gated, BUS-authorised)
+#
+# WHY:
+# - Recover from transient PX starvation
+# - Provide macro (market-truth) trend context
+# - Preserve BUS authority and determinism
+#
+# INVARIANTS:
+# - Never overrides BUS PX
+# - Never blocks
+# - Never runs without explicit BUS permission
+# ======================================================================
+
         odds = ctx.get("px")
+
+        # --------------------------------------------------
+        # 🔁 OPTIONAL BETFAIR PX + MACRO TREND FALLBACK
+        # --------------------------------------------------
+        if odds is None and ctx.get("_allow_bf_px_fallback"):
+            try:
+                from tools.betfair_runner_trend_surface import get_runner_trend
+
+                trend = get_runner_trend(mid, sid)
+
+                bf_px = trend.get("to_price")
+                if bf_px and bf_px > 0:
+                    odds = float(bf_px)
+                    ctx["px"] = odds   # local use only
+
+                    # Inject MACRO trend context (non-authoritative)
+                    ctx["bf_trend_direction"] = trend.get("direction")
+                    ctx["bf_trend_ticks"]     = trend.get("ticks_moved")
+                    ctx["bf_trend_conf"]      = trend.get("confidence")
+
+                else:
+                    return self._no_signal("px_missing_bf_fallback")
+
+            except Exception:
+                return self._no_signal("px_missing_bf_error")
+
         if odds is None or odds <= 0:
             return self._no_signal("odds_unavailable")
 
-        if odds > self.ODDS_MAX:
-            return self._no_signal("odds_too_high")
-
-        # protect favourite leader
-        if ctx.get("fav_rank") == 1 and ctx.get("pos_inplay") == 1:
-            return self._no_signal("favourite_leading")
-
-        # must be past race midpoint
-        if ctx.get("pos_inplay") is not None and ctx.get("pos_inplay") < 2:
-            return self._no_signal("early_in_play")
 
         # decision intelligence
         dec = compute_msc_decision(ctx)

@@ -27,17 +27,17 @@ _session.mount("http://", _adapter)
 # BUS ROUTE CONFIG (LOCKED)
 # ============================================================
 
-PLANS_PER_TICK = 35
-CYCLE_SIZE = 350          # parents per full cycle
+PLANS_PER_TICK = 70
+CYCLE_SIZE = 700          # parents per full cycle
 TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
 ROUTE_SPLIT = {
-    "LEGACY": 7,
-    "MSC_RISK": 15,
-    "MSC_INPLAY": 5,
-    "MSC_EXPLORATORY": 3,
-    "OVERWATCHER": 5,
+    "LEGACY": 14,
+    "MSC_RISK": 30,
+    "MSC_INPLAY": 10,
+    "MSC_EXPLORATORY": 6,
+    "OVERWATCHER": 10,
 }
 
 def _order_runner_pool_by_market_time(pairs):
@@ -99,6 +99,7 @@ def _order_runner_pool_by_market_time(pairs):
         ordered_pairs.extend(by_market.get(mid, []))
 
     return ordered_pairs
+
 
 
 def _build_runner_pool():
@@ -228,14 +229,16 @@ class BusRouteSnapshot:
                     session_token=session_token
                 )
 
-                parent = next(
-                    (
-                        p for p in legacy_parents
-                        if str(p["marketId"]) == str(mid)
-                        and str(p["selectionId"]) == str(sid)
-                    ),
-                    None,
-                )
+                # Index for O(1) lookup
+                legacy_parent_by_runner = {
+                    (str(p["marketId"]), str(p["selectionId"])): p
+                    for p in legacy_parents
+                }
+
+                # --------------------------------------------------
+                # LEGACY parent binding (STATIC FOR ROUTE)
+                # --------------------------------------------------
+                parent = legacy_parent_by_runner.get((str(mid), str(sid)))
 
                 if parent:
                     ctx["legacy_parent_id"]   = parent["parent_id"]
@@ -244,6 +247,7 @@ class BusRouteSnapshot:
                     ctx["legacy_entry_stake"] = parent.get("entry_stake")
                 else:
                     ctx["legacy_parent_id"] = None
+
 
                 # --------------------------------------------------
                 # V7 IN-PLAY INTEL (STATIC SNAPSHOT PER ROUTE)
@@ -372,65 +376,140 @@ def get_root_ctx_runner_pairs():
     Authoritative union of ALL (marketId, selectionId) pairs
     required by any BUS lane.
 
-    This is the ONLY helper BUS should use to decide which
-    runners must have CTX built.
-
-    Includes:
-      • Route runners (scope + MarketMonitor)
-      • RISK legacy parents (DB-first)
-      • IN-PLAY runners (DB-first snapshot)
-
-    No filtering.
-    No execution logic.
-    No CTX building.
+    BUS ROUTE is the ONLY place where runner identity is expanded.
+    Lanes must NEVER introduce new runners.
     """
 
-    # ------------------------------------------------------------------
-    # 1️⃣ Route runners (LEGACY / EXPLORATORY)
-    # ------------------------------------------------------------------
-    route_pairs = set(_build_runner_pool())
+    pairs = set()
 
-    # ------------------------------------------------------------------
-    # 2️⃣ RISK runners — LEGACY parent × anchor cycles (DB-first)
-    # ------------------------------------------------------------------
-    risk_pairs = set()
+    # --------------------------------------------------
+    # 1️⃣ LEGACY / EXPLORATORY route runners
+    # --------------------------------------------------
     try:
-        for mid, sid, _parent_id, _anchor_px in get_risk_legacy_parent_pairs():
+        pairs |= set(_build_runner_pool())
+    except Exception:
+        pass
+
+    # --------------------------------------------------
+    # 2️⃣ RISK legacy-parent anchor runners
+    # --------------------------------------------------
+    try:
+        for mid, sid, _legacy_pid, _anchor_px in get_risk_legacy_parent_pairs():
             if mid and sid:
-                risk_pairs.add((str(mid), str(sid)))
+                pairs.add((str(mid), str(sid)))
     except Exception:
         pass
 
-    # ------------------------------------------------------------------
-    # 3️⃣ IN-PLAY runners — DB-first snapshot (authoritative for MSC_INPLAY)
-    # ------------------------------------------------------------------
-    inplay_pairs = set()
+    # --------------------------------------------------
+    # 3️⃣ RISK exclusion cycles (unmatched RISK children)
+    # --------------------------------------------------
     try:
-        from engines.decision_engine.decide_once.scope import scope_snapshot
-
-        scope = scope_snapshot(inplay_window_min=15)
-        inplay_markets = scope.get("in_play", []) or []
-
-        for mid, _ in inplay_markets:
-            snap = get_v7_inplay_snapshot(str(mid)) or []
-            for r in snap:
-                mid2 = r.get("marketId")
-                sid2 = r.get("selectionId")
-                if mid2 and sid2:
-                    inplay_pairs.add((str(mid2), str(sid2)))
+        for mid, sid, _risk_pid in get_risk_cycle_exclusions():
+            if mid and sid:
+                pairs.add((str(mid), str(sid)))
     except Exception:
         pass
 
-    # ------------------------------------------------------------------
-    # 🔒 FINAL AUTHORITATIVE UNION
-    # ------------------------------------------------------------------
-    return route_pairs | risk_pairs | inplay_pairs
+    # --------------------------------------------------
+    # 4️⃣ EXPLORATORY exclusion runners
+    # --------------------------------------------------
+    try:
+        pairs |= {
+            (str(mid), str(sid))
+            for (mid, sid) in get_exploratory_active_parent_pairs()
+        }
+    except Exception:
+        pass
+
+    # --------------------------------------------------
+    # 7️⃣ IN-PLAY parent runners (BUS Phase-0 mirror)
+    # --------------------------------------------------
+    try:
+        pairs |= get_inplay_parent_runner_pairs()
+    except Exception:
+        pass
+
+
+    # --------------------------------------------------
+    # 6️⃣ STOPLOSS surfaces (Overwatcher)
+    # --------------------------------------------------
+    try:
+        pairs |= {
+            (str(mid), str(sid))
+            for (mid, sid) in get_stoploss_parent_pairs()
+        }
+    except Exception:
+        pass
+
+    return pairs
+
+
 
 
 
 # ============================================================================
 # RISK ELIGIBILITY — LEGACY PARENTS WITHOUT MATCHED CHILD
 # ============================================================================
+# ======================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ADD: risk cycle exclusion helper
+# 📆 PATCHED: 2026-03-22 — risk child-missing exclusion (BUS authority)
+# ======================================================================
+
+# ======================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_risk_cycle_exclusions():
+# 🧩 ACTION: SCOPE EXCLUSIONS PER LEGACY PARENT CYCLE
+# 📆 PATCHED: 2026-03-22 — Risk exclusion keyed by legacy_parent_id
+#
+# WHY:
+# - Risk cycles are PER LEGACY PARENT, not per runner
+# - One blocked child must NOT suppress other shadow cycles
+# - Prevents silent risk starvation
+#
+# RETURNS:
+#   Set[(legacy_parent_id)]
+# ======================================================================
+
+def get_risk_cycle_exclusions():
+    """
+    Return LEGACY parent IDs whose MSC_RISK shadow cycle
+    is currently blocked (risk parent exists but child not matched).
+
+    Scope:
+      • One exclusion per LEGACY parent
+      • Runner-level sharing is forbidden
+    """
+
+    from engines.config_paths import auto_conn
+    import sqlite3
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                p.parent_id AS legacy_parent_id
+            FROM orders r
+            JOIN orders p
+              ON p.id = r.parent_id
+            LEFT JOIN orders c
+              ON c.hedge_of = r.id
+             AND c.role = 'CHILD'
+            WHERE r.engine = 'MSC_RISK'
+              AND r.role = 'PARENT'
+              AND UPPER(r.entry_status) IN ('PLACED','MATCHED')
+              AND (c.id IS NULL OR UPPER(c.entry_status) <> 'MATCHED')
+            """
+        ).fetchall()
+    finally:
+        con.close()
+
+    return {int(r["legacy_parent_id"]) for r in rows}
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus_route.py
 # 🔎 SEARCH: def get_risk_legacy_parent_pairs():
@@ -519,6 +598,46 @@ def get_risk_legacy_parent_pairs():
         and r["parent_id"] is not None
         and r["anchor_px"] is not None
     ]
+
+# ============================================================================
+# INPLAY LIFECYCLE — ALL ACTIVE MIDS & SIDS
+# ============================================================================
+def get_inplay_parent_runner_pairs():
+    """
+    Authoritative IN-PLAY runner surface.
+
+    Returns (marketId, selectionId) for ALL runners that:
+      - Have ANY parent today (any engine)
+      - Market has started (or is flagged in-play)
+      - DB-first
+    """
+
+    from engines.config_paths import auto_conn
+    import sqlite3
+    con.execute("ATTACH DATABASE 'data/bets.db' AS bets")
+
+    con = auto_conn(rw=False)
+    con.row_factory = sqlite3.Row
+
+    try:
+        rows = con.execute("""
+            SELECT DISTINCT
+                p.marketId,
+                p.selectionId
+            FROM orders p
+            JOIN bets.bets b
+              ON b.marketId = p.marketId
+            WHERE date(p.opened_at) = date('now','utc')
+              AND julianday(b.marketStartTime) <= julianday('now','utc')
+        """).fetchall()
+    finally:
+        con.close()
+
+    return {
+        (str(r["marketId"]), str(r["selectionId"]))
+        for r in rows
+        if r["marketId"] and r["selectionId"]
+    }
 
 # ============================================================================
 # EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS

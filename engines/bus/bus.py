@@ -205,8 +205,8 @@ class CadenceController:
         self.window_seconds   = 60
         self.tick_seconds     = 3
         self.ticks_per_window = 10
-        self.plans_per_window = 350
-        self.plans_per_tick   = 35
+        self.plans_per_window = 700
+        self.plans_per_tick   = 70
 
         # State
         self.window_start_ts = time.time()
@@ -675,7 +675,6 @@ class DecisionBus:
                 ctx_l = dict(ctx)
                 _normalize_ctx_enums(ctx_l)
 
-
                 exit_side = "BACK" if p["side"].upper() == "LAY" else "LAY"
 
                 from engines.live.child_rescue import ensure_single_child_for_parent
@@ -692,7 +691,6 @@ class DecisionBus:
                     engine      = "OVERWATCHER",
                     reason      = "lane6_missing_child",
                 )
-
 
             # --------------------------------------------------
             # 2️⃣ RISK GAP FILL — MSC_RISK ONLY
@@ -719,15 +717,11 @@ class DecisionBus:
                 if not ctx:
                     continue
 
-                # --------------------------------------------------
-                # PROMINENCE NORMALISATION (BUS AUTHORITY)
-                # --------------------------------------------------
                 _normalize_ctx_enums(ctx)
 
-
-                ctx = dict(ctx)
-                ctx["risk_parent_id"] = legacy_pid
-                ctx["risk_anchor_px"] = anchor_px
+                ctx_l = dict(ctx)
+                ctx_l["risk_parent_id"] = legacy_pid
+                ctx_l["risk_anchor_px"] = anchor_px
 
                 repair_plans.append((
                     "MSC_RISK",
@@ -741,13 +735,14 @@ class DecisionBus:
                         "direction": "LAY->BACK",
                         "why": "lane6_risk_gap_fill",
                     },
-                    ctx,
+                    ctx_l,
                 ))
 
         finally:
             con.close()
 
         return repair_plans
+
 
 
 # ======================================================================
@@ -864,21 +859,17 @@ class DecisionBus:
                 (engine, mid, sid),
             ).fetchone()
 
-            # No matched parent → allow
             if row is None:
                 return True
 
             _pid, _parent_status, child_exit_status = row
 
-            # Parent matched, child not matched → block
             if not child_exit_status or str(child_exit_status).upper() != "MATCHED":
                 return False
 
-            # Parent + child matched → allow
             return True
 
         except Exception:
-            # BUS must fail-open, never deadlock
             return True
 
         finally:
@@ -886,6 +877,7 @@ class DecisionBus:
                 con.close()
             except Exception:
                 pass
+
 
 
     # 🔑 THIS MUST BE HERE — SAME INDENT AS tick(), _build_ctx_for_market(), etc.
@@ -989,7 +981,9 @@ class DecisionBus:
             (mid, sid): ctx
             for (mid, sid), ctx in self._route_ctx_map.items()
             if ctx.get("px") is not None
+            or ctx.get("_allow_bf_px_fallback")
         }
+
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
         # --------------------------------------------------
@@ -1057,58 +1051,94 @@ class DecisionBus:
                     _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
 
         # --------------------------------------------------
-        # 🟨 LANE 2 — MSC_RISK (HELPER-DRIVEN)
+        # 🟨 LANE 2 — MSC_RISK (BETFAIR-TRUTH DRIVEN)
         # --------------------------------------------------
         engine_report["MSC_RISK"]["evaluated"] = True
 
-        from engines.bus_route import get_risk_legacy_parent_pairs
+        from engines.bus_route import (
+            get_risk_legacy_parent_pairs,
+            get_risk_cycle_exclusions,
+        )
+        from tools.betfair_match_surface import query_bet_match_surface
+        from tools.betfair_runner_trend_surface import get_runner_trend
+        import os
+        from engines.daily_config import get_app_key
 
-        engine_report["MSC_RISK"]["evaluated"] = True
         risc = self.engines.get("MSC_RISK")
+        if not risc:
+            return
 
-        if risc:
-            for mid, sid, parent_id, anchor_px in get_risk_legacy_parent_pairs():
+        app_key = get_app_key()
+        token   = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
 
-                ctx = self._route_ctx_map.get((mid, sid))
+        # --------------------------------------------------
+        # BUS-AUTHORITATIVE EXCLUSIONS (PER LEGACY PARENT)
+        # --------------------------------------------------
+        excluded_legacy_parents = get_risk_cycle_exclusions()
 
-                if not ctx:
-                    try:
-                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                        if ctx:
-                            self._route_ctx_map[(mid, sid)] = ctx
-                    except Exception:
-                        continue
+        for mid, sid, legacy_parent_id, anchor_px in get_risk_legacy_parent_pairs():
 
-                if not ctx:
+            # 🔒 Cycle-scoped exclusion
+            if legacy_parent_id in excluded_legacy_parents:
+                continue
+
+            ctx = self._route_ctx_map.get((mid, sid))
+            if not ctx:
+                continue
+
+            last_px = ctx.get("px")
+            if last_px is None:
+                continue
+
+            # ----------------------------------------------
+            # 2️⃣ Betfair MATCH surface (cycle truth)
+            # ----------------------------------------------
+            bet_id = ctx.get("entry_bet_id")
+            if bet_id:
+                surf = query_bet_match_surface(
+                    bet_id=bet_id,
+                    app_key=app_key,
+                    token=token,
+                )
+                if surf.get("state") == "TERMINAL":
                     continue
-                if ctx.get("px") is None:
-                    print(f"[BUS][DROP] no px mid={mid} sid={sid}")
-                    continue
 
-                # --------------------------------------------------
-                # RISK CYCLE IDENTITY (AUTHORITATIVE)
-                # Each LEGACY parent × anchor_px is a distinct cycle
-                # --------------------------------------------------
-                ctx_l = dict(ctx)
-                ctx_l["risk_parent_id"] = parent_id
-                ctx_l["risk_anchor_px"] = anchor_px
+            # ----------------------------------------------
+            # 3️⃣ Betfair TREND surface (direction truth)
+            # ----------------------------------------------
+            trend = get_runner_trend(mid, sid)
+            if trend["direction"] == "FLAT":
+                continue
 
-                # --------------------------------------------------
-                # PROMINENCE NORMALISATION (BUS AUTHORITY)
-                # --------------------------------------------------
-                _normalize_ctx_enums(ctx_l)
+            # ----------------------------------------------
+            # 4️⃣ Build PURE RISK CTX (BUS owns truth)
+            # ----------------------------------------------
+            ctx_l = dict(ctx)
+            ctx_l.update({
+                "legacy_parent_id":   legacy_parent_id,
+                "legacy_entry_odds":  float(anchor_px),
+                "legacy_entry_stake": ctx.get("legacy_entry_stake"),
+                "last_px":            float(last_px),
+                "risk_direction":     trend["direction"],
+                "risk_ticks_moved":   trend["ticks_moved"],
+                "risk_confidence":    trend["confidence"],
+            })
 
-                try:
-                    r = risc.tick(ctx_l)
-                    if r and r.get("enter"):
-                        plan = dict(r)
-                        plan["engine"] = "MSC_RISK"
-                        plans.append(("MSC_RISK", plan, ctx_l))
-                        engine_report["MSC_RISK"]["fired"] += 1
-                        lane_counts[2] += 1
-                except Exception:
-                    _record_reason(engine_report, "MSC_RISK", "tick_error")
+            _normalize_ctx_enums(ctx_l)
 
+            # ----------------------------------------------
+            # 5️⃣ RiskEngine = pure plan emitter
+            # ----------------------------------------------
+            try:
+                plan = risc.tick(ctx_l)
+                if plan:
+                    plan = dict(plan)
+                    plan["engine"] = "MSC_RISK"
+                    plans.append(("MSC_RISK", plan, ctx_l))
+                    engine_report["MSC_RISK"]["fired"] += 1
+                    lane_counts[2] += 1
+            except Exception:
+                _record_reason(engine_report, "MSC_RISK", "tick_error")
 
         # --------------------------------------------------
         # 🟥 LANE 3 — MSC_INPLAY (BUS-ROUTED + SNAPSHOT-ENRICHED)
@@ -1134,10 +1164,82 @@ class DecisionBus:
 
             for sid in sids:
                 ctx = self._route_ctx_map.get((mid, sid))
+
                 if not ctx:
                     continue
 
+                # --------------------------------------------------
+                # 🕒 BUS IN-PLAY TIME WINDOW (PHASE-0 ALIGNED)
+                # --------------------------------------------------
+                try:
+                    from engines.config_paths import connect_db
+                    from datetime import datetime, timezone
+                    import sqlite3
+
+                    con = connect_db(ro=True)
+                    con.row_factory = sqlite3.Row
+
+                    row = con.execute(
+                        """
+                        SELECT marketStartTime
+                        FROM bets
+                        WHERE marketId = ?
+                        LIMIT 1
+                        """,
+                        (mid,),
+                    ).fetchone()
+
+                finally:
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
+
+                if not row or not row["marketStartTime"]:
+                    continue
+
+                off = datetime.fromisoformat(
+                    row["marketStartTime"].replace("Z", "+00:00")
+                )
+                now = datetime.now(timezone.utc)
+                secs = (off - now).total_seconds()
+
+                # In-play window:
+                #   • <= 1 min to off
+                #   • >= 6 min after off
+                if secs > 60 or secs < -360:
+                    continue
+
+                # --------------------------------------------------
+                # 🔒 PX REQUIRED DURING IN-PLAY
+                # --------------------------------------------------
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: ctx_l = dict(ctx)
+# 🧩 ACTION: ALLOW EXPLICIT PX FALLBACK FOR MSC_INPLAY ONLY
+# 📆 PATCHED: 2026-03-22 — Controlled Betfair PX fallback (Pattern B)
+#
+# WHY:
+# - Prevent InPlay starvation if Betfair omits PX momentarily
+# - BUS remains execution authority
+# - Engine fallback is opt-in and visible
+#
+# INVARIANT:
+# - This flag does NOTHING unless PX is None
+# - No network calls are introduced in BUS
+# ======================================================================
+
+                # --------------------------------------------------
+                # 🔓 EXPLICIT PX FALLBACK PERMISSION (MSC_INPLAY ONLY)
+                # --------------------------------------------------
                 ctx_l = dict(ctx)
+
+                if ctx_l.get("px") is None:
+                    ctx_l["_allow_bf_px_fallback"] = True
+                else:
+                    ctx_l["_allow_bf_px_fallback"] = False
+
+
 
 
                 # --------------------------------------------------
@@ -1941,6 +2043,11 @@ class DecisionBus:
         _bc = build_context(source="LIVE")
         base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
 
+        if not self.live_run_id:
+            self.live_run_id = f"LIVE-{int(time.time())}"
+        base_ctx["run_id"] = self.live_run_id
+
+
         # ===============================================================
         # 3️⃣ ROUTE / BUS STOP ADVANCEMENT
         # ===============================================================
@@ -2216,7 +2323,11 @@ class DecisionBus:
 
         # 🔑 CRITICAL FIX:
         # Always forward something to cadence
-        plans = slotted_plans or unslotted_plans
+
+   
+        if not slotted_plans and unslotted_plans:
+            print(f"[BUS][DROP] {len(unslotted_plans)} unslotted plans (not enriched)")
+        plans = slotted_plans
 
 
         # ==================================================
@@ -2324,6 +2435,14 @@ class DecisionBus:
                 plan.setdefault("marketId", ctx.get("marketId"))
                 plan.setdefault("selectionId", ctx.get("selectionId"))
                 plan.setdefault("px", ctx.get("px"))
+
+                # --------------------------------------------------
+                # TARGET TICKS — BUS AUTHORITY (PARENT ONLY)
+                # --------------------------------------------------
+                if plan.get("role") != "CHILD":
+                    # Default hedge distance is 1 tick unless engine explicitly set it
+                    plan.setdefault("target_ticks", 1)
+
 
                 if engine == "MSC_INPLAY" and not ctx.get("legacy_parent_id"):
                     plan["_bus_block"] = "inplay_no_parent_context"

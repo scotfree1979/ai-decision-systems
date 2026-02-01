@@ -18,20 +18,28 @@ class RiskEngine:
     # ======================================================
     # Per-parent state accessor
     # ======================================================
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def _state(self, pid: int) -> dict:
+# 📆 PATCHED: 2026-03-22 — remove cycle suppression (BUS is authority)
+#
+# WHY:
+# - Risk must emit on EVERY tick where px != anchor_px
+# - Lifecycle gating moved to BUS / BUS_ROUTE
+# - Prevents silent risk starvation
+# ======================================================================
+
     def _state(self, pid: int) -> dict:
-        st = self._parents.get(pid)
-        if not st:
-            st = {
-                "entry_px": None,
-                "entry_side": None,
-                "last_px": None,
-                "attached": False,
-                "active_plan": None,
-                "used_prices": set(),
-                "cycle_active": False,
-            }
-            self._parents[pid] = st
-        return st
+        """
+        Minimal state: retained for telemetry only.
+        """
+        return {
+            "entry_px": None,
+            "entry_side": None,
+            "last_px": None,
+        }
+
+
 
     # ======================================================
     # Telemetry (non-blocking)
@@ -113,67 +121,25 @@ class RiskEngine:
     # ======================================================
     def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
-        pid = ctx.get("legacy_parent_id")
-        if pid is None:
-            return None
-
-        px = float(ctx.get("px") or 0.0)
+        px = float(ctx.get("last_px") or 0.0)
         if px <= 0:
             return None
 
-        state = self._state(pid)
-
-        entry_px = float(ctx.get("legacy_entry_odds") or 0.0)
-        entry_side = (ctx.get("legacy_entry_side") or "").upper()
-        if entry_px <= 0 or entry_side not in ("LAY", "BACK"):
+        direction = ctx.get("risk_direction")
+        if direction not in ("BACK->LAY", "LAY->BACK"):
             return None
 
-        state["entry_px"] = entry_px
-        state["entry_side"] = entry_side
-
-        entry_ticks = int(ctx.get("risk_entry_ticks", 2))
-        stop_ticks = int(ctx.get("risk_stop_ticks", 4))
-        stake_mult = float(ctx.get("msc_multiplier") or 1.0)
-        self.mode = ctx.get("risk_mode", "MODERATE")
-
-        oc_phase = ctx.get("oc_phase")
-        if oc_phase is not None and int(oc_phase) >= 6:
-            return self._terminate_oc6(ctx)
-
-        # --------------------------------------------------
-        # FIRST ATTACH — START CYCLE ONLY AFTER PRICE MOVES
-        # --------------------------------------------------
-        if not state["cycle_active"]:
-
-            state["cycle_active"] = True
-            state["attached"] = True
-            state["last_px"] = px
-
-            # EntryPX is NOT tradable, but cycle is now alive
-            if px == state["entry_px"]:
-                return None
-
-            return self._initial_shadow(
-                state,
-                px,
-                entry_ticks,
-                stop_ticks,
-                stake_mult,
-                ctx,
-            )
-
-        # --------------------------------------------------
-        # ACTIVE PLAN DOES NOT BLOCK FURTHER SCALPING
-        # --------------------------------------------------
-        # RISC may emit multiple parent plans per legacy parent
-        # (one per price level). Placement/BankState enforce exposure.
-        # --------------------------------------------------
-        if state["active_plan"]:
-            self._monitor(state, px)
-            # DO NOT return here
-
-
-        return self._scalp_tick(state, px, entry_ticks, stop_ticks, stake_mult, ctx)
+        return {
+            "enter": True,
+            "role": "PARENT",
+            "engine": "MSC_RISK",
+            "parent_id": ctx["legacy_parent_id"],
+            "marketId": ctx["marketId"],
+            "selectionId": ctx["selectionId"],
+            "direction": direction,
+            "px": px,
+            "why": "risk_shadow_cycle",
+        }
 
     # ======================================================
     # INITIAL SHADOW
@@ -250,7 +216,7 @@ class RiskEngine:
         if px == entry_px:
             return None
 
-        if px in state["used_prices"]:
+        if px in state["used_prices"] and state.get("active_plan"):
             return None
 
         state["used_prices"].add(px)
