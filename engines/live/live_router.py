@@ -107,9 +107,9 @@ def _router_child_worker_loop():
                     child_id = _orders_insert_child_queued(parent_cor)
 
                     if not child_id:
-                        raise RuntimeError(
-                            f"failed to create child row for parent {parent_cor}"
-                        )
+                        # Parent not eligible (cancelled / unmatched / closed)
+                        continue
+
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -223,6 +223,9 @@ def _router_child_worker_loop():
                   FROM orders p
                  WHERE p.role='PARENT'
                    AND UPPER(p.entry_status)='MATCHED'
+                   AND COALESCE(p.parent_closed,0)=0
+                   AND (p.exit_status IS NULL OR UPPER(p.exit_status) NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+                   AND COALESCE(p.exposure_released,0)=0
                    AND datetime(p.opened_at) <= datetime('now','utc', ?)
                    AND NOT EXISTS (
                          SELECT 1 FROM orders c
@@ -958,6 +961,9 @@ def _router_child_recovery_sweep():
         FROM orders p
         WHERE p.role = 'PARENT'
           AND p.entry_status = 'MATCHED'
+          AND COALESCE(parent_closed,0)=0
+          AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+
           AND NOT EXISTS (
               SELECT 1 FROM orders c
               WHERE c.hedge_of = p.id
@@ -2613,6 +2619,8 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
               AND p.role='PARENT'
               AND UPPER(p.entry_status)='MATCHED'
               AND UPPER(c.entry_status)='MATCHED'
+              AND COALESCE(p.parent_closed,0)=0
+              AND (p.exit_status IS NULL OR UPPER(p.exit_status) NOT IN ('CANCELLED','EXPIRED','SETTLED'))
               AND COALESCE(p.exposure_released,0)=0
             LIMIT ?
         """, (int(limit),)).fetchall()
@@ -2899,6 +2907,8 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
             WHERE customerOrderRef=?
               AND role='PARENT'
               AND entry_status='MATCHED'
+              AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+              AND COALESCE(parent_closed,0)=0
             LIMIT 1
         """, (str(parent_cor),)).fetchone()
 
@@ -4173,16 +4183,28 @@ def _orders_insert_child_queued(parent_cor: str) -> int | None:
                 entry_stake,
                 source,
                 engine,
-                target_ticks
+                target_ticks,
+                entry_status,
+                exit_status
             FROM orders
             WHERE customerOrderRef=?
               AND role='PARENT'
-              AND entry_status='MATCHED'
             LIMIT 1
         """, (str(parent_cor),)).fetchone()
 
+        # --------------------------------------------------
+        # 🔒 HARD ROUTER INVARIANT
+        # --------------------------------------------------
         if not parent:
             return None
+
+        if (parent["entry_status"] or "").upper() != "MATCHED":
+            # Parent is QUEUED / PLACED / CANCELLED / FAILED / EXPIRED
+            return None
+
+        if (parent["exit_status"] or "").upper() in ("CANCELLED","EXPIRED","SETTLED"):
+            return None
+
 
         parent_id = int(parent["id"])
 
@@ -5076,6 +5098,9 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
              WHERE p.mode='LIVE'
                AND p.role='PARENT'
                AND UPPER(p.entry_status)='MATCHED'
+               AND COALESCE(p.parent_closed,0)=0
+               AND (p.exit_status IS NULL OR UPPER(p.exit_status) NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+               AND COALESCE(p.exposure_released,0)=0
                AND (p.exit_status IS NULL OR UPPER(p.exit_status)<>'MATCHED')
                AND NOT EXISTS (
                      SELECT 1 FROM orders c

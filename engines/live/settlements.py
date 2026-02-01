@@ -36,6 +36,14 @@ import urllib.request, urllib.error
 from engines.live import bank_state
 from engines.live.live_router import _release_parent_exposure_db
 
+# ============================================================
+# LIVE SETTLEMENT GUARDS
+# ============================================================
+
+LIVE_SKIP_META = True      # 🔒 DEFAULT: never fetch metadata live
+LIVE_META_CHUNK = 40       # safe Betfair payload size
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Settlements Live loop
 # ──────────────────────────────────────────────────────────────────────────────
@@ -64,8 +72,25 @@ def _run_2e_once(*, since_days: int | None = None):
             "SELECT DISTINCT marketId FROM bf_cleared_orders WHERE marketId IS NOT NULL"
         )]
 
-    if mkt_ids:
-        fetch_market_metadata_api(mkt_ids[:200])
+    # --------------------------------------------------
+    # 🔒 LIVE META GUARD (CRITICAL)
+    # --------------------------------------------------
+    if not LIVE_SKIP_META and mkt_ids:
+
+        def _chunks(lst, n):
+            for i in range(0, len(lst), n):
+                yield lst[i:i+n]
+
+        for chunk in _chunks(mkt_ids, LIVE_META_CHUNK):
+            try:
+                fetch_market_metadata_api(chunk)
+            except RuntimeError as e:
+                msg = str(e)
+                if "TOO_MUCH_DATA" in msg or "ANGX-0001" in msg:
+                    print("[settlements][WARN] meta TOO_MUCH_DATA — skipping remainder")
+                    break
+                raise
+
 
 def start_settlement_loop(period_s: int = 300):
     def _loop():

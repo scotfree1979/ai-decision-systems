@@ -491,10 +491,10 @@ def get_risk_cycle_exclusions():
         rows = con.execute(
             """
             SELECT DISTINCT
-                p.parent_id AS legacy_parent_id
+                p.id AS legacy_parent_id
             FROM orders r
             JOIN orders p
-              ON p.id = r.parent_id
+              ON p.id = r.hedge_of
             LEFT JOIN orders c
               ON c.hedge_of = r.id
              AND c.role = 'CHILD'
@@ -531,73 +531,68 @@ def get_risk_cycle_exclusions():
 
 def get_risk_legacy_parent_pairs():
     """
-    Shadowbet eligibility (AUTHORITATIVE, CYCLE-AWARE).
+    Return ONLY TODAY's MATCHED LEGACY parents eligible for MSC_RISK.
 
-    Returns (marketId, selectionId, parent_id, anchor_px) for
-    EACH DISTINCT LEGACY PARENT × PRICE ANCHOR combination.
-
-    This allows MULTIPLE RISK cycles per LEGACY parent as the
-    market moves, instead of collapsing everything to one
-    runner-level opportunity.
-
-    DB-first.
-    Bets DB is the time authority.
-    No schema changes.
+    HARD INVARIANTS:
+    - LIVE mode
+    - LEGACY engine
+    - PARENT role
+    - entry_status = MATCHED
+    - exit_status != MATCHED
+    - opened TODAY (UTC)
+    - excluded risk cycles removed
     """
 
-    from engines.config_paths import auto_conn
+    from engines.config_paths import open_auto_db
+    from engines.bus_route import get_risk_cycle_exclusions
     import sqlite3
 
-    con = auto_conn(rw=False)
+    con = open_auto_db(rw=False)
     con.row_factory = sqlite3.Row
 
     try:
-        con.execute("ATTACH DATABASE 'data/bets.db' AS bets")
+        # Cycle exclusions are parent_id based
+        excluded_legacy_parents = get_risk_cycle_exclusions()
 
         rows = con.execute(
             """
             SELECT
-                p.id          AS parent_id,
-                p.marketId    AS marketId,
-                p.selectionId AS selectionId,
-                p.entry_odds  AS anchor_px
+                p.marketId,
+                p.selectionId,
+                p.id         AS legacy_parent_id,
+                p.entry_odds AS anchor_px
             FROM orders p
-            JOIN bets.bets b
-              ON b.marketId = p.marketId
-            WHERE p.engine = 'LEGACY'
+            WHERE p.mode = 'LIVE'
               AND p.role = 'PARENT'
-              AND UPPER(p.entry_status) IN ('PLACED','MATCHED')
+              AND p.engine = 'LEGACY'
+              AND UPPER(p.entry_status) = 'MATCHED'
+              AND (p.exit_status IS NULL OR UPPER(p.exit_status) != 'MATCHED')
               AND date(p.opened_at) = date('now','utc')
-
-              -- market has NOT started
-              AND julianday(b.marketStartTime) > julianday('now','utc')
-
-              -- more than 3 minutes to off
-              AND (julianday(b.marketStartTime) - julianday('now','utc')) > (3.0 / 1440.0)
             """
         ).fetchall()
 
+        out = []
+        for r in rows:
+            pid = int(r["legacy_parent_id"])
+
+            # 🔒 FINAL GUARD — cycle-scoped exclusion
+            if pid in excluded_legacy_parents:
+                continue
+
+            out.append(
+                (
+                    str(r["marketId"]),
+                    str(r["selectionId"]),
+                    pid,
+                    float(r["anchor_px"]),
+                )
+            )
+
+        return out
+
     finally:
-        try:
-            con.execute("DETACH DATABASE bets")
-        except Exception:
-            pass
         con.close()
 
-    # 🔑 EXPAND TO PER-PARENT PER-ANCHOR CYCLES
-    return [
-        (
-            str(r["marketId"]),
-            str(r["selectionId"]),
-            int(r["parent_id"]),
-            float(r["anchor_px"]),
-        )
-        for r in rows
-        if r["marketId"]
-        and r["selectionId"]
-        and r["parent_id"] is not None
-        and r["anchor_px"] is not None
-    ]
 
 # ============================================================================
 # INPLAY LIFECYCLE — ALL ACTIVE MIDS & SIDS

@@ -21,23 +21,27 @@ class RiskEngine:
 # ======================================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
 # 🔎 SEARCH: def _state(self, pid: int) -> dict:
-# 📆 PATCHED: 2026-03-22 — remove cycle suppression (BUS is authority)
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-29 — Introduce microcycle-scoped state
 #
 # WHY:
-# - Risk must emit on EVERY tick where px != anchor_px
-# - Lifecycle gating moved to BUS / BUS_ROUTE
-# - Prevents silent risk starvation
+# - Shadow cycle = time window
+# - Microcycle = monotonic excursion away from anchor
+# - used_prices MUST reset on anchor cross
 # ======================================================================
 
     def _state(self, pid: int) -> dict:
         """
-        Minimal state: retained for telemetry only.
+        Per-legacy-parent state.
+        Microcycle-scoped.
         """
         return {
-            "entry_px": None,
-            "entry_side": None,
+            "anchor_px": None,          # legacy entry odds
+            "microcycle_dir": None,     # None | "UP" | "DOWN"
+            "used_prices": set(),       # RESET per microcycle
             "last_px": None,
         }
+
 
 
 
@@ -125,8 +129,99 @@ class RiskEngine:
         if px <= 0:
             return None
 
-        direction = ctx.get("risk_direction")
-        if direction not in ("BACK->LAY", "LAY->BACK"):
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+# 🧩 ACTION: INSERT AFTER px VALIDATION
+# 📆 PATCHED: 2026-03-29 — Anchor-cross microcycle control
+#
+# RULES:
+# - Anchor cross RESETS microcycle
+# - Reversal WITHOUT anchor cross FREEZES trading
+# - used_prices is microcycle-scoped
+# ======================================================================
+
+        pid = ctx.get("legacy_parent_id")
+        state = self._parents.setdefault(pid, self._state(pid))
+
+        px = float(ctx.get("last_px") or 0.0)
+        if px <= 0:
+            return None
+
+        anchor = float(ctx.get("legacy_entry_odds") or 0.0)
+        if anchor <= 0:
+            return None
+
+        # --------------------------------------------------
+        # Anchor binding (one-time)
+        # --------------------------------------------------
+        if state["anchor_px"] is None:
+            state["anchor_px"] = anchor
+
+        # --------------------------------------------------
+        # 🔁 MICRO-CYCLE RESET — anchor cross
+        # --------------------------------------------------
+        if state["microcycle_dir"] == "DOWN" and px >= anchor:
+            state["microcycle_dir"] = None
+            state["used_prices"].clear()
+
+        elif state["microcycle_dir"] == "UP" and px <= anchor:
+            state["microcycle_dir"] = None
+            state["used_prices"].clear()
+
+        # --------------------------------------------------
+        # 🟢 ARM NEW MICRO-CYCLE
+        # --------------------------------------------------
+        if state["microcycle_dir"] is None and px != anchor:
+            state["microcycle_dir"] = "DOWN" if px < anchor else "UP"
+            state["used_prices"].clear()
+            state["last_px"] = px
+            # allow first trade in new microcycle
+
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: direction = ctx.get("risk_direction")
+# 🧩 ACTION: REPLACE PRICE ELIGIBILITY LOGIC
+# 📆 PATCHED: 2026-03-29 — Monotonic microcycle enforcement
+#
+# INVARIANT:
+# - Trade ONLY while moving monotonically away from anchor
+# - Freeze on retrace until anchor cross
+# ======================================================================
+
+        # --------------------------------------------------
+        # ⛔ FREEZE ON RETRACE (no anchor cross)
+        # --------------------------------------------------
+        if state["last_px"] is not None:
+            if state["microcycle_dir"] == "DOWN" and px >= state["last_px"]:
+                return None
+            if state["microcycle_dir"] == "UP" and px <= state["last_px"]:
+                return None
+
+        # --------------------------------------------------
+        # ⛔ USED PRICE (microcycle scoped)
+        # --------------------------------------------------
+        if px in state["used_prices"]:
+            return None
+
+        # --------------------------------------------------
+        # Record price use
+        # --------------------------------------------------
+        state["used_prices"].add(px)
+        state["last_px"] = px
+
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: return {
+# 🧩 ACTION: REPLACE FINAL EMISSION
+# 📆 PATCHED: 2026-03-29 — Anchor-relative risk emission
+# ======================================================================
+
+        if px > anchor:
+            direction = "LAY->BACK"
+        elif px < anchor:
+            direction = "BACK->LAY"
+        else:
             return None
 
         return {
@@ -138,8 +233,9 @@ class RiskEngine:
             "selectionId": ctx["selectionId"],
             "direction": direction,
             "px": px,
-            "why": "risk_shadow_cycle",
+            "why": "risk_shadow_microcycle",
         }
+
 
     # ======================================================
     # INITIAL SHADOW

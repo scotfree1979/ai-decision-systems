@@ -975,14 +975,6 @@ class DecisionBus:
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
 
-        # 🔒 HARD BUS INVARIANT
-        # Do not evaluate ANY engine without execution price
-        self._route_ctx_map = {
-            (mid, sid): ctx
-            for (mid, sid), ctx in self._route_ctx_map.items()
-            if ctx.get("px") is not None
-            or ctx.get("_allow_bf_px_fallback")
-        }
 
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
@@ -2118,6 +2110,7 @@ class DecisionBus:
         # 🔁 CRITICAL: REFRESH DYNAMIC ODDS BEFORE ENGINE EVAL
         # --------------------------------------------------
         dt = self._route_snapshot.refresh_ctx_dynamic_fields()
+
         # 🔗 CRITICAL: bind refreshed CTX map to BUS execution view
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
 
@@ -2127,7 +2120,6 @@ class DecisionBus:
         for ctx in self._route_ctx_map.values():
             _normalize_ctx_enums(ctx)
 
-
         self._ctx_refresh_times.append(dt)
 
         print(
@@ -2136,25 +2128,6 @@ class DecisionBus:
             f"runners={len(self._route_snapshot.ctx_map)} "
             f"dt={dt:.4f}s"
         )
-
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: def tick(self):
-# 🧩 ACTION: REPLACE CTX BUILD SECTION (route-authoritative)
-# 📆 PATCHED: 2026-03-16 — Enforce route-owned runner identity for CTX
-#
-# WHY:
-# - BUS must NEVER recompute or rediscover (marketId, selectionId)
-# - BusRouteSnapshot is the sole authority for runner membership
-# - CTX is built ONLY for runners already selected by the route helper
-#
-# EFFECT:
-# - Fixes broken CTX → engine pipeline
-# - Prevents scope / monitor re-entry
-# - Restores correct plan generation flow
-# ======================================================================================================
-
 
         # ===============================================================
         # 6️⃣ LEGACY BUS STOP SLICE (ROUTE-PROVIDED)
@@ -2169,16 +2142,9 @@ class DecisionBus:
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
         bus_stop_pairs = legacy_slice
 
-
         # ===============================================================
         # 7️⃣ AUTHORITATIVE PLAN GENERATION (LANES ONLY)
         # ===============================================================
-        # ======================================================================================================
-        # 📍 TARGET: engines/bus/bus.py
-        # 🔎 SEARCH: generated_plans = self._evaluate_runner(
-        # 🧩 ACTION: REPLACE
-        # 📆 PATCHED: 2026-03-16 — bind returned lane counts
-        # ======================================================================================================
 
         generated_plans, lane_counts = self._evaluate_runner(
             base_ctx=base_ctx,
