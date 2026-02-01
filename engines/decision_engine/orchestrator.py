@@ -3624,6 +3624,17 @@ def start_live_loop(*args, **kwargs):
     global F_ENABLE_STRATS
     F_ENABLE_STRATS = False
 
+    # --------------------------------------------------------------
+    # 6C.1) START ROUTER HOUSEKEEPING LOOP (REHEDGE / CLEANUP)
+    # --------------------------------------------------------------
+    try:
+        from engines.live.live_router import _start_rehedge_loop
+        _start_rehedge_loop()
+        print(f"[REHEDGE_LOOP][STARTED]")
+    except Exception as e:
+        print(f"[REHEDGE_LOOP][WARN] failed to start rehedge loop: {e}")
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/decision_engine/orchestrator.py
 # 🔎 SEARCH: "# 7) START BUS TICKER"

@@ -280,6 +280,28 @@ def _router_child_worker_loop():
         # Prevent tight loop
         time.sleep(1.0)
 
+def _guard_cancel_if_matched(*, parent_cor: str, bet_id: str | None) -> bool:
+    """
+    Returns True if cancellation should proceed.
+    Returns False if parent is already MATCHED at Betfair.
+    """
+    if not bet_id:
+        return True
+
+    status = get_bet_status(str(bet_id))
+    if status == "EXECUTION_COMPLETE":
+        # Canonical promotion
+        _orders_update_parent_matched(parent_cor, str(bet_id))
+        _log_event(
+            "INFO",
+            "live_router",
+            f"[CANCEL-GUARD] prevented cancel — already matched ref={parent_cor}"
+        )
+        return False
+
+    return True
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 ADD: canonical LIVE run_id resolver (DB-first fallback)
@@ -1702,11 +1724,87 @@ def _list_current(app_key: str, token: str, bet_id: str) -> dict:
 # === PATCH END ===
 
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _cancel(app_key: str, token: str, bet_id: str) -> None:
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-01 — Cancel ⇒ release parent exposure (authoritative)
+#
+# INVARIANT:
+# - If a parent is cancelled at Betfair, it will NEVER match
+# - Exposure MUST be released immediately
+# - DB is the lock; BankState mutation is idempotent
+# ======================================================================
+
 def _cancel(app_key: str, token: str, bet_id: str) -> None:
+    # --------------------------------------------------
+    # Resolve parent FIRST
+    # --------------------------------------------------
     try:
-        _rpc(app_key, token, "cancelOrders", {"betIds": [bet_id]})
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        parent = _q_retry(cur, """
+            SELECT id, customerOrderRef, entry_status
+              FROM orders
+             WHERE entry_bet_id=?
+               AND role='PARENT'
+             LIMIT 1
+        """, (str(bet_id),)).fetchone()
+        con.close()
+
+        if not parent:
+            return
+
+        parent_id  = int(parent["id"])
+        parent_cor = str(parent["customerOrderRef"])
+
+        # 🔒 GUARD: never cancel matched bets
+        if not _guard_cancel_if_matched(parent_cor=parent_cor, bet_id=bet_id):
+            return
+
+    except Exception:
+        return
+
+    # --------------------------------------------------
+    # 1️⃣ Cancel at Betfair (best effort)
+    # --------------------------------------------------
+    try:
+        _rpc(app_key, token, "cancelOrders", {"betIds": [str(bet_id)]})
     except Exception:
         pass
+
+    # --------------------------------------------------
+    # 2️⃣ Mark CANCELLED in DB
+    # --------------------------------------------------
+    try:
+        con = _orders_conn()
+        cur = con.cursor()
+
+        _q_retry(cur, """
+            UPDATE orders
+               SET entry_status='CANCELLED',
+                   exit_status='CANCELLED',
+                   closed_at=COALESCE(closed_at, datetime('now','utc')),
+                   error=COALESCE(error, 'betfair_cancel')
+             WHERE id=?
+        """, (parent_id,))
+        con.commit()
+        con.close()
+
+        _release_parent_exposure_db(parent_id)
+
+        _log_event(
+            "INFO","bankstate",
+            f"[CANCEL→RELEASE] parent_ref={parent_cor}"
+        )
+
+    except Exception as e:
+        _log_event("ERROR","bankstate",
+                   f"[CANCEL RELEASE FAILED] bet_id={bet_id}: {e}")
+
+
 
 def _replace(app_key: str, token: str, market_id: str, bet_id: str, new_price: float) -> None:
     """
@@ -1996,6 +2094,28 @@ def _orders_insert_parent_queued(
     Stores stop_loss_px for Overwatcher STOPLOSS engine.
     """
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _orders_insert_parent_queued(
+# 🧩 ACTION: ADD required_exposure backfill at QUEUED insert
+# 📆 PATCHED: 2026-04-02 — enforce exposure invariant at parent creation
+#
+# WHY:
+# - required_exposure was only derived in place_parent_and_hedge()
+# - Parents can be CANCELLED before that path executes
+# - Exposure release is correctly blocked when required_exposure <= 0
+# - Therefore required_exposure MUST exist at QUEUED time
+# ======================================================================
+
+    # --------------------------------------------------
+    # 🔐 REQUIRED EXPOSURE (AUTHORITATIVE, DB-FIRST)
+    # --------------------------------------------------
+    try:
+        req_exposure = float(entry_stake) * float(entry_odds)
+    except Exception:
+        req_exposure = None
+
+
     # --- canonical engine resolution (LIVE invariant) ---
     # In MSC fast-path, parent row may not exist yet.
     # Engine must be supplied by placement/BUS.
@@ -2051,29 +2171,31 @@ def _orders_insert_parent_queued(
         _q_retry(cur, f"""
             INSERT INTO orders (
                 customerOrderRef, run_id, mode, marketId, selectionId,
-                side, entry_odds, entry_stake, entry_status, opened_at,
+                side, entry_odds, entry_stake, required_exposure,
+                entry_status, opened_at,
                 role, source, engine, stop_loss_px
             )
             VALUES (
-                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED', ?,
+                ?, ?, 'LIVE', ?, ?, ?, ?, ?, ?,
+                'QUEUED', ?,
                 'PARENT', ?, ?, ?
             )
             ON CONFLICT(customerOrderRef) DO UPDATE SET
-                run_id        = COALESCE(orders.run_id, excluded.run_id),
-                mode          = 'LIVE',
-                marketId      = COALESCE(excluded.marketId, orders.marketId),
-                selectionId   = COALESCE(excluded.selectionId, orders.selectionId),
-                side          = excluded.side,
-                entry_odds    = excluded.entry_odds,
-                entry_stake   = excluded.entry_stake,
-                entry_status  = COALESCE(orders.entry_status, 'QUEUED'),
-                opened_at     = COALESCE(orders.opened_at, excluded.opened_at),
-                role          = 'PARENT',
-                source        = COALESCE(orders.source, excluded.source),
-                engine        = COALESCE(orders.engine, excluded.engine),
-                stop_loss_px  = COALESCE(excluded.stop_loss_px, orders.stop_loss_px)
-        """,   # 👈 FIX: properly close SQL f-string here
-        (
+                run_id            = COALESCE(orders.run_id, excluded.run_id),
+                mode              = 'LIVE',
+                marketId          = COALESCE(excluded.marketId, orders.marketId),
+                selectionId       = COALESCE(excluded.selectionId, orders.selectionId),
+                side              = excluded.side,
+                entry_odds        = excluded.entry_odds,
+                entry_stake       = excluded.entry_stake,
+                required_exposure = COALESCE(orders.required_exposure, excluded.required_exposure),
+                entry_status      = COALESCE(orders.entry_status, 'QUEUED'),
+                opened_at         = COALESCE(orders.opened_at, excluded.opened_at),
+                role              = 'PARENT',
+                source            = COALESCE(orders.source, excluded.source),
+                engine            = COALESCE(orders.engine, excluded.engine),
+                stop_loss_px      = COALESCE(excluded.stop_loss_px, orders.stop_loss_px)
+        """, (
             str(cor),
             int(fk),
             str(market_id),
@@ -2081,11 +2203,13 @@ def _orders_insert_parent_queued(
             side.upper(),
             float(entry_odds),
             float(entry_stake),
+            req_exposure,
             _utcnow_str(),
             source,
             eng,
             stop_loss_px
         ))
+
 
 
         con.commit()
@@ -2369,99 +2493,55 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 1) -> 
 # ======================================================================
 
 def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
+    """
+    Canonical parent MATCHED handler.
+
+    CONTRACT:
+    - Caller has already determined Betfair truth (EXECUTION_COMPLETE)
+    - This function MUST always flip parent → MATCHED
+    - Child creation is best-effort and must NEVER block the flip
+    """
+
     _ensure_orders_schema()
     con = _orders_conn()
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
     try:
+        # ------------------------------------------------------------------
+        # 1️⃣ LOAD PARENT (AUTHORITATIVE)
+        # ------------------------------------------------------------------
         parent = _q_retry(cur, """
-            SELECT id, engine, source, side,
-                   entry_odds, entry_stake,
-                   entry_status,
-                   marketId, selectionId
-              FROM orders
-             WHERE customerOrderRef=? AND role='PARENT'
-             LIMIT 1
+            SELECT
+                id,
+                run_id,
+                engine,
+                source,
+                side,
+                entry_odds,
+                entry_stake,
+                entry_status,
+                marketId,
+                selectionId
+            FROM orders
+            WHERE customerOrderRef=?
+              AND role='PARENT'
+            LIMIT 1
         """, (str(cor),)).fetchone()
 
         if not parent:
             return
 
-        # 🔒 Idempotency
+        # Idempotency: already matched → nothing to do
         if (parent["entry_status"] or "").upper() == "MATCHED":
             return
 
-        parent_id = int(parent["id"])
+        parent_id   = int(parent["id"])
         parent_side = parent["side"].upper()
 
-        # ==================================================
-        # 🔑 ATOMIC SECTION — CHILD MUST EXIST FIRST
-        # ==================================================
-
-        # 1️⃣ Ensure CHILD row exists (idempotent)
-        row = _q_retry(cur, """
-            SELECT id FROM orders
-            WHERE role='CHILD' AND hedge_of=?
-            LIMIT 1
-        """, (parent_id,)).fetchone()
-
-        if not row:
-            hedge_side = "BACK" if parent_side == "LAY" else "LAY"
-
-            from engines.price_math import odds_plus_ticks
-            from engines.math.dynamic_stake_v7 import calc_greenup_stake
-
-            hedge_odds = odds_plus_ticks(
-                float(parent["entry_odds"]),
-                +1 if hedge_side == "BACK" else -1
-            )
-            hedge_odds = _round_odds(float(hedge_odds))
-
-            hedge_stake = calc_greenup_stake(
-                parent_side,
-                float(parent["entry_odds"]),
-                float(parent["entry_stake"]),
-                hedge_odds
-            )
-
-            _q_retry(cur, """
-                INSERT INTO orders (
-                    customerOrderRef,
-                    run_id,
-                    mode,
-                    marketId,
-                    selectionId,
-                    side,
-                    entry_odds,
-                    entry_stake,
-                    entry_status,
-                    opened_at,
-                    role,
-                    hedge_of,
-                    source,
-                    exit_kind,
-                    engine
-                )
-                VALUES (
-                    ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED',
-                    datetime('now','utc'),
-                    'CHILD', ?, ?, 'HEDGE', ?
-                )
-            """, (
-                f"CHILD-{uuid.uuid4().hex[:12]}",
-                parent["run_id"],
-                parent["marketId"],
-                parent["selectionId"],
-                hedge_side,
-                float(hedge_odds),
-                float(hedge_stake),
-                parent_id,
-                parent["source"],
-                parent["engine"],
-            ))
-
-        # 2️⃣ NOW mark parent MATCHED (no race possible)
+        # ------------------------------------------------------------------
+        # 2️⃣ FLIP PARENT → MATCHED (NON-NEGOTIABLE)
+        # ------------------------------------------------------------------
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='MATCHED',
@@ -2471,14 +2551,108 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
              WHERE id=?
         """, (parent["engine"], parent_id))
 
-        con.commit()
+        con.commit()   # 🔑 parent state is now correct and durable
 
     except Exception as e:
         _log_event(
             "ERROR",
             "live_router",
-            f"parent_matched atomic failed ref={cor}: {e}"
+            f"parent_matched failed (parent flip) ref={cor}: {e}"
         )
+        return
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    # ======================================================================
+    # 3️⃣ ENSURE CHILD EXISTS (BEST-EFFORT, NON-BLOCKING)
+    # ======================================================================
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        # Child already exists?
+        row = _q_retry(cur, """
+            SELECT id
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+             LIMIT 1
+        """, (parent_id,)).fetchone()
+
+        if row:
+            return  # invariant satisfied
+
+        # Derive hedge
+        hedge_side = "BACK" if parent_side == "LAY" else "LAY"
+
+        from engines.price_math import odds_plus_ticks
+        from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+        hedge_odds = odds_plus_ticks(
+            float(parent["entry_odds"]),
+            +1 if hedge_side == "BACK" else -1
+        )
+        hedge_odds = _round_odds(float(hedge_odds))
+
+        hedge_stake = calc_greenup_stake(
+            parent_side,
+            float(parent["entry_odds"]),
+            float(parent["entry_stake"]),
+            hedge_odds
+        )
+
+        # Insert CHILD (QUEUED)
+        _q_retry(cur, """
+            INSERT INTO orders (
+                customerOrderRef,
+                run_id,
+                mode,
+                marketId,
+                selectionId,
+                side,
+                entry_odds,
+                entry_stake,
+                entry_status,
+                opened_at,
+                role,
+                hedge_of,
+                source,
+                exit_kind,
+                engine
+            )
+            VALUES (
+                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED',
+                datetime('now','utc'),
+                'CHILD', ?, ?, 'HEDGE', ?
+            )
+        """, (
+            f"CHILD-{uuid.uuid4().hex[:12]}",
+            parent["run_id"],
+            parent["marketId"],
+            parent["selectionId"],
+            hedge_side,
+            float(hedge_odds),
+            float(hedge_stake),
+            parent_id,
+            parent["source"],
+            parent["engine"],
+        ))
+
+        con.commit()
+
+    except Exception as e:
+        # 🔒 CHILD FAILURE MUST NEVER ROLLBACK PARENT
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"child ensure failed (non-fatal) ref={cor}: {e}"
+        )
+
     finally:
         try:
             con.close()
@@ -2547,9 +2721,7 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                              WHERE id=?
                         """, (avg_odds, matched_size, child_id))
 
-                        # 🔓 RELEASE BankState exposure IMMEDIATELY
-                        parent_id = int(parent["id"])  # or fetched explicitly
-                        _release_parent_exposure_db(parent_id)
+
 
 
                         _q_retry(cur, """
@@ -2658,13 +2830,7 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
             pass
 
 # === PATCH END ==============================================================
-def _record_release(reason: str, amount: float):
-    _EXPOSURE_RELEASE_COUNTS[reason] += 1
-    print(
-        f"[EXPOSURE][RELEASE] reason={reason} "
-        f"amount={amount:.2f} "
-        f"count={_EXPOSURE_RELEASE_COUNTS[reason]}"
-    )
+
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: def _release_parent_exposure_db(
@@ -2867,7 +3033,7 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         # module-level counters (router scope)
         _EXPOSURE_RELEASE_COUNTS = defaultdict(int)
 
-        _record_release()
+     
 
 
 
@@ -3352,9 +3518,6 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str,
         if not p:
             return
 
-        # 🔐 BankState — release exposure
-        parent_id = int(parent["id"])  # or fetched explicitly
-        _release_parent_exposure_db(parent_id)
 
 
         # Compute realized PnL
@@ -3719,21 +3882,56 @@ def _active_parents_count_per_letter(market_id: str, selection_id: str, letter: 
 def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> None:
     _ensure_orders_schema()
     con = _orders_conn(); cur = con.cursor()
+
     try:
+        row = _q_retry(cur, """
+            SELECT entry_bet_id
+              FROM orders
+             WHERE customerOrderRef=?
+               AND role='PARENT'
+             LIMIT 1
+        """, (str(cor),)).fetchone()
+
+        bet_id = row["entry_bet_id"] if row else None
+
+        # 🔒 GUARD: never cancel if already matched
+        if not _guard_cancel_if_matched(parent_cor=cor, bet_id=bet_id):
+            return
+
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='CANCELLED',
+                   exit_status='CANCELLED',
                    closed_at=COALESCE(closed_at, ?),
                    error=COALESCE(error, ?),
                    mode='LIVE'
              WHERE customerOrderRef=?
         """, (_utcnow_str(), reason[:200], str(cor)))
+
         con.commit()
+
     finally:
         con.close()
 
-    # 🔑 RELEASE UNMATCHED EXPOSURE
-    _release_unmatched_parent_exposure(cor)
+    # 🔓 Exposure release (unchanged)
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        row = _q_retry(con, """
+            SELECT id FROM orders
+             WHERE customerOrderRef=?
+               AND role='PARENT'
+             LIMIT 1
+        """, (str(cor),)).fetchone()
+        con.close()
+
+        if row:
+            _release_parent_exposure_db(int(row["id"]))
+
+    except Exception as e:
+        _log_event("ERROR","bankstate",
+                   f"[CANCEL EXPOSURE RELEASE FAILED] ref={cor}: {e}")
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4054,16 +4252,32 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
         qph = ",".join("?" * len(sweep_mids))
 
         # A) CANCEL unmatched parents
-        n_cancel = con.execute(f"""
-            UPDATE orders
-               SET entry_status='CANCELLED',
-                   closed_at=COALESCE(closed_at, datetime('now','utc'))
-             WHERE mode='LIVE'
-               AND role='PARENT'
-               AND marketId IN ({qph})
-               AND UPPER(COALESCE(entry_status,'')) IN ('QUEUED','PLACED')
-               AND COALESCE(exposure_released,0)=0
-        """, tuple(sweep_mids)).rowcount
+        for mid in sweep_mids:
+            rows = con.execute("""
+                SELECT id, customerOrderRef, entry_bet_id
+                  FROM orders
+                 WHERE mode='LIVE'
+                   AND role='PARENT'
+                   AND marketId=?
+                   AND UPPER(entry_status) IN ('QUEUED','PLACED')
+                   AND COALESCE(exposure_released,0)=0
+            """, (mid,)).fetchall()
+
+            for r in rows:
+                cor = r["customerOrderRef"]
+                bet_id = r["entry_bet_id"]
+
+                if not _guard_cancel_if_matched(parent_cor=cor, bet_id=bet_id):
+                    continue
+
+                con.execute("""
+                    UPDATE orders
+                       SET entry_status='CANCELLED',
+                           exit_status='CANCELLED',
+                           closed_at=COALESCE(closed_at, datetime('now','utc'))
+                     WHERE id=?
+                """, (int(r["id"]),))
+
 
         # B) SETTLE matched parents
         n_settle = con.execute(f"""
@@ -4301,7 +4515,7 @@ def _sync_settlement_terminal_exposure(limit: int = 200) -> int:
     Settlement alignment sweep.
 
     If Settlement has flipped a PARENT to a terminal state
-知道 and exposure has not yet been released, release it here.
+    and exposure has not yet been released, release it here.
 
     Idempotent.
     Router owns exposure lifecycle.
@@ -4327,8 +4541,7 @@ def _sync_settlement_terminal_exposure(limit: int = 200) -> int:
 
         for r in rows:
             try:
-                parent_id = int(parent["id"])  # or fetched explicitly
-                _release_parent_exposure_db(parent_id)
+  
 
 
                 _q_retry(cur, """
@@ -4916,6 +5129,7 @@ def place_parent_and_hedge(
                             """
                             UPDATE orders
                                SET entry_status='CANCELLED',
+                                   exit_status='CANCELLED',
                                    closed_at=COALESCE(closed_at, datetime('now','utc'))
                              WHERE customerOrderRef=?
                                AND COALESCE(entry_status,'')<>'MATCHED'
@@ -5190,6 +5404,16 @@ def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -
             try:
                 cor = str(r["customerOrderRef"])
 
+                row2 = _q_retry(cur, """
+                    SELECT entry_bet_id FROM orders WHERE id=? LIMIT 1
+                """, (int(r["id"]),)).fetchone()
+
+                bet_id = row2["entry_bet_id"] if row2 else None
+
+                # 🔒 GUARD
+                if not _guard_cancel_if_matched(parent_cor=cor, bet_id=bet_id):
+                    continue
+
                 # 1️⃣ Cancel on Betfair (best effort)
                 try:
                     row = _q_retry(cur, """
@@ -5209,6 +5433,7 @@ def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -
                 _q_retry(cur, """
                     UPDATE orders
                        SET entry_status='CANCELLED',
+                           exit_status='CANCELLED',
                            closed_at=datetime('now','utc'),
                            error='recycle_timeout'
                      WHERE id=?
@@ -5448,6 +5673,7 @@ def cleanup_orphan_parents() -> int:
             _q_retry(cur, """
                 UPDATE orders
                    SET entry_status='CANCELLED',
+                       exit_status='CANCELLED',
                        closed_at=COALESCE(closed_at, datetime('now','utc')),
                        error=COALESCE(error, 'cleanup_orphan'),
                        mode='LIVE'
