@@ -1122,6 +1122,18 @@ class DecisionBus:
                 _normalize_ctx_enums(ctx_l)
                 ctx_l["letter"] = letter
 
+                # inside LEGACY letter loop, before plan_for_strategy
+                if "direction" not in ctx_l:
+                    try:
+                        from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+                        dec = compute_msc_decision(ctx_l)
+                        if isinstance(dec, dict):
+                            d = dec.get("direction")
+                            if d in ("BACK->LAY", "LAY->BACK"):
+                                ctx_l["direction"] = d
+                    except Exception:
+                        pass
+
                 # ==================================================
                 # 🧩 STRATEGY: OG_STRATEGY (S)
                 # ==================================================

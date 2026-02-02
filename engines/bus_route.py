@@ -108,10 +108,10 @@ def _filter_valid_markets(
 ):
     """
     Enforce route-quality invariants:
-    - A valid market has >= min_runners_per_market runners
-    - A route should have >= min_markets valid markets
+    - Prefer markets with >= min_runners_per_market runners
+    - GUARANTEE at least min_markets markets by extending with next-best markets
 
-    Fail-open but loud if invariant cannot be met.
+    Never blocks the route.
     """
 
     from collections import defaultdict
@@ -120,25 +120,46 @@ def _filter_valid_markets(
     for mid, sid in runner_pairs:
         by_market[str(mid)].append((mid, sid))
 
-    # keep only valid markets
+    # 1️⃣ Primary valid markets
     valid_markets = {
         mid: pairs
         for mid, pairs in by_market.items()
         if len(pairs) >= min_runners_per_market
     }
 
-    if len(valid_markets) < min_markets:
-        print(
-            f"[BUS_ROUTE][WARN] "
-            f"only {len(valid_markets)} valid markets "
-            f"(need {min_markets}, ≥{min_runners_per_market} runners each)"
-        )
-        # fail-open: keep all markets, but warn
-        return runner_pairs
+    if len(valid_markets) >= min_markets:
+        out = []
+        for pairs in valid_markets.values():
+            out.extend(pairs)
+        return out
 
-    # flatten back to ordered runner list (market order preserved upstream)
+    # 2️⃣ Extend with largest remaining markets
+    print(
+        f"[BUS_ROUTE][WARN] only {len(valid_markets)} valid markets "
+        f"(need {min_markets}, ≥{min_runners_per_market} runners each) — extending route"
+    )
+
+    # Sort remaining markets by runner count (desc)
+    remaining = sorted(
+        (
+            (mid, pairs)
+            for mid, pairs in by_market.items()
+            if mid not in valid_markets
+        ),
+        key=lambda x: len(x[1]),
+        reverse=True,
+    )
+
+    extended_markets = dict(valid_markets)
+
+    for mid, pairs in remaining:
+        extended_markets[mid] = pairs
+        if len(extended_markets) >= min_markets:
+            break
+
+    # 3️⃣ Flatten, preserving market grouping
     out = []
-    for mid, pairs in valid_markets.items():
+    for pairs in extended_markets.values():
         out.extend(pairs)
 
     return out
