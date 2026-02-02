@@ -28,6 +28,18 @@ except Exception:
         "OVERWATCHER": 0,
     }
 
+# BUS authority: legacy letter → concrete strategy name
+LEGACY_LETTER_TO_STRATEGY = {
+    "S": "OG_STRATEGY",
+    "B": "BTL_SCOUT",
+    "G": "BTL_AGGR",
+    "X": "S4_CROSSOVER",
+    "R": "S5_BREAKOUT",
+    "F": "S6_STEAM_FADE",
+    "P": "BLUEPRINTS",   # special-case, see below
+}
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: inside CTX preparation (right after ctx is loaded from route)
@@ -960,21 +972,7 @@ class DecisionBus:
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
-        from engines.bus_route import get_runner_odds_map
-
-        all_pairs = list(self._route_ctx_map.keys())
-        odds_map = get_runner_odds_map(all_pairs)
-
-        for (mid, sid), odds in odds_map.items():
-            ctx = self._route_ctx_map.get((mid, sid))
-            if not ctx:
-                continue
-
-            ctx["px"]   = odds["px"]
-            ctx["odds"] = odds["px"]
-            ctx["back"] = odds.get("back")
-            ctx["lay"]  = odds.get("lay")
-
+        self._route_ctx_map = self._route_snapshot.get_ctx_map()
 
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
@@ -1025,22 +1023,243 @@ class DecisionBus:
             # --------------------------------------------------
             _normalize_ctx_enums(ctx)
 
+            # --------------------------------------------------
+            # 🧠 BLUEPRINT MATERIALISATION (BUS AUTHORITY)
+            # --------------------------------------------------
+            # Blueprint is NOT an engine.
+            # It is a state writer that MUST run before strategy P is evaluated.
+            # Failure must NOT block strategy evaluation.
 
+            try:
+                from engines.blueprint.blueprint_build import update_for_market
+
+                update_for_market(
+                    marketId=mid,
+                    selectionId=sid,
+                    ctx=ctx,      # full route ctx; blueprint extracts what it needs
+                    source="BUS", # audit only
+                )
+            except Exception as e:
+                _record_reason(
+                    engine_report,
+                    "LEGACY",
+                    f"blueprint_update_error:{e}",
+                )
+            # ==================================================
+            # 🧠 MARKET MONITOR REFRESH (BUS AUTHORITY)
+            # ==================================================
+            # Required for:
+            # - BTL_AGGR (G): get_moved_signals()
+            #
+            # NOTE:
+            # - refresh() populates the global move buffer
+            # - strategies consume it via get_moved_signals()
+            # - MUST run before strategy evaluation
+            #
+            try:
+                from engines.market_monitor.monitor import refresh
+                refresh([mid])
+            except Exception as e:
+                _record_reason(
+                    engine_report,
+                    "LEGACY",
+                    f"market_monitor_refresh_error:{e}",
+                )
+
+            # --------------------------------------------------
+            # 🧠 STRATEGY EVALUATION (ALL LEGACY STRATEGIES)
+            # --------------------------------------------------
             for letter in self.ALLOWED_LEGACY_LETTERS:
                 ctx_l = dict(ctx)
                 _normalize_ctx_enums(ctx_l)
                 ctx_l["letter"] = letter
 
+                # ==================================================
+                # 🧩 STRATEGY: OG_STRATEGY (S)
+                # ==================================================
+                # OG requires MarketMonitor signals
+                # BUS must materialise and inject them
+
+                if letter == "S":
+                    try:
+                        from engines.market_monitor.monitor import signals_for_runner
+
+                        ctx_l["signals"] = signals_for_runner(
+                            mid,
+                            sid,
+                            ctx_l.get("px"),
+                        )
+                    except Exception as e:
+                        _record_reason(
+                            engine_report,
+                            "LEGACY",
+                            f"og_signal_error:{e}",
+                        )
+
+                # ==================================================
+                # 🧩 STRATEGY: BTL_SCOUT (B)
+                # ==================================================
+                # Requires MarketMonitor PASSIVE→ACTIVE signal
+
+                if letter == "B":
+                    try:
+                        from engines.market_monitor.monitor import signals_for_runner
+
+                        ctx_l["signals"] = signals_for_runner(
+                            mid,
+                            sid,
+                            ctx_l.get("px"),
+                        )
+                    except Exception as e:
+                        _record_reason(
+                            engine_report,
+                            "LEGACY",
+                            f"btl_scout_signal_error:{e}",
+                        )
+
+                # ======================================================================
+                # 📍 TARGET: engines/bus/bus.py
+                # 🔎 CONTEXT: LANE 1 — LEGACY (BUS STOP ONLY)
+                # 🧩 STRATEGY: S4_CROSSOVER (X)
+                # 📆 PATCHED: 2026-02-02 — Inject fav_rank for crossover detection
+                #
+                # WHY:
+                # - S4_CROSSOVER requires ctx.fav_rank
+                # - fav_rank is stored in odds_current
+                # - BUS must materialise it into ctx
+                #
+                # CONTRACT:
+                # - No strategy logic
+                # - DB-backed read only
+                # - Pure wiring
+                # ======================================================================
+
+                if letter == "X":
+                    try:
+                        from engines.config_paths import open_auto_db
+
+                        con = open_auto_db(rw=False)
+                        row = con.execute(
+                            """
+                            SELECT fav_rank
+                            FROM odds_current
+                            WHERE marketId = ?
+                              AND selectionId = ?
+                              AND fav_rank IS NOT NULL
+                            ORDER BY updated_ts DESC
+                            LIMIT 1
+                            """,
+                            (mid, sid),
+                        ).fetchone()
+                        con.close()
+
+                        if row and row[0] is not None:
+                            ctx_l["fav_rank"] = int(row[0])
+
+                    except Exception as e:
+                        _record_reason(
+                            engine_report,
+                            "LEGACY",
+                            f"x_fav_rank_error:{e}",
+                        )
+
+                # ======================================================================
+                # 📍 TARGET: engines/bus/bus.py
+                # 🔎 CONTEXT: LANE 1 — LEGACY (BUS STOP ONLY)
+                # 🧩 STRATEGY: S5_BREAKOUT (R)
+                # 📆 PATCHED: 2026-02-02 — Inject price alias for OC breakout
+                #
+                # WHY:
+                # - S5_BREAKOUT reads ctx.price explicitly
+                # - BUS owns live price as ctx["px"]
+                # - Strategy is DB-backed and event-based
+                #
+                # CONTRACT:
+                # - No breakout logic here
+                # - No DB reads here
+                # - Pure field wiring only
+                # ======================================================================
+
+                if letter == "R":
+                    try:
+                        # Ensure price alias exists for strategy
+                        if "price" not in ctx_l:
+                            ctx_l["price"] = ctx_l.get("px")
+                    except Exception as e:
+                        _record_reason(
+                            engine_report,
+                            "LEGACY",
+                            f"r_price_inject_error:{e}",
+                        )
+
+                # ======================================================================
+                # 📍 TARGET: engines/bus/bus.py
+                # 🔎 CONTEXT: LANE 1 — LEGACY (BUS STOP ONLY)
+                # 🧩 STRATEGY: S6_STEAM_FADE (F)
+                # 📆 PATCHED: 2026-02-02 — Inject MarketMonitor signals for STEAM_FADE
+                #
+                # WHY:
+                # - S6_STEAM_FADE depends on ctx.signals["lost_fav_recent"]
+                # - signals are computed by MarketMonitor
+                # - BUS must materialise and inject them
+                #
+                # CONTRACT:
+                # - No strategy logic here
+                # - No guards
+                # - Pure wiring only
+                # ======================================================================
+
+                if letter == "F":
+                    try:
+                        from engines.market_monitor.monitor import signals_for_runner
+
+                        # Reuse the same MarketMonitor signal surface
+                        ctx_l["signals"] = signals_for_runner(
+                            mid,
+                            sid,
+                            ctx_l.get("px"),
+                        )
+
+                    except Exception as e:
+                        _record_reason(
+                            engine_report,
+                            "LEGACY",
+                            f"steam_fade_signal_error:{e}",
+                        )
+
+
+
+                # --------------------------------------------------
+                # Mastery → Strategy decision
+                # --------------------------------------------------
                 try:
-                    res = plan_for_strategy(letter, ctx_l)
+                    strategy = LEGACY_LETTER_TO_STRATEGY.get(letter)
+                    if not strategy:
+                        continue  # defensive
+
+                    res = plan_for_strategy(strategy, ctx_l)
                     if res and res.get("enter"):
                         plan = dict(res)
+
+                        # 🔒 SAFETY INVARIANT
+                        assert plan.get("letter") == letter, (
+                            f"[BUS] LEGACY plan letter mismatch: "
+                            f"expected={letter} got={plan.get('letter')} "
+                            f"(strategy={strategy})"
+                        )
+
                         plan["engine"] = "LEGACY"
                         plans.append(("LEGACY", plan, ctx_l))
                         engine_report["LEGACY"]["fired"] += 1
                         lane_counts[1] += 1
+
                 except Exception as e:
-                    _record_reason(engine_report, "LEGACY", f"mastery_error:{e}")
+                    _record_reason(
+                        engine_report,
+                        "LEGACY",
+                        f"mastery_error:{e}",
+                    )
+
 
         # --------------------------------------------------
         # 🟨 LANE 2 — MSC_RISK (BETFAIR-TRUTH DRIVEN)
@@ -1058,7 +1277,7 @@ class DecisionBus:
 
         risc = self.engines.get("MSC_RISK")
         if not risc:
-            return
+            return plans, lane_counts
 
         app_key = get_app_key()
         token   = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
@@ -1133,154 +1352,134 @@ class DecisionBus:
                 _record_reason(engine_report, "MSC_RISK", "tick_error")
 
         # --------------------------------------------------
-        # 🟥 LANE 3 — MSC_INPLAY (BUS-ROUTED + SNAPSHOT-ENRICHED)
+        # 🟥 LANE 3 — MSC_INPLAY (BUS-AUTHORISED, DB-FIRST)
         # --------------------------------------------------
         engine_report["MSC_INPLAY"]["evaluated"] = True
 
         from engines.bus_route import get_v7_inplay_snapshot
+        from engines.config_paths import connect_db
+        from datetime import datetime, timezone
+        import sqlite3
 
         inplay = self.engines.get("MSC_INPLAY")
         if not inplay:
-            return
+            return plans, lane_counts
 
-        # Group BUS runners by marketId (BUS is the selector)
-        by_market = {}
-        for (mid, sid) in self._route_ctx_map.keys():
-            by_market.setdefault(mid, []).append(str(sid))
+        # --------------------------------------------------
+        # 1️⃣ BUS determines in-play markets (DB authority)
+        # --------------------------------------------------
+        con = connect_db(ro=True)
+        con.row_factory = sqlite3.Row
 
-        for mid, sids in by_market.items():
+        try:
+            rows = con.execute(
+                """
+                SELECT DISTINCT
+                    marketId
+                FROM bets
+                WHERE
+                    julianday(marketStartTime) <= julianday('now','utc')
+                    AND julianday(marketStartTime) >= julianday('now','utc') - (6.0 / 1440.0)
+                """
+            ).fetchall()
+        finally:
+            con.close()
 
-            # Snapshot is enrichment only (NOT a selector)
+        inplay_mids = [str(r["marketId"]) for r in rows if r["marketId"]]
+
+        if not inplay_mids:
+            return plans, lane_counts
+
+        # --------------------------------------------------
+        # 2️⃣ BUS expands runners via bets DB (NOT route)
+        # --------------------------------------------------
+        con = connect_db(ro=True)
+        con.row_factory = sqlite3.Row
+
+        try:
+            runner_rows = con.execute(
+                """
+                SELECT DISTINCT
+                    marketId,
+                    selectionId
+                FROM bets
+                WHERE marketId IN ({})
+                """.format(",".join("?" * len(inplay_mids))),
+                inplay_mids,
+            ).fetchall()
+        finally:
+            con.close()
+
+        runner_pairs = [
+            (str(r["marketId"]), str(r["selectionId"]))
+            for r in runner_rows
+            if r["marketId"] and r["selectionId"]
+        ]
+
+        if not runner_pairs:
+            return plans, lane_counts
+
+        # --------------------------------------------------
+        # 3️⃣ BUS_ROUTE supplies CTX (reuse, no rebuild)
+        # --------------------------------------------------
+        for mid, sid in runner_pairs:
+            ctx = self._route_ctx_map.get((mid, sid))
+            if not ctx:
+                continue
+
+            # --------------------------------------------------
+            # 4️⃣ In-play helper enrichment (non-gating)
+            # --------------------------------------------------
             snap = get_v7_inplay_snapshot(mid) or []
             snap_by_sid = {str(r["selectionId"]): r for r in snap}
 
-            for sid in sids:
-                ctx = self._route_ctx_map.get((mid, sid))
+            ctx_l = dict(ctx)
 
-                if not ctx:
-                    continue
+            # PX fallback permission (BUS-controlled)
+            ctx_l["_allow_bf_px_fallback"] = ctx_l.get("px") is None
 
-                # --------------------------------------------------
-                # 🕒 BUS IN-PLAY TIME WINDOW (PHASE-0 ALIGNED)
-                # --------------------------------------------------
-                try:
-                    from engines.config_paths import connect_db
-                    from datetime import datetime, timezone
-                    import sqlite3
+            intel = snap_by_sid.get(sid)
+            if intel:
+                ctx_l.update({
+                    "fav_rank":            intel.get("fav_rank"),
+                    "success":             intel.get("success"),
+                    "weight":              intel.get("weight"),
+                    "drift_ratio":         intel.get("drift_ratio"),
+                    "drift_pct":           intel.get("drift_pct"),
+                    "actual_drift_pct":    intel.get("actual_drift_pct"),
+                    "reversal_flag":       intel.get("reversal_flag"),
+                    "mto_minutes":         intel.get("mto_minutes"),
+                    "pos_inplay":          intel.get("pos_inplay"),
+                    "inplay_move_class":   intel.get("move"),
+                    "inplay_rank_base_px": intel.get("base_px"),
+                    "inplay_pnl_if_win":   intel.get("pnl_if_win"),
+                })
 
-                    con = connect_db(ro=True)
-                    con.row_factory = sqlite3.Row
-
-                    row = con.execute(
-                        """
-                        SELECT marketStartTime
-                        FROM bets
-                        WHERE marketId = ?
-                        LIMIT 1
-                        """,
-                        (mid,),
-                    ).fetchone()
-
-                finally:
-                    try:
-                        con.close()
-                    except Exception:
-                        pass
-
-                if not row or not row["marketStartTime"]:
-                    continue
-
-                off = datetime.fromisoformat(
-                    row["marketStartTime"].replace("Z", "+00:00")
+            # Optional intel broker (engine-requested only)
+            if ctx_l.get("_request_intel"):
+                opt = self._get_optional_intel(
+                    engine="MSC_INPLAY",
+                    ctx=ctx_l,
                 )
-                now = datetime.now(timezone.utc)
-                secs = (off - now).total_seconds()
+                if opt:
+                    ctx_l.update(opt)
 
-                # In-play window:
-                #   • <= 1 min to off
-                #   • >= 6 min after off
-                if secs > 60 or secs < -360:
-                    continue
+            # Normalisation is BUS authority
+            _normalize_ctx_enums(ctx_l)
 
-                # --------------------------------------------------
-                # 🔒 PX REQUIRED DURING IN-PLAY
-                # --------------------------------------------------
-# ======================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: ctx_l = dict(ctx)
-# 🧩 ACTION: ALLOW EXPLICIT PX FALLBACK FOR MSC_INPLAY ONLY
-# 📆 PATCHED: 2026-03-22 — Controlled Betfair PX fallback (Pattern B)
-#
-# WHY:
-# - Prevent InPlay starvation if Betfair omits PX momentarily
-# - BUS remains execution authority
-# - Engine fallback is opt-in and visible
-#
-# INVARIANT:
-# - This flag does NOTHING unless PX is None
-# - No network calls are introduced in BUS
-# ======================================================================
-
-                # --------------------------------------------------
-                # 🔓 EXPLICIT PX FALLBACK PERMISSION (MSC_INPLAY ONLY)
-                # --------------------------------------------------
-                ctx_l = dict(ctx)
-
-                if ctx_l.get("px") is None:
-                    ctx_l["_allow_bf_px_fallback"] = True
-                else:
-                    ctx_l["_allow_bf_px_fallback"] = False
-
-
-
-
-                # --------------------------------------------------
-                # Snapshot enrichment (pre-engine)
-                # --------------------------------------------------
-                intel = snap_by_sid.get(sid)
-                if intel:
-                    ctx_l.update({
-                        "fav_rank":            intel.get("fav_rank"),
-                        "success":             intel.get("success"),
-                        "weight":              intel.get("weight"),
-                        "drift_ratio":         intel.get("drift_ratio"),
-                        "drift_pct":           intel.get("drift_pct"),
-                        "actual_drift_pct":    intel.get("actual_drift_pct"),
-                        "reversal_flag":       intel.get("reversal_flag"),
-                        "mto_minutes":         intel.get("mto_minutes"),
-                        "pos_inplay":          intel.get("pos_inplay"),
-                        "inplay_move_class":   intel.get("move"),
-                        "inplay_rank_base_px": intel.get("base_px"),
-                        "inplay_pnl_if_win":   intel.get("pnl_if_win"),
-                    })
-
-                # --------------------------------------------------
-                # OPTIONAL INTEL — ENGINE REQUESTED
-                # --------------------------------------------------
-                if ctx_l.get("_request_intel"):
-                    opt = self._get_optional_intel(
-                        engine="MSC_INPLAY",
-                        ctx=ctx_l,
-                    )
-                    if opt:
-                        ctx_l.update(opt)
-
-                # --------------------------------------------------
-                # PROMINENCE NORMALISATION (BUS AUTHORITY)
-                # --------------------------------------------------
-                _normalize_ctx_enums(ctx_l)
-
-                try:
-                    p = inplay.tick(ctx_l)
-                    if p and p.get("enter"):
-                        plan = dict(p)
-                        plan["engine"] = "MSC_INPLAY"
-                        plans.append(("MSC_INPLAY", plan, ctx_l))
-                        engine_report["MSC_INPLAY"]["fired"] += 1
-                        lane_counts[3] += 1
-                except Exception:
-                    _record_reason(engine_report, "MSC_INPLAY", "tick_error")
-
+            # --------------------------------------------------
+            # 5️⃣ Pure engine decision
+            # --------------------------------------------------
+            try:
+                p = inplay.tick(ctx_l)
+                if p and p.get("enter"):
+                    plan = dict(p)
+                    plan["engine"] = "MSC_INPLAY"
+                    plans.append(("MSC_INPLAY", plan, ctx_l))
+                    engine_report["MSC_INPLAY"]["fired"] += 1
+                    lane_counts[3] += 1
+            except Exception:
+                _record_reason(engine_report, "MSC_INPLAY", "tick_error")
 
 
 
@@ -2410,13 +2609,7 @@ class DecisionBus:
                     plan.setdefault("target_ticks", 1)
 
 
-                if engine == "MSC_INPLAY" and not ctx.get("legacy_parent_id"):
-                    plan["_bus_block"] = "inplay_no_parent_context"
-                    tick_ctx["plans_route_failed"].append(
-                        (plan, "inplay_no_parent_context")
-                    )
-                    _record_reason(engine_report, engine, "inplay_no_parent_context")
-                    continue
+           
 
 
                 # --------------------------------------------------

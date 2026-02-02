@@ -930,7 +930,7 @@ def enforce_stop_losses():
     # 3) Evaluate trailing SL per parent
     for r in rows:
         source = str(r.get("source") or "").upper()
-        if source != "MSC_EXPLORATORY":
+        if source not in ("MSC_EXPLORATORY", "LEGACY"):
             continue
         mid = str(r["marketId"])
         sid = str(r["selectionId"])

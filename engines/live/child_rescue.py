@@ -118,8 +118,11 @@ def ensure_single_child_for_parent(
             "hedge_of": parent_id,
             "why": reason,
         }
-        enqueue_for_placement(engine, plan, {})
-        return "CREATED"
+        from engines.live.live_router import _orders_insert_child_queued
+
+        child_id = _orders_insert_child_queued(parent_cor)
+        if not child_id:
+            return "SKIPPED_NO_PARENT"
 
     # --------------------------------------------------
     # CASE B — one child → maybe replace
