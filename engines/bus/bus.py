@@ -1115,6 +1115,11 @@ class DecisionBus:
                 )
 
             # --------------------------------------------------
+            # LEGACY PHASE CONTRACT (BUS AUTHORITY)
+            # --------------------------------------------------
+            ctx_l["phase"] = "PRE"
+
+            # --------------------------------------------------
             # 🧠 STRATEGY EVALUATION (ALL LEGACY STRATEGIES)
             # --------------------------------------------------
             for letter in self.ALLOWED_LEGACY_LETTERS:
@@ -1495,6 +1500,11 @@ class DecisionBus:
             snap_by_sid = {str(r["selectionId"]): r for r in snap}
 
             ctx_l = dict(ctx)
+
+            # --------------------------------------------------
+            # MSC_INPLAY MODE CONTRACT (BUS AUTHORITY)
+            # --------------------------------------------------
+            ctx_l["in_play"] = True
 
             # PX fallback permission (BUS-controlled)
             ctx_l["_allow_bf_px_fallback"] = ctx_l.get("px") is None
