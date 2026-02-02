@@ -100,6 +100,48 @@ def _order_runner_pool_by_market_time(pairs):
 
     return ordered_pairs
 
+def _filter_valid_markets(
+    runner_pairs: list[tuple[str, str]],
+    *,
+    min_runners_per_market: int = 6,
+    min_markets: int = 5,
+):
+    """
+    Enforce route-quality invariants:
+    - A valid market has >= min_runners_per_market runners
+    - A route should have >= min_markets valid markets
+
+    Fail-open but loud if invariant cannot be met.
+    """
+
+    from collections import defaultdict
+
+    by_market = defaultdict(list)
+    for mid, sid in runner_pairs:
+        by_market[str(mid)].append((mid, sid))
+
+    # keep only valid markets
+    valid_markets = {
+        mid: pairs
+        for mid, pairs in by_market.items()
+        if len(pairs) >= min_runners_per_market
+    }
+
+    if len(valid_markets) < min_markets:
+        print(
+            f"[BUS_ROUTE][WARN] "
+            f"only {len(valid_markets)} valid markets "
+            f"(need {min_markets}, ≥{min_runners_per_market} runners each)"
+        )
+        # fail-open: keep all markets, but warn
+        return runner_pairs
+
+    # flatten back to ordered runner list (market order preserved upstream)
+    out = []
+    for mid, pairs in valid_markets.items():
+        out.extend(pairs)
+
+    return out
 
 
 def _build_runner_pool():
@@ -169,13 +211,14 @@ class BusRouteSnapshot:
     def build_route(self):
         self.route_id += 1
         raw_pairs = list(get_root_ctx_runner_pairs())
-        self.runner_pool = _order_runner_pool_by_market_time(raw_pairs)
+        ordered = _order_runner_pool_by_market_time(raw_pairs)
 
-
-        if not self.runner_pool:
-            self.bus_stops = {}
-            self.ctx_map = {}
-            return
+        # 🔒 ROUTE QUALITY ENFORCEMENT
+        self.runner_pool = _filter_valid_markets(
+            ordered,
+            min_runners_per_market=6,
+            min_markets=5,
+        )
 
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route

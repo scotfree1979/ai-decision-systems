@@ -18,6 +18,24 @@ DEFAULT_POLICY = {
     "*": ("ACTIVE", "PASSIVE")  # others default to ACTIVE or PASSIVE; IGNORED never allowed
 }
 
+# ------------------------------------------------------------------
+# GLOBAL MARKET MONITOR STATE (AUTHORITATIVE, IMPORT-TIME)
+# ------------------------------------------------------------------
+_STATE: Dict[str, dict] = {}
+
+# band / fav / price memory
+_STATE.setdefault("runner_band", {})       # {mid: {sid: (band, ts)}}
+_STATE.setdefault("high_seen", {})         # {mid: {sid: float}}
+_STATE.setdefault("fav_sid", None)
+_STATE.setdefault("fav_changed_ts", 0.0)
+
+# rank / structure memory (USED BY ORCHESTRATOR BOOTSTRAP)
+_STATE.setdefault("rank_prev", {})         # {mid: [sid1, sid2, ...]}
+_STATE.setdefault("rank_now", {})          # {mid: [sid1, sid2, ...]}
+_STATE.setdefault("crossovers", {})        # {mid: {sid: {...}}}
+
+
+
 try:
     # Optional override
     from engines.daily_config import MARKET_MONITOR as _CFG  # type: ignore
@@ -148,15 +166,7 @@ def signals_for_runner(mid: str, sid: str, px: float | None, *, recent_s: int = 
 # 📍 TARGET: engines/market_monitor/monitor.py:_adb
 # 📆 PATCHED: 2025-11-20 — guaranteed REAL sqlite3 (no hijack, no DAL)
 
-# === PATCH START ============================================================
-# 📍 TARGET: engines/market_monitor/monitor.py
-# 🔎 ANCHOR: near _STATE initialisation
-# 📆 PATCHED: 2026-03-20 — structural runner-order crossover detection
-# ============================================================================
 
-_STATE.setdefault("rank_prev", {})     # {mid: [sid1, sid2, ...]}
-_STATE.setdefault("rank_now", {})      # {mid: [sid1, sid2, ...]}
-_STATE.setdefault("crossovers", {})    # {mid: {sid: {...}}}
 
 def _update_rank_state(mid: str, runners: dict) -> None:
     """
@@ -237,22 +247,6 @@ def _adb():
     return con
 # === PATCH END ===
 
-
-
-# --- in-memory state per market ---
-# _STATE[mid] = {
-#   "updated_ts": float_unix_sec,
-#   "fav_sid": str | None,
-#   "runners": {
-#       sid: {"px": float|None, "band": "ACTIVE"/"PASSIVE"/"IGNORED"/"UNKNOWN", "is_fav": bool}
-#   }
-# }
-_STATE: Dict[str, dict] = {}
-
-_STATE.setdefault("runner_band", {})       # {mid: {sid: ("PASSIVE"/"ACTIVE"/...), ts}}
-_STATE.setdefault("high_seen", {})         # {mid: {sid: float}}
-_STATE.setdefault("fav_sid", None)         # current fav sid (you likely already have)
-_STATE.setdefault("fav_changed_ts", 0.0)   # last fav change unix ts
 
 # engines/market_monitor/monitor.py
 from engines.strategy_config import CONFIG

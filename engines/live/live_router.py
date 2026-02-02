@@ -3315,6 +3315,28 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         """, (realized, realized, pid))
         con.commit()
 
+        # ======================================================================
+        # 📍 TARGET: engines/live/live_router.py
+        # 🔎 ANCHOR: def _orders_update_child_matched(
+        # 🧩 ACTION: ADD missing parent exit transition
+        # 📆 PATCHED: 2026-02-02 — parent exit_status MUST flip on child match
+        #
+        # INVARIANT:
+        #   CHILD MATCHED ⇒ PARENT exit_status='MATCHED'
+        # ======================================================================
+
+        # 🔒 MISSING STEP — CLOSE PARENT ON CHILD MATCH
+        _q_retry(cur, """
+            UPDATE orders
+               SET exit_status = 'MATCHED',
+                   parent_closed = 1,
+                   closed_at = COALESCE(closed_at, datetime('now','utc'))
+             WHERE id = ?
+               AND role = 'PARENT'
+               AND (exit_status IS NULL OR exit_status <> 'MATCHED')
+        """, (parent_id,))
+
+
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py:_place_stoploss_child_now
 # 📆 PATCHED: 2025-12-12 — Engine penalty on stoploss

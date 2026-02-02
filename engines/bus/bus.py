@@ -80,19 +80,33 @@ def _normalize_ctx_enums(ctx: dict) -> None:
     """
 
     # --------------------
-    # Band (market monitor)
+    # Band (MarketMonitor)
     # --------------------
     band = ctx.get("band")
     if isinstance(band, str):
         ctx["band"] = _BAND_MAP.get(band.upper(), -1)
 
     # --------------------
-    # Prominence (position / running style)
+    # Prominence / prominent
     # --------------------
     prom = ctx.get("prominence")
     if isinstance(prom, str):
         ctx["prominence"] = _PROMINENCE_MAP.get(prom.upper(), 1)
 
+    # Some paths use `prominent` instead
+    prom2 = ctx.get("prominent")
+    if isinstance(prom2, str):
+        ctx["prominent"] = _PROMINENCE_MAP.get(prom2.upper(), 1)
+
+    # --------------------
+    # In-play positional enums (defensive)
+    # --------------------
+    pos = ctx.get("pos_inplay")
+    if isinstance(pos, str):
+        try:
+            ctx["pos_inplay"] = int(pos)
+        except Exception:
+            ctx["pos_inplay"] = -1
 
 
 # ======================================================================
@@ -1058,11 +1072,6 @@ class DecisionBus:
                 continue
 
             # --------------------------------------------------
-            # PROMINENCE NORMALISATION (BUS AUTHORITY)
-            # --------------------------------------------------
-            _normalize_ctx_enums(ctx)
-
-            # --------------------------------------------------
             # 🧠 BLUEPRINT MATERIALISATION (BUS AUTHORITY)
             # --------------------------------------------------
             # Blueprint is NOT an engine.
@@ -1506,6 +1515,38 @@ class DecisionBus:
 
             # Normalisation is BUS authority
             _normalize_ctx_enums(ctx_l)
+
+            # ==================================================
+            # 🔑 PROMINENCE SIGNAL (BUS → INPLAY)
+            #
+            # SOURCE OF TRUTH:
+            # - MarketMonitor structural signals
+            # - No DB, no history, no heuristics
+            #
+            # Invariant:
+            #   INPLAY does NOT infer prominence itself
+            # ==================================================
+
+            try:
+                from engines.market_monitor.monitor import (
+                    signals_for_runner,
+                    get_crossover_signal,
+                )
+
+                mm = signals_for_runner(mid, sid, ctx_l.get("px")) or {}
+                xo = get_crossover_signal(mid, sid) or {}
+
+                ctx_l["prominent"] = bool(
+                    mm.get("is_fav_now")
+                    or mm.get("new_fav_recent")
+                    or mm.get("lost_fav_recent")
+                    or xo.get("crossed_over_recent")
+                )
+
+            except Exception:
+                # Fail-open: no prominence = no in-play trade
+                ctx_l["prominent"] = False
+
 
             # --------------------------------------------------
             # 5️⃣ Pure engine decision
