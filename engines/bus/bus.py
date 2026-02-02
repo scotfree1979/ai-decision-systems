@@ -1031,7 +1031,7 @@ class DecisionBus:
             # Failure must NOT block strategy evaluation.
 
             try:
-                from engines.blueprint.blueprint_build import update_for_market
+                from engines.blueprint_build import update_for_market
 
                 update_for_market(
                     marketId=mid,
