@@ -694,6 +694,47 @@ def _run_builder() -> None:
 
     # --- END moved body ---
 
+def _infer_surface_from_bets(con, marketId: str) -> str:
+    row = con.execute(
+        """
+        SELECT market_name
+        FROM bets
+        WHERE marketId = ?
+        LIMIT 1
+        """,
+        (marketId,)
+    ).fetchone()
+
+    if not row or not row[0]:
+        return "flat"  # fail-safe
+
+    name = row[0].lower()
+    if any(x in name for x in ("hurdle", "hrd", "chase", "chs", "nhf")):
+        return "jumps"
+
+    return "flat"
+
+def update_for_market(*, marketId, selectionId, ctx, source="BUS"):
+    from engines.config_paths import connect_db
+    from engines.blueprint_cache import reload_cache
+
+    con = connect_db(ro=True)
+    try:
+        surface = _infer_surface_from_bets(con, marketId)
+    finally:
+        con.close()
+
+    blueprints = reload_cache(verbose=False)
+
+    surface_patterns = blueprints.get(surface)
+    if not surface_patterns:
+        return  # nothing to attach
+
+    # Attach ONLY what strategies need
+    ctx["blueprint_surface"] = surface
+    ctx["blueprint_patterns"] = surface_patterns
+
+
 
 # === PATCH START ===
 # 📍 TARGET: engines/blueprint_build.py: main()

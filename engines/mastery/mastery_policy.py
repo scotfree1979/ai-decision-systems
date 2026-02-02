@@ -1812,17 +1812,27 @@ def plan_for_strategy(fam: str, ctx: dict) -> dict:
             pass
 
     # ------------------------------------------------------------------
-    # 3) STRATEGY-SPECIFIC HANDLER (IF EXISTS)
+    # 3) STRATEGY IS AUTHORITATIVE
     # ------------------------------------------------------------------
     fn = globals().get(f"plan_for_{fam.lower()}")
-    if callable(fn):
-        raw = fn(ctx)
-    else:
-        # ------------------------------------------------------------------
-        # 4) FALLBACK → MASTERy GATE + SIZE ONLY
-        # ------------------------------------------------------------------
-        ctx["letter"] = letter
-        raw = propose_trade(ctx)
+
+    if not callable(fn):
+        # No concrete strategy = NO TRADE
+        return _ensure_plan(fam, ctx, None)
+
+    raw = fn(ctx)
+
+    # Strategy explicitly declined
+    if not raw or not raw.get("enter"):
+        return _ensure_plan(fam, ctx, None)
+
+    # ------------------------------------------------------------------
+    # 4) OPTIONAL: Mastery post-processing ONLY AFTER strategy says YES
+    # ------------------------------------------------------------------
+    # (direction, size, credits, ledger etc. remain unchanged)
+
+    return _ensure_plan(fam, ctx, raw)
+
 
     # ------------------------------------------------------------------
     # 5) CANONICAL NORMALISATION (NEVER NONE)

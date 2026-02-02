@@ -93,6 +93,8 @@ def _normalize_ctx_enums(ctx: dict) -> None:
     if isinstance(prom, str):
         ctx["prominence"] = _PROMINENCE_MAP.get(prom.upper(), 1)
 
+
+
 # ======================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: def _apply_bus_stake_gate(
@@ -599,6 +601,40 @@ class DecisionBus:
         print("[BUS] registered strategies:",
               [name for (name, _fn) in self.legacy_strategies])
 
+    def _ensure_px_from_route(self, ctx: dict) -> bool:
+        """
+        HARD INVARIANT:
+        PX must come from BusRouteSnapshot if missing.
+
+        Returns:
+            True  -> px present
+            False -> px still unavailable (runner truly not priced)
+        """
+        if ctx.get("px") is not None:
+            return True
+
+        mid = ctx.get("marketId")
+        sid = ctx.get("selectionId")
+
+        if not mid or not sid:
+            return False
+
+        route_ctx = self._route_ctx_map.get((mid, sid))
+        if not route_ctx:
+            return False
+
+        px = route_ctx.get("px")
+        if px is None:
+            return False
+
+        # 🔑 authoritative refresh
+        ctx["px"] = px
+        ctx["odds"] = px
+        ctx["ltp"] = px
+
+        return True
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus.__init__
@@ -1015,7 +1051,10 @@ class DecisionBus:
 
         for mid, sid in bus_stop_pairs:
             ctx = self._route_ctx_map.get((mid, sid))
-            if not ctx or ctx.get("px") is None:
+            if not ctx:
+                continue
+
+            if not self._ensure_px_from_route(ctx):
                 continue
 
             # --------------------------------------------------
@@ -1277,7 +1316,7 @@ class DecisionBus:
 
         risc = self.engines.get("MSC_RISK")
         if not risc:
-            return plans, lane_counts
+            pass
 
         app_key = get_app_key()
         token   = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
@@ -1363,7 +1402,7 @@ class DecisionBus:
 
         inplay = self.engines.get("MSC_INPLAY")
         if not inplay:
-            return plans, lane_counts
+            pass
 
         # --------------------------------------------------
         # 1️⃣ BUS determines in-play markets (DB authority)
@@ -1388,7 +1427,7 @@ class DecisionBus:
         inplay_mids = [str(r["marketId"]) for r in rows if r["marketId"]]
 
         if not inplay_mids:
-            return plans, lane_counts
+            pass
 
         # --------------------------------------------------
         # 2️⃣ BUS expands runners via bets DB (NOT route)
@@ -1417,7 +1456,7 @@ class DecisionBus:
         ]
 
         if not runner_pairs:
-            return plans, lane_counts
+            pass
 
         # --------------------------------------------------
         # 3️⃣ BUS_ROUTE supplies CTX (reuse, no rebuild)
@@ -2599,7 +2638,10 @@ class DecisionBus:
                 # --------------------------------------------------
                 plan.setdefault("marketId", ctx.get("marketId"))
                 plan.setdefault("selectionId", ctx.get("selectionId"))
-                plan.setdefault("px", ctx.get("px"))
+                # 🔁 PX REFRESH (LAST CHANCE, BUS AUTHORITY)
+                if plan.get("px") is None:
+                    self._ensure_px_from_route(ctx)
+                    plan["px"] = ctx.get("px")
 
                 # --------------------------------------------------
                 # TARGET TICKS — BUS AUTHORITY (PARENT ONLY)
@@ -2660,7 +2702,14 @@ class DecisionBus:
                     from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
 
                     parent_px  = ctx.get("legacy_entry_odds") or ctx.get("entry_odds")
-                    current_px = ctx.get("px")
+                    # 🔁 PX REFRESH (BUS AUTHORITY)
+                    if not self._ensure_px_from_route(ctx):
+                        plan["_bus_block"] = "risk_missing_px"
+                        tick_ctx["plans_route_failed"].append((plan, "risk_missing_px"))
+                        continue
+
+                    current_px = ctx["px"]
+
 
                     if not parent_px or not current_px:
                         plan["_bus_block"] = "risk_missing_px"
@@ -3374,3 +3423,5 @@ class DecisionBus:
 
 # Global BUS instance
 BUS = DecisionBus()
+
+
