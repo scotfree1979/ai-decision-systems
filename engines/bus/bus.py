@@ -1173,34 +1173,35 @@ class DecisionBus:
                 # - Pure wiring
                 # ======================================================================
 
+                # === PATCH START ============================================================
+                # 📍 TARGET: engines/bus/bus.py
+                # 🔎 CONTEXT: LANE 1 — LEGACY (BUS STOP ONLY)
+                # 🧩 STRATEGY: S4_CROSSOVER (X)
+                # 📆 PATCHED: 2026-03-20 — inject structural crossover signals
+                # ============================================================================
+
                 if letter == "X":
                     try:
-                        from engines.config_paths import open_auto_db
+                        from engines.market_monitor.monitor import (
+                            signals_for_runner,
+                            get_crossover_signal,
+                        )
 
-                        con = open_auto_db(rw=False)
-                        row = con.execute(
-                            """
-                            SELECT fav_rank
-                            FROM odds_current
-                            WHERE marketId = ?
-                              AND selectionId = ?
-                              AND fav_rank IS NOT NULL
-                            ORDER BY updated_ts DESC
-                            LIMIT 1
-                            """,
-                            (mid, sid),
-                        ).fetchone()
-                        con.close()
+                        sig = signals_for_runner(mid, sid, ctx_l.get("px"))
+                        cross = get_crossover_signal(mid, sid)
 
-                        if row and row[0] is not None:
-                            ctx_l["fav_rank"] = int(row[0])
+                        ctx_l["signals"] = {
+                            **sig,
+                            **cross,
+                        }
 
                     except Exception as e:
                         _record_reason(
                             engine_report,
                             "LEGACY",
-                            f"x_fav_rank_error:{e}",
+                            f"x_signal_error:{e}",
                         )
+                # === PATCH END ==============================================================
 
                 # ======================================================================
                 # 📍 TARGET: engines/bus/bus.py

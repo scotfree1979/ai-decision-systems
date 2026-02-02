@@ -148,6 +148,70 @@ def signals_for_runner(mid: str, sid: str, px: float | None, *, recent_s: int = 
 # 📍 TARGET: engines/market_monitor/monitor.py:_adb
 # 📆 PATCHED: 2025-11-20 — guaranteed REAL sqlite3 (no hijack, no DAL)
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py
+# 🔎 ANCHOR: near _STATE initialisation
+# 📆 PATCHED: 2026-03-20 — structural runner-order crossover detection
+# ============================================================================
+
+_STATE.setdefault("rank_prev", {})     # {mid: [sid1, sid2, ...]}
+_STATE.setdefault("rank_now", {})      # {mid: [sid1, sid2, ...]}
+_STATE.setdefault("crossovers", {})    # {mid: {sid: {...}}}
+
+def _update_rank_state(mid: str, runners: dict) -> None:
+    """
+    Compute and store runner rank order by price (ascending).
+    Detect structural crossovers (any rank change).
+    """
+    mid = str(mid)
+
+    # rank runners by px (ignore None)
+    ranked = [
+        sid for sid, r in
+        sorted(
+            runners.items(),
+            key=lambda x: (x[1].get("px") is None, x[1].get("px", float("inf")))
+        )
+    ]
+
+    prev = _STATE["rank_prev"].get(mid)
+    _STATE["rank_now"][mid] = ranked
+    _STATE["crossovers"].setdefault(mid, {})
+
+    if prev:
+        for sid in ranked:
+            if sid in prev:
+                prev_i = prev.index(sid)
+                now_i  = ranked.index(sid)
+                if prev_i != now_i:
+                    _STATE["crossovers"][mid][sid] = {
+                        "crossed_over_recent": True,
+                        "rank_prev": prev_i,
+                        "rank_now": now_i,
+                        "rank_delta": prev_i - now_i,
+                        "ts": _now_ts(),
+                    }
+
+    # advance snapshot
+    _STATE["rank_prev"][mid] = ranked
+
+
+def get_crossover_signal(mid: str, sid: str, *, recent_s: int = 10) -> dict:
+    """
+    Return crossover signal for this runner if recent.
+    """
+    mid = str(mid); sid = str(sid)
+    sig = (_STATE.get("crossovers", {}).get(mid, {}) or {}).get(sid)
+    if not sig:
+        return {"crossed_over_recent": False}
+
+    if (_now_ts() - sig["ts"]) > recent_s:
+        return {"crossed_over_recent": False}
+
+    return dict(sig)
+# === PATCH END ==============================================================
+
+
 def _adb():
     """
     Guaranteed REAL local sqlite3 connection to autoscalp_gui.db.
@@ -334,6 +398,7 @@ def refresh(mids: list[str], *, max_runners: int = 12) -> None:
                 "fav_sid": fav_sid,
                 "runners": runners,
             }
+            _update_rank_state(str(mid), runners)
 
             # NEW: update per-runner state *after* favourite is known
             for sid_key, info in runners.items():
