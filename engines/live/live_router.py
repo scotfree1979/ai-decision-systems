@@ -3307,7 +3307,7 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
 
     try:
         parent = _q_retry(cur, """
-            SELECT id, side, entry_odds, entry_stake, marketId, selectionId, source
+            SELECT id, side, entry_odds, entry_stake, marketId, selectionId, source, engine
             FROM orders
             WHERE customerOrderRef=? AND role='PARENT'
         """, (str(cor),)).fetchone()
@@ -3507,12 +3507,18 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
 
             from engines.shadow_confidence import record
 
-            direction = "DRIFT" if plan["side"] == "BACK" else "STEAM"
-            n = record(plan["marketId"], plan["selectionId"], plan.get("engine"), direction)
+            # Direction is derived from parent → child hedge relationship
+            if parent_side.upper() == "LAY" and exit_side.upper() == "BACK":
+                direction = "DRIFT"
+            elif parent_side.upper() == "BACK" and exit_side.upper() == "LAY":
+                direction = "STEAM"
+            else:
+                # Fallback (should never happen, but stay safe)
+                direction = "UNKNOWN"
 
-            print(f"[SHADOW][CONF] {(plan['marketId'], plan['selectionId'], plan.get('engine'))} {direction}={n}")
+            n = record(mid, sid, parent["engine"], direction)
 
-
+            print(f"[SHADOW][CONF] {(mid, sid, parent['engine'])} {direction}={n}")
 
 
             # Mark exposure as released (idempotent)
