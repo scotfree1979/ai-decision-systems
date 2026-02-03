@@ -103,64 +103,80 @@ def _order_runner_pool_by_market_time(pairs):
 def _filter_valid_markets(
     runner_pairs: list[tuple[str, str]],
     *,
-    min_runners_per_market: int = 6,
-    min_markets: int = 5,
+    min_runners_per_market: int = 6,   # kept for signature compatibility (NOT USED here)
+    min_markets: int = 5,              # window size (authoritative)
 ):
     """
-    Enforce route-quality invariants:
-    - Prefer markets with >= min_runners_per_market runners
-    - GUARANTEE at least min_markets markets by extending with next-best markets
+    RECONCILIATION-ONLY MARKET COMPLETER
 
-    Never blocks the route.
+    CONTRACT (LOCKED):
+    - Operates on marketIds ONLY
+    - NEVER removes existing markets
+    - NEVER decides eligibility
+    - NEVER returns empty if markets exist today
+    - ONLY ensures the required marketIds are present
+
+    runner_pairs may be incomplete.
+    This function makes it complete.
     """
 
+    from engines.config_paths import connect_db
+    from datetime import datetime, timezone
+    import sqlite3
     from collections import defaultdict
 
-    by_market = defaultdict(list)
+    # --------------------------------------------
+    # 1) Extract marketIds already present
+    # --------------------------------------------
+    existing_by_market = defaultdict(list)
     for mid, sid in runner_pairs:
-        by_market[str(mid)].append((mid, sid))
+        existing_by_market[str(mid)].append((mid, sid))
 
-    # 1️⃣ Primary valid markets
-    valid_markets = {
-        mid: pairs
-        for mid, pairs in by_market.items()
-        if len(pairs) >= min_runners_per_market
-    }
+    existing_mids = set(existing_by_market.keys())
 
-    if len(valid_markets) >= min_markets:
-        out = []
-        for pairs in valid_markets.values():
-            out.extend(pairs)
-        return out
+    # --------------------------------------------
+    # 2) Load authoritative market window (DB-first)
+    #    TODAY, ordered by marketStartTime
+    # --------------------------------------------
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """
+            SELECT
+                marketId,
+                marketStartTime
+            FROM bets
+            WHERE date(marketStartTime) = date('now','utc')
+            ORDER BY datetime(marketStartTime) ASC
+            """
+        ).fetchall()
+    finally:
+        con.close()
 
-    # 2️⃣ Extend with largest remaining markets
-    print(
-        f"[BUS_ROUTE][WARN] only {len(valid_markets)} valid markets "
-        f"(need {min_markets}, ≥{min_runners_per_market} runners each) — extending route"
-    )
+    if not rows:
+        # No markets today → return whatever we already have
+        return list(runner_pairs)
 
-    # Sort remaining markets by runner count (desc)
-    remaining = sorted(
-        (
-            (mid, pairs)
-            for mid, pairs in by_market.items()
-            if mid not in valid_markets
-        ),
-        key=lambda x: len(x[1]),
-        reverse=True,
-    )
+    # --------------------------------------------
+    # 3) Determine sliding window (first N markets)
+    #    NOTE: disappearance happens only AFTER grace,
+    #    but that logic already lives in scope/schedule.
+    # --------------------------------------------
+    required_mids = [str(r["marketId"]) for r in rows[:min_markets]]
 
-    extended_markets = dict(valid_markets)
+    # --------------------------------------------
+    # 4) Reconcile: add missing marketIds
+    # --------------------------------------------
+    out = list(runner_pairs)
 
-    for mid, pairs in remaining:
-        extended_markets[mid] = pairs
-        if len(extended_markets) >= min_markets:
-            break
+    for mid in required_mids:
+        if mid in existing_mids:
+            continue
 
-    # 3️⃣ Flatten, preserving market grouping
-    out = []
-    for pairs in extended_markets.values():
-        out.extend(pairs)
+        # Add a placeholder entry for this marketId.
+        # selectionId is intentionally None.
+        out.append((mid, None))
 
     return out
 
@@ -256,8 +272,18 @@ class BusRouteSnapshot:
 
         base_ctx, _meta = build_context(source="LIVE")
 
-        # ⛓️ Preserve existing CTX map if present
-        ctx_map = dict(self.ctx_map) if self.ctx_map else {}
+        # --------------------------------------------------
+        # CTX ACCUMULATION + WARM-UP CONTROL
+        # --------------------------------------------------
+        # IMPORTANT:
+        # - CTX MUST ACCUMULATE across calls
+        # - CTX MUST NEVER be reset
+        # - Warm-up happens progressively
+        # 🔒 ACCUMULATIVE CTX MAP (DO NOT RESET)
+        ctx_map = self.ctx_map
+
+        WARMUP_LIMIT = 50      # max new CTX builds per build_route() call
+        built_this_pass = 0
 
         # --------------------------------------------------
         # Build CTX ONLY for unseen runners
@@ -268,6 +294,10 @@ class BusRouteSnapshot:
             # 🔒 REUSE — do NOT rebuild CTX
             if key in ctx_map:
                 continue
+
+            # 🔁 Progressive warm-up limit
+            if built_this_pass >= WARMUP_LIMIT:
+                break
 
             try:
                 # --------------------------------------------------
@@ -335,12 +365,14 @@ class BusRouteSnapshot:
                         })
 
                 ctx_map[key] = ctx
-
+                built_this_pass += 1
             except Exception:
                 continue  # fail-open (route must never die)
 
         self.ctx_map = ctx_map
         self.partition_into_bus_stops()
+        print(f"[CTX] total={len(self.ctx_map)} built_this_pass={built_this_pass}")
+
 
 
     # ======================================================================================================

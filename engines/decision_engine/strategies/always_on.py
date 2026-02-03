@@ -1,55 +1,78 @@
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/strategies/always_on.py
-# 🔎 SEARCH: (file does not exist)
-# ⛏️ ACTION: create file with AlwaysOnStrategy (OG clone, name=ALWAYS_ON)
 from __future__ import annotations
-from typing import Dict, List
-from .strategy_base import StrategyBase
-from engines.mastery.plan_ledger import record_plan, concurrency_ok
+from typing import Dict, Optional
+
+from tools.betfair_runner_trend_surface import get_runner_trend
+from tools.betfair_match_surface import get_direction_confidence
+
 
 NAME = "ALWAYS_ON"
 
-# === PATCH START ===
-# 📍 TARGET: engines/decision_engine/strategies/always_on.py
-# 🔎 SEARCH: ^def decide\(ctx: Dict\[str, Any\]\) -> Optional\[Dict\[str, Any\]\]:
-# ⛏️ ACTION: replace entire decide() with below
-def decide(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Always-On: simple gate on price band and minutes-to-off."""
+
+def decide(ctx: Dict) -> Optional[Dict]:
+    """
+    ALWAYS_ON (A)
+
+    Primitive, truth-driven strategy:
+    - Direction from MARKET TRUTH (runner trend)
+    - Confidence from EXECUTION TRUTH (matched hedge cycles)
+
+    No time gating.
+    No heuristics.
+    No firing logic.
+
+    Mastery decides whether to act.
+    """
     try:
-        # odds
-        ltp = ctx.get("odds") or ctx.get("ltp")
-        if ltp is None:
-            return None
-        ltp = float(ltp)
+        market_id = ctx.get("marketId")
+        selection_id = ctx.get("selectionId")
+        px = ctx.get("px") or ctx.get("odds")
 
-        # minutes-to-off: compute if missing
-        mto = ctx.get("minutes_to_off") or ctx.get("tto_minutes")
-        try:
-            mto = float(mto)
-        except Exception:
-            # fallback: compute from orchestrator if possible
-            try:
-                from engines.decision_engine.orchestrator import _compute_minutes_to_off
-                mid = str(ctx.get("marketId") or "")
-                mto, _ = _compute_minutes_to_off(mid, source="LIVE")
-            except Exception:
-                mto = 9999.0
-
-        if not (5.0 <= mto <= 60.0):
-            return None
-        if not (2.0 <= ltp <= 12.0):
+        if not market_id or not selection_id or px is None:
             return None
 
+        # --------------------------------------------------
+        # 1️⃣ MARKET TRUTH — price movement direction
+        # --------------------------------------------------
+        trend = get_runner_trend(
+            str(market_id),
+            str(selection_id),
+        )
+
+        direction = trend.get("direction")
+        if direction == "FLAT":
+            direction = None  # explicit neutrality
+
+        # --------------------------------------------------
+        # 2️⃣ EXECUTION TRUTH — hedge-cycle confidence
+        # --------------------------------------------------
+        confidence = get_direction_confidence(
+            str(market_id),
+            str(selection_id),
+        )
+
+        # --------------------------------------------------
+        # 3️⃣ Emit plan context ONLY
+        # --------------------------------------------------
         return {
-            "enter": True,
+            "enter": True,               # ALWAYS evaluated
             "letter": "A",
-            "direction": "LAY->BACK" if ltp >= 4.0 else "BACK->LAY",
+            "engine": "LEGACY",
+
+            # authoritative signals
+            "direction": direction,      # BACK->LAY / LAY->BACK / None
+            "confidence": confidence,    # 0.0 → 1.0
+
+            # execution context
+            "px": float(px),
             "target_ticks": 1,
-            "hedge_ticks": 1,
-            "size": 2.0,
-            "px": ltp,
-            "plan_why": f"A-on px={ltp:.2f} mto={mto:.1f}"
+
+            # audit trail
+            "plan_why": (
+                f"A trend={trend.get('direction')} "
+                f"ticks={trend.get('ticks_moved')} "
+                f"conf={confidence}"
+            ),
         }
+
     except Exception:
         return None
-# === PATCH END ===

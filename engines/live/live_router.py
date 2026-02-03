@@ -2705,8 +2705,17 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                 # 1️⃣ PRIMARY PATH — CHILD MATCHED
                 # --------------------------------------------------
                 if r["child_status"] == "PLACED":
+
+                    # 🔒 CANONICAL GUARD — Betfair is authority
+                    if not r["child_bet_id"]:
+                        continue
+
                     status = get_bet_status(str(r["child_bet_id"]))
-                    if status == "EXECUTION_COMPLETE":
+                    if status != "EXECUTION_COMPLETE":
+                        continue
+
+                    # ✅ SAFE TO PROMOTE
+
                         app_key, token = _keys()
                         avg_odds, matched_size = _fetch_avg_match(
                             app_key, token, str(r["child_bet_id"])
@@ -2799,9 +2808,26 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
 
         for r in rows:
             try:
-                parent_id = int(r["parent_id"])  # or fetched explicitly
-                _release_parent_exposure_db(parent_id)
+                parent_id = int(r["parent_id"])
 
+                # 🔒 GUARD — child must be truly matched at Betfair
+                rowc = _q_retry(cur, """
+                    SELECT entry_bet_id
+                      FROM orders
+                     WHERE role='CHILD'
+                       AND hedge_of=?
+                       AND entry_bet_id IS NOT NULL
+                     LIMIT 1
+                """, (parent_id,)).fetchone()
+
+                if not rowc:
+                    continue
+
+                if get_bet_status(str(rowc["entry_bet_id"])) != "EXECUTION_COMPLETE":
+                    continue
+
+                # ✅ SAFE TO RELEASE
+                _release_parent_exposure_db(parent_id)
 
                 _q_retry(cur, """
                     UPDATE orders
@@ -2809,7 +2835,7 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
                            parent_closed = 1,
                            closed_at = COALESCE(closed_at, datetime('now','utc'))
                      WHERE id = ?
-                """, (int(r["parent_id"]),))
+                """, (parent_id,))
 
                 released += 1
 
@@ -2822,6 +2848,7 @@ def _release_exposure_for_matched_children(limit: int = 200) -> int:
 
         con.commit()
         return released
+
 
     finally:
         try:
@@ -3275,22 +3302,46 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
     cor = parent customerOrderRef
     """
     _ensure_orders_schema()
-    con = _orders_conn(); cur = con.cursor()
+    con = _orders_conn()
+    cur = con.cursor()
+
     try:
         parent = _q_retry(cur, """
             SELECT id, side, entry_odds, entry_stake, marketId, selectionId, source
             FROM orders
             WHERE customerOrderRef=? AND role='PARENT'
         """, (str(cor),)).fetchone()
+
         if not parent:
             return
 
+        parent_id = int(parent["id"])
+
+        # 🔒 CANONICAL GUARD — never trust DB-only MATCHED
+        rowc = _q_retry(cur, """
+            SELECT entry_bet_id
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_bet_id IS NOT NULL
+             LIMIT 1
+        """, (parent_id,)).fetchone()
+
+        if not rowc:
+            return
+
+        if get_bet_status(str(rowc["entry_bet_id"])) != "EXECUTION_COMPLETE":
+            return
+
         pid, parent_side, parent_odds, parent_stake = (
-            int(parent["id"]),
+            parent_id,
             parent["side"],
             float(parent["entry_odds"] or 0.0),
             float(parent["entry_stake"] or 0.0),
         )
+
+        # --- existing P&L + MATCHED logic continues unchanged below ---
+
         mid = str(parent["marketId"])
         sid = str(parent["selectionId"])
         letter = str(parent["source"] or "")[:1].upper()
@@ -3312,6 +3363,8 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
                    realized_pnl=?,
                    net_pl=?
              WHERE hedge_of = ?
+               AND role = 'CHILD'
+               AND entry_bet_id IS NOT NULL
         """, (realized, realized, pid))
         con.commit()
 

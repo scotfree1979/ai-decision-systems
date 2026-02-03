@@ -37,6 +37,7 @@ LEGACY_LETTER_TO_STRATEGY = {
     "R": "S5_BREAKOUT",
     "F": "S6_STEAM_FADE",
     "P": "BLUEPRINTS",   # special-case, see below
+    "A": "ALWAYS_ON",
 }
 
 
@@ -552,7 +553,7 @@ def bus_snapshot():
     return snap
 
 class DecisionBus:
-    ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F"}
+    ALLOWED_LEGACY_LETTERS = {"S", "P", "B", "G", "X", "R", "F", "A"}
 
     def __init__(self):
         self.tick_id = 0
@@ -1115,16 +1116,15 @@ class DecisionBus:
                 )
 
             # --------------------------------------------------
-            # LEGACY PHASE CONTRACT (BUS AUTHORITY)
-            # --------------------------------------------------
-            ctx_l["phase"] = "PRE"
-
-            # --------------------------------------------------
             # 🧠 STRATEGY EVALUATION (ALL LEGACY STRATEGIES)
             # --------------------------------------------------
             for letter in self.ALLOWED_LEGACY_LETTERS:
                 ctx_l = dict(ctx)
                 _normalize_ctx_enums(ctx_l)
+                # --------------------------------------------------
+                # LEGACY PHASE CONTRACT (BUS AUTHORITY)
+                # --------------------------------------------------
+                ctx_l["phase"] = "PRE"
                 ctx_l["letter"] = letter
 
                 # inside LEGACY letter loop, before plan_for_strategy
@@ -1138,6 +1138,60 @@ class DecisionBus:
                                 ctx_l["direction"] = d
                     except Exception:
                         pass
+
+                # ==================================================
+                # 🧩 STRATEGY: ALWAYS_ON (A)
+                # ==================================================
+                # Always-on baseline strategy
+                # • No MarketMonitor dependency
+                # • No firing logic
+                # • Direction = market truth
+                # • Confidence = execution truth
+                # BUS only materialises fields
+
+                if letter == "A":
+                    try:
+                        # --------------------------------------------------
+                        # Ensure execution price aliases
+                        # --------------------------------------------------
+                        ctx_l.setdefault("odds", ctx_l.get("px"))
+                        ctx_l.setdefault("ltp",  ctx_l.get("px"))
+
+                        # --------------------------------------------------
+                        # MARKET TRUTH — direction from price movement
+                        # --------------------------------------------------
+                        from tools.betfair_runner_trend_surface import get_runner_trend
+
+                        trend = get_runner_trend(
+                            str(ctx_l.get("marketId")),
+                            str(ctx_l.get("selectionId")),
+                        )
+
+                        direction = trend.get("direction")
+                        if direction == "FLAT":
+                            direction = None
+
+                        ctx_l["direction"]     = direction
+                        ctx_l["trend_ticks"]   = trend.get("ticks_moved")
+                        ctx_l["trend_conf"]    = trend.get("confidence")
+
+                        # --------------------------------------------------
+                        # EXECUTION TRUTH — hedge-cycle confidence
+                        # --------------------------------------------------
+                        from tools.betfair_match_surface import get_direction_confidence
+
+                        ctx_l["confidence"] = get_direction_confidence(
+                            str(ctx_l.get("marketId")),
+                            str(ctx_l.get("selectionId")),
+                        )
+
+                    except Exception as e:
+                        _record_reason(
+                            engine_report,
+                            "LEGACY",
+                            f"always_on_inject_error:{e}",
+                        )
+
 
                 # ==================================================
                 # 🧩 STRATEGY: OG_STRATEGY (S)
@@ -2399,22 +2453,28 @@ class DecisionBus:
 
 
         # ===============================================================
-        # 4️⃣ ROUTE SNAPSHOT + PRE-ENGINE ODDS REFRESH (AUTHORITATIVE)
+        # 4️⃣ ROUTE SNAPSHOT — LAZY BUILD + PER-TICK REFRESH
         # ===============================================================
-        if self._bus_stop == 1 or self._route_snapshot is None:
-            from engines.bus_route import BusRouteSnapshot
 
+        from engines.bus_route import BusRouteSnapshot
+
+        # Ensure snapshot object exists
+        if self._route_snapshot is None:
             self._route_snapshot = BusRouteSnapshot()
+
+        # 🔑 LAZY BUILD: build CTX ONCE, only when empty
+        if not self._route_snapshot.ctx_map:
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
-
+ 
         # --------------------------------------------------
-        # 🔁 CRITICAL: REFRESH DYNAMIC ODDS BEFORE ENGINE EVAL
+        # 🔁 REFRESH DYNAMIC ODDS EVERY TICK (IN PLACE)
         # --------------------------------------------------
         dt = self._route_snapshot.refresh_ctx_dynamic_fields()
 
-        # 🔗 CRITICAL: bind refreshed CTX map to BUS execution view
+        # 🔗 Bind refreshed CTX map (same object, updated values)
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
 
         # ------------------------------------------------------------------
         # 🔒 HARD INVARIANT: normalize ALL route CTX enums ONCE per tick
