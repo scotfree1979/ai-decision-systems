@@ -742,6 +742,18 @@ def get_risk_legacy_parent_pairs():
 # ============================================================================
 # INPLAY LIFECYCLE — ALL ACTIVE MIDS & SIDS
 # ============================================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_inplay_parent_runner_pairs():
+# 📆 PATCHED: 2026-02-04 — DAL-safe in-play runner surface
+#
+# FIXES:
+# - Remove use of undefined `con`
+# - Use canonical DAL opener
+# - Attach bets DB AFTER connection exists
+# - Fail-open, never block BUS tick
+# ============================================================================
+
 def get_inplay_parent_runner_pairs():
     """
     Authoritative IN-PLAY runner surface.
@@ -752,15 +764,24 @@ def get_inplay_parent_runner_pairs():
       - DB-first
     """
 
-    from engines.config_paths import auto_conn
+    from engines.config_paths import connect_orders_db, bets_db
     import sqlite3
-    con.execute("ATTACH DATABASE 'data/bets.db' AS bets")
 
-    con = auto_conn(rw=False)
-    con.row_factory = sqlite3.Row
-
+    con = None
     try:
-        rows = con.execute("""
+        # --------------------------------------------------
+        # Open ORDERS DB via DAL (authoritative owner)
+        # --------------------------------------------------
+        con = connect_orders_db(ro=True)
+        con.row_factory = sqlite3.Row
+
+        # --------------------------------------------------
+        # Attach BETS DB for market time authority
+        # --------------------------------------------------
+        con.execute(f"ATTACH DATABASE '{bets_db()}' AS bets")
+
+        rows = con.execute(
+            """
             SELECT DISTINCT
                 p.marketId,
                 p.selectionId
@@ -769,15 +790,31 @@ def get_inplay_parent_runner_pairs():
               ON b.marketId = p.marketId
             WHERE date(p.opened_at) = date('now','utc')
               AND julianday(b.marketStartTime) <= julianday('now','utc')
-        """).fetchall()
+            """
+        ).fetchall()
+
+    except Exception:
+        # HARD RULE: fail-open — BUS must never stall here
+        return set()
+
     finally:
-        con.close()
+        if con:
+            try:
+                con.execute("DETACH DATABASE bets")
+            except Exception:
+                pass
+            try:
+                con.close()
+            except Exception:
+                pass
 
     return {
         (str(r["marketId"]), str(r["selectionId"]))
         for r in rows
         if r["marketId"] and r["selectionId"]
     }
+
+# === PATCH END ==============================================================
 
 # ============================================================================
 # EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS

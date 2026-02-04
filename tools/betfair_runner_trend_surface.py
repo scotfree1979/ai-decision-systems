@@ -52,11 +52,24 @@ def bf_rpc(app_key: str, token: str, method: str, params: dict) -> dict:
 # --------------------------------------------------
 # Resolve SESSION TOKEN (identical pattern)
 # --------------------------------------------------
-def resolve_session_token() -> str:
-    tok = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
-    if tok:
-        return tok.strip()
-    return getpass.getpass("Enter Betfair SESSION TOKEN: ").strip()
+def resolve_session_token():
+    """
+    LIVE-SAFE token resolver.
+    NEVER blocks. NEVER prompts.
+    """
+    import os
+
+    tok = (
+        os.getenv("SESSION_TOKEN")
+        or os.getenv("BETFAIR_SESSION_TOKEN")
+    )
+
+    if not tok:
+        # Fail-open: no token → trend unavailable
+        return None
+
+    return tok.strip()
+
 
 # --------------------------------------------------
 # Core: fetch market runner book
@@ -103,7 +116,12 @@ def get_runner_trend(market_id: str, selection_id: str) -> Dict[str, Any]:
 
     token = resolve_session_token()
     if not token:
-        raise RuntimeError("SESSION_TOKEN not available")
+        return {
+            "direction": "FLAT",
+            "ticks_moved": 0,
+            "confidence": 0.0,
+        }
+
 
     book = fetch_market_book(app_key, token, market_id)
 

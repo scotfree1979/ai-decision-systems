@@ -263,9 +263,13 @@ def evaluate_progress(live_pnl, win_rate, matched_ratio):
     win_score = min(1.0, win_rate / g["win_rate"])
 
     # Matched ratio score
+    # Matched ratio score (already canonical from _trade_stats)
     match_score = min(1.0, matched_ratio / g["matched_ratio"])
 
+
+
     return round((profit_score + loss_score + win_score + match_score) / 4.0, 3)
+
 # === PATCH END =========================================================
 # === PATCH START =======================================================
 # 📍 TARGET: engines/mastery/goal_adapter.py:_trade_good_bad_counts
@@ -460,27 +464,27 @@ from gui.dashboard_data import kpi_tiles
 
 def compute_live_goals():
     """
-    Live GoalAdapter inputs (DB-truth):
-      • live_pnl        → dashboard 'today'
-      • win_rate        → market-level PnL (today)
-      • matched_ratio   → today matched ratio
+    Live GoalAdapter inputs — CANONICAL.
+    Must match Trade Outcome Summary + Dashboard.
     """
+    # live pnl stays dashboard-driven (fast + correct)
+    from gui.dashboard_data import kpi_tiles
 
-    # live pnl can still come from dashboard (fast + correct)
     kpis = kpi_tiles(source="LIVE")
     live_pnl = float(kpis.get("today", 0.0))
 
-    # ✅ canonical win rate (market-level)
+    # 🔒 canonical stats (same as Trade Outcome Summary TODAY)
     stats_today = _trade_stats(0)
-    win_rate = float(stats_today.get("win_rate", 0.0))
 
-    matched_ratio = _matched_ratio_today()
+    win_rate = float(stats_today.get("win_rate", 0.0))
+    matched_ratio = float(stats_today.get("matched_ratio", 0.0))
 
     return (
         live_pnl,
         win_rate,
         matched_ratio,
     )
+
 
 
 # === PATCH END =========================================================
