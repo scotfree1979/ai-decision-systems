@@ -12,6 +12,12 @@ from engines.mastery.risk import pretrade_ok, derive_stops
 from collections import defaultdict
 from typing import Dict, Set
 
+PLAN_BOARD = {}
+
+def update_plan_board(*args, **kwargs):
+    return None
+
+
 # === PATCH A START (EPIC state) ===
 from collections import defaultdict
 
@@ -450,13 +456,7 @@ def ingest_scope(scope_snapshot: dict) -> None:
         _SCOPE_STATE["epics"] = epics
         _prime_day_plan_once()
 
-        # === NEW: trigger plan board reseed so plan_ledger is refreshed ===
-        try:
-            from engines.mastery.mastery_policy import update_plan_board
-            update_plan_board(scope_snapshot)
-        except Exception as e:
-            print(f"[ingest_scope] plan-board reseed warn: {e}")
-        # =================================================================
+
     except Exception:
         pass
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -742,26 +742,15 @@ def ordered_markets_for_tick(scope_obj=None, *, ahead_min: int = 30, lookback_mi
 
 def plan_for_always_on(ctx: dict) -> dict:
     """
-    ALWAYS_ON (A) is deprecated.
-    Replace all A plans with OG_STRATEGY (S) logic.
+    ALWAYS_ON (A) — baseline shadow starter.
+    Direction comes from MSC.
+    Sizing + gating handled by Mastery.
     """
-    try:
-        # Force strategy family to OG_STRATEGY
-        ctx2 = dict(ctx)
-        ctx2["letter"] = "S"
-        return plan_for_strategy("OG_STRATEGY", ctx2)
-    except Exception:
-        # If OG_STRATEGY fails, return no-trade
-        return {
-            "enter": False,
-            "letter": "A",
-            "why": "A_disabled_redirect_to_S_failed",
-            "px": float(ctx.get("px") or ctx.get("odds") or 0.0),
-            "size": 0.0,
-            "target_ticks": 0,
-        }
+    return {
+        "enter": True,
+        "letter": "A",
+    }
 
-# === PATCH END ================================================================
 
 
 # -----------------------------------------------------------------------------
@@ -1769,16 +1758,7 @@ def _stoploss_exit_plan(ctx: dict) -> dict | None:
 
 
 def plan_for_strategy(fam: str, ctx: dict) -> dict:
-    # --- HARD DISABLE ALWAYS_ON (A) STRATEGY ------------------------------
-    if str(fam).upper() == "ALWAYS_ON":
-        return {
-            "enter": False,
-            "letter": "A",
-            "why": "disabled_A_msc_replacement",
-            "px": float(ctx.get("odds") or ctx.get("px") or 0.0),
-            "target_ticks": 0,
-            "size": 0.0,
-        }
+
 
     # ------------------------------------------------------------------
     # 0) DEFENSIVE COPY
@@ -1788,13 +1768,6 @@ def plan_for_strategy(fam: str, ctx: dict) -> dict:
     mid = str(ctx.get("marketId") or "")
     sid = str(ctx.get("selectionId") or "")
     letter = _FAM_LETTER.get(fam, fam[:1])
-
-    # ------------------------------------------------------------------
-    # 1) FAST PATH — PLAN BOARD (already direction-complete)
-    # ------------------------------------------------------------------
-    entry = PLAN_BOARD.get((mid, sid, letter))
-    if entry and entry["valid_from"] <= time.time() <= entry["valid_until"]:
-        return dict(entry["plan"])
 
     # ------------------------------------------------------------------
     # 2) MSC DIRECTION INJECTION (AUTHORITATIVE)
@@ -1870,102 +1843,6 @@ def _in_scope(mid: str) -> bool:
     # If we have no scope yet (early boot), fail-open.
     return not _SCOPE_MIDS or str(mid) in _SCOPE_MIDS
 
-# ---- existing code (…keep your functions…) ----
-
-# === PATCH START ===
-# 📍 TARGET: engines/mastery/mastery_policy.py
-# 🔎 SEARCH: top of file / imports
-# ⛏️ ACTION: add PlanBoard and an update_scope entrypoint
-
-
-import time, threading
-from collections import defaultdict
-
-_PLAN_HORIZON_TICKS = 30        # ~30 ticks ahead
-_COOL_OFF_MINUTES   = 3.0
-
-class _PlanBoard:
-    """
-    Keeps a rolling N-tick plan per (mid,sid,letter).
-    Inputs: scope snapshot + latest contexts from DecideOnce.
-    Output: per-letter plan dicts (or explicit no-trade).
-    """
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._scope = {"markets": []}
-        self._plans: dict[tuple[str,str,str], dict] = {}  # (mid,sid,letter)->plan
-        self._last_tick = 0
-
-    def update_scope(self, scope_snap: dict):
-        with self._lock:
-            self._scope = scope_snap or {"markets": []}
-            # prune plans for markets no longer in scope
-            active = {(m["marketId"], sid)
-                      for m in self._scope.get("markets", [])
-                      for sid in (m.get("active_sids") or [])}
-            stale = [key for key in self._plans.keys()
-                     if (key[0], key[1]) not in active]
-            for k in stale: self._plans.pop(k, None)
-
-    def _letters_for(self, mto_min: float | None) -> list[str]:
-        # mirror your lanes window policy (pre-day → in-play)
-        if mto_min is None or mto_min > 60:   return ["A","P"]
-        if 60 >= mto_min > 30:                return ["A","P","X","R","F"]
-        if 30 >= mto_min > 20:                return ["A","P","X","R","F","L"]
-        if 20 >= mto_min > 5:                 return ["A","P","X","R","F","L","B","G"]
-        if 5 >= mto_min >= 3:                 return ["A","P","X","R","F","L","G"]
-        if 3 > mto_min > 0:                   return ["P"]   # COOL_OFF: Blueprint hedges only
-        return ["P","I","T","C","E","K"]                   # in-play letters
-
-    def _default_direction(self, odds: float) -> str:
-        return "LAY->BACK" if odds >= 4.0 else "BACK->LAY"
-
-    def _cool_off_block(self, mto_min: float | None) -> bool:
-        try:
-            return (mto_min is not None) and (mto_min <= _COOL_OFF_MINUTES) and (mto_min > 0)
-        except Exception:
-            return False
-
-    def propose(self, fam: str, ctx: dict) -> dict:
-        """
-        Return a plan dict (enter or no-trade) for fam given the current ctx.
-        Never raises; never returns None.
-        """
-        mid = str(ctx.get("marketId","")); sid = str(ctx.get("selectionId",""))
-        odds = float(ctx.get("odds") or 0.0)
-        mto  = ctx.get("minutes_to_off", None)
-        try: mto = float(mto) if mto is not None else None
-        except Exception: mto = None
-
-        # out-of-scope? explicit no-trade
-        in_scope = False
-        for m in self._scope.get("markets", []):
-            if m.get("marketId") == mid and sid in (m.get("active_sids") or []):
-                in_scope = True; break
-        if not in_scope:
-            return {"enter": False, "letter": fam[:1], "why": "scope:no", "px": odds}
-
-        # cool-off: permit only hedge/blueprint; all others no-trade
-        if self._cool_off_block(mto) and fam not in ("BLUEPRINTS", "ALWAYS_ON"):
-            return {"enter": False, "letter": fam[:1], "why": "cool_off", "px": odds}
-
-        # allowed letters in window
-        letters = self._letters_for(mto)
-        if (fam[:1] not in letters) and (fam not in ("BLUEPRINTS","ALWAYS_ON")):
-            return {"enter": False, "letter": fam[:1], "why": "window", "px": odds}
-
-        # Base 1-tick liquidity seeking plan
-        plan = {
-            "enter": True,
-            "letter": (fam[:1] or "A").upper(),
-            "direction": self._default_direction(odds),
-            "target_ticks": 1,
-            "hedge_ticks": 1,
-            "size": float(ctx.get("size_cap", 2.0) or 2.0),
-            "px": float(odds),
-            "plan_why": f"{plan_letter(fam)}-plan horizon:{_PLAN_HORIZON_TICKS} | px_live",
-        }
-        return plan
 
 # letter helper for consistent plan_why
 def plan_letter(fam: str) -> str:

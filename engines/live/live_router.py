@@ -280,6 +280,71 @@ def _router_child_worker_loop():
         # Prevent tight loop
         time.sleep(1.0)
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: Canonical parent exit stamper (single source of truth)
+# 📆 PATCHED: 2026-04-XX — unify all parent exit transitions
+#
+# CONTRACT:
+# - ONLY stamps PARENT rows
+# - Idempotent
+# - Never touches CHILD rows
+# - Settlement is excluded (handled elsewhere)
+# ======================================================================
+
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: canonical parent exit stamper
+# ======================================================================
+
+def _stamp_parent_exit_sql(
+    cur,
+    *,
+    parent_id: int,
+    status: str,
+    reason: str | None = None,
+):
+    """
+    Canonical parent exit stamper.
+    MUST be called from inside an existing DB context.
+
+    - Uses caller's cursor
+    - Does NOT open/close connections
+    - Idempotent
+    - Never overwrites SETTLED
+    """
+
+    status = status.upper()
+
+    row = _q_retry(cur, """
+        SELECT exit_status
+          FROM orders
+         WHERE id=? AND role='PARENT'
+         LIMIT 1
+    """, (int(parent_id),)).fetchone()
+
+    if not row:
+        return
+
+    if (row["exit_status"] or "").upper() == "SETTLED":
+        return
+
+    _q_retry(cur, """
+        UPDATE orders
+           SET exit_status   = ?,
+               parent_closed = 1,
+               closed_at     = COALESCE(closed_at, datetime('now','utc')),
+               error         = COALESCE(error, ?)
+         WHERE id = ?
+           AND role='PARENT'
+           AND (exit_status IS NULL OR exit_status <> ?)
+    """, (
+        status,
+        reason,
+        int(parent_id),
+        status,
+    ))
+
 def _guard_cancel_if_matched(*, parent_cor: str, bet_id: str | None) -> bool:
     """
     Returns True if cancellation should proceed.
@@ -1784,12 +1849,17 @@ def _cancel(app_key: str, token: str, bet_id: str) -> None:
 
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='CANCELLED',
-                   exit_status='CANCELLED',
-                   closed_at=COALESCE(closed_at, datetime('now','utc')),
-                   error=COALESCE(error, 'betfair_cancel')
+               SET entry_status='CANCELLED'
              WHERE id=?
         """, (parent_id,))
+
+        _stamp_parent_exit_sql(
+            cur,
+            parent_id=parent_id,
+            status="CANCELLED",
+            reason="betfair_cancel",
+        )
+
         con.commit()
         con.close()
 
@@ -2364,6 +2434,20 @@ def _orders_update_parent_failed(cor, error_msg):
                AND mode='LIVE'
                AND entry_bet_id IS NULL
         """, (str(error_msg)[:240], cor))
+
+        # ADD THIS
+        parent = _q_retry(cur, """
+            SELECT id FROM orders
+             WHERE customerOrderRef=? AND role='PARENT'
+        """, (cor,)).fetchone()
+
+        if parent:
+            _stamp_parent_exit_sql(
+                cur,
+                parent_id=int(parent["id"]),
+                status="FAILED",
+                reason=error_msg,
+            )
         con.commit()
     finally:
         try: con.close()
@@ -3379,15 +3463,11 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         # ======================================================================
 
         # 🔒 MISSING STEP — CLOSE PARENT ON CHILD MATCH
-        _q_retry(cur, """
-            UPDATE orders
-               SET exit_status = 'MATCHED',
-                   parent_closed = 1,
-                   closed_at = COALESCE(closed_at, datetime('now','utc'))
-             WHERE id = ?
-               AND role = 'PARENT'
-               AND (exit_status IS NULL OR exit_status <> 'MATCHED')
-        """, (parent_id,))
+        _stamp_parent_exit_sql(
+            cur,
+            parent_id=parent_id,
+            status="MATCHED",
+        )
 
 
 # === PATCH START ============================================================
@@ -4202,19 +4282,13 @@ def _place_stoploss_child_now(
 
         child_id = int(cur.lastrowid)
 
-        _q_retry(cur, """
-            UPDATE orders
-               SET exit_status='MATCHED',
-                   exit_kind='STOPLOSS',
-                   exit_odds=?,
-                   exit_stake=?,
-                   closed_at=datetime('now','utc')
-             WHERE customerOrderRef=?
-        """, (
-            float(exit_odds),
-            float(parent_stake),
-            str(parent_cor)
-        ))
+        _stamp_parent_exit_sql(
+            cur,
+            parent_id=pid,
+            status="MATCHED",
+            reason="stoploss",
+        )
+
 
         con.commit()
 
@@ -4330,11 +4404,13 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
         # --------------------------------------------------
         con = open_auto_db(rw=True)
         con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
         qph = ",".join("?" * len(sweep_mids))
 
         # A) CANCEL unmatched parents
         for mid in sweep_mids:
-            rows = con.execute("""
+            rows = cur.execute("""
                 SELECT id, customerOrderRef, entry_bet_id
                   FROM orders
                  WHERE mode='LIVE'
@@ -4348,33 +4424,39 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
                 cor = r["customerOrderRef"]
                 bet_id = r["entry_bet_id"]
 
+                # Betfair truth guard
                 if not _guard_cancel_if_matched(parent_cor=cor, bet_id=bet_id):
                     continue
 
-                con.execute("""
-                    UPDATE orders
-                       SET entry_status='CANCELLED',
-                           exit_status='CANCELLED',
-                           closed_at=COALESCE(closed_at, datetime('now','utc'))
-                     WHERE id=?
-                """, (int(r["id"]),))
-
+                # Canonical cancel
+                _stamp_parent_exit_sql(
+                    cur,
+                    parent_id=int(r["id"]),
+                    status="CANCELLED",
+                    reason="market_sweep",
+                )
 
         # B) SETTLE matched parents
-        n_settle = con.execute(f"""
-            UPDATE orders
-               SET exit_status='SETTLED',
-                   closed_at=COALESCE(closed_at, datetime('now','utc')),
-                   exposure_released=1
+        rows = cur.execute(f"""
+            SELECT id
+              FROM orders
              WHERE mode='LIVE'
                AND role='PARENT'
                AND marketId IN ({qph})
                AND UPPER(COALESCE(entry_status,''))='MATCHED'
                AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
-        """, tuple(sweep_mids)).rowcount
+        """, tuple(sweep_mids)).fetchall()
+
+        for r in rows:
+            _stamp_parent_exit_sql(
+                cur,
+                parent_id=int(r["id"]),
+                status="SETTLED",
+            )
 
         con.commit()
         con.close()
+
 
         _log_event(
             "INFO",
@@ -5520,6 +5602,13 @@ def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -
                      WHERE id=?
                        AND UPPER(entry_status)='PLACED'
                 """, (int(r["id"]),))
+
+                _stamp_parent_exit_sql(
+                    cur,
+                    parent_id=int(r["id"]),
+                    status="CANCELLED",
+                    reason="recycle_timeout",
+                )
 
                 con.commit()
 

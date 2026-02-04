@@ -1729,11 +1729,11 @@ def reconcile_orders() -> Tuple[int,int]:
                     betId
                 ))
 
-                # Continue only if a row was actually settled
+                # Only act if something actually changed
                 if o.total_changes:
 
                     # --------------------------------------------------
-                    # Delegate exposure release to router (idempotent)
+                    # Delegate exposure release to router (DB-locked, idempotent)
                     # --------------------------------------------------
                     try:
                         prow = o.execute("""
@@ -1755,7 +1755,7 @@ def reconcile_orders() -> Tuple[int,int]:
                         )
 
                     # --------------------------------------------------
-                    # Emit final settlement event (DB-confirmed)
+                    # Emit Betfair-truth settlement event
                     # --------------------------------------------------
                     try:
                         _emit_settlement_event("order_settled", {
@@ -1771,6 +1771,7 @@ def reconcile_orders() -> Tuple[int,int]:
                             f"[EventSync][settlement] emit failed "
                             f"betId={betId}: {e}"
                         )
+
 
 
             # Compute runner-day rollups

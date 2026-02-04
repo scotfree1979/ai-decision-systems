@@ -10,6 +10,7 @@ from .ladder_strategy import LadderStrategy
 from .btl_scout import decide as BTL_SCOUT
 from .btl_aggr  import decide as BTL_AGGR
 from .og_bias   import decide as OG_BIAS
+from .always_on import decide as ALWAYS_ON
 
 # ---- Mastery integration (wrappers) ----
 from engines.mastery import mastery_policy as mp

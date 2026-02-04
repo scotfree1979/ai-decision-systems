@@ -583,6 +583,8 @@ class DecisionBus:
         self._route_snapshot = None
 
 
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: class DecisionBus.__init__
@@ -615,6 +617,35 @@ class DecisionBus:
         print("[BUS] registered engines:", list(self.engines.keys()))
         print("[BUS] registered strategies:",
               [name for (name, _fn) in self.legacy_strategies])
+
+    # ======================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🧩 ACTION: ADD helper — authoritative PX refresh gate
+    # 📆 PATCHED: 2026-02-03 — enforce refresh-before-dispatch invariant
+    #
+    # INVARIANT:
+    #   BUS MUST refresh odds immediately before sending CTX to ANY engine.
+    # ======================================================================
+
+    def _refresh_before_engine_dispatch(self, runner_pairs):
+        """
+        Authoritative PX refresh gate.
+
+        This MUST be called immediately before CTX is sent to any engine.
+        """
+        if not runner_pairs:
+            return
+
+        # Ensure route snapshot exists
+        if self._route_snapshot is None:
+            return
+
+        # Refresh dynamic odds for ALL runners involved in this dispatch
+        self._route_snapshot.refresh_ctx_dynamic_fields()
+
+        # Re-bind refreshed ctx map
+        self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
 
     def _ensure_px_from_route(self, ctx: dict) -> bool:
         """
@@ -1025,6 +1056,24 @@ class DecisionBus:
         # --------------------------------------------------
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
 
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: start of def _evaluate_runner
+# 🧩 ACTION: FORCE odds refresh before ANY engine evaluation
+# 📆 PATCHED: 2026-02-03 — refresh odds at send time (canonical)
+#
+# INVARIANT:
+#   Every engine sees odds fresh at time of evaluation
+#   Handled by specific lane refresh
+# ======================================================================
+
+        # --------------------------------------------------
+        # 🔁 ABSOLUTE ODDS REFRESH (SEND-TIME TRUTH)
+        # --------------------------------------------------
+        #self._route_snapshot.refresh_ctx_dynamic_fields()
+        #self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
+
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
         # --------------------------------------------------
@@ -1063,6 +1112,10 @@ class DecisionBus:
         # 🟦 LANE 1 — LEGACY (BUS STOP ONLY)
         # --------------------------------------------------
         engine_report["LEGACY"]["evaluated"] = True
+
+        # BEFORE LEGACY engine loop
+        self._refresh_before_engine_dispatch(bus_stop_pairs)
+
 
         for mid, sid in bus_stop_pairs:
             ctx = self._route_ctx_map.get((mid, sid))
@@ -1407,6 +1460,16 @@ class DecisionBus:
         # --------------------------------------------------
         excluded_legacy_parents = get_risk_cycle_exclusions()
 
+        # 🔑 BUILD RISK PAIRS FOR THIS LANE
+        risk_pairs = [
+            (mid, sid)
+            for (mid, sid, _pid, _anchor_px)
+            in get_risk_legacy_parent_pairs()
+            if mid and sid
+        ]
+
+        self._refresh_before_engine_dispatch(risk_pairs)
+
         for mid, sid, legacy_parent_id, anchor_px in get_risk_legacy_parent_pairs():
 
             # 🔒 Cycle-scoped exclusion
@@ -1542,6 +1605,7 @@ class DecisionBus:
         # --------------------------------------------------
         # 3️⃣ BUS_ROUTE supplies CTX (reuse, no rebuild)
         # --------------------------------------------------
+        self._refresh_before_engine_dispatch(runner_pairs)
         for mid, sid in runner_pairs:
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
@@ -1651,6 +1715,10 @@ class DecisionBus:
  
         exp = self.engines.get("MSC_EXPLORATORY")
 
+        exploratory_pairs = list(self._route_ctx_map.keys())
+        self._refresh_before_engine_dispatch(exploratory_pairs)
+
+
         if exp:
             for (mid, sid), ctx in self._route_ctx_map.items():
                 if (mid, sid) in exclusions or ctx.get("px") is None:
@@ -1683,6 +1751,16 @@ class DecisionBus:
         from engines.bus_route import get_stoploss_parent_surfaces
 
         overwatcher = self.engines.get("OVERWATCHER")
+
+        # 🔑 BUILD STOPLOSS PAIRS FOR THIS LANE
+        stop_pairs = [
+            (p["marketId"], p["selectionId"])
+            for p in get_stoploss_parent_surfaces()
+            if p.get("marketId") and p.get("selectionId")
+        ]
+
+
+        self._refresh_before_engine_dispatch(stop_pairs)
 
         if overwatcher:
             for p in get_stoploss_parent_surfaces():

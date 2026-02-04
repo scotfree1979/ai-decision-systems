@@ -467,47 +467,79 @@ class BusRouteSnapshot:
 # - If an engine can evaluate a runner, that runner MUST be in the route snapshot
 # ======================================================================================================
 
+# ======================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_root_ctx_runner_pairs():
+# 🧩 ACTION: ADD — ensure RISK parents are always in route snapshot
+# 📆 PATCHED: 2026-02-03 — fix risk_missing_px (CTX identity invariant)
+# ======================================================================
+
 def get_root_ctx_runner_pairs():
-    """
-    Authoritative union of ALL (marketId, selectionId) pairs
-    required by any BUS lane.
-
-    BUS ROUTE is the ONLY place where runner identity is expanded.
-    Lanes must NEVER introduce new runners.
-    """
-
     pairs = set()
 
     # --------------------------------------------------
-    # 1️⃣ LEGACY / EXPLORATORY route runners
+    # 1️⃣ Base runner pool (scope + monitor)
     # --------------------------------------------------
     try:
         pairs |= set(_build_runner_pool())
     except Exception:
         pass
 
+# ======================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: def get_root_ctx_runner_pairs():
+# 🧩 ACTION: ADD — parent permanence invariant
+# 📆 PATCHED: 2026-02-03 — matched parents permanently pinned into route
+#
+# INVARIANT:
+#   If a parent is MATCHED today, its (mid, sid) MUST exist in route CTX
+# ======================================================================
+
     # --------------------------------------------------
-    # 2️⃣ RISK legacy-parent anchor runners
+    # 6️⃣ MATCHED PARENTS — PERMANENT ROUTE MEMBERSHIP
     # --------------------------------------------------
     try:
-        for mid, sid, _legacy_pid, _anchor_px in get_risk_legacy_parent_pairs():
+        from engines.config_paths import open_auto_db
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        rows = con.execute("""
+            SELECT DISTINCT
+                marketId,
+                selectionId
+            FROM orders
+            WHERE role = 'PARENT'
+              AND UPPER(entry_status) = 'MATCHED'
+              AND date(opened_at) = date('now','utc')
+        """).fetchall()
+
+        for r in rows:
+            if r["marketId"] and r["selectionId"]:
+                pairs.add((str(r["marketId"]), str(r["selectionId"])))
+
+    except Exception:
+        pass
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    # --------------------------------------------------
+    # 2️⃣ RISK parent runners (LEGACY + EXPLORATORY)
+    # 🔑 CRITICAL: MUST be present for px refresh
+    # --------------------------------------------------
+    try:
+        for mid, sid, _pid, _anchor_px in get_risk_legacy_parent_pairs():
             if mid and sid:
                 pairs.add((str(mid), str(sid)))
     except Exception:
         pass
 
     # --------------------------------------------------
-    # 3️⃣ RISK exclusion cycles (unmatched RISK children)
-    # --------------------------------------------------
-    try:
-        for mid, sid, _risk_pid in get_risk_cycle_exclusions():
-            if mid and sid:
-                pairs.add((str(mid), str(sid)))
-    except Exception:
-        pass
-
-    # --------------------------------------------------
-    # 4️⃣ EXPLORATORY exclusion runners
+    # 3️⃣ Exploratory exclusions (already active parents)
     # --------------------------------------------------
     try:
         pairs |= {
@@ -518,16 +550,15 @@ def get_root_ctx_runner_pairs():
         pass
 
     # --------------------------------------------------
-    # 7️⃣ IN-PLAY parent runners (BUS Phase-0 mirror)
+    # 4️⃣ In-play parents
     # --------------------------------------------------
     try:
         pairs |= get_inplay_parent_runner_pairs()
     except Exception:
         pass
 
-
     # --------------------------------------------------
-    # 6️⃣ STOPLOSS surfaces (Overwatcher)
+    # 5️⃣ Stoploss parents
     # --------------------------------------------------
     try:
         pairs |= {
@@ -538,10 +569,6 @@ def get_root_ctx_runner_pairs():
         pass
 
     return pairs
-
-
-
-
 
 # ============================================================================
 # RISK ELIGIBILITY — LEGACY PARENTS WITHOUT MATCHED CHILD
@@ -627,40 +654,47 @@ def get_risk_cycle_exclusions():
 
 def get_risk_legacy_parent_pairs():
     """
-    Return ONLY TODAY's MATCHED LEGACY parents eligible for MSC_RISK.
+    Return TODAY's MATCHED parents eligible for MSC_RISK.
 
-    HARD INVARIANTS:
-    - LIVE mode
-    - LEGACY engine
-    - PARENT role
-    - entry_status = MATCHED
-    - exit_status != MATCHED
-    - opened TODAY (UTC)
-    - excluded risk cycles removed
+    SOURCES:
+      • LEGACY parents
+      • MSC_EXPLORATORY parents
+
+    EXCLUSIONS (DIFFERENT BY ENGINE):
+      • LEGACY        → get_risk_cycle_exclusions()   (parent_id based)
+      • EXPLORATORY   → get_exploratory_active_parent_pairs() (mid,sid based)
     """
 
     from engines.config_paths import open_auto_db
-    from engines.bus_route import get_risk_cycle_exclusions
+    from engines.bus_route import (
+        get_risk_cycle_exclusions,
+        get_exploratory_active_parent_pairs,
+    )
     import sqlite3
 
     con = open_auto_db(rw=False)
     con.row_factory = sqlite3.Row
 
     try:
-        # Cycle exclusions are parent_id based
-        excluded_legacy_parents = get_risk_cycle_exclusions()
+        # --- exclusion sets (authoritative) ---
+        legacy_blocked_parent_ids = get_risk_cycle_exclusions()
+        exploratory_active_pairs  = {
+            (str(mid), str(sid))
+            for (mid, sid) in get_exploratory_active_parent_pairs()
+        }
 
         rows = con.execute(
             """
             SELECT
                 p.marketId,
                 p.selectionId,
-                p.id         AS legacy_parent_id,
-                p.entry_odds AS anchor_px
+                p.id         AS parent_id,
+                p.entry_odds AS anchor_px,
+                p.engine     AS engine
             FROM orders p
             WHERE p.mode = 'LIVE'
               AND p.role = 'PARENT'
-              AND p.engine = 'LEGACY'
+              AND p.engine IN ('LEGACY', 'MSC_EXPLORATORY')
               AND UPPER(p.entry_status) = 'MATCHED'
               AND (p.exit_status IS NULL OR UPPER(p.exit_status) != 'MATCHED')
               AND date(p.opened_at) = date('now','utc')
@@ -668,17 +702,31 @@ def get_risk_legacy_parent_pairs():
         ).fetchall()
 
         out = []
-        for r in rows:
-            pid = int(r["legacy_parent_id"])
 
-            # 🔒 FINAL GUARD — cycle-scoped exclusion
-            if pid in excluded_legacy_parents:
-                continue
+        for r in rows:
+            mid = str(r["marketId"])
+            sid = str(r["selectionId"])
+            pid = int(r["parent_id"])
+            eng = r["engine"]
+
+            # ------------------------------------
+            # LEGACY exclusion → risk cycle blocked
+            # ------------------------------------
+            if eng == "LEGACY":
+                if pid in legacy_blocked_parent_ids:
+                    continue
+
+            # ------------------------------------
+            # EXPLORATORY exclusion → already active
+            # ------------------------------------
+            elif eng == "MSC_EXPLORATORY":
+                if (mid, sid) in exploratory_active_pairs:
+                    continue
 
             out.append(
                 (
-                    str(r["marketId"]),
-                    str(r["selectionId"]),
+                    mid,
+                    sid,
                     pid,
                     float(r["anchor_px"]),
                 )
@@ -688,6 +736,7 @@ def get_risk_legacy_parent_pairs():
 
     finally:
         con.close()
+
 
 
 # ============================================================================

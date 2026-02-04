@@ -13,6 +13,7 @@ from engines.decision_engine.strategies.registry import STRAT_CODE
 
 # Enable ALL by default (no env exports required)
 ENABLED = {
+    "ALWAYS_ON": True,
     "BTL_AGGR": True,
     "BTL_SCOUT": True,
     "OG_STRATEGY": True,
@@ -28,6 +29,7 @@ ENABLED = {
 }
 
 # Import all deciders
+from .always_on import decide as A_ALWAYS_ON
 from .btl_aggr import decide as S_BTL_AGGR
 from .btl_scout import decide as S_BTL_SCOUT
 from .og_bias import decide as S_OG
@@ -43,6 +45,7 @@ from .inplay import collapse_fade as IP_COL
 
 # Evaluation order (first match fires; ladder can return multiple)
 ORDER = [
+    ("ALWAYS_ON",   A_ALWAYS_ON),
     ("BTL_SCOUT",   S_BTL_SCOUT),
     ("BTL_AGGR",    S_BTL_AGGR),
     ("OG_STRATEGY", S_OG),
