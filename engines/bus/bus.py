@@ -1409,57 +1409,62 @@ class DecisionBus:
 
         for mid, sid, legacy_parent_id, anchor_px in get_risk_legacy_parent_pairs():
 
-            # 🔒 Cycle-scoped exclusion
+            # --------------------------------------------------
+            # 🔒 ONLY VALID GATE:
+            # One risk parent per risk cycle
+            # (cycle = legacy_parent_id)
+            # --------------------------------------------------
             if legacy_parent_id in excluded_legacy_parents:
                 continue
 
+            # --------------------------------------------------
+            # CTX MUST COME FROM ROUTE (AUTHORITATIVE)
+            # Never gate on missing CTX
+            # --------------------------------------------------
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
+                # Fail-open: cannot evaluate without CTX,
+                # but this is not a logical exclusion
                 continue
 
+            # --------------------------------------------------
+            # PX MUST COME FROM ROUTE (AUTHORITATIVE)
+            # Never gate on missing PX
+            # --------------------------------------------------
             last_px = ctx.get("px")
             if last_px is None:
-                continue
-
-            # ----------------------------------------------
-            # 2️⃣ Betfair MATCH surface (cycle truth)
-            # ----------------------------------------------
-            bet_id = ctx.get("entry_bet_id")
-            if bet_id:
-                surf = query_bet_match_surface(
-                    bet_id=bet_id,
-                    app_key=app_key,
-                    token=token,
-                )
-                if surf.get("state") == "TERMINAL":
+                # Try one last authoritative refresh
+                if not self._ensure_px_from_route(ctx):
+                    continue
+                last_px = ctx.get("px")
+                if last_px is None:
                     continue
 
-            # ----------------------------------------------
-            # 3️⃣ Betfair TREND surface (direction truth)
-            # ----------------------------------------------
-            trend = get_runner_trend(mid, sid)
-            if trend["direction"] == "FLAT":
-                continue
+            # --------------------------------------------------
+            # TREND IS INFORMATIONAL ONLY
+            # NOT A GATE
+            # --------------------------------------------------
+            trend = get_runner_trend(mid, sid) or {}
 
-            # ----------------------------------------------
-            # 4️⃣ Build PURE RISK CTX (BUS owns truth)
-            # ----------------------------------------------
+            # --------------------------------------------------
+            # BUILD PURE RISK CTX (BUS OWNS TRUTH)
+            # --------------------------------------------------
             ctx_l = dict(ctx)
             ctx_l.update({
                 "legacy_parent_id":   legacy_parent_id,
                 "legacy_entry_odds":  float(anchor_px),
                 "legacy_entry_stake": ctx.get("legacy_entry_stake"),
                 "last_px":            float(last_px),
-                "risk_direction":     trend["direction"],
-                "risk_ticks_moved":   trend["ticks_moved"],
-                "risk_confidence":    trend["confidence"],
+                "risk_direction":     trend.get("direction"),
+                "risk_ticks_moved":   trend.get("ticks_moved"),
+                "risk_confidence":    trend.get("confidence"),
             })
 
             _normalize_ctx_enums(ctx_l)
 
-            # ----------------------------------------------
-            # 5️⃣ RiskEngine = pure plan emitter
-            # ----------------------------------------------
+            # --------------------------------------------------
+            # RISK ENGINE — PURE PLAN EMITTER
+            # --------------------------------------------------
             try:
                 plan = risc.tick(ctx_l)
                 if plan:
@@ -1478,7 +1483,6 @@ class DecisionBus:
 
         from engines.bus_route import get_v7_inplay_snapshot
         from engines.config_paths import connect_db
-        from datetime import datetime, timezone
         import sqlite3
 
         inplay = self.engines.get("MSC_INPLAY")
@@ -1499,146 +1503,104 @@ class DecisionBus:
                 FROM bets
                 WHERE
                     julianday(marketStartTime) <= julianday('now','utc')
-                    AND julianday(marketStartTime) >= julianday('now','utc') - (6.0 / 1440.0)
+                    AND julianday(marketStartTime) >= julianday('now','utc') - (15.0 / 1440.0)
                 """
             ).fetchall()
         finally:
             con.close()
 
         inplay_mids = [str(r["marketId"]) for r in rows if r["marketId"]]
-
         if not inplay_mids:
             pass
 
         # --------------------------------------------------
-        # 2️⃣ BUS expands runners via bets DB (NOT route)
+        # 2️⃣ BUS_ROUTE supplies CTX (market-scoped, authoritative)
         # --------------------------------------------------
-        con = connect_db(ro=True)
-        con.row_factory = sqlite3.Row
+        for mid in inplay_mids:
 
-        try:
-            runner_rows = con.execute(
-                """
-                SELECT DISTINCT
-                    marketId,
-                    selectionId
-                FROM bets
-                WHERE marketId IN ({})
-                """.format(",".join("?" * len(inplay_mids))),
-                inplay_mids,
-            ).fetchall()
-        finally:
-            con.close()
-
-        runner_pairs = [
-            (str(r["marketId"]), str(r["selectionId"]))
-            for r in runner_rows
-            if r["marketId"] and r["selectionId"]
-        ]
-
-        if not runner_pairs:
-            pass
-
-        # --------------------------------------------------
-        # 3️⃣ BUS_ROUTE supplies CTX (reuse, no rebuild)
-        # --------------------------------------------------
-        for mid, sid in runner_pairs:
-            ctx = self._route_ctx_map.get((mid, sid))
-            if not ctx:
+            market_ctxs = self._route_snapshot.get_ctx_for_market(mid)
+            if not market_ctxs:
                 continue
 
-            # --------------------------------------------------
-            # 4️⃣ In-play helper enrichment (non-gating)
-            # --------------------------------------------------
+            # In-play snapshot (ONCE per market)
             snap = get_v7_inplay_snapshot(mid) or []
             snap_by_sid = {str(r["selectionId"]): r for r in snap}
 
-            ctx_l = dict(ctx)
+            for (_mid, sid), ctx in market_ctxs.items():
+                if not ctx:
+                    continue
 
-            # --------------------------------------------------
-            # MSC_INPLAY MODE CONTRACT (BUS AUTHORITY)
-            # --------------------------------------------------
-            ctx_l["in_play"] = True
+                ctx_l = dict(ctx)
 
-            # PX fallback permission (BUS-controlled)
-            ctx_l["_allow_bf_px_fallback"] = ctx_l.get("px") is None
+                # --------------------------------------------------
+                # MSC_INPLAY MODE CONTRACT (BUS AUTHORITY)
+                # --------------------------------------------------
+                ctx_l["in_play"] = True
+                ctx_l["_allow_bf_px_fallback"] = ctx_l.get("px") is None
 
-            intel = snap_by_sid.get(sid)
-            if intel:
-                ctx_l.update({
-                    "fav_rank":            intel.get("fav_rank"),
-                    "success":             intel.get("success"),
-                    "weight":              intel.get("weight"),
-                    "drift_ratio":         intel.get("drift_ratio"),
-                    "drift_pct":           intel.get("drift_pct"),
-                    "actual_drift_pct":    intel.get("actual_drift_pct"),
-                    "reversal_flag":       intel.get("reversal_flag"),
-                    "mto_minutes":         intel.get("mto_minutes"),
-                    "pos_inplay":          intel.get("pos_inplay"),
-                    "inplay_move_class":   intel.get("move"),
-                    "inplay_rank_base_px": intel.get("base_px"),
-                    "inplay_pnl_if_win":   intel.get("pnl_if_win"),
-                })
+                intel = snap_by_sid.get(str(sid))
+                if intel:
+                    ctx_l.update({
+                        "fav_rank":            intel.get("fav_rank"),
+                        "success":             intel.get("success"),
+                        "weight":              intel.get("weight"),
+                        "drift_ratio":         intel.get("drift_ratio"),
+                        "drift_pct":           intel.get("drift_pct"),
+                        "actual_drift_pct":    intel.get("actual_drift_pct"),
+                        "reversal_flag":       intel.get("reversal_flag"),
+                        "mto_minutes":         intel.get("mto_minutes"),
+                        "pos_inplay":          intel.get("pos_inplay"),
+                        "inplay_move_class":   intel.get("move"),
+                        "inplay_rank_base_px": intel.get("base_px"),
+                        "inplay_pnl_if_win":   intel.get("pnl_if_win"),
+                    })
 
-            # Optional intel broker (engine-requested only)
-            if ctx_l.get("_request_intel"):
-                opt = self._get_optional_intel(
-                    engine="MSC_INPLAY",
-                    ctx=ctx_l,
-                )
-                if opt:
-                    ctx_l.update(opt)
+                # Optional intel broker
+                if ctx_l.get("_request_intel"):
+                    opt = self._get_optional_intel(
+                        engine="MSC_INPLAY",
+                        ctx=ctx_l,
+                    )
+                    if opt:
+                        ctx_l.update(opt)
 
-            # Normalisation is BUS authority
-            _normalize_ctx_enums(ctx_l)
+                _normalize_ctx_enums(ctx_l)
 
-            # ==================================================
-            # 🔑 PROMINENCE SIGNAL (BUS → INPLAY)
-            #
-            # SOURCE OF TRUTH:
-            # - MarketMonitor structural signals
-            # - No DB, no history, no heuristics
-            #
-            # Invariant:
-            #   INPLAY does NOT infer prominence itself
-            # ==================================================
+                # --------------------------------------------------
+                # PROMINENCE SIGNAL (BUS → INPLAY)
+                # --------------------------------------------------
+                try:
+                    from engines.market_monitor.monitor import (
+                        signals_for_runner,
+                        get_crossover_signal,
+                    )
 
-            try:
-                from engines.market_monitor.monitor import (
-                    signals_for_runner,
-                    get_crossover_signal,
-                )
+                    mm = signals_for_runner(mid, sid, ctx_l.get("px")) or {}
+                    xo = get_crossover_signal(mid, sid) or {}
 
-                mm = signals_for_runner(mid, sid, ctx_l.get("px")) or {}
-                xo = get_crossover_signal(mid, sid) or {}
+                    ctx_l["prominent"] = bool(
+                        mm.get("is_fav_now")
+                        or mm.get("new_fav_recent")
+                        or mm.get("lost_fav_recent")
+                        or xo.get("crossed_over_recent")
+                    )
 
-                ctx_l["prominent"] = bool(
-                    mm.get("is_fav_now")
-                    or mm.get("new_fav_recent")
-                    or mm.get("lost_fav_recent")
-                    or xo.get("crossed_over_recent")
-                )
+                except Exception:
+                    ctx_l["prominent"] = False
 
-            except Exception:
-                # Fail-open: no prominence = no in-play trade
-                ctx_l["prominent"] = False
-
-
-            # --------------------------------------------------
-            # 5️⃣ Pure engine decision
-            # --------------------------------------------------
-            try:
-                p = inplay.tick(ctx_l)
-                if p and p.get("enter"):
-                    plan = dict(p)
-                    plan["engine"] = "MSC_INPLAY"
-                    plans.append(("MSC_INPLAY", plan, ctx_l))
-                    engine_report["MSC_INPLAY"]["fired"] += 1
-                    lane_counts[3] += 1
-            except Exception:
-                _record_reason(engine_report, "MSC_INPLAY", "tick_error")
-
-
+                # --------------------------------------------------
+                # 5️⃣ Pure engine decision (PER RUNNER)
+                # --------------------------------------------------
+                try:
+                    p = inplay.tick(ctx_l)
+                    if p and p.get("enter"):
+                        plan = dict(p)
+                        plan["engine"] = "MSC_INPLAY"
+                        plans.append(("MSC_INPLAY", plan, ctx_l))
+                        engine_report["MSC_INPLAY"]["fired"] += 1
+                        lane_counts[3] += 1
+                except Exception:
+                    _record_reason(engine_report, "MSC_INPLAY", "tick_error")
 
         # --------------------------------------------------
         # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)

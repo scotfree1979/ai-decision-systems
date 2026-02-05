@@ -226,17 +226,178 @@ def build_cycle_table(db: pd.DataFrame) -> pd.DataFrame:
         "bet_id_child": "child_bet_id",
     })
 
+# -------------------------------------------------------------------
+# PARENT ↔ CHILD INTEGRITY (DB-ONLY, SCHEMA-PURE)
+# -------------------------------------------------------------------
+
+def parent_child_integrity_report(db: pd.DataFrame):
+    """
+    DB-authoritative parent ↔ child integrity report.
+
+    Schema truth only:
+    - role        → PARENT / CHILD
+    - hedge_of    → linkage
+    - no odds
+    - no Betfair
+    - no inference
+    """
+
+    print("\n================ PARENT ↔ CHILD INTEGRITY =================\n")
+
+    parents = db[db["role"] == "PARENT"]
+    children = db[db["role"] == "CHILD"]
+
+    print(f"Total parents (today):  {len(parents)}")
+    print(f"Total children (today): {len(children)}\n")
+
+    # --------------------------------------------------
+    # Parents with NO children
+    # --------------------------------------------------
+    parents_no_child = parents[
+        ~parents["id"].isin(children["hedge_of"].dropna())
+    ]
+
+    print("=== PARENTS WITH NO CHILD ===")
+    print(f"count: {len(parents_no_child)}")
+
+    if len(parents_no_child):
+        print(
+            parents_no_child[
+                [
+                    "engine",
+                    "marketId",
+                    "selectionId",
+                    "entry_status",
+                    "exit_status",
+                    "opened_at",
+                ]
+            ]
+            .sort_values("opened_at")
+            .head(25)
+            .to_string(index=False)
+        )
+    else:
+        print("None 🎉")
+
+    print()
+
+    # --------------------------------------------------
+    # Parents with MULTIPLE children
+    # --------------------------------------------------
+    multi_child = (
+        children
+        .dropna(subset=["hedge_of"])
+        .groupby("hedge_of")
+        .size()
+        .reset_index(name="child_count")
+    )
+
+    multi_child = multi_child[multi_child["child_count"] > 1]
+
+    print("=== PARENTS WITH MULTIPLE CHILDREN ===")
+    print(f"count: {len(multi_child)}")
+
+    if len(multi_child):
+        print(
+            multi_child
+            .merge(
+                parents,
+                left_on="hedge_of",
+                right_on="id",
+                how="left",
+            )[
+                [
+                    "engine",
+                    "marketId",
+                    "selectionId",
+                    "child_count",
+                    "opened_at",
+                ]
+            ]
+            .sort_values("child_count", ascending=False)
+            .head(25)
+            .to_string(index=False)
+        )
+    else:
+        print("None 🎉")
+
+    print()
+
+    # --------------------------------------------------
+    # Orphaned children (CHILD rows with no parent)
+    # --------------------------------------------------
+    orphan_children = children[
+        children["hedge_of"].notna()
+        & ~children["hedge_of"].isin(parents["id"])
+    ]
+
+    print("=== ORPHANED CHILDREN (SHOULD BE ZERO) ===")
+    print(f"count: {len(orphan_children)}")
+
+    if len(orphan_children):
+        print(
+            orphan_children[
+                [
+                    "engine",
+                    "marketId",
+                    "selectionId",
+                    "hedge_of",
+                    "entry_status",
+                    "exit_status",
+                    "opened_at",
+                ]
+            ]
+            .sort_values("opened_at")
+            .head(25)
+            .to_string(index=False)
+        )
+    else:
+        print("None 🎉")
+
+    print()
+
+    # --------------------------------------------------
+    # Engine-level summary
+    # --------------------------------------------------
+    parent_ids_with_child = set(children["hedge_of"].dropna())
+
+    engine_summary = (
+        parents
+        .assign(has_child=parents["id"].isin(parent_ids_with_child))
+        .groupby(["engine", "has_child"])
+        .size()
+        .unstack(fill_value=0)
+        .rename(columns={
+            False: "parents_without_child",
+            True:  "parents_with_child",
+        })
+    )
+
+    print("=== ENGINE SUMMARY (PARENT ↔ CHILD) ===")
+    print(engine_summary.to_string())
+
+    print("\n===========================================================\n")
+
 
 # -------------------------------------------------------------------
-# MAIN
+# MAIN (REWRITTEN – SCHEMA-PURE)
 # -------------------------------------------------------------------
 
 def main():
     print("\n=== Daily Betfair ↔ AutoScalp Reconciliation ===\n")
 
     bf = load_betfair_csvs()
+    bf_by_id = bf.set_index("bet_id")
     db = load_orders_db()
 
+    # ------------------------------------------------
+    # DB-only integrity (authoritative)
+    # ------------------------------------------------
+    parent_child_integrity_report(db)
+
+    # ------------------------------------------------
+    # Build execution cycles (structure only)
+    # ------------------------------------------------
     print("\n================ CYCLE TABLE ====================")
 
     cycles = build_cycle_table(db)
@@ -244,87 +405,57 @@ def main():
     print(f"Total parent cycles: {len(cycles)}")
     print(cycles.groupby(["engine", "cycle_complete"]).size())
 
-    print("\n=== INCOMPLETE CYCLES (no child) ===")
-    print(
-        cycles[~cycles["cycle_complete"]][
-            ["engine", "marketId", "selectionId", "parent_time"]
-        ].head(20)
+    # ------------------------------------------------
+    # Attach Betfair odds (by bet_id)
+    # ------------------------------------------------
+    cycles["parent_bf_odds"] = cycles["parent_bet_id"].map(
+        lambda x: bf_by_id.loc[x]["odds"] if x in bf_by_id.index else None
     )
 
-    print("\n=== DELAY STATS (seconds) ===")
-    print(
-        cycles[cycles["cycle_complete"]]
-        .groupby("engine")["delay_seconds"]
-        .describe()
+    cycles["child_bf_odds"] = cycles["child_bet_id"].map(
+        lambda x: bf_by_id.loc[x]["odds"] if x in bf_by_id.index else None
     )
 
-    # ================================================================
-    # PARENT ↔ CHILD ↔ BETFAIR TRUTH TABLE
-    # ================================================================
-
-    print("\n================ EXECUTION TRUTH TABLE =================")
-
     # ------------------------------------------------
-    # Build Betfair lookup by bet_id
+    # Join DB rows for parent and child (schema-pure)
     # ------------------------------------------------
-    bf_by_id = bf.set_index("bet_id")
-
-    def bf_exists(bet_id):
-        if not isinstance(bet_id, str):
-            return False
-        return bet_id in bf_by_id.index
-
-    # ------------------------------------------------
-    # Enrich cycles with DB + Betfair truth
-    # ------------------------------------------------
-    truth = cycles.merge(
-        db[
-            [
-                "id",
-                "side",
-                "entry_odds",
-     
-                "role",
-            ]
-        ],
-        left_on="parent_id",
-        right_on="id",
-        how="left",
-    ).rename(columns={
+    parents_db = db[
+        ["id", "role", "side", "entry_odds"]
+    ].rename(columns={
+        "id": "parent_id",
         "side": "parent_side",
-        "entry_odds": "parent_odds",
+        "entry_odds": "parent_entry_odds",
     })
 
-    truth = truth.merge(
-        db[
-            [
-                "id",
-                "side",
-                "entry_odds",
-            ]
-        ],
-        left_on="child_id",
-        right_on="id",
-        how="left",
-        suffixes=("", "_child"),
-    ).rename(columns={
-        "side_child": "child_side",
-        "entry_odds_child": "child_odds",
+    children_db = db[
+        ["id", "role", "side", "entry_odds"]
+    ].rename(columns={
+        "id": "child_id",
+        "side": "child_entry_side",
+        "entry_odds": "child_entry_odds",
     })
 
-    truth["bf_parent"] = truth["parent_bet_id"].apply(bf_exists)
-    truth["bf_child"]  = truth["child_bet_id"].apply(bf_exists)
-  
+    truth = (
+        cycles
+        .merge(parents_db, on="parent_id", how="left")
+        .merge(children_db, on="child_id", how="left")
+    )
 
     # ------------------------------------------------
-    # Direction rule check
+    # Presence on Betfair
+    # ------------------------------------------------
+    truth["parent_seen_bf"] = truth["parent_bet_id"].isin(bf_by_id.index)
+    truth["child_seen_bf"]  = truth["child_bet_id"].isin(bf_by_id.index)
+
+    # ------------------------------------------------
+    # Direction check (schema-pure)
     # ------------------------------------------------
     def direction_ok(row):
         try:
             ps = row["parent_side"]
-            cs = row["child_side"]
-            po = float(row["parent_odds"])
-            co = float(row["child_odds"])
+            cs = row["child_entry_side"]
+            po = float(row["parent_entry_odds"])
+            co = float(row["child_entry_odds"])
 
             if ps == "LAY" and cs == "BACK":
                 return co > po
@@ -340,11 +471,11 @@ def main():
     # Cycle classification
     # ------------------------------------------------
     def classify(row):
-        if not row["bf_parent"]:
+        if not row["parent_seen_bf"]:
             return "DB_ONLY_PARENT"
         if pd.isna(row["child_id"]):
             return "NO_CHILD_DB"
-        if not row["bf_child"]:
+        if not row["child_seen_bf"]:
             return "CHILD_NOT_SENT"
         if row["direction_ok"] is False:
             return "DIRECTION_VIOLATION"
@@ -352,58 +483,109 @@ def main():
 
     truth["cycle_status"] = truth.apply(classify, axis=1)
 
-    problems = truth[truth["cycle_status"] != "OK"]
-
     # ------------------------------------------------
     # Summary
     # ------------------------------------------------
     print("\n=== CYCLE STATUS SUMMARY ===")
     print(truth.groupby(["engine", "cycle_status"]).size())
 
+
+
     # ------------------------------------------------
-    # Detailed problem rows (Betfair-truth based)
+    # PRICE INTEGRITY VIEW (schema-pure)
     # ------------------------------------------------
+    print("\n================ PRICE INTEGRITY (DB ↔ BETFAIR) =================")
 
+    price_view = truth[
+        [
+            "engine",
+            "marketId",
+            "selectionId",
+            "parent_id",
+            "child_id",
+            "parent_side",
+            "child_entry_side",
+            "parent_entry_odds",
+            "parent_bf_odds",
+            "child_entry_odds",
+            "child_bf_odds",
+            "cycle_status",
+        ]
+    ].assign(
+        parent_odds_diff=lambda d: (d["parent_entry_odds"] - d["parent_bf_odds"]).round(3),
+        child_odds_diff=lambda d: (d["child_entry_odds"] - d["child_bf_odds"]).round(3),
+    )
 
-    print("\n=== PROBLEM CYCLES (DB ↔ BETFAIR DIVERGENCE) ===")
+    print(price_view.head(50).to_string(index=False))
 
-    if problems.empty:
-        print("None 🎉")
-    else:
-        rows = []
+    # ------------------------------------------------
+    # RISK CYCLE REALITY CHECK (schema-pure)
+    # ------------------------------------------------
+    print("\n================ RISK CYCLE REALITY =================")
 
-        for _, r in problems.iterrows():
-            pbid = r["parent_bet_id"]
-            cbid = r["child_bet_id"]
+    shadow_cycles = db[
+        (db["role"] == "PARENT")
+        & (db["entry_status"] == "MATCHED")
+        & (db["engine"].isin(["LEGACY", "MSC_EXPLORATORY"]))
+    ][["engine", "marketId", "selectionId", "entry_odds"]]
 
-            # Betfair truth
-            pbf = bf_by_id.loc[pbid] if pbid in bf_by_id.index else None
-            cbf = bf_by_id.loc[cbid] if cbid in bf_by_id.index else None
+    anchors = (
+        shadow_cycles
+        .groupby(["marketId", "selectionId"])
+        .agg(
+            cycles=("entry_odds", "count"),
+            distinct_anchor_px=("entry_odds", pd.Series.nunique),
+        )
+        .reset_index()
+    )
 
-            rows.append({
-                "engine": r["engine"],
-                "marketId": r["marketId"],
-                "selectionId": r["selectionId"],
+    price_moves = (
+        db.groupby(["marketId", "selectionId"])
+        .agg(
+            min_px=("entry_odds", "min"),
+            max_px=("entry_odds", "max"),
+        )
+        .assign(price_range=lambda d: (d["max_px"] - d["min_px"]).round(3))
+        .reset_index()
+    )
 
-                "parent_bet_id": pbid,
-                "parent_side_bf": pbf["side"] if pbf is not None else None,
-                "parent_odds_bf": pbf["odds"] if pbf is not None else None,
-                "parent_seen_bf": pbf is not None,
+    risk_fires = (
+        db[
+            (db["role"] == "PARENT")
+            & (db["entry_status"] == "MATCHED")
+            & (db["engine"] == "MSC_RISK")
+        ]
+        .groupby(["marketId", "selectionId"])
+        .size()
+        .reset_index(name="risk_parents")
+    )
 
-                "child_bet_id": cbid,
-                "child_side_bf": cbf["side"] if cbf is not None else None,
-                "child_odds_bf": cbf["odds"] if cbf is not None else None,
-                "child_seen_bf": cbf is not None,
+    risk_view = (
+        anchors
+        .merge(price_moves, on=["marketId", "selectionId"], how="left")
+        .merge(risk_fires, on=["marketId", "selectionId"], how="left")
+        .fillna({"risk_parents": 0})
+        .assign(missing_risk=lambda d: d["cycles"] - d["risk_parents"])
+        .sort_values("missing_risk", ascending=False)
+    )
 
-                "cycle_status": r["cycle_status"],
-            })
+    print(risk_view.head(50).to_string(index=False))
 
-        prob_df = pd.DataFrame(rows)
+    # ------------------------------------------------
+    # EXIT STATUS COUNTS
+    # ------------------------------------------------
+    print("\n================ EXIT STATUS SUMMARY =================")
 
-        print(prob_df.head(50))
+    print(
+        db["exit_status"]
+        .fillna("OPEN")
+        .value_counts()
+        .rename_axis("exit_status")
+        .reset_index(name="count")
+        .to_string(index=False)
+    )
 
-
-    print("\n================================================")
+    print("\n===============================================================")
 
 
 if __name__ == "__main__":

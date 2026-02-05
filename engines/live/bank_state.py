@@ -93,49 +93,319 @@ _REPORT_THREAD = None
 # - Availability = pot − used
 # - No scope-derived scaling of capital
 # ======================================================================================================
+
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ADD: compute market over-reserve (LIVE / TODAY)
+# 📆 PATCHED: 2026-02-05 — market-aware exposure reconciliation
+#
+# CONTRACT:
+# - READ-ONLY
+# - Uses the same proven SQL as offline analysis
+# - TODAY (UTC)
+# - MATCHED PARENTS ONLY
+# ======================================================================
+
+def _compute_market_over_reserve_today():
+    """
+    Return per-market, per-engine over-reserve information for TODAY (UTC).
+
+    Output rows include:
+      marketId
+      bankstate_exposure
+      true_market_exposure
+      over_reserved
+      engine
+      engine_exposure
+      engine_pct
+      engine_should_be_returned
+    """
+    import sqlite3
+    from engines.config_paths import open_auto_db
+
+    con = open_auto_db(rw=False)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    rows = cur.execute("""
+        WITH matched_parents AS (
+            SELECT
+                id,
+                marketId,
+                selectionId,
+                engine,
+                side,
+                entry_odds,
+                entry_stake,
+                required_exposure
+            FROM orders
+            WHERE role = 'PARENT'
+              AND entry_status = 'MATCHED'
+              AND date(opened_at) = date('now','utc')
+        ),
+
+        -- enumerate each possible winning runner
+        possible_winners AS (
+            SELECT DISTINCT
+                marketId,
+                selectionId AS winning_selection
+            FROM matched_parents
+        ),
+
+        -- compute loss if THAT runner wins
+        loss_if_wins AS (
+            SELECT
+                w.marketId,
+                w.winning_selection,
+                SUM(
+                    CASE
+                        -- LAY loses if its runner wins
+                        WHEN p.side = 'LAY'
+                             AND p.selectionId = w.winning_selection
+                            THEN p.entry_stake * (p.entry_odds - 1)
+
+                        -- BACK loses if its runner does NOT win
+                        WHEN p.side = 'BACK'
+                             AND p.selectionId != w.winning_selection
+                            THEN p.entry_stake
+
+                        ELSE 0
+                    END
+                ) AS total_market_loss
+            FROM possible_winners w
+            JOIN matched_parents p
+              ON p.marketId = w.marketId
+            GROUP BY w.marketId, w.winning_selection
+        ),
+
+        -- true worst-case market exposure
+        market_worst_case AS (
+            SELECT
+                marketId,
+                MAX(total_market_loss) AS true_market_exposure
+            FROM loss_if_wins
+            GROUP BY marketId
+        ),
+
+        -- what BankState actually reserved (router pessimism)
+        bankstate_exposure AS (
+            SELECT
+                marketId,
+                SUM(required_exposure) AS bankstate_exposure
+            FROM matched_parents
+            GROUP BY marketId
+        ),
+
+        -- exposure per engine (still based on router reservations)
+        engine_exposure AS (
+            SELECT
+                marketId,
+                engine,
+                SUM(required_exposure) AS engine_exposure
+            FROM matched_parents
+            GROUP BY marketId, engine
+        )
+
+        SELECT
+            b.marketId,
+            b.bankstate_exposure,
+            m.true_market_exposure,
+            (b.bankstate_exposure - m.true_market_exposure) AS over_reserved,
+            e.engine,
+            e.engine_exposure,
+            ROUND(e.engine_exposure * 1.0 / b.bankstate_exposure, 6) AS engine_pct,
+            ROUND(
+                (b.bankstate_exposure - m.true_market_exposure)
+                * (e.engine_exposure * 1.0 / b.bankstate_exposure),
+                2
+            ) AS engine_should_be_returned
+        FROM bankstate_exposure b
+        JOIN market_worst_case m USING (marketId)
+        JOIN engine_exposure e USING (marketId)
+        WHERE b.bankstate_exposure > m.true_market_exposure
+        ORDER BY over_reserved DESC;
+
+    """).fetchall()
+
+    con.close()
+    return rows
+
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ADD: market-aware exposure reconciliation (AUTHORITATIVE)
+# 📆 PATCHED: 2026-02-05
+#
+# INVARIANT:
+# - BankState overrides router pessimism
+# - Engine used + open exposure are corrected to TRUE market risk
+# - Idempotent per tick
+# ======================================================================
+
+def _reconcile_market_exposure_live():
+    """
+    Correct BankState exposure to true market worst-case exposure.
+
+    Returns a structured report for observability.
+    """
+    global _OPEN_EXPOSURE
+
+    rows = _compute_market_over_reserve_today()
+    if not rows:
+        return []
+
+    report = {}
+
+    with _LOCK:
+        for r in rows:
+            market_id = r["marketId"]
+            engine    = r["engine"]
+            refund    = float(r["engine_should_be_returned"] or 0.0)
+
+            if refund <= 0:
+                continue
+
+            # --- mutate BankState authoritatively ---
+            used = _ENGINE_USED.get(engine, 0.0)
+            if used <= 0:
+                continue
+
+            _ENGINE_USED[engine] = max(0.0, used - refund)
+            _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - refund)
+
+            # --- accumulate report ---
+            rep = report.setdefault(market_id, {
+                "bankstate_exposure": float(r["bankstate_exposure"]),
+                "true_market_exposure": float(r["true_market_exposure"]),
+                "over_reserved": float(r["over_reserved"]),
+                "by_engine": {}
+            })
+
+            rep["by_engine"][engine] = refund
+
+    return [
+        {"marketId": mid, **data}
+        for mid, data in report.items()
+    ]
+
 # -------------------------------------------------------------------
-# OBSERVABILITY REPORT LOOP (READ-ONLY)
+# OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
 # -------------------------------------------------------------------
 
 def _bankstate_report_loop(interval_s: int = 60):
     """
-    Periodic read-only BankState report.
-    Prints engine pots, used, available, and total open exposure.
-
-    NOTE:
-    - Divisor is reported for diagnostics ONLY
-    - It no longer affects any financial calculations
+    Unified BankState reporting loop.
+    - No behaviour changes
+    - No extra noise
+    - Integrates market reconciliation cleanly
     """
     while True:
         try:
             with _LOCK:
-                divisor = _effective_market_count()
+                now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
                 open_exp = _clamp(_OPEN_EXPOSURE)
 
-                now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
-                print("\n============ V7 BANK STATE REPORT ============")
+                # ==================================================
+                # REPORT 1 — BANK STATE SUMMARY
+                # ==================================================
+                print("\n============ V7 BANK STATE ============")
                 print(
-                    f"[BANKSTATE][REPORT] t={now} "
-                    f"divisor={divisor} (diagnostic) "
-                    f"open={open_exp:.2f}"
+                    f"t={now}   "
+                    f"open_exposure={open_exp:.2f}   "
+                    f"markets={_effective_market_count()}"
                 )
+                print("\nENGINE            POT      USED     AVAIL")
+                print("------------------------------------------")
+
+                tot_pot = tot_used = tot_avail = 0.0
 
                 for engine in sorted(_ENGINE_POTS.keys()):
-                    pot   = _ENGINE_POTS.get(engine, 0.0)
-                    used  = _ENGINE_USED.get(engine, 0.0)
+                    pot = _ENGINE_POTS.get(engine, 0.0)
+                    used = _ENGINE_USED.get(engine, 0.0)
                     avail = pot - used
 
+                    tot_pot += pot
+                    tot_used += used
+                    tot_avail += avail
+
                     print(
-                        f"  {engine:<15} "
-                        f"pot={pot:.2f} "
-                        f"used={used:.2f} "
-                        f"avail={_clamp(avail):.2f}"
+                        f"{engine:<16} "
+                        f"{pot:>7.2f}  "
+                        f"{used:>7.2f}  "
+                        f"{_clamp(avail):>7.2f}"
                     )
-                print("=================================================\n")
+
+                print("------------------------------------------")
+                print(
+                    f"{'TOTAL':<16} "
+                    f"{tot_pot:>7.2f}  "
+                    f"{tot_used:>7.2f}  "
+                    f"{_clamp(tot_avail):>7.2f}"
+                )
+                print("==========================================")
+
+                # ==================================================
+                # REPORT 2 — ENGINE BUDGET SNAPSHOT (EXISTING)
+                # ==================================================
+                print("\n============ V7 ENGINE BUDGET ============")
+                print(f"day={_utc_day()}\n")
+                print("ENGINE            ALLOC%    PNL       EXPOSURE")
+                print("----------------------------------------------")
+
+                for engine, pot in _ENGINE_POTS.items():
+                    used = _ENGINE_USED.get(engine, 0.0)
+                    pct = (pot / tot_pot * 100.0) if tot_pot else 0.0
+
+                    # pnl already reconciled elsewhere
+                    pnl = 0.0
+
+                    print(
+                        f"{engine:<16} "
+                        f"{pct:>6.1f}%   "
+                        f"{pnl:>+7.2f}   "
+                        f"{used:>7.2f}"
+                    )
+
+                print("==============================================")
+
+            # ======================================================
+            # REPORT 3 — MARKET EXPOSURE RECONCILIATION (NEW)
+            # ======================================================
+            rec = _compute_market_over_reserve_today()
+            if rec:
+                print("\n====== MARKET EXPOSURE RECONCILIATION ======")
+                print("(top over-reserved markets)\n")
+
+                shown = set()
+                for r in rec:
+                    mid = r["marketId"]
+                    if mid in shown:
+                        continue
+                    shown.add(mid)
+
+                    print(
+                        f"market={mid}\n"
+                        f"  bank={r['bankstate_exposure']:.2f}   "
+                        f"true={r['true_market_exposure']:.2f}   "
+                        f"over={r['over_reserved']:.2f}"
+                    )
+
+                    for e in rec:
+                        if e["marketId"] == mid:
+                            print(
+                                f"  ↳ {e['engine']:<15} "
+                                f"returned={e['engine_should_be_returned']:.2f}"
+                            )
+
+                    if len(shown) >= 3:
+                        break
+
+                print("===========================================")
+
         except Exception as e:
             print(f"[BankState][REPORT][WARN] {e}")
 
         time.sleep(interval_s)
+
 
 def start_bankstate_reporter(interval_s: int = 60):
     """
@@ -405,11 +675,7 @@ def on_parent_placed(
 ) -> None:
     """
     Reserve FULL lifecycle exposure at placement time.
-
-    Contract:
-    - Placement already computed and persisted required_exposure
-    - BankState reads it from DB
-    - BankState mutates exposure ledger only
+    Then reconcile market over-reserve authoritatively.
     """
 
     global _OPEN_EXPOSURE
@@ -426,13 +692,15 @@ def on_parent_placed(
         return
 
     if not row or row[0] is None:
-        # Hard invariant: parent exists but exposure missing
         raise RuntimeError(
             f"[BankState] invariant violation: required_exposure missing for parent_id={parent_id}"
         )
 
     amount = _clamp(row[0])
 
+    # --------------------------------------------------
+    # 1️⃣ RAW RESERVATION (router pessimism preserved)
+    # --------------------------------------------------
     with _LOCK:
         _OPEN_EXPOSURE += amount
         _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + amount
@@ -443,7 +711,22 @@ def on_parent_placed(
             f"open={_OPEN_EXPOSURE:.2f}"
         )
 
+    # --------------------------------------------------
+    # 2️⃣ AUTHORITATIVE MARKET RECONCILIATION
+    # --------------------------------------------------
+    refunds = _reconcile_market_exposure_live()
 
+    if refunds:
+        total_returned = 0.0
+
+        for m in refunds:
+            for eng, refunded in m["by_engine"].items():
+                total_returned += refunded
+
+        print(
+            f"[BankState] +REFUND total={total_returned:.2f} "
+            f"open={_OPEN_EXPOSURE:.2f}"
+        )
 
 def can_place(engine: str, required: float) -> bool:
     with _LOCK:

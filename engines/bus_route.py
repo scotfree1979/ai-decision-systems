@@ -373,6 +373,24 @@ class BusRouteSnapshot:
         self.partition_into_bus_stops()
         print(f"[CTX] total={len(self.ctx_map)} built_this_pass={built_this_pass}")
 
+    def get_ctx_for_market(self, market_id: str):
+        """
+        Return CTX for ALL runners in a single market.
+
+        - No CTX building
+        - No odds refresh
+        - No filtering
+        - DB-agnostic
+        - BUS decides when to call
+        """
+        mid = str(market_id)
+
+        return {
+            (m, s): ctx
+            for (m, s), ctx in self.ctx_map.items()
+            if m == mid
+        }
+
 
 
     # ======================================================================================================
