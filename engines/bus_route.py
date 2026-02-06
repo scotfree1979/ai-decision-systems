@@ -250,12 +250,19 @@ class BusRouteSnapshot:
         raw_pairs = list(get_root_ctx_runner_pairs())
         ordered = _order_runner_pool_by_market_time(raw_pairs)
 
-        # 🔒 ROUTE QUALITY ENFORCEMENT
-        self.runner_pool = _filter_valid_markets(
-            ordered,
-            min_runners_per_market=6,
-            min_markets=5,
-        )
+        # --------------------------------------------------
+        # 🔒 CUMULATIVE ROUTE MEMBERSHIP (DAY-LONG)
+        # --------------------------------------------------
+
+        new_pairs = _order_runner_pool_by_market_time(raw_pairs)
+
+        existing = set(self.runner_pool)
+
+        for mid, sid in new_pairs:
+            key = (str(mid), str(sid))
+            if key not in existing:
+                self.runner_pool.append(key)
+                existing.add(key)
 
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
@@ -404,20 +411,29 @@ class BusRouteSnapshot:
     # ======================================================================================================
 
     def refresh_ctx_dynamic_fields(self):
-        """
-        Refresh px / odds / back / lay only.
-        Returns elapsed time (seconds).
-        """
         import time
+        import os
         from engines.bus_route import get_runner_odds_map
 
         t0 = time.time()
 
-        odds_map = get_runner_odds_map(list(self.ctx_map.keys()))
+        session_token = (
+            os.getenv("SESSION_TOKEN")
+            or os.getenv("BETFAIR_SESSION_TOKEN")
+        )
 
-        for (mid, sid), odds in odds_map.items():
-            ctx = self.ctx_map.get((mid, sid))
-            if not ctx:
+        # 🔑 AUTHORITATIVE: fetch odds for ALL runners
+        odds_map = get_runner_odds_map(
+            list(self.ctx_map.keys()),
+            session_token=session_token,
+        )
+
+        for (mid, sid), ctx in self.ctx_map.items():
+            odds = odds_map.get((mid, sid))
+
+            if not odds:
+                # This is now a BUG, not a condition
+                ctx["px"] = None
                 continue
 
             ctx["px"]   = odds["px"]
@@ -426,6 +442,59 @@ class BusRouteSnapshot:
             ctx["lay"]  = odds.get("lay")
 
         return time.time() - t0
+
+    # ============================================================
+    # 🔑 NEW — absorb external runners into route snapshot
+    # ============================================================
+    def absorb_runner_pairs(self, pairs):
+        """
+        Ensure (marketId, selectionId) pairs exist in route snapshot.
+
+        CONTRACT:
+        - Idempotent
+        - Builds CTX only if missing
+        - Once absorbed, runners persist for entire route
+        """
+
+        if not pairs:
+            return 0
+
+        from engines.mastery.context_builder import build_context_for_runner
+
+        added = 0
+
+        for mid, sid in pairs:
+            if not mid or not sid:
+                continue
+
+            key = (str(mid), str(sid))
+
+            # Already present → nothing to do
+            if key in self.ctx_map:
+                continue
+
+            try:
+                # Build FULL static CTX exactly once
+                ctx, _ = build_context_for_runner(
+                    str(mid),
+                    str(sid),
+                    source="LIVE",
+                )
+
+                # Dynamic fields — BUS owns refresh later
+                ctx.setdefault("px",   None)
+                ctx.setdefault("odds", None)
+                ctx.setdefault("back", None)
+                ctx.setdefault("lay",  None)
+
+                self.ctx_map[key] = ctx
+                added += 1
+
+            except Exception:
+                # Fail-open: route must never die
+                continue
+
+        return added
 
 
     def get_ctx_map(self):

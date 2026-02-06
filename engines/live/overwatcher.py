@@ -167,6 +167,68 @@ def evaluate_redistribution(ctx: dict) -> dict:
     except Exception:
         return {}
 
+# ======================================================================
+# STOPLOSS → BUS PLAN EMITTER (CANONICAL)
+# ======================================================================
+
+def maybe_emit_stoploss_plan(
+    *,
+    parent_row: dict,
+    current_px: float,
+) -> dict | None:
+    """
+    PURE stop-loss evaluator.
+
+    - NO DB writes
+    - NO routing
+    - NO execution
+    - Returns a BUS-native CHILD plan or None
+    """
+
+    # --- required inputs ---
+    side        = (parent_row.get("side") or "").upper()
+    entry_odds = parent_row.get("entry_odds")
+    stop_ticks = parent_row.get("stop_ticks")
+    stake      = parent_row.get("entry_stake")
+    mid        = parent_row.get("marketId")
+    sid        = parent_row.get("selectionId")
+
+    if (
+        not side
+        or entry_odds is None
+        or stop_ticks is None
+        or stake is None
+        or current_px is None
+    ):
+        return None
+
+    # --- canonical adverse-direction logic ---
+    # Lay first  → loss if odds STEAM DOWN
+    # Back first → loss if odds DRIFT UP
+
+    if side == "LAY":
+        stop_px   = walk_ticks(entry_odds, stop_ticks, direction="down")
+        hit       = current_px <= stop_px
+        exit_side = "BACK"
+    else:  # BACK
+        stop_px   = walk_ticks(entry_odds, stop_ticks, direction="up")
+        hit       = current_px >= stop_px
+        exit_side = "LAY"
+
+    if not hit:
+        return None
+
+    # --- BUS-native CHILD plan ---
+    return {
+        "engine": "OVERWATCHER",
+        "role": "CHILD",
+        "exit_kind": "STOPLOSS",
+        "marketId": mid,
+        "selectionId": sid,
+        "side": exit_side,
+        "px": current_px,
+        "size": float(stake),   # BUS will validate, not recompute
+    }
 
 
 def enforce_msc_exploratory_stoploss():

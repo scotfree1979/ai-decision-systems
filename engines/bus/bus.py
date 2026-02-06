@@ -756,6 +756,71 @@ class DecisionBus:
                 )
 
             # --------------------------------------------------
+            # 3️⃣ CHILD CONSISTENCY + LIFECYCLE FINALISATION
+            # --------------------------------------------------
+            rows = con.execute("""
+                SELECT
+                    c.id              AS child_id,
+                    c.hedge_of        AS parent_id,
+                    c.entry_status    AS child_entry_status,
+                    p.parent_closed   AS parent_closed
+                FROM orders c
+                JOIN orders p ON p.id = c.hedge_of
+                WHERE c.role = 'CHILD'
+                  AND p.mode = 'LIVE'
+            """).fetchall()
+
+            by_parent = {}
+            for r in rows:
+                by_parent.setdefault(r["parent_id"], []).append(r)
+
+            for parent_id, children in by_parent.items():
+
+                matched_children = [
+                    c for c in children
+                    if (c["child_entry_status"] or "").upper() == "MATCHED"
+                ]
+
+                # Invariant: at most ONE matched child
+                if len(matched_children) == 0:
+                    continue
+
+                primary_child = matched_children[0]
+
+                # --------------------------------------------------
+                # A) cancel any extra matched / pending children
+                # --------------------------------------------------
+                for c in children:
+                    if c["child_id"] == primary_child["child_id"]:
+                        continue
+
+                    if (c["child_entry_status"] or "").upper() in ("QUEUED", "PLACING", "PLACED", "MATCHED"):
+                        con.execute("""
+                            UPDATE orders
+                               SET entry_status = 'CANCELLED',
+                                   exit_kind   = 'CANCELLED_BY_LANE6',
+                                   closed_at   = datetime('now','utc')
+                             WHERE id = ?
+                        """, (int(c["child_id"]),))
+
+                # --------------------------------------------------
+                # B) finalise parent lifecycle (idempotent)
+                # --------------------------------------------------
+                if not primary_child["parent_closed"]:
+                    con.execute("""
+                        UPDATE orders
+                           SET parent_closed = 1,
+                               exit_status   = 'MATCHED',
+                               closed_at     = COALESCE(closed_at, datetime('now','utc'))
+                         WHERE id = ?
+                           AND role = 'PARENT'
+                           AND parent_closed = 0
+                    """, (int(parent_id),))
+
+            con.commit()
+
+
+            # --------------------------------------------------
             # 2️⃣ RISK GAP FILL — MSC_RISK ONLY
             # --------------------------------------------------
             for mid, sid, legacy_pid, anchor_px in get_risk_legacy_parent_pairs():
@@ -1481,7 +1546,7 @@ class DecisionBus:
         # --------------------------------------------------
         engine_report["MSC_INPLAY"]["evaluated"] = True
 
-        from engines.bus_route import get_v7_inplay_snapshot
+        from engines.bus_route import get_v7_inplay_snapshot, get_inplay_parent_runner_pairs
         from engines.config_paths import connect_db
         import sqlite3
 
@@ -1490,7 +1555,8 @@ class DecisionBus:
             pass
 
         # --------------------------------------------------
-        # 1️⃣ BUS determines in-play markets (DB authority)
+        # 1️⃣ PRE-INPLAY CTX PRE-WARM (BUS → ROUTE)
+        #     Runs ONCE per market, 5min → 0min before off
         # --------------------------------------------------
         con = connect_db(ro=True)
         con.row_factory = sqlite3.Row
@@ -1499,17 +1565,70 @@ class DecisionBus:
             rows = con.execute(
                 """
                 SELECT DISTINCT
-                    marketId
+                    marketId,
+                    (julianday(marketStartTime) - julianday('now','utc')) * 1440.0 AS mins_to_off
                 FROM bets
                 WHERE
-                    julianday(marketStartTime) <= julianday('now','utc')
-                    AND julianday(marketStartTime) >= julianday('now','utc') - (15.0 / 1440.0)
+                    (julianday(marketStartTime) - julianday('now','utc')) <= 5.0
+                    AND (julianday(marketStartTime) - julianday('now','utc')) > 0.0
                 """
             ).fetchall()
         finally:
             con.close()
 
-        inplay_mids = [str(r["marketId"]) for r in rows if r["marketId"]]
+        prewarm_mids = [
+            str(r["marketId"])
+            for r in rows
+            if r["marketId"]
+            and str(r["marketId"]) not in self._inplay_ctx_prewarmed
+        ]
+
+        if prewarm_mids:
+            prewarm_pairs = [
+                (mid, sid)
+                for (mid, sid) in get_inplay_parent_runner_pairs()
+                if mid in prewarm_mids
+            ]
+
+            if prewarm_pairs:
+                added = self._route_snapshot.absorb_runner_pairs(prewarm_pairs)
+
+                for mid in prewarm_mids:
+                    self._inplay_ctx_prewarmed.add(mid)
+
+                if added:
+                    print(
+                        f"[BUS][INPLAY][PREWARM] "
+                        f"markets={len(prewarm_mids)} runners_added={added}"
+                    )
+
+        # --------------------------------------------------
+        # 1️⃣.1️⃣ CTX CONSUMPTION — ONLY AFTER OFF
+        # --------------------------------------------------
+        con = connect_db(ro=True)
+        con.row_factory = sqlite3.Row
+
+        try:
+            rows = con.execute(
+                """
+                SELECT DISTINCT
+                    marketId,
+                    (julianday(marketStartTime) - julianday('now','utc')) * 1440.0 AS mins_to_off
+                FROM bets
+                WHERE
+                    julianday(marketStartTime) <= julianday('now','utc')
+                """
+            ).fetchall()
+        finally:
+            con.close()
+
+        inplay_mids = [
+            str(r["marketId"])
+            for r in rows
+            if r["marketId"]
+            and (r["mins_to_off"] is None or r["mins_to_off"] <= 0.0)
+        ]
+
         if not inplay_mids:
             pass
 
@@ -1536,7 +1655,7 @@ class DecisionBus:
                 # MSC_INPLAY MODE CONTRACT (BUS AUTHORITY)
                 # --------------------------------------------------
                 ctx_l["in_play"] = True
-                ctx_l["_allow_bf_px_fallback"] = ctx_l.get("px") is None
+                ctx_l["_allow_bf_px_fallback"] = False
 
                 intel = snap_by_sid.get(str(sid))
                 if intel:
@@ -1555,7 +1674,6 @@ class DecisionBus:
                         "inplay_pnl_if_win":   intel.get("pnl_if_win"),
                     })
 
-                # Optional intel broker
                 if ctx_l.get("_request_intel"):
                     opt = self._get_optional_intel(
                         engine="MSC_INPLAY",
@@ -1589,7 +1707,7 @@ class DecisionBus:
                     ctx_l["prominent"] = False
 
                 # --------------------------------------------------
-                # 5️⃣ Pure engine decision (PER RUNNER)
+                # PURE ENGINE DECISION
                 # --------------------------------------------------
                 try:
                     p = inplay.tick(ctx_l)
@@ -1710,30 +1828,36 @@ class DecisionBus:
                     continue
 
                 # Emit STOPLOSS child plan
+                from engines.live.overwatcher import maybe_emit_stoploss_plan
                 from engines.live.child_rescue import ensure_single_child_for_parent
 
+                plan = maybe_emit_stoploss_plan(
+                    parent_row=p,
+                    current_px=px,
+                )
+
+                if not plan:
+                    continue
+
+                # STOPLOSS is an emergency CHILD — DB first, no placement
                 ensure_single_child_for_parent(
-                    parent_id=p["parent_id"],
-                    marketId=mid,
-                    selectionId=sid,
-                    side=exit_side,
-                    px=px,
-                    stake=entry_stake,
-                    exit_kind="STOPLOSS",
-                    lane=5,
-                    engine="OVERWATCHER",
-                    reason="overwatcher_stoploss",
+                    parent_id   = int(p["parent_id"]),
+                    marketId    = p["marketId"],
+                    selectionId = p["selectionId"],
+                    side        = plan["side"],          # BACK or LAY (already computed)
+                    px          = plan["px"],            # live px
+                    stake       = float(p["entry_stake"]),
+                    exit_kind   = "STOPLOSS",
+                    lane        = 5,
+                    engine      = "OVERWATCHER",
+                    reason      = "lane5_overwatcher_stoploss",
                 )
 
                 engine_report["OVERWATCHER"]["fired"] += 1
                 lane_counts[5] += 1
 
 
-
         return plans, lane_counts
-
-
-
 
     def _ensure_route_buffer(self):
         if self._route_buffer:

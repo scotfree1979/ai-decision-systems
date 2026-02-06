@@ -22,6 +22,8 @@ import traceback
 
 _ROUTER_CHILD_QUEUE: "queue.Queue[tuple[dict, dict]]" = queue.Queue()
 _ROUTER_CHILD_WORKER = None
+child_id = None
+
 
 GRACE_MINUTES = 6
 
@@ -30,6 +32,7 @@ def enqueue_router_child(plan: dict, ctx: dict):
 
 
 def _router_child_worker_loop():
+    
     from engines.live.live_router import (
         _attempt_place_child_with_retry,
         _orders_insert_child_queued,
@@ -42,6 +45,7 @@ def _router_child_worker_loop():
     RESCUE_DELAY_SECONDS = 120  # 2 minutes
 
     while True:
+        child_id = None   # ← THIS LINE IS REQUIRED
         try:
             # ==================================================
             # PHASE 1 — NORMAL CHILD EXECUTION PATH
@@ -51,7 +55,7 @@ def _router_child_worker_loop():
 
                 parent_cor = plan.get("parent_cor")
                 if parent_cor:
-                    child_id = _ensure_child_queued_for_matched_parent(parent_cor)
+                    child_id = _ensure_child_executed(parent_cor)
                     if child_id:
                         plan["child_id"] = child_id
 
@@ -104,7 +108,7 @@ def _router_child_worker_loop():
                         )
 
                     # Canonical DB-first child creation
-                    child_id = _orders_insert_child_queued(parent_cor)
+                    child_id = _ensure_child_executed(parent_cor)
 
                     if not child_id:
                         # Parent not eligible (cancelled / unmatched / closed)
@@ -177,20 +181,61 @@ def _router_child_worker_loop():
                         pass
 
                 # --------------------------------------------------
+                # STOPLOSS TIMEOUT GUARD (ROUTER AUTHORITY)
+                # --------------------------------------------------
+                if plan.get("exit_kind") == "STOPLOSS":
+                    try:
+                        con = _orders_conn()
+                        con.row_factory = sqlite3.Row
+
+                        row = _q_retry(con, """
+                            SELECT opened_at
+                              FROM orders
+                             WHERE id = ?
+                               AND role = 'CHILD'
+                               AND UPPER(exit_kind) = 'STOPLOSS'
+                        """, (int(child_id),)).fetchone()
+
+                        con.close()
+
+                        if row and row["opened_at"]:
+                            opened = datetime.fromisoformat(
+                                row["opened_at"].replace("Z", "+00:00")
+                            )
+                            age_s = (datetime.now(timezone.utc) - opened).total_seconds()
+
+                            # HARD RULE: stoploss must NOT linger
+                            if age_s >= 60:
+                                _log_event(
+                                    "INFO",
+                                    "live_router",
+                                    f"[STOPLOSS TIMEOUT] cancelling child_id={child_id}"
+                                )
+
+                                _q_retry(
+                                    _orders_conn(),
+                                    """
+                                    UPDATE orders
+                                       SET entry_status='CANCELLED',
+                                           exit_kind='STOPLOSS_TIMEOUT',
+                                           closed_at=datetime('now','utc')
+                                     WHERE id=?
+                                    """,
+                                    (int(child_id),)
+                                )
+
+                                # Allow BUS / Overwatcher to re-emit next tick
+                                continue
+
+                    except Exception:
+                        # MUST NEVER block router loop
+                        pass
+
+
+
+                # --------------------------------------------------
                 # EXECUTE CHILD (PLACE + RETRY)
                 # --------------------------------------------------
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: raise RuntimeError(f"router child placement failed id={child_id}")
-# 🧩 ACTION: Make child placement failure non-fatal to router worker
-# 📆 PATCHED: 2026-01-08 — child placement failures are expected, not fatal
-#
-# RATIONALE:
-# - _attempt_place_child_with_retry() already marks FAILED
-# - Router must NOT crash on normal Betfair rejections
-# - Recovery is handled by rehedge / rescue / market-finish logic
-# ============================================================================
-
                 ok = _attempt_place_child_with_retry(int(child_id))
                 if not ok:
                     _log_event(
@@ -198,15 +243,62 @@ def _router_child_worker_loop():
                         "live_router",
                         f"[CHILD PLACE FAILED] id={child_id} — marked FAILED, will retry/rescue later"
                     )
-                    # IMPORTANT: do NOT raise
+                    # IMPORTANT:
+                    # - DO NOT raise
+                    # - DO NOT crash worker
+                    # - Recovery is handled by rescue + rehedge loops
                     continue
+
 
 # === PATCH END ==============================================================
 
 
             except queue.Empty:
                 # No normal child work right now
-                pass
+                continue
+
+                # --------------------------------------------------
+                # STOPLOSS MATCHED ⇒ CANCEL ALL SIBLING CHILDREN
+                # --------------------------------------------------
+                try:
+                    con = _orders_conn()
+                    con.row_factory = sqlite3.Row
+                    cur = con.cursor()
+
+                    row = _q_retry(cur, """
+                        SELECT hedge_of, exit_kind, entry_status
+                          FROM orders
+                         WHERE id = ?
+                           AND role = 'CHILD'
+                    """, (int(child_id),)).fetchone()
+
+                    if row and (row["exit_kind"] or "").upper() == "STOPLOSS":
+                        if (row["entry_status"] or "").upper() == "MATCHED":
+                            _q_retry(cur, """
+                                UPDATE orders
+                                   SET entry_status='CANCELLED',
+                                       exit_kind='CANCELLED_BY_STOPLOSS',
+                                       closed_at=datetime('now','utc')
+                                 WHERE role='CHILD'
+                                   AND hedge_of = ?
+                                   AND id <> ?
+                                   AND entry_status IN ('QUEUED','PLACING','PLACED')
+                            """, (int(row["hedge_of"]), int(child_id)))
+
+                            con.commit()
+
+                except Exception as e:
+                    _log_event(
+                        "WARN",
+                        "live_router",
+                        f"stoploss sibling cancel failed child_id={child_id}: {e}"
+                    )
+                finally:
+                    try:
+                        con.close()
+                    except Exception:
+                        pass
+
 
 
             from engines.market_monitor.phase_clock import MarketPhaseClock
@@ -251,13 +343,9 @@ def _router_child_worker_loop():
 
 
                     # ✅ MARKET STILL HEDGEABLE — RESCUE
-                    _ensure_child_queued_for_matched_parent(parent_cor)
+                    _ensure_child_executed(parent_cor)
 
 
-                    # ✅ SAFE TO RESCUE
-                    _ensure_child_queued_for_matched_parent(
-                        str(r["customerOrderRef"])
-                    )
 
                 except Exception as e:
                     _log_event(
@@ -357,6 +445,7 @@ def _guard_cancel_if_matched(*, parent_cor: str, bet_id: str | None) -> bool:
     if status == "EXECUTION_COMPLETE":
         # Canonical promotion
         _orders_update_parent_matched(parent_cor, str(bet_id))
+        _ensure_child_executed(parent_cor)
         _log_event(
             "INFO",
             "live_router",
@@ -1081,7 +1170,8 @@ def _router_child_recovery_sweep():
 
             # NOTE:
             # _orders_insert_child_queued is POSITIONAL.
-            _orders_insert_child_queued(r["parent_cor"])
+            _ensure_child_executed(parent_cor)
+
 
 
             print(f"[ROUTER][RECOVER] child rebuilt for {r['parent_cor']}")
@@ -1154,7 +1244,7 @@ def _sync_all_matches(limit: int = 100) -> int:
 
             # 🔒 CANONICAL MATCHED HANDLER (guarantees CHILD)
             _orders_update_parent_matched(parent_cor, bet_id)
-
+            _ensure_child_executed(parent_cor)
             _log_event(
                 "INFO",
                 "live_router",
@@ -2151,7 +2241,75 @@ def _start_reconcile_loop(period_s: int = 30):
     t.start()
     _log_event("INFO", "live_router", f"Reconcile loop started (period={period_s}s)")
     return stop_evt
+
+
 # === PATCH END ===
+
+def _ensure_child_executed(parent_cor: str) -> int | None:
+    """
+    Authoritative child execution invariant.
+
+    Guarantees:
+    - Parent is MATCHED
+    - A CHILD row exists
+    - CHILD has a Betfair entry_bet_id
+    - If not, child is (re)queued for execution
+
+    Returns child_id if execution is in-flight or placed.
+    """
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        # Load matched parent
+        parent = _q_retry(cur, """
+            SELECT id
+              FROM orders
+             WHERE customerOrderRef=?
+               AND role='PARENT'
+               AND entry_status='MATCHED'
+             LIMIT 1
+        """, (str(parent_cor),)).fetchone()
+
+        if not parent:
+            return None
+
+        parent_id = int(parent["id"])
+
+        # Load child (if any)
+        child = _q_retry(cur, """
+            SELECT id, entry_status, entry_bet_id
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+             LIMIT 1
+        """, (parent_id,)).fetchone()
+
+        # No child at all → create + enqueue
+        if not child:
+            child_id = _ensure_child_queued_for_matched_parent(parent_cor)
+            if child_id:
+                enqueue_router_child({"parent_cor": parent_cor}, {})
+            return child_id
+
+        child_id = int(child["id"])
+
+        # Child exists but was never placed
+        if not child["entry_bet_id"]:
+            enqueue_router_child({"parent_cor": parent_cor}, {})
+            return child_id
+
+        # Child has Betfair ID → authoritative
+        return child_id
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
 
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: ^def _orders_insert_parent_queued\(
@@ -2691,43 +2849,21 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         )
 
         # Insert CHILD (QUEUED)
-        _q_retry(cur, """
-            INSERT INTO orders (
-                customerOrderRef,
-                run_id,
-                mode,
-                marketId,
-                selectionId,
-                side,
-                entry_odds,
-                entry_stake,
-                entry_status,
-                opened_at,
-                role,
-                hedge_of,
-                source,
-                exit_kind,
-                engine
+        child_id = _ensure_child_executed(cor)
+        if not child_id:
+            _log_event(
+                "CRITICAL",
+                "live_router",
+                f"[INVARIANT BREACH] parent MATCHED without executable child ref={cor}"
             )
-            VALUES (
-                ?, ?, 'LIVE', ?, ?, ?, ?, ?, 'QUEUED',
-                datetime('now','utc'),
-                'CHILD', ?, ?, 'HEDGE', ?
-            )
-        """, (
-            f"CHILD-{uuid.uuid4().hex[:12]}",
-            parent["run_id"],
-            parent["marketId"],
-            parent["selectionId"],
-            hedge_side,
-            float(hedge_odds),
-            float(hedge_stake),
-            parent_id,
-            parent["source"],
-            parent["engine"],
-        ))
 
-        con.commit()
+        child_id = _ensure_child_executed(cor)
+        if not child_id:
+            _log_event(
+                "CRITICAL",
+                "live_router",
+                f"[INVARIANT BREACH] parent MATCHED without child ref={cor}"
+            )
 
     except Exception as e:
         # 🔒 CHILD FAILURE MUST NEVER ROLLBACK PARENT
@@ -2814,6 +2950,22 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                              WHERE id=?
                         """, (avg_odds, matched_size, child_id))
 
+                        # --------------------------------------------------
+                        # ROUTER INVARIANT:
+                        # If ONE child matches, CANCEL ALL sibling children
+                        # --------------------------------------------------
+                        _q_retry(cur, """
+                            UPDATE orders
+                               SET entry_status='CANCELLED',
+                                   exit_kind='CANCELLED_BY_SIBLING_MATCH',
+                                   closed_at=datetime('now','utc')
+                             WHERE role='CHILD'
+                               AND hedge_of = (
+                                   SELECT hedge_of FROM orders WHERE id = ?
+                               )
+                               AND id <> ?
+                               AND entry_status IN ('QUEUED','PLACING','PLACED')
+                        """, (child_id, child_id))
 
 
 
@@ -3451,6 +3603,8 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
                AND entry_bet_id IS NOT NULL
         """, (realized, realized, pid))
         con.commit()
+        _ensure_child_executed(cor)
+
 
         # ======================================================================
         # 📍 TARGET: engines/live/live_router.py
@@ -4226,6 +4380,9 @@ def _place_stoploss_child_now(
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
+
+
+
     try:
         parent = _q_retry(cur, """
             SELECT id, run_id, engine, source, entry_odds, entry_stake, exit_status
@@ -4233,6 +4390,10 @@ def _place_stoploss_child_now(
              WHERE customerOrderRef=? AND role='PARENT'
              LIMIT 1
         """, (str(parent_cor),)).fetchone()
+
+        # Before any parent exit mutation
+        if parent["entry_status"] == "MATCHED":
+            _ensure_child_executed(parent_cor)
 
         if not parent:
             return None
@@ -4249,7 +4410,7 @@ def _place_stoploss_child_now(
         _release_parent_exposure_db(parent_id)
 
         # 🔁 STOPLOSS must NOT place directly — enqueue child instead
-        child_id = _orders_insert_child_queued(parent_cor)
+        child_id = _ensure_child_executed(parent_cor)
 
         if not child_id:
             return None
@@ -4347,6 +4508,8 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
     Returns (n_cancelled, n_settled)
     """
 
+
+
     try:
         from datetime import datetime, timezone
         import sqlite3
@@ -4384,6 +4547,8 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
 
         for r in rows:
             try:
+                if r["entry_status"] == "MATCHED":
+                    _ensure_child_executed(r["customerOrderRef"])
                 off = datetime.fromisoformat(
                     r["marketStartTime"].replace("Z", "+00:00")
                 )
@@ -4688,6 +4853,8 @@ def _sync_settlement_terminal_exposure(limit: int = 200) -> int:
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
+
+
     try:
         rows = _q_retry(cur, """
             SELECT
@@ -4704,7 +4871,8 @@ def _sync_settlement_terminal_exposure(limit: int = 200) -> int:
 
         for r in rows:
             try:
-  
+                if r["entry_status"] == "MATCHED":
+                    _ensure_child_executed(r["customerOrderRef"]) 
 
 
                 _q_retry(cur, """
@@ -5310,6 +5478,7 @@ def place_parent_and_hedge(
             # --------------------------------------------------
             try:
                 _orders_update_parent_matched(parent_ref, bf_parent_id)
+                _ensure_child_executed(parent_ref)
                 _orders_probe(parent_ref, note="parent_matched")
                 _log_event_safe(
                     "INFO",
@@ -5674,20 +5843,8 @@ def _sync_parent_matches(limit: int = 50) -> int:
                 parent_cor = str(r["customerOrderRef"])
 
                 _orders_update_parent_matched(parent_cor)
+                _ensure_child_executed(parent_cor)
 
-                # 🔑 CONTINUE LIFECYCLE → ROUTER
-                enqueue_router_child(
-                    plan={
-                        "parent_cor": parent_cor,
-                    },
-                    ctx={}
-                )
-
-                _log_event(
-                    "INFO",
-                    "live_router",
-                    f"[SYNC] flipped parent_ref={parent_cor} to MATCHED"
-                )
 
                 fixed += 1
 

@@ -3,8 +3,9 @@
 import time
 import sqlite3
 from engines.config_paths import open_auto_db
-from engines.decision_engine.decide_once.placement import enqueue_for_placement
+
 from engines.price_math import walk_ticks
+from engines.live.live_router import enqueue_router_child
 
 
 GRACE_SECONDS = 3.0
@@ -101,70 +102,90 @@ def ensure_single_child_for_parent(
     # PX authority resolved by lane
     final_px = hedge_px
 
+    # --------------------------------------------------
+    # CASE A — HEDGE CHILD (normal lifecycle)
+    # --------------------------------------------------
+    if exit_kind == "HEDGE":
+        from engines.live.live_router import _orders_insert_child_queued, enqueue_router_child
 
-    # --------------------------------------------------
-    # CASE A — no child → create
-    # --------------------------------------------------
-    if not rows:
-        plan = {
-            "engine": engine,
-            "role": "CHILD",
-            "exit_kind": exit_kind,
-            "marketId": marketId,
-            "selectionId": selectionId,
-            "side": side,
-            "px": final_px,
-            "size": stake,
-            "hedge_of": parent_id,
-            "why": reason,
-        }
-        from engines.live.live_router import _orders_insert_child_queued
+        con3 = open_auto_db(rw=False)
+        con3.row_factory = sqlite3.Row
+        try:
+            row = con3.execute(
+                "SELECT customerOrderRef FROM orders WHERE id = ?",
+                (parent_id,)
+            ).fetchone()
+        finally:
+            con3.close()
+
+        if not row or not row["customerOrderRef"]:
+            return "NO_CHILD_CREATED"
+
+        parent_cor = str(row["customerOrderRef"])
 
         child_id = _orders_insert_child_queued(parent_cor)
         if not child_id:
-            return "SKIPPED_NO_PARENT"
+            return "NO_CHILD_CREATED"
+
+        enqueue_router_child(
+            plan={
+                "child_id": child_id,
+                "parent_id": parent_id,
+                "marketId": marketId,
+                "selectionId": selectionId,
+                "exit_kind": exit_kind,
+                "engine": engine,
+            },
+            ctx={}
+        )
+
+        return f"CREATED_{exit_kind}_CHILD"
 
     # --------------------------------------------------
-    # CASE B — one child → maybe replace
+    # CASE B — STOPLOSS CHILD (OVERWATCHER)
     # --------------------------------------------------
-    if len(rows) == 1:
-        child = rows[0]
-        opened_at = child["opened_at"]
-        if opened_at:
-            try:
-                from datetime import datetime
-                ts = datetime.fromisoformat(opened_at.replace("Z", "+00:00")).timestamp()
-                if (now - ts) < GRACE_SECONDS:
-                    return "SKIPPED_GRACE"
-            except Exception:
-                pass
+    if exit_kind == "STOPLOSS":
+        from engines.live.live_router import _orders_insert_child_queued, enqueue_router_child
 
-        # Replace existing child
-        _cancel_child(child["id"], reason="child_replace")
+        con3 = open_auto_db(rw=False)
+        con3.row_factory = sqlite3.Row
+        try:
+            row = con3.execute(
+                "SELECT customerOrderRef FROM orders WHERE id = ?",
+                (parent_id,)
+            ).fetchone()
+        finally:
+            con3.close()
 
-        plan = {
-            "engine": engine,
-            "role": "CHILD",
-            "exit_kind": exit_kind,
-            "marketId": marketId,
-            "selectionId": selectionId,
-            "side": side,
-            "px": final_px,
-            "size": stake,
-            "hedge_of": parent_id,
-            "why": reason,
-        }
-        enqueue_for_placement(engine, plan, {})
-        return "REPLACED"
+        if not row or not row["customerOrderRef"]:
+            return "NO_CHILD_CREATED"
+
+        parent_cor = str(row["customerOrderRef"])
+
+        child_id = _orders_insert_child_queued(parent_cor)
+        if not child_id:
+            return "NO_CHILD_CREATED"
+
+        enqueue_router_child(
+            plan={
+                "child_id": child_id,
+                "parent_id": parent_id,
+                "marketId": marketId,
+                "selectionId": selectionId,
+                "exit_kind": exit_kind,
+                "engine": engine,
+            },
+            ctx={}
+        )
+
+
+        return f"CREATED_{exit_kind}_CHILD"
 
     # --------------------------------------------------
-    # CASE C — duplicates → collapse
+    # NO ACTION
     # --------------------------------------------------
-    survivor = rows[0]
-    for r in rows[1:]:
-        _cancel_child(r["id"], reason="child_dedupe")
+    return "NO_ACTION"
 
-    return "DEDUPED"
 
 
 def _cancel_child(child_id: int, *, reason: str):
