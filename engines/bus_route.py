@@ -303,8 +303,11 @@ class BusRouteSnapshot:
                 continue
 
             # 🔁 Progressive warm-up limit
+            # IMPORTANT:
+            # Do NOT break — that would orphan later runners.
+            # Skip for now; they will be built on a future pass.
             if built_this_pass >= WARMUP_LIMIT:
-                break
+                continue
 
             try:
                 # --------------------------------------------------

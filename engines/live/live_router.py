@@ -433,6 +433,44 @@ def _router_enforce_status_authority():
             )
 
             # --------------------------------------------------
+            # Betfair CLEARED ⇒ SETTLED (AUTHORITATIVE)
+            # --------------------------------------------------
+            bf_cleared = (
+                str(surf.get("source") or "").upper() == "CLEARED"
+                or str(surf.get("state") or "").upper() in ("TERMINAL", "EXECUTION_COMPLETE")
+            )
+
+            if bf_cleared:
+                parent_id = int(r["id"])
+
+                # 1️⃣ Settle CHILD first (if exists)
+                cur.execute("""
+                    UPDATE orders
+                       SET entry_status='MATCHED',
+                           exit_status='SETTLED',
+                           closed_at=COALESCE(closed_at, datetime('now','utc'))
+                     WHERE role='CHILD'
+                       AND hedge_of=?
+                       AND (exit_status IS NULL OR exit_status <> 'SETTLED')
+                """, (parent_id,))
+
+                # 2️⃣ Settle PARENT
+                cur.execute("""
+                    UPDATE orders
+                       SET exit_status='SETTLED',
+                           parent_closed=1,
+                           exposure_released=1,
+                           closed_at=COALESCE(closed_at, datetime('now','utc'))
+                     WHERE id=?
+                       AND role='PARENT'
+                       AND (exit_status IS NULL OR exit_status <> 'SETTLED')
+                """, (parent_id,))
+
+                _ROUTER_STATUS["parents_settled"] += 1
+                continue
+
+
+            # --------------------------------------------------
             # DB says MATCHED but Betfair does NOT
             # --------------------------------------------------
             if r["entry_status"] == "MATCHED" and not bf_matched:
