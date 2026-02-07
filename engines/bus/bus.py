@@ -71,43 +71,31 @@ _PROMINENCE_MAP = {
 
 def _normalize_ctx_enums(ctx: dict) -> None:
     """
-    Normalize all enum-like CTX fields to integers.
-
-    HARD GUARANTEES:
-    - Never raises
-    - Never leaves strings behind
-    - Idempotent
-    - BUS-only authority
+    BUS authority: normalize ALL enum-like CTX fields to ints.
+    Must be idempotent and never raise.
     """
 
-    # --------------------
-    # Band (MarketMonitor)
-    # --------------------
+    # ---- band ----
     band = ctx.get("band")
     if isinstance(band, str):
         ctx["band"] = _BAND_MAP.get(band.upper(), -1)
 
-    # --------------------
-    # Prominence / prominent
-    # --------------------
-    prom = ctx.get("prominence")
-    if isinstance(prom, str):
-        ctx["prominence"] = _PROMINENCE_MAP.get(prom.upper(), 1)
+    # ---- prominence ----
+    for key in ("prominence", "prominent"):
+        val = ctx.get(key)
+        if isinstance(val, str):
+            ctx[key] = _PROMINENCE_MAP.get(val.upper(), 1)
+        elif isinstance(val, bool):
+            ctx[key] = 1 if val else 0
 
-    # Some paths use `prominent` instead
-    prom2 = ctx.get("prominent")
-    if isinstance(prom2, str):
-        ctx["prominent"] = _PROMINENCE_MAP.get(prom2.upper(), 1)
-
-    # --------------------
-    # In-play positional enums (defensive)
-    # --------------------
-    pos = ctx.get("pos_inplay")
-    if isinstance(pos, str):
-        try:
-            ctx["pos_inplay"] = int(pos)
-        except Exception:
-            ctx["pos_inplay"] = -1
+    # ---- positional / rank fields (defensive) ----
+    for key in ("pos_inplay", "position", "rank", "lane_rank"):
+        val = ctx.get(key)
+        if isinstance(val, str):
+            try:
+                ctx[key] = int(val)
+            except Exception:
+                ctx[key] = -1
 
 
 # ======================================================================
@@ -616,6 +604,40 @@ class DecisionBus:
         print("[BUS] registered engines:", list(self.engines.keys()))
         print("[BUS] registered strategies:",
               [name for (name, _fn) in self.legacy_strategies])
+
+    def _force_px_refresh(self, mid: str, sid: str, ctx: dict) -> bool:
+        """
+        LAST-CHANCE PX recovery (BUS authority).
+
+        CONTRACT:
+        - Called only after normal route refresh + _ensure_px_from_route failed
+        - Forces BusRouteSnapshot to refetch live odds immediately
+        - Never raises
+        - Returns True iff px is recovered
+        """
+
+        try:
+            # Force an immediate dynamic refresh
+            self._route_snapshot.refresh_ctx_dynamic_fields()
+
+            route_ctx = self._route_ctx_map.get((mid, sid))
+            if not route_ctx:
+                return False
+
+            px = route_ctx.get("px")
+            if px is None:
+                return False
+
+            # Re-bind into the working ctx
+            ctx["px"]   = px
+            ctx["odds"] = px
+            ctx["ltp"]  = px
+
+            return True
+
+        except Exception:
+            # BUS must fail-open, never crash a tick
+            return False
 
     def _ensure_px_from_route(self, ctx: dict) -> bool:
         """
@@ -1513,7 +1535,8 @@ class DecisionBus:
             if last_px is None:
                 # Try one last authoritative refresh
                 if not self._ensure_px_from_route(ctx):
-                    continue
+                    if not self._force_px_refresh(mid, sid, ctx):
+                        continue
                 last_px = ctx.get("px")
                 if last_px is None:
                     continue

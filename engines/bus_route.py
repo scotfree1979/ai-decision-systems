@@ -100,6 +100,7 @@ def _order_runner_pool_by_market_time(pairs):
 
     return ordered_pairs
 
+
 def _filter_valid_markets(
     runner_pairs: list[tuple[str, str]],
     *,

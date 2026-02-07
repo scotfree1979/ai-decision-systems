@@ -245,7 +245,10 @@ def _reconcile_market_exposure_live():
     """
     Correct BankState exposure to true market worst-case exposure.
 
-    Returns a structured report for observability.
+    Invariant (CRITICAL):
+    - Total open exposure MUST NEVER fall below the sum of
+      per-market true worst-case exposure.
+    - Refunds are capped so this floor is always held.
     """
     global _OPEN_EXPOSURE
 
@@ -255,6 +258,21 @@ def _reconcile_market_exposure_live():
 
     report = {}
 
+    # --------------------------------------------------
+    # 1️⃣ Compute authoritative exposure FLOOR
+    #     (sum of true worst-case per market)
+    # --------------------------------------------------
+    market_floor = {}
+    for r in rows:
+        mid = r["marketId"]
+        floor = float(r["true_market_exposure"] or 0.0)
+        market_floor[mid] = max(market_floor.get(mid, 0.0), floor)
+
+    required_open_exposure = sum(market_floor.values())
+
+    # --------------------------------------------------
+    # 2️⃣ Apply refunds, CLAMPED to exposure floor
+    # --------------------------------------------------
     with _LOCK:
         for r in rows:
             market_id = r["marketId"]
@@ -264,13 +282,20 @@ def _reconcile_market_exposure_live():
             if refund <= 0:
                 continue
 
-            # --- mutate BankState authoritatively ---
             used = _ENGINE_USED.get(engine, 0.0)
             if used <= 0:
                 continue
 
-            _ENGINE_USED[engine] = max(0.0, used - refund)
-            _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - refund)
+            # 🔒 HARD INVARIANT:
+            # never refund below true market exposure floor
+            max_refundable = max(0.0, _OPEN_EXPOSURE - required_open_exposure)
+            actual_refund = min(refund, max_refundable)
+
+            if actual_refund <= 0:
+                continue
+
+            _ENGINE_USED[engine] = max(0.0, used - actual_refund)
+            _OPEN_EXPOSURE -= actual_refund
 
             # --- accumulate report ---
             rep = report.setdefault(market_id, {
@@ -280,12 +305,13 @@ def _reconcile_market_exposure_live():
                 "by_engine": {}
             })
 
-            rep["by_engine"][engine] = refund
+            rep["by_engine"][engine] = rep["by_engine"].get(engine, 0.0) + actual_refund
 
     return [
         {"marketId": mid, **data}
         for mid, data in report.items()
     ]
+
 
 # -------------------------------------------------------------------
 # OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
