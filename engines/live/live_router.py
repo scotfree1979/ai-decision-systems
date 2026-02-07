@@ -433,21 +433,40 @@ def _router_enforce_status_authority():
             )
 
             # --------------------------------------------------
-            # Betfair CLEARED ⇒ SETTLED (AUTHORITATIVE)
+            # Betfair CLEARED ⇒ SETTLED (ONLY AFTER CHILD MATCHED)
             # --------------------------------------------------
-            bf_cleared = (
-                str(surf.get("source") or "").upper() == "CLEARED"
-                or str(surf.get("state") or "").upper() in ("TERMINAL", "EXECUTION_COMPLETE")
+
+            bf_parent_matched = (
+                (surf.get("matched") or 0) > 0
+                or str(surf.get("state") or "").upper() in ("EXECUTION_COMPLETE",)
             )
 
-            if bf_cleared:
+            bf_market_cleared = (
+                str(surf.get("source") or "").upper() == "CLEARED"
+                or str(surf.get("state") or "").upper() == "TERMINAL"
+            )
+
+            if bf_market_cleared:
                 parent_id = int(r["id"])
 
-                # 1️⃣ Settle CHILD first (if exists)
+                # ✅ HARD GUARD: child must already be MATCHED
+                child_matched = cur.execute("""
+                    SELECT 1
+                      FROM orders
+                     WHERE role='CHILD'
+                       AND hedge_of=?
+                       AND entry_status='MATCHED'
+                     LIMIT 1
+                """, (parent_id,)).fetchone()
+
+                if not child_matched:
+                    # Market cleared but hedge never matched → DO NOT SETTLE
+                    continue
+
+                # 1️⃣ Settle CHILD
                 cur.execute("""
                     UPDATE orders
-                       SET entry_status='MATCHED',
-                           exit_status='SETTLED',
+                       SET exit_status='SETTLED',
                            closed_at=COALESCE(closed_at, datetime('now','utc'))
                      WHERE role='CHILD'
                        AND hedge_of=?
@@ -468,6 +487,7 @@ def _router_enforce_status_authority():
 
                 _ROUTER_STATUS["parents_settled"] += 1
                 continue
+
 
 
             # --------------------------------------------------

@@ -41,25 +41,27 @@ ROUTE_SPLIT = {
 }
 
 def _order_runner_pool_by_market_time(pairs):
-    """
-    Reorder (marketId, selectionId) pairs so that:
-    - All runners from the same market are contiguous
-    - Markets are ordered by earliest marketStartTime first
-    """
-
     from engines.config_paths import connect_db
+    from datetime import datetime, timezone, timedelta
     import sqlite3
-    from datetime import datetime, timezone
+    from collections import defaultdict
 
     if not pairs:
         return []
 
-    # Group runners by market
-    by_market = {}
-    for mid, sid in pairs:
-        by_market.setdefault(str(mid), []).append((str(mid), str(sid)))
+    NOW = datetime.now(timezone.utc)
+    GRACE_MINUTES = 15
 
-    # Load market start times (authoritative: bets.db)
+    # --------------------------------------------------
+    # 1) Group runners by market
+    # --------------------------------------------------
+    by_market = defaultdict(list)
+    for mid, sid in pairs:
+        by_market[str(mid)].append((str(mid), str(sid)))
+
+    # --------------------------------------------------
+    # 2) Load market start times (authoritative: bets.db)
+    # --------------------------------------------------
     con = connect_db(ro=True)
     con.row_factory = sqlite3.Row
 
@@ -76,29 +78,35 @@ def _order_runner_pool_by_market_time(pairs):
                 (mid,),
             ).fetchone()
 
-            if row and row["marketStartTime"]:
-                off = datetime.fromisoformat(
-                    row["marketStartTime"].replace("Z", "+00:00")
-                )
-                market_times[mid] = off
-            else:
-                # Push unknown markets to the end safely
-                market_times[mid] = datetime.max.replace(tzinfo=timezone.utc)
+            if not row or not row["marketStartTime"]:
+                continue
+
+            off = datetime.fromisoformat(
+                row["marketStartTime"].replace("Z", "+00:00")
+            )
+
+            if off < (NOW - timedelta(minutes=GRACE_MINUTES)):
+                continue
+
+            market_times[mid] = off
+
     finally:
         con.close()
 
-    # Sort markets by off time
-    ordered_markets = sorted(
-        market_times.items(),
-        key=lambda x: x[1]
-    )
+    if not market_times:
+        return []
 
-    # Flatten runners market-by-market
+    ordered_mids = [
+        mid for mid, _ in sorted(market_times.items(), key=lambda x: x[1])
+    ]
+
     ordered_pairs = []
-    for mid, _off in ordered_markets:
-        ordered_pairs.extend(by_market.get(mid, []))
+    for mid in ordered_mids:
+        ordered_pairs.extend(by_market[mid])
 
     return ordered_pairs
+
+
 
 def _filter_valid_markets(
     runner_pairs: list[tuple[str, str]],
@@ -148,7 +156,6 @@ def _filter_valid_markets(
                 marketStartTime
             FROM bets
             WHERE date(marketStartTime) = date('now','utc')
-              AND julianday(marketStartTime) >= julianday('now','utc') - (15.0 / 1440.0)
             ORDER BY datetime(marketStartTime) ASC
             """
         ).fetchall()
@@ -181,21 +188,79 @@ def _filter_valid_markets(
 
     return out
 
-
 def _build_runner_pool():
     """
-    Authoritative runner pool:
-    - scope markets
-    - active / passive runners only
-    - no filtering by engine
-    """
-    scope = build_and_maintain_scope()
-    markets = scope.get("markets", []) or []
+    Build runner pool from the NEXT 5 UNIQUE upcoming WIN markets
+    that have >= 6 ACTIVE/PASSIVE runners.
 
+    DB-first for market ordering.
+    MarketMonitor for runner truth.
+    """
+
+    from engines.config_paths import connect_db
+    from datetime import datetime, timezone, timedelta
+    import sqlite3
+
+    NOW = datetime.now(timezone.utc)
+    GRACE_MINUTES = 15
+    REQUIRED_MARKETS = 5
+    MIN_RUNNERS = 6
+
+    # --------------------------------------------------
+    # 1) Get UNIQUE upcoming markets by start time
+    # --------------------------------------------------
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """
+            SELECT
+                marketId,
+                MIN(datetime(marketStartTime)) AS marketStartTime
+            FROM bets
+            WHERE julianday(marketStartTime) >= julianday(?)
+            GROUP BY marketId
+            ORDER BY marketStartTime ASC
+            """,
+            ((NOW - timedelta(minutes=GRACE_MINUTES)).isoformat(),),
+        ).fetchall()
+    finally:
+        con.close()
+
+    if not rows:
+        return []
+
+    # --------------------------------------------------
+    # 2) Select first 5 markets with >= 6 runners
+    # --------------------------------------------------
+    selected_mids = []
+
+    for r in rows:
+        mid = str(r["marketId"])
+        st = get_market_state(mid) or {}
+        runners = st.get("runners") or {}
+
+        active_count = sum(
+            1 for x in runners.values()
+            if x.get("band") in ("ACTIVE", "PASSIVE")
+        )
+
+        if active_count >= MIN_RUNNERS:
+            selected_mids.append(mid)
+
+        if len(selected_mids) == REQUIRED_MARKETS:
+            break
+
+    # End-of-day fallback: take whatever is available
+    if not selected_mids:
+        selected_mids = [str(r["marketId"]) for r in rows[:REQUIRED_MARKETS]]
+
+    # --------------------------------------------------
+    # 3) Build runner pool (market-time ordered)
+    # --------------------------------------------------
     pool = []
 
-    for m in markets:
-        mid = m["marketId"] if isinstance(m, dict) else str(m)
+    for mid in selected_mids:
         st = get_market_state(mid) or {}
         runners = st.get("runners") or {}
 
@@ -248,22 +313,39 @@ class BusRouteSnapshot:
 
     def build_route(self):
         self.route_id += 1
-        raw_pairs = list(get_root_ctx_runner_pairs())
-        ordered = _order_runner_pool_by_market_time(raw_pairs)
 
         # --------------------------------------------------
-        # 🔒 CUMULATIVE ROUTE MEMBERSHIP (DAY-LONG)
+        # ROUTE SEED — MARKET RUNNERS FIRST (AUTHORITATIVE)
         # --------------------------------------------------
+        base_pairs = _build_runner_pool()
+
+        # Root CTX pairs are additive, not authoritative
+        root_pairs = list(get_root_ctx_runner_pairs())
+
+        # Merge (market runners always win)
+        raw_pairs = list({(mid, sid) for mid, sid in base_pairs} |
+                         {(mid, sid) for mid, sid in root_pairs})
 
         new_pairs = _order_runner_pool_by_market_time(raw_pairs)
 
-        existing = set(self.runner_pool)
 
-        for mid, sid in new_pairs:
-            key = (str(mid), str(sid))
-            if key not in existing:
-                self.runner_pool.append(key)
-                existing.add(key)
+        # --------------------------------------------------
+        # 🔑 ROUTE SEED (AUTHORITATIVE)
+        # --------------------------------------------------
+        if not self.runner_pool:
+            self.runner_pool = [
+                (str(mid), str(sid))
+                for mid, sid in new_pairs
+                if mid and sid
+            ]
+        else:
+            existing = set(self.runner_pool)
+            for mid, sid in new_pairs:
+                key = (str(mid), str(sid))
+                if key not in existing:
+                    self.runner_pool.append(key)
+                    existing.add(key)
+
 
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
@@ -519,20 +601,58 @@ class BusRouteSnapshot:
         return self.bus_stops.get(tick, [])
 
     def partition_into_bus_stops(self):
-        n = len(self.runner_pool)
+        """
+        Slice the full runner list into linear bus-stop chunks.
+        No rotation. No modulo. Tick repetition only.
+        """
+
+        runners = list(self.runner_pool)
+        n = len(runners)
+
+        self.bus_stops = {i: [] for i in range(1, TICKS_PER_CYCLE + 1)}
+
         if n == 0:
             return
 
-        base = n // TICKS_PER_CYCLE
-        remainder = n % TICKS_PER_CYCLE
+        # --------------------------------------------------
+        # 1) Decide runners per stop
+        # --------------------------------------------------
+        if n >= 70:
+            per_stop = 7
+        elif n >= 60:
+            per_stop = 6
+        elif n >= 50:
+            per_stop = 5
+        else:
+            per_stop = 4
 
-        self.bus_stops = {}
+        # --------------------------------------------------
+        # 2) Slice full runner list linearly
+        # --------------------------------------------------
+        slices = []
         idx = 0
+        while idx < n:
+            slices.append(runners[idx:idx + per_stop])
+            idx += per_stop
 
+        if not slices:
+            return
+
+        # --------------------------------------------------
+        # 3) Repeat whole ticks to reach 10
+        # --------------------------------------------------
+        full_ticks = []
+        i = 0
+        while len(full_ticks) < TICKS_PER_CYCLE:
+            full_ticks.append(slices[i % len(slices)])
+            i += 1
+
+        # --------------------------------------------------
+        # 4) Assign ticks
+        # --------------------------------------------------
         for tick in range(1, TICKS_PER_CYCLE + 1):
-            size = base + (1 if tick <= remainder else 0)
-            self.bus_stops[tick] = self.runner_pool[idx:idx+size]
-            idx += size
+            self.bus_stops[tick] = full_ticks[tick - 1]
+
 
     def get_bus_stop(self, tick):
         return self.bus_stops.get(tick, [])

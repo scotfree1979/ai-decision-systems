@@ -621,6 +621,7 @@ def build_and_maintain_scope(*, inplay_window_min: int = 15, show_dashboard: boo
         SELECT DISTINCT marketId, marketStartTime
           FROM bets
          WHERE date(marketStartTime)=date('now','utc')
+           AND julianday(marketStartTime) >= julianday('now','utc') - (15.0 / 1440.0)
          ORDER BY datetime(marketStartTime) ASC
     """).fetchall() or []
     con.close()
@@ -706,16 +707,16 @@ def build_and_maintain_scope(*, inplay_window_min: int = 15, show_dashboard: boo
         con.row_factory = sqlite3.Row
         rows = _q(con, """
             SELECT
-              marketId, selectionId,
+              marketId,
+              selectionId,
               SUM(CASE WHEN UPPER(role)='PARENT' AND entry_status='MATCHED' THEN 1 ELSE 0 END) AS parent_entry_matched,
-              SUM(CASE WHEN UPPER(role)='PARENT' AND entry_status<>'MATCHED' THEN 1 ELSE 0 END) AS parent_entry_unmatched,
-              SUM(CASE WHEN UPPER(role)='CHILD'  AND entry_status='MATCHED' THEN 1 ELSE 0 END) AS child_entry_matched,
-              SUM(CASE WHEN UPPER(role)='CHILD'  AND entry_status<>'MATCHED' THEN 1 ELSE 0 END) AS child_entry_unmatched
+              SUM(CASE WHEN UPPER(role)='CHILD'  AND entry_status='MATCHED' THEN 1 ELSE 0 END) AS child_entry_matched
             FROM orders
             WHERE date(opened_at)=date('now','utc')
             GROUP BY marketId, selectionId
-            HAVING (parent_entry_matched+parent_entry_unmatched+
-                     child_entry_matched+child_entry_unmatched) > 0
+            HAVING
+                parent_entry_matched > 0
+                AND child_entry_matched = 0
         """).fetchall() or []
         con.close()
         for r in rows:
@@ -723,12 +724,11 @@ def build_and_maintain_scope(*, inplay_window_min: int = 15, show_dashboard: boo
                 "marketId": str(r["marketId"]),
                 "selectionId": str(r["selectionId"]),
                 "parents_matched": int(r["parent_entry_matched"] or 0),
-                "parents_unmatched": int(r["parent_entry_unmatched"] or 0),
                 "children_matched": int(r["child_entry_matched"] or 0),
-                "children_unmatched": int(r["child_entry_unmatched"] or 0),
             })
     except Exception as e:
         print(f"[SCOPE] warn (open_bets): {e}")
+
 
 
     # --- Capture any movement signals (if monitor supports it) --------
