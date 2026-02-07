@@ -1090,7 +1090,18 @@ class DecisionBus:
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
-        _normalize_ctx_enums(ctx)  # ← ADD / ENSURE HERE
+        # === PATCH START ============================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: _normalize_ctx_enums(ctx)
+        # 🧩 ACTION: normalize route ctx map instead of undefined variable
+        # 📆 PATCHED: 2026-02-07 — fix BUS ctx scoping bug
+        # ============================================================================
+
+        for ctx in self._route_ctx_map.values():
+            _normalize_ctx_enums(ctx)
+  
+        # === PATCH END ==============================================================
+
 
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)

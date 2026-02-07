@@ -20,6 +20,20 @@ from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_re
 from engines.math.dynamic_stake_v7 import calc_dynamic_stake, calc_greenup_stake
 from engines.live import bank_state
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py (module scope)
+# 🧩 ADD: router report throttle state
+# 📆 PATCHED: 2026-02-07 — suppress duplicate router reports
+# ============================================================================
+
+_ROUTER_STATUS_LAST = None
+
+_ROUTER_LIVE_LAST = None
+
+
+# === PATCH END ==============================================================
+
+
 # --- Router child execution queue ---
 # live_router.py (top-level)
 
@@ -457,14 +471,35 @@ def _router_enforce_status_authority():
 
 
         con.commit()
-        _print_router_report(_ROUTER_STATUS)
+        # === PATCH START ============================================================
+        # 📍 TARGET: engines/live/live_router.py
+        # 🔎 SEARCH: _print_router_report(_ROUTER_STATUS)
+        # 🧩 ACTION: print only on status change
+        # 📆 PATCHED: 2026-02-07 — router report delta guard
+        # ============================================================================
+
+        global _ROUTER_STATUS_LAST
+
+        snapshot = tuple(
+            _ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys())
+        )
+
+        if snapshot != _ROUTER_STATUS_LAST:
+            _print_router_report(_ROUTER_STATUS)
+            _ROUTER_STATUS_LAST = snapshot
+   
+        # === PATCH END ==============================================================
+
 
         # ---------------- Live State (post-fix truth) ----------------
-        try:
-            live, inv = _collect_router_live_state()
+        global _ROUTER_LIVE_LAST
+        snap = (tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
+                tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
+                live["summary"]["open_trades"], live["summary"]["completed_trades"],
+                inv["parents_illegal"], inv["children_illegal"])
+        if snap != _ROUTER_LIVE_LAST:
             _print_router_live_state(live, inv)
-        except Exception as e:
-            _log_event("ERROR", "live_router", f"router live state failed: {e}")
+            _ROUTER_LIVE_LAST = snap
 
 
 
