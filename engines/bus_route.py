@@ -44,28 +44,45 @@ def _order_runner_pool_by_market_time(pairs):
     """
     Reorder (marketId, selectionId) pairs so that:
     - All runners from the same market are contiguous
-    - Markets are ordered by earliest marketStartTime first
+    - Markets are ordered by earliest eligible marketStartTime first
+    - Exactly 5 markets are used whenever possible
+    - Each market must have >= 6 runners
+    - Fewer than 5 markets ONLY when genuinely end-of-day
     """
 
     from engines.config_paths import connect_db
+    from datetime import datetime, timezone, timedelta
     import sqlite3
-    from datetime import datetime, timezone
+    from collections import defaultdict
 
     if not pairs:
         return []
 
-    # Group runners by market
-    by_market = {}
-    for mid, sid in pairs:
-        by_market.setdefault(str(mid), []).append((str(mid), str(sid)))
+    NOW = datetime.now(timezone.utc)
+    GRACE_MINUTES = 15
+    MIN_MARKETS = 5
+    MIN_RUNNERS = 6
 
-    # Load market start times (authoritative: bets.db)
+    # --------------------------------------------------
+    # 1) Group runners by market
+    # --------------------------------------------------
+    by_market: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for mid, sid in pairs:
+        by_market[str(mid)].append((str(mid), str(sid)))
+
+    # --------------------------------------------------
+    # 2) Load market start times (authoritative: bets.db)
+    # --------------------------------------------------
     con = connect_db(ro=True)
     con.row_factory = sqlite3.Row
 
     market_times = {}
     try:
-        for mid in by_market.keys():
+        for mid, runners in by_market.items():
+            # Enforce runner count invariant
+            if len(runners) < MIN_RUNNERS:
+                continue
+
             row = con.execute(
                 """
                 SELECT marketStartTime
@@ -76,29 +93,53 @@ def _order_runner_pool_by_market_time(pairs):
                 (mid,),
             ).fetchone()
 
-            if row and row["marketStartTime"]:
-                off = datetime.fromisoformat(
-                    row["marketStartTime"].replace("Z", "+00:00")
-                )
-                market_times[mid] = off
-            else:
-                # Push unknown markets to the end safely
-                market_times[mid] = datetime.max.replace(tzinfo=timezone.utc)
+            if not row or not row["marketStartTime"]:
+                continue
+
+            off = datetime.fromisoformat(
+                row["marketStartTime"].replace("Z", "+00:00")
+            )
+
+            # ⛔ Drop markets finished beyond grace
+            if off < (NOW - timedelta(minutes=GRACE_MINUTES)):
+                continue
+
+            market_times[mid] = off
+
     finally:
         con.close()
 
-    # Sort markets by off time
-    ordered_markets = sorted(
-        market_times.items(),
-        key=lambda x: x[1]
-    )
+    if not market_times:
+        return []
 
-    # Flatten runners market-by-market
-    ordered_pairs = []
-    for mid, _off in ordered_markets:
-        ordered_pairs.extend(by_market.get(mid, []))
+    # --------------------------------------------------
+    # 3) Order markets by time
+    # --------------------------------------------------
+    ordered_mids = [
+        mid for mid, _ in sorted(
+            market_times.items(),
+            key=lambda x: x[1]
+        )
+    ]
+
+    # --------------------------------------------------
+    # 4) Enforce 5-market window (unless end-of-day)
+    # --------------------------------------------------
+    if len(ordered_mids) >= MIN_MARKETS:
+        selected_mids = ordered_mids[:MIN_MARKETS]
+    else:
+        # End-of-day condition — take what is left
+        selected_mids = ordered_mids
+
+    # --------------------------------------------------
+    # 5) Flatten runners market-by-market (contiguous)
+    # --------------------------------------------------
+    ordered_pairs: list[tuple[str, str]] = []
+    for mid in selected_mids:
+        ordered_pairs.extend(by_market[mid])
 
     return ordered_pairs
+
 
 def _filter_valid_markets(
     runner_pairs: list[tuple[str, str]],
