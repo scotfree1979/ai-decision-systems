@@ -55,6 +55,33 @@ _ROUTER_STATUS = {
     "children_blocked": 0,
 }
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: persistent execution truth ledger
+# 📆 PATCHED: 2026-02-07 — execution_events persistence
+# ============================================================================
+
+def _ensure_execution_events_schema():
+    con = _orders_conn()
+    cur = con.cursor()
+    try:
+        _q_retry(cur, """
+            CREATE TABLE IF NOT EXISTS execution_events (
+                order_id INTEGER PRIMARY KEY,
+                bet_id TEXT,
+                role TEXT,
+                matched_size REAL,
+                matched_odds REAL,
+                seen_at TEXT,
+                source TEXT
+            )
+        """)
+        con.commit()
+    finally:
+        con.close()
+
+# === PATCH END ==============================================================
+
 
 def _collect_router_live_state() -> tuple[dict, dict]:
     """
@@ -1734,7 +1761,19 @@ def _sync_all_matches(limit: int = 100) -> int:
     for r in rows:
         try:
             bet_id = str(r["entry_bet_id"])
-            status = get_bet_status(bet_id)
+            row = _q_retry(cur, """
+                SELECT 1 FROM execution_events
+                 WHERE bet_id = ?
+                 LIMIT 1
+            """, (str(bet_id),)).fetchone()
+
+            if row:
+                # ✅ execution already proven — DO NOT query Betfair
+                matched = True
+            else:
+                # 🔁 only then ask Betfair
+                matched = (get_bet_status(bet_id) == "EXECUTION_COMPLETE")
+
 
             if status != "EXECUTION_COMPLETE":
                 continue
@@ -3308,6 +3347,46 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         except Exception:
             pass
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: _orders_update_parent_matched
+# 🧩 ACTION: persist execution truth at detection time
+# ============================================================================
+
+        # 🔒 Persist execution truth (ONE-TIME)
+        _ensure_execution_events_schema()
+
+        # fetch matched details while Betfair still knows
+        try:
+            app_key, token = _keys()
+            avg_odds, matched_size = _fetch_avg_match(app_key, token, str(bet_id))
+        except Exception:
+            avg_odds, matched_size = (None, None)
+
+        _q_retry(cur, """
+            INSERT OR IGNORE INTO execution_events (
+                order_id,
+                bet_id,
+                role,
+                matched_size,
+                matched_odds,
+                seen_at,
+                source
+            )
+            VALUES (?, ?, 'PARENT', ?, ?, datetime('now','utc'), 'live_poll')
+        """, (
+            parent_id,
+            str(bet_id),
+            float(matched_size or 0.0),
+            float(avg_odds or 0.0),
+        ))
+
+        con.commit()
+
+# === PATCH END ==============================================================
+
+
+
     # ======================================================================
     # 3️⃣ ENSURE CHILD EXISTS (BEST-EFFORT, NON-BLOCKING)
     # ======================================================================
@@ -3831,7 +3910,7 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
               AND role='PARENT'
               AND entry_status='MATCHED'
               AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
-              AND COALESCE(parent_closed,0)=0
+    
             LIMIT 1
         """, (str(parent_cor),)).fetchone()
 
