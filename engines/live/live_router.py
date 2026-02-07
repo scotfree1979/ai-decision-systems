@@ -34,6 +34,7 @@ child_id = None
 _ROUTER_STATUS = {
     "parents_checked": 0,
     "parents_bf_matched": 0,
+    "parents_db_promoted": 0,
     "parents_matched": 0,
     "children_already_present": 0,
     "children_created": 0,
@@ -423,6 +424,7 @@ def _router_enforce_status_authority():
                 _orders_update_parent_matched(cor, bet_id)
 
                 _ROUTER_STATUS["parents_matched"] += 1
+                _ROUTER_STATUS["parents_db_promoted"] += 1
                 print(
                     f"[ROUTER][STATUS-FIX] "
                     f"{cor} promoted to MATCHED (Betfair truth)"
