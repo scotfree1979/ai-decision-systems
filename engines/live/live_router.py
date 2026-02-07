@@ -7,6 +7,13 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 from engines import price_math as pm
 from collections import defaultdict
+
+_ROUTER_LIVE_STATE = {
+    "parents":  defaultdict(lambda: defaultdict(int)),
+    "children": defaultdict(lambda: defaultdict(int)),
+    "movement": defaultdict(int),
+}
+
 import uuid
 import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
@@ -33,32 +40,6 @@ _ROUTER_STATUS = {
     "children_blocked": 0,
 }
 
-_ROUTER_LIVE_STATE = {
-    "parents": {
-        engine: {
-            "QUEUED": 0,
-            "PLACING": 0,
-            "PLACED": 0,
-            "MATCHED": 0,
-            "CLOSED": 0,
-        }
-    },
-    "children": {
-        engine: {
-            "QUEUED": 0,
-            "PLACING": 0,
-            "PLACED": 0,
-            "MATCHED": 0,
-            "CLOSED": 0,
-        }
-    },
-    "movement": {
-        "parents_promoted": 0,
-        "children_created": 0,
-        "children_matched": 0,
-        "parents_closed": 0,
-    }
-}
 
 def _collect_router_live_state() -> tuple[dict, dict]:
     """
