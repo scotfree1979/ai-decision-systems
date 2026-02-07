@@ -489,7 +489,8 @@ def _router_enforce_status_authority():
             _ROUTER_STATUS_LAST = snapshot
    
         # === PATCH END ==============================================================
-
+        
+        live, inv = _collect_router_live_state()
 
         # ---------------- Live State (post-fix truth) ----------------
         global _ROUTER_LIVE_LAST
