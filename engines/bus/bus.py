@@ -565,7 +565,8 @@ class DecisionBus:
         self._cadence = CadenceController()
         self._ctx_refresh_times = []
         self._optional_intel_cache = {}
-  
+        # 🔑 REQUIRED — MSC_INPLAY prewarm tracking
+        self._inplay_ctx_prewarmed = set()  
 
 
 # ======================================================================================================
@@ -1089,6 +1090,7 @@ class DecisionBus:
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
+        _normalize_ctx_enums(ctx)  # ← ADD / ENSURE HERE
 
         # --------------------------------------------------
         # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
