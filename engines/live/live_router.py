@@ -395,20 +395,28 @@ def enqueue_router_child(plan: dict, ctx: dict):
 # ======================================================================
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB
 # ======================================================================
+
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 ANCHOR: def _router_enforce_status_authority():
-# 🧩 ACTION: Enforce sqlite3.Row row_factory for all router status queries
-# 📆 PATCHED: 2026-02-08 — fix tuple-indexing runtime error during OBSERVE
+# 🧩 ACTION: FIX SQLITE CURSOR LIFETIME (ISLAND DYSFUNCTION)
+# 📆 PATCHED: 2026-02-08 — eliminate "Cannot operate on a closed database"
 #
 # RATIONALE:
-# - Runtime warning: "tuple indices must be integers or slices, not str"
-# - Caused by cursors returning tuple rows instead of sqlite3.Row
-# - Router status authority relies on dict-style access (row["id"])
+# - This function previously held a long-lived cursor while calling helpers
+#   that open/close their own DB connections.
+# - SQLite invalidates active cursors when the underlying connection is closed,
+#   causing: "Cannot operate on a closed database".
+#
+# FIX:
+# - Never hold a cursor across helper calls.
+# - Phase DB access into short-lived connections.
+# - Helpers are free to open/close DBs without side effects.
 #
 # INVARIANT:
-# - ALL router authority DB reads MUST use sqlite3.Row
-# - Behaviour unchanged; this is a correctness-only fix
+# - Behaviour unchanged
+# - Betfair remains execution truth
+# - Router remains status authority
 # ======================================================================================================
 
 def _router_enforce_status_authority():
@@ -424,7 +432,7 @@ def _router_enforce_status_authority():
 
     import os
     import sqlite3
-    from engines.config_paths import autoscalp_db
+    from engines.config_paths import open_auto_db
     from engines.daily_config import get_app_key
     from tools.betfair_match_surface import query_bet_match_surface
 
@@ -436,13 +444,12 @@ def _router_enforce_status_authority():
     for k in _ROUTER_STATUS:
         _ROUTER_STATUS[k] = 0
 
-    # 🔒 CRITICAL FIX — enforce Row objects
-    con = sqlite3.connect(autoscalp_db())
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
+    # --------------------------------------------------
+    # PHASE 1 — LOAD TODAY'S PARENTS (READ-ONLY, SHORT-LIVED)
+    # --------------------------------------------------
     try:
-        rows = cur.execute("""
+        con = open_auto_db(rw=False)
+        rows = con.execute("""
             SELECT
                 id,
                 customerOrderRef,
@@ -454,8 +461,16 @@ def _router_enforce_status_authority():
             WHERE role='PARENT'
               AND date(opened_at)=date('now','utc')
         """).fetchall()
+        con.close()
+    except Exception as e:
+        print(f"[ROUTER][STATUS-AUTH][WARN] preload failed: {e}")
+        return
 
-        for r in rows:
+    # --------------------------------------------------
+    # PHASE 2 — PROCESS EACH PARENT (SHORT-LIVED RW ISLANDS)
+    # --------------------------------------------------
+    for r in rows:
+        try:
             parent_id = int(r["id"])
             cor = r["customerOrderRef"]
             bet_id = r["entry_bet_id"]
@@ -482,11 +497,15 @@ def _router_enforce_status_authority():
             )
 
             # --------------------------------------------------
+            # OPEN A FRESH WRITE CONNECTION FOR THIS PARENT
+            # --------------------------------------------------
+            con = open_auto_db(rw=True)
+            cur = con.cursor()
+
+            # --------------------------------------------------
             # CLEARED ⇒ SETTLED (only after child matched)
             # --------------------------------------------------
             if bf_market_cleared:
-                parent_id = int(r["id"])
-
                 child_matched = cur.execute("""
                     SELECT 1
                       FROM orders
@@ -496,30 +515,31 @@ def _router_enforce_status_authority():
                      LIMIT 1
                 """, (parent_id,)).fetchone()
 
-                if not child_matched:
-                    continue
+                if child_matched:
+                    cur.execute("""
+                        UPDATE orders
+                           SET exit_status='SETTLED',
+                               closed_at=COALESCE(closed_at, datetime('now','utc'))
+                         WHERE role='CHILD'
+                           AND hedge_of=?
+                           AND (exit_status IS NULL OR exit_status <> 'SETTLED')
+                    """, (parent_id,))
 
-                cur.execute("""
-                    UPDATE orders
-                       SET exit_status='SETTLED',
-                           closed_at=COALESCE(closed_at, datetime('now','utc'))
-                     WHERE role='CHILD'
-                       AND hedge_of=?
-                       AND (exit_status IS NULL OR exit_status <> 'SETTLED')
-                """, (parent_id,))
+                    cur.execute("""
+                        UPDATE orders
+                           SET exit_status='SETTLED',
+                               parent_closed=1,
+                               exposure_released=1,
+                               closed_at=COALESCE(closed_at, datetime('now','utc'))
+                         WHERE id=?
+                           AND role='PARENT'
+                           AND (exit_status IS NULL OR exit_status <> 'SETTLED')
+                    """, (parent_id,))
 
-                cur.execute("""
-                    UPDATE orders
-                       SET exit_status='SETTLED',
-                           parent_closed=1,
-                           exposure_released=1,
-                           closed_at=COALESCE(closed_at, datetime('now','utc'))
-                     WHERE id=?
-                       AND role='PARENT'
-                       AND (exit_status IS NULL OR exit_status <> 'SETTLED')
-                """, (parent_id,))
+                    _ROUTER_STATUS["parents_settled"] += 1
 
-                _ROUTER_STATUS["parents_settled"] += 1
+                con.commit()
+                con.close()
                 continue
 
             # --------------------------------------------------
@@ -532,8 +552,10 @@ def _router_enforce_status_authority():
                            exit_status=NULL,
                            parent_closed=0
                      WHERE id=?
-                """, (int(r["id"]),))
+                """, (parent_id,))
                 _ROUTER_STATUS["parents_matched"] += 1
+                con.commit()
+                con.close()
                 continue
 
             # --------------------------------------------------
@@ -543,9 +565,11 @@ def _router_enforce_status_authority():
                 _ROUTER_STATUS["parents_bf_matched"] += 1
 
             if bf_matched and r["entry_status"] != "MATCHED":
+                con.close()  # helpers manage their own DB islands
                 _orders_update_parent_matched(cor, bet_id)
                 _ROUTER_STATUS["parents_matched"] += 1
                 _ROUTER_STATUS["parents_db_promoted"] += 1
+                continue
 
             # --------------------------------------------------
             # Parent MATCHED ⇒ child must exist
@@ -556,53 +580,52 @@ def _router_enforce_status_authority():
                      WHERE role='CHILD'
                        AND hedge_of=?
                      LIMIT 1
-                """, (int(r["id"]),)).fetchone()
+                """, (parent_id,)).fetchone()
 
                 if child:
                     _ROUTER_STATUS["children_already_present"] += 1
                 else:
+                    con.close()
                     cid = _ensure_child_queued_for_matched_parent(cor)
                     if cid:
                         _ROUTER_STATUS["children_created"] += 1
                     else:
                         _ROUTER_STATUS["children_blocked"] += 1
+                    continue
 
-
-
-        # ==================================================
-        # REPORTING (unchanged)
-        # ==================================================
-        global _ROUTER_STATUS_LAST
-        snapshot = tuple(_ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys()))
-        if snapshot != _ROUTER_STATUS_LAST:
-            _print_router_report(_ROUTER_STATUS)
-            _ROUTER_STATUS_LAST = snapshot
-
-        live, inv = _collect_router_live_state()
-        global _ROUTER_LIVE_LAST
-        snap = (
-            tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
-            tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
-            live["summary"]["open_trades"],
-            live["summary"]["completed_trades"],
-            inv["parents_illegal"],
-            inv["children_illegal"],
-        )
-        if snap != _ROUTER_LIVE_LAST:
-            _print_router_live_state(live, inv)
-            _ROUTER_LIVE_LAST = snap
-
-        con.commit()
-
-    except Exception as e:
-        print(f"[ROUTER][STATUS-AUTH][WARN] {e}")
-
-    finally:
-        # 🔒 EXACTLY ONE CLOSE — cursor dies with connection
-        try:
+            con.commit()
             con.close()
-        except Exception:
-            pass
+
+        except Exception as e:
+            try:
+                con.close()
+            except Exception:
+                pass
+            print(f"[ROUTER][STATUS-AUTH][WARN] {e}")
+
+    # --------------------------------------------------
+    # REPORTING (UNCHANGED)
+    # --------------------------------------------------
+    global _ROUTER_STATUS_LAST
+    snapshot = tuple(_ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys()))
+    if snapshot != _ROUTER_STATUS_LAST:
+        _print_router_report(_ROUTER_STATUS)
+        _ROUTER_STATUS_LAST = snapshot
+
+    live, inv = _collect_router_live_state()
+    global _ROUTER_LIVE_LAST
+    snap = (
+        tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
+        tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
+        live["summary"]["open_trades"],
+        live["summary"]["completed_trades"],
+        inv["parents_illegal"],
+        inv["children_illegal"],
+    )
+    if snap != _ROUTER_LIVE_LAST:
+        _print_router_live_state(live, inv)
+        _ROUTER_LIVE_LAST = snap
+
 
 def _router_child_worker_loop():
     
@@ -5309,7 +5332,7 @@ def get_bet_status(bet_id: str) -> str:
         from engines.config_paths import autoscalp_db
         import sqlite3
 
-        con = sqlite3.connect(autoscalp_db())
+        con = open_auto_db(rw=True)
         con.row_factory = sqlite3.Row
         row = con.execute("""
             SELECT fully_matched
