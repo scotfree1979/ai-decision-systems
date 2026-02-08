@@ -395,22 +395,20 @@ def enqueue_router_child(plan: dict, ctx: dict):
 # ======================================================================
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB
 # ======================================================================
-
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 ANCHOR: def _router_enforce_status_authority():
-# 🧩 ACTION: FIX SQLite connection lifecycle (single open / single close)
-# 📆 PATCHED: 2026-02-08 — eliminate "Cannot operate on a closed database"
+# 🧩 ACTION: Enforce sqlite3.Row row_factory for all router status queries
+# 📆 PATCHED: 2026-02-08 — fix tuple-indexing runtime error during OBSERVE
 #
 # RATIONALE:
-# - Cursor was being used after its connection was closed
-# - Caused intermittent router failure under reconciliation load
-# - Enforce strict DB lifecycle: one open, one cursor, one close
+# - Runtime warning: "tuple indices must be integers or slices, not str"
+# - Caused by cursors returning tuple rows instead of sqlite3.Row
+# - Router status authority relies on dict-style access (row["id"])
 #
-# INVARIANT (LOCKED):
-# - open_auto_db() is the ONLY opener
-# - con.close() happens EXACTLY ONCE (finally block)
-# - no helper may close this connection
+# INVARIANT:
+# - ALL router authority DB reads MUST use sqlite3.Row
+# - Behaviour unchanged; this is a correctness-only fix
 # ======================================================================================================
 
 def _router_enforce_status_authority():
@@ -426,7 +424,7 @@ def _router_enforce_status_authority():
 
     import os
     import sqlite3
-    from engines.config_paths import open_auto_db
+    from engines.config_paths import autoscalp_db
     from engines.daily_config import get_app_key
     from tools.betfair_match_surface import query_bet_match_surface
 
@@ -438,16 +436,12 @@ def _router_enforce_status_authority():
     for k in _ROUTER_STATUS:
         _ROUTER_STATUS[k] = 0
 
-    # ------------------------------------------------------------------
-    # 🔒 SINGLE AUTHORITATIVE CONNECTION (ORDERS DB)
-    # ------------------------------------------------------------------
-    con = open_auto_db(ro=False)
+    # 🔒 CRITICAL FIX — enforce Row objects
+    con = sqlite3.connect(autoscalp_db())
+    con.row_factory = sqlite3.Row
     cur = con.cursor()
 
     try:
-        # ==================================================
-        # PARENT AUTHORITY
-        # ==================================================
         rows = cur.execute("""
             SELECT
                 id,
@@ -462,6 +456,7 @@ def _router_enforce_status_authority():
         """).fetchall()
 
         for r in rows:
+            parent_id = int(r["id"])
             cor = r["customerOrderRef"]
             bet_id = r["entry_bet_id"]
 
@@ -473,6 +468,7 @@ def _router_enforce_status_authority():
                 app_key=app_key,
                 token=token,
             )
+
             _ROUTER_STATUS["parents_checked"] += 1
 
             if not isinstance(surf, dict):
