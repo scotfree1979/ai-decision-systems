@@ -5347,12 +5347,47 @@ def get_bet_status(bet_id: str) -> str:
     """
     Canonical Betfair execution status.
 
-    Uses unified Betfair Match Surface (CURRENT ⊔ CLEARED),
-    not listCurrentOrders fallbacks.
+    ORDER OF AUTHORITY:
+      1) execution_events (persistent truth)
+      2) Betfair CURRENT
+      3) Betfair CLEARED
+      4) UNKNOWN
+
+    Returns only:
+      - EXECUTION_COMPLETE
+      - EXECUTABLE
+      - UNKNOWN
     """
     if not bet_id:
         return "UNKNOWN"
 
+    # --------------------------------------------------
+    # 1️⃣ PERSISTENT EXECUTION TRUTH (AUTHORITATIVE)
+    # --------------------------------------------------
+    try:
+        from engines.config_paths import autoscalp_db
+        import sqlite3
+
+        con = sqlite3.connect(autoscalp_db())
+        con.row_factory = sqlite3.Row
+        row = con.execute("""
+            SELECT fully_matched
+              FROM execution_events
+             WHERE bet_id = ?
+             LIMIT 1
+        """, (str(bet_id),)).fetchone()
+        con.close()
+
+        if row and int(row["fully_matched"]) == 1:
+            return "EXECUTION_COMPLETE"
+
+    except Exception:
+        # Never block — fall through to Betfair
+        pass
+
+    # --------------------------------------------------
+    # 2️⃣ BETFAIR MATCH SURFACE (CURRENT ⊔ CLEARED)
+    # --------------------------------------------------
     try:
         app_key, token = _keys()
 
@@ -5365,7 +5400,7 @@ def get_bet_status(bet_id: str) -> str:
         if not isinstance(surf, dict):
             return "UNKNOWN"
 
-        # EXECUTION_COMPLETE means matched at Betfair
+        # EXECUTION_COMPLETE = matched at exchange
         if (
             (surf.get("matched") or 0.0) > 0.0
             or str(surf.get("state") or "").upper() in ("TERMINAL", "EXECUTION_COMPLETE")
@@ -5381,6 +5416,7 @@ def get_bet_status(bet_id: str) -> str:
 
     except Exception:
         return "UNKNOWN"
+
 
 # ── public adapter: parent now, optional hedge after matched ────────────────
 def _infer_phase_from_schedule(mid: str) -> str:

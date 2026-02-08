@@ -118,22 +118,168 @@ def fetch_cleared(app_key: str, token: str):
     cleared = res.get("clearedOrders") or []
     return {str(o.get("betId")): o for o in cleared}
 
+# ============================================================
+# 📍 TARGET: tools/betfair_match_surface.py
+# 🔎 SEARCH: import sqlite3
+# 🧩 ADD: execution_events persistence helper
+# ============================================================
+
+def _persist_execution_event(
+    *,
+    order_id: int | None,
+    bet_id: str,
+    role: str,
+    matched: float,
+    placed: float,
+    source: str,
+):
+    """
+    Persist Betfair execution truth.
+
+    Invariants:
+    - Insert ONCE, never downgrade
+    - Parent: any matched > 0 => fully_matched
+    - Child: matched == placed => fully_matched
+    """
+    try:
+        con = sqlite3.connect(autoscalp_db())
+        cur = con.cursor()
+
+        fully_matched = 0
+        if role == "PARENT" and matched > 0:
+            fully_matched = 1
+        elif role == "CHILD" and placed > 0 and matched >= placed:
+            fully_matched = 1
+
+        cur.execute("""
+            INSERT OR IGNORE INTO execution_events (
+                order_id,
+                bet_id,
+                role,
+                matched_size,
+                placed_size,
+                fully_matched,
+                seen_at,
+                source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now','utc'), ?)
+        """, (
+            order_id,
+            str(bet_id),
+            role,
+            float(matched),
+            float(placed),
+            int(fully_matched),
+            str(source),
+        ))
+
+        con.commit()
+        con.close()
+
+    except Exception:
+        # Betfair surface must NEVER crash
+        pass
+
+
 def query_bet_match_surface(*, bet_id: str, app_key: str, token: str) -> dict:
     """
     Canonical Betfair match truth for ONE bet_id.
-
-    Returns:
-        {
-          "exists": bool,
-          "matched": float,
-          "placed": float,
-          "fraction": float,     # matched / placed
-          "state": "LIVE" | "TERMINAL" | "UNKNOWN",
-          "source": "CURRENT" | "CLEARED" | "NONE"
-        }
     """
-    # this is literally the same logic you already wrote,
-    # just scoped to one bet_id and returning a dict
+    try:
+        # CURRENT orders
+        cur = bf_rpc(
+            app_key,
+            token,
+            "listCurrentOrders",
+            {"betIds": [str(bet_id)]}
+        )
+        orders = (cur.get("currentOrders") or [])
+
+        if orders:
+            o = orders[0]
+            matched = float(o.get("sizeMatched") or 0.0)
+            placed  = float(o.get("sizePlaced") or 0.0)
+
+            _persist_execution_event(
+                order_id=None,
+                bet_id=bet_id,
+                role="PARENT",   # child callers override upstream
+                matched=matched,
+                placed=placed,
+                source="CURRENT",
+            )
+
+            return {
+                "exists": True,
+                "matched": matched,
+                "placed": placed,
+                "fraction": (matched / placed) if placed > 0 else 0.0,
+                "state": "LIVE",
+                "source": "CURRENT",
+            }
+
+
+        # CLEARED orders
+        frm = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        to  = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+
+        clr = bf_rpc(
+            app_key,
+            token,
+            "listClearedOrders",
+            {
+                "betStatus": "CANCELLED",
+                "settledDateRange": {"from": frm, "to": to},
+                "betIds": [str(bet_id)],
+                "includeItemDescription": True,
+            }
+        )
+
+        cleared = clr.get("clearedOrders") or []
+        if cleared:
+            o = cleared[0]
+            matched = float(o.get("sizeSettled") or o.get("sizeMatched") or 0.0)
+            placed  = matched
+
+            _persist_execution_event(
+                order_id=None,
+                bet_id=bet_id,
+                role="PARENT",
+                matched=matched,
+                placed=placed,
+                source="CLEARED",
+            )
+
+            return {
+                "exists": True,
+                "matched": matched,
+                "placed": placed,
+                "fraction": 1.0 if placed > 0 else 0.0,
+                "state": "TERMINAL",
+                "source": "CLEARED",
+            }
+
+
+        # Exists but not visible
+        return {
+            "exists": True,
+            "matched": 0.0,
+            "placed": 0.0,
+            "fraction": 0.0,
+            "state": "UNKNOWN",
+            "source": "NONE",
+        }
+
+    except Exception:
+        return {
+            "exists": False,
+            "matched": 0.0,
+            "placed": 0.0,
+            "fraction": 0.0,
+            "state": "UNKNOWN",
+            "source": "NONE",
+        }
+
 
 def get_direction_confidence(marketId: str, selectionId: str) -> float:
     """
