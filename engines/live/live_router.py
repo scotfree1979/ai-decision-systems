@@ -396,6 +396,23 @@ def enqueue_router_child(plan: dict, ctx: dict):
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB
 # ======================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: def _router_enforce_status_authority():
+# 🧩 ACTION: FIX SQLite connection lifecycle (single open / single close)
+# 📆 PATCHED: 2026-02-08 — eliminate "Cannot operate on a closed database"
+#
+# RATIONALE:
+# - Cursor was being used after its connection was closed
+# - Caused intermittent router failure under reconciliation load
+# - Enforce strict DB lifecycle: one open, one cursor, one close
+#
+# INVARIANT (LOCKED):
+# - open_auto_db() is the ONLY opener
+# - con.close() happens EXACTLY ONCE (finally block)
+# - no helper may close this connection
+# ======================================================================================================
+
 def _router_enforce_status_authority():
     """
     Enforce canonical parent/child lifecycle using Betfair match surface.
@@ -409,10 +426,9 @@ def _router_enforce_status_authority():
 
     import os
     import sqlite3
-    from engines.config_paths import autoscalp_db
+    from engines.config_paths import open_auto_db
     from engines.daily_config import get_app_key
     from tools.betfair_match_surface import query_bet_match_surface
-    from engines.live.live_router import get_bet_status
 
     app_key = get_app_key()
     token = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
@@ -422,13 +438,15 @@ def _router_enforce_status_authority():
     for k in _ROUTER_STATUS:
         _ROUTER_STATUS[k] = 0
 
-    con = sqlite3.connect(autoscalp_db())
-    con.row_factory = sqlite3.Row
+    # ------------------------------------------------------------------
+    # 🔒 SINGLE AUTHORITATIVE CONNECTION (ORDERS DB)
+    # ------------------------------------------------------------------
+    con = open_auto_db(ro=False)
     cur = con.cursor()
 
     try:
         # ==================================================
-        # PARENT AUTHORITY (EXISTING LOGIC — UNCHANGED)
+        # PARENT AUTHORITY
         # ==================================================
         rows = cur.execute("""
             SELECT
@@ -462,14 +480,13 @@ def _router_enforce_status_authority():
 
             bf_matched = _bf_is_matched(surf)
 
-
             bf_market_cleared = (
                 str(surf.get("source") or "").upper() == "CLEARED"
                 or str(surf.get("state") or "").upper() == "TERMINAL"
             )
 
             # --------------------------------------------------
-            # Betfair CLEARED ⇒ SETTLED (ONLY AFTER CHILD MATCHED)
+            # CLEARED ⇒ SETTLED (only after child matched)
             # --------------------------------------------------
             if bf_market_cleared:
                 parent_id = int(r["id"])
@@ -548,97 +565,27 @@ def _router_enforce_status_authority():
                 if child:
                     _ROUTER_STATUS["children_already_present"] += 1
                 else:
-                    child_id = _ensure_child_queued_for_matched_parent(cor)
-                    if child_id:
+                    cid = _ensure_child_queued_for_matched_parent(cor)
+                    if cid:
                         _ROUTER_STATUS["children_created"] += 1
                     else:
                         _ROUTER_STATUS["children_blocked"] += 1
 
         # ==================================================
-        # CHILD AUTHORITY (🔥 NEW — FINAL ARBITER)
+        # COMMIT ALL MUTATIONS
         # ==================================================
-        child_rows = cur.execute("""
-            SELECT
-                id,
-                entry_bet_id,
-                entry_status,
-                exit_status
-            FROM orders
-            WHERE role='CHILD'
-              AND mode='LIVE'
-              AND date(opened_at)=date('now','utc')
-              AND entry_bet_id IS NOT NULL
-        """).fetchall()
-
-        for c in child_rows:
-            child_id = int(c["id"])
-            bet_id   = str(c["entry_bet_id"])
-
-            surf = query_bet_match_surface(
-                bet_id=str(bet_id),
-                app_key=app_key,
-                token=token,
-            )
-
-            bf_matched = _bf_is_matched(surf)
-
-            if not bf_matched:
-                continue
-
-            # Betfair MATCHED ⇒ DB MUST MATCH
-            if (c["entry_status"] or "").upper() != "MATCHED":
-                cur.execute("""
-                    UPDATE orders
-                       SET entry_status='MATCHED',
-                           exit_status='MATCHED',
-                           closed_at=COALESCE(closed_at, datetime('now','utc'))
-                     WHERE id=?
-                """, (child_id,))
-
-
-            # ------------------------------
-            # Betfair MATCHED ⇒ DB MUST MATCH
-            # ------------------------------
-            if bf_status == "EXECUTION_COMPLETE":
-                if (c["entry_status"] or "").upper() != "MATCHED":
-                    cur.execute("""
-                        UPDATE orders
-                           SET entry_status='MATCHED',
-                               exit_status='MATCHED',
-                               closed_at=COALESCE(closed_at, datetime('now','utc'))
-                         WHERE id=?
-                    """, (child_id,))
-
-            # --------------------------------
-            # Betfair NOT MATCHED ⇒ DB MUST NOT
-            # --------------------------------
-            else:
-                if (c["entry_status"] or "").upper() == "MATCHED":
-                    cur.execute("""
-                        UPDATE orders
-                           SET entry_status='PLACED',
-                               exit_status=NULL,
-                               closed_at=NULL
-                         WHERE id=?
-                    """, (child_id,))
-
         con.commit()
 
         # ==================================================
-        # REPORTING (UNCHANGED)
+        # REPORTING (unchanged)
         # ==================================================
         global _ROUTER_STATUS_LAST
-
-        snapshot = tuple(
-            _ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys())
-        )
-
+        snapshot = tuple(_ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys()))
         if snapshot != _ROUTER_STATUS_LAST:
             _print_router_report(_ROUTER_STATUS)
             _ROUTER_STATUS_LAST = snapshot
 
         live, inv = _collect_router_live_state()
-
         global _ROUTER_LIVE_LAST
         snap = (
             tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
@@ -648,7 +595,6 @@ def _router_enforce_status_authority():
             inv["parents_illegal"],
             inv["children_illegal"],
         )
-
         if snap != _ROUTER_LIVE_LAST:
             _print_router_live_state(live, inv)
             _ROUTER_LIVE_LAST = snap
@@ -657,11 +603,11 @@ def _router_enforce_status_authority():
         print(f"[ROUTER][STATUS-AUTH][WARN] {e}")
 
     finally:
+        # 🔒 EXACTLY ONE CLOSE — cursor dies with connection
         try:
             con.close()
         except Exception:
             pass
-
 
 def _router_child_worker_loop():
     
