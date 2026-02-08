@@ -426,11 +426,8 @@ def _router_enforce_status_authority():
             if not isinstance(surf, dict):
                 continue
 
-            bf_matched = (
-                (surf.get("matched") or 0) > 0
-                or str(surf.get("state") or "").upper() in ("EXECUTION_COMPLETE", "TERMINAL")
-                or str(surf.get("source") or "").upper() == "CLEARED"
-            )
+            bf_matched = _bf_is_matched(surf)
+
 
             bf_market_cleared = (
                 str(surf.get("source") or "").upper() == "CLEARED"
@@ -543,7 +540,14 @@ def _router_enforce_status_authority():
             child_id = int(c["id"])
             bet_id   = str(c["entry_bet_id"])
 
-            bf_status = get_bet_status(bet_id)
+            surf = query_bet_match_surface(
+                bet_id=str(bet_id),
+                app_key=app_key,
+                token=token,
+            )
+
+            if _bf_is_matched(surf):
+                # stamp child MATCHED
 
             # ------------------------------
             # Betfair MATCHED ⇒ DB MUST MATCH
