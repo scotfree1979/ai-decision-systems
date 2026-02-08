@@ -567,10 +567,7 @@ def _router_enforce_status_authority():
                     else:
                         _ROUTER_STATUS["children_blocked"] += 1
 
-        # ==================================================
-        # COMMIT ALL MUTATIONS
-        # ==================================================
-        con.commit()
+
 
         # ==================================================
         # REPORTING (unchanged)
@@ -594,6 +591,8 @@ def _router_enforce_status_authority():
         if snap != _ROUTER_LIVE_LAST:
             _print_router_live_state(live, inv)
             _ROUTER_LIVE_LAST = snap
+
+        con.commit()
 
     except Exception as e:
         print(f"[ROUTER][STATUS-AUTH][WARN] {e}")
