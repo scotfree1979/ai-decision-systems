@@ -54,6 +54,40 @@ _ROUTER_STATUS = {
     "children_created": 0,
     "children_blocked": 0,
 }
+def _bf_is_matched(surf: dict) -> bool:
+    """
+    Canonical Betfair MATCHED detector.
+
+    IMPORTANT:
+    - sizeMatched > 0 is authoritative
+    - TERMINAL / EXECUTION_COMPLETE is authoritative
+    - CLEARED is authoritative
+    - LIVE does NOT mean unmatched
+    """
+    if not isinstance(surf, dict):
+        return False
+
+    try:
+        matched = float(surf.get("matched") or 0.0)
+        placed  = float(surf.get("placed") or 0.0)
+
+        if matched > 0.0:
+            return True
+
+        state = str(surf.get("state") or "").upper()
+        source = str(surf.get("source") or "").upper()
+
+        if state in ("EXECUTION_COMPLETE", "TERMINAL"):
+            return True
+
+        if source == "CLEARED":
+            return True
+
+    except Exception:
+        pass
+
+    return False
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -546,8 +580,21 @@ def _router_enforce_status_authority():
                 token=token,
             )
 
-            if _bf_is_matched(surf):
-                # stamp child MATCHED
+            bf_matched = _bf_is_matched(surf)
+
+            if not bf_matched:
+                continue
+
+            # Betfair MATCHED ⇒ DB MUST MATCH
+            if (c["entry_status"] or "").upper() != "MATCHED":
+                cur.execute("""
+                    UPDATE orders
+                       SET entry_status='MATCHED',
+                           exit_status='MATCHED',
+                           closed_at=COALESCE(closed_at, datetime('now','utc'))
+                     WHERE id=?
+                """, (child_id,))
+
 
             # ------------------------------
             # Betfair MATCHED ⇒ DB MUST MATCH
