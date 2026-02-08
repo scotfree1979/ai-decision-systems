@@ -378,7 +378,7 @@ def _router_enforce_status_authority():
     from engines.config_paths import autoscalp_db
     from engines.daily_config import get_app_key
     from tools.betfair_match_surface import query_bet_match_surface
- 
+    from engines.live.live_router import get_bet_status
 
     app_key = get_app_key()
     token = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
@@ -388,14 +388,14 @@ def _router_enforce_status_authority():
     for k in _ROUTER_STATUS:
         _ROUTER_STATUS[k] = 0
 
-
     con = sqlite3.connect(autoscalp_db())
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
-    
-
     try:
+        # ==================================================
+        # PARENT AUTHORITY (EXISTING LOGIC — UNCHANGED)
+        # ==================================================
         rows = cur.execute("""
             SELECT
                 id,
@@ -432,24 +432,17 @@ def _router_enforce_status_authority():
                 or str(surf.get("source") or "").upper() == "CLEARED"
             )
 
-            # --------------------------------------------------
-            # Betfair CLEARED ⇒ SETTLED (ONLY AFTER CHILD MATCHED)
-            # --------------------------------------------------
-
-            bf_parent_matched = (
-                (surf.get("matched") or 0) > 0
-                or str(surf.get("state") or "").upper() in ("EXECUTION_COMPLETE",)
-            )
-
             bf_market_cleared = (
                 str(surf.get("source") or "").upper() == "CLEARED"
                 or str(surf.get("state") or "").upper() == "TERMINAL"
             )
 
+            # --------------------------------------------------
+            # Betfair CLEARED ⇒ SETTLED (ONLY AFTER CHILD MATCHED)
+            # --------------------------------------------------
             if bf_market_cleared:
                 parent_id = int(r["id"])
 
-                # ✅ HARD GUARD: child must already be MATCHED
                 child_matched = cur.execute("""
                     SELECT 1
                       FROM orders
@@ -460,10 +453,8 @@ def _router_enforce_status_authority():
                 """, (parent_id,)).fetchone()
 
                 if not child_matched:
-                    # Market cleared but hedge never matched → DO NOT SETTLE
                     continue
 
-                # 1️⃣ Settle CHILD
                 cur.execute("""
                     UPDATE orders
                        SET exit_status='SETTLED',
@@ -473,7 +464,6 @@ def _router_enforce_status_authority():
                        AND (exit_status IS NULL OR exit_status <> 'SETTLED')
                 """, (parent_id,))
 
-                # 2️⃣ Settle PARENT
                 cur.execute("""
                     UPDATE orders
                        SET exit_status='SETTLED',
@@ -488,8 +478,6 @@ def _router_enforce_status_authority():
                 _ROUTER_STATUS["parents_settled"] += 1
                 continue
 
-
-
             # --------------------------------------------------
             # DB says MATCHED but Betfair does NOT
             # --------------------------------------------------
@@ -502,32 +490,18 @@ def _router_enforce_status_authority():
                      WHERE id=?
                 """, (int(r["id"]),))
                 _ROUTER_STATUS["parents_matched"] += 1
-                print(
-                    f"[ROUTER][STATUS-FIX] "
-                    f"{cor} illegal MATCHED → PLACED"
-                )
                 continue
 
             # --------------------------------------------------
             # Betfair MATCHED but DB not updated
             # --------------------------------------------------
-            # engines/live/live_router.py
-            # 📍 TARGET: _router_enforce_status_authority
-            # 🔎 SEARCH: if bf_matched and r["entry_status"] != "MATCHED":
-            # 📆 PATCHED: 2026-02-06 — commit parent MATCHED before child enforcement
-
             if bf_matched:
                 _ROUTER_STATUS["parents_bf_matched"] += 1
 
             if bf_matched and r["entry_status"] != "MATCHED":
                 _orders_update_parent_matched(cor, bet_id)
-
                 _ROUTER_STATUS["parents_matched"] += 1
                 _ROUTER_STATUS["parents_db_promoted"] += 1
-                print(
-                    f"[ROUTER][STATUS-FIX] "
-                    f"{cor} promoted to MATCHED (Betfair truth)"
-                )
 
             # --------------------------------------------------
             # Parent MATCHED ⇒ child must exist
@@ -542,27 +516,66 @@ def _router_enforce_status_authority():
 
                 if child:
                     _ROUTER_STATUS["children_already_present"] += 1
-
                 else:
                     child_id = _ensure_child_queued_for_matched_parent(cor)
                     if child_id:
                         _ROUTER_STATUS["children_created"] += 1
-                        print(f"[ROUTER][CREATE] {cor} matched → child queued")
                     else:
                         _ROUTER_STATUS["children_blocked"] += 1
-                        print(f"[ROUTER][BLOCKED] {cor} matched but child not eligible")
 
+        # ==================================================
+        # CHILD AUTHORITY (🔥 NEW — FINAL ARBITER)
+        # ==================================================
+        child_rows = cur.execute("""
+            SELECT
+                id,
+                entry_bet_id,
+                entry_status,
+                exit_status
+            FROM orders
+            WHERE role='CHILD'
+              AND mode='LIVE'
+              AND date(opened_at)=date('now','utc')
+              AND entry_bet_id IS NOT NULL
+        """).fetchall()
 
+        for c in child_rows:
+            child_id = int(c["id"])
+            bet_id   = str(c["entry_bet_id"])
 
+            bf_status = get_bet_status(bet_id)
+
+            # ------------------------------
+            # Betfair MATCHED ⇒ DB MUST MATCH
+            # ------------------------------
+            if bf_status == "EXECUTION_COMPLETE":
+                if (c["entry_status"] or "").upper() != "MATCHED":
+                    cur.execute("""
+                        UPDATE orders
+                           SET entry_status='MATCHED',
+                               exit_status='MATCHED',
+                               closed_at=COALESCE(closed_at, datetime('now','utc'))
+                         WHERE id=?
+                    """, (child_id,))
+
+            # --------------------------------
+            # Betfair NOT MATCHED ⇒ DB MUST NOT
+            # --------------------------------
+            else:
+                if (c["entry_status"] or "").upper() == "MATCHED":
+                    cur.execute("""
+                        UPDATE orders
+                           SET entry_status='PLACED',
+                               exit_status=NULL,
+                               closed_at=NULL
+                         WHERE id=?
+                    """, (child_id,))
 
         con.commit()
-        # === PATCH START ============================================================
-        # 📍 TARGET: engines/live/live_router.py
-        # 🔎 SEARCH: _print_router_report(_ROUTER_STATUS)
-        # 🧩 ACTION: print only on status change
-        # 📆 PATCHED: 2026-02-07 — router report delta guard
-        # ============================================================================
 
+        # ==================================================
+        # REPORTING (UNCHANGED)
+        # ==================================================
         global _ROUTER_STATUS_LAST
 
         snapshot = tuple(
@@ -572,24 +585,22 @@ def _router_enforce_status_authority():
         if snapshot != _ROUTER_STATUS_LAST:
             _print_router_report(_ROUTER_STATUS)
             _ROUTER_STATUS_LAST = snapshot
-   
-        # === PATCH END ==============================================================
-        
+
         live, inv = _collect_router_live_state()
 
-        # ---------------- Live State (post-fix truth) ----------------
         global _ROUTER_LIVE_LAST
-        snap = (tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
-                tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
-                live["summary"]["open_trades"], live["summary"]["completed_trades"],
-                inv["parents_illegal"], inv["children_illegal"])
+        snap = (
+            tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
+            tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
+            live["summary"]["open_trades"],
+            live["summary"]["completed_trades"],
+            inv["parents_illegal"],
+            inv["children_illegal"],
+        )
+
         if snap != _ROUTER_LIVE_LAST:
             _print_router_live_state(live, inv)
             _ROUTER_LIVE_LAST = snap
-
-
-
-
 
     except Exception as e:
         print(f"[ROUTER][STATUS-AUTH][WARN] {e}")
@@ -599,7 +610,6 @@ def _router_enforce_status_authority():
             con.close()
         except Exception:
             pass
-
 
 
 def _router_child_worker_loop():
@@ -1151,7 +1161,7 @@ def process_stoploss(payload: dict, *, max_chase_ticks: int = 3, poll_s: float =
          WHERE role='PARENT'
            AND marketId=?
            AND selectionId=?
-           AND entry_status='matched'
+           AND entry_status='MATCHED'
            AND exit_status IS NULL
          ORDER BY opened_at DESC
          LIMIT 1
@@ -3383,6 +3393,7 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='MATCHED',
+                   exit_status='MATCHED',
                    mode='LIVE',
                    role='PARENT',
                    engine=?
@@ -3575,6 +3586,7 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                         _q_retry(cur, """
                             UPDATE orders
                                SET entry_status='MATCHED',
+                                   exit_status='MATCHED',
                                    entry_matched_odds=?,
                                    entry_matched_stake=?,
                                    closed_at=datetime('now','utc')
@@ -4225,6 +4237,7 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='MATCHED',
+                   exit_status='MATCHED',
                    closed_at=COALESCE(closed_at, datetime('now','utc')),
                    role='CHILD',
                    realized_pnl=?,
@@ -4483,7 +4496,8 @@ def _orders_update_hedge_matched(*, cor: str, exit_side: str,
         # Persist DB state
         _q_retry(cur, """
             UPDATE orders
-               SET exit_status='MATCHED',
+               SET entry_status='MATCHED',
+                   exit_status='MATCHED',
                    exit_kind='HEDGE',
                    exit_odds=?, exit_stake=?,
                    realized_pnl=?, net_pl=COALESCE(net_pl,0)+?,
@@ -5276,25 +5290,44 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
 
 
 # Public status helper for orchestrator
+# engines/live/live_router.py (or shared helper module)
+
 def get_bet_status(bet_id: str) -> str:
+    """
+    Canonical Betfair execution status.
+
+    Uses unified Betfair Match Surface (CURRENT ⊔ CLEARED),
+    not listCurrentOrders fallbacks.
+    """
     if not bet_id:
         return "UNKNOWN"
+
     try:
         app_key, token = _keys()
-        resp = _list_current(app_key, token, str(bet_id))
-        orders = (resp.get("result", {}) or {}).get("currentOrders") or []
-        if not orders:
+
+        surf = query_bet_match_surface(
+            bet_id=str(bet_id),
+            app_key=app_key,
+            token=token,
+        )
+
+        if not isinstance(surf, dict):
+            return "UNKNOWN"
+
+        # EXECUTION_COMPLETE means matched at Betfair
+        if (
+            (surf.get("matched") or 0.0) > 0.0
+            or str(surf.get("state") or "").upper() in ("TERMINAL", "EXECUTION_COMPLETE")
+            or str(surf.get("source") or "").upper() == "CLEARED"
+        ):
             return "EXECUTION_COMPLETE"
-        o = orders[0]
-        matched = float(o.get("sizeMatched") or 0.0)
-        status  = str(o.get("orderStatus") or o.get("status") or "").upper()
-        if matched > 0.0 or "EXECUTION_COMPLETE" in status:
-            return "EXECUTION_COMPLETE"
-        if "EXECUTABLE" in status:
+
+        # Still live / executable
+        if str(surf.get("state") or "").upper() == "LIVE":
             return "EXECUTABLE"
-        if "CANCELLED" in status:
-            return "CANCELLED"
-        return status or "UNKNOWN"
+
+        return "UNKNOWN"
+
     except Exception:
         return "UNKNOWN"
 
