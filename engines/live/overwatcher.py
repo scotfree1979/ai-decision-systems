@@ -185,6 +185,13 @@ def maybe_emit_stoploss_plan(
     - Returns a BUS-native CHILD plan or None
     """
 
+    opened_at = parent_row.get("opened_at")
+        if opened_at:
+            opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - opened).total_seconds() < 2.0:
+                return None
+
+
     # --- required inputs ---
     side        = (parent_row.get("side") or "").upper()
     entry_odds = parent_row.get("entry_odds")
@@ -217,6 +224,21 @@ def maybe_emit_stoploss_plan(
 
     if not hit:
         return None
+
+    con = _orders_conn(); con.row_factory = sqlite3.Row
+    row = _q_retry(con, """
+        SELECT 1
+          FROM orders
+          WHERE role='CHILD'
+           AND hedge_of = ?
+           AND UPPER(exit_kind) = 'STOPLOSS'
+         LIMIT 1
+    """, (parent_row["id"],)).fetchone()
+    con.close()
+
+    if row:
+        return None
+
 
     # --- BUS-native CHILD plan ---
     return {
@@ -314,70 +336,8 @@ from engines.price_math import walk_ticks, calculate_tick_distance as _tick_dist
 from engines.mastery import event_sink
 
 def enforce_parent_stoploss_px():
-    """
-    Detect stop-loss for MSC_EXPLORATORY parents only.
-    Emits STOPLOSS plans; never executes.
-    """
-    con = _orders_conn(); con.row_factory = sqlite3.Row
-    parents = _q_retry(con, """
-        SELECT id, customerOrderRef, marketId, selectionId,
-               side, entry_odds, entry_stake, stop_loss_px, source
-          FROM orders
-         WHERE role='PARENT'
-           AND entry_status='matched'
-           AND exit_status IS NULL
-           AND stop_loss_px IS NOT NULL
-    """).fetchall()
-    con.close()
+    return  # STOPLOSS emission disabled (MSC only)
 
-    if not parents:
-        return
-
-    con = _orders_conn(); con.row_factory = sqlite3.Row
-    prices = {
-        (str(r["marketId"]), str(r["selectionId"])): float(r["ltp"])
-        for r in _q_retry(con, """
-            SELECT marketId, selectionId, ltp
-              FROM odds_current
-             WHERE ltp IS NOT NULL
-        """).fetchall()
-    }
-    con.close()
-
-    for p in parents:
-        if (p["source"] or "").upper() != "MSC_EXPLORATORY":
-            continue
-
-        mid = str(p["marketId"])
-        sid = str(p["selectionId"])
-        px = prices.get((mid, sid))
-        if px is None:
-            continue
-
-        side = p["side"].upper()
-
-        if side == "LAY":
-            hit = px >= stop_px   # adverse: odds drift UP
-        else:
-            hit = px <= stop_px   # adverse: odds drift DOWN
-
-        if not hit:
-            continue
-        sl = float(p["stop_loss_px"])
-
-        hit = (side == "LAY" and px >= sl) or (side == "BACK" and px <= sl)
-        if not hit:
-            continue
-
-        process_stoploss({
-            "marketId": mid,
-            "selectionId": sid,
-            "entry_side": side,
-            "entry_stake": float(p["entry_stake"]),
-            "current_odds": px,
-            "stop_loss_px": sl,
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        })
 
 from engines.live.live_router import _cancel, _keys, _orders_conn
 
@@ -396,7 +356,7 @@ def _cancel_active_hedge_child(parent_id: int):
          WHERE role='CHILD'
            AND hedge_of=?
            AND UPPER(exit_kind)='HEDGE'
-           AND entry_status IN ('QUEUED','PLACED')
+           AND entry_status IN ('PLACED')
            AND entry_bet_id IS NOT NULL
          LIMIT 1
     """, (int(parent_id),)).fetchone()

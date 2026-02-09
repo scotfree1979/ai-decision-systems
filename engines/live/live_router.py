@@ -146,7 +146,9 @@ def _collect_router_live_state() -> tuple[dict, dict]:
         "children": defaultdict(lambda: defaultdict(int)),
         "summary": {
             "open_trades": 0,
+            "cancelled_trades": 0,   # 👈 ADD
             "completed_trades": 0,
+            
         },
     }
 
@@ -214,30 +216,51 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     # --------------------------------------------------
     row = _q_retry(cur, """
         SELECT
+          -- OPEN = parent matched AND no matched child yet
           SUM(
             CASE
-              WHEN role='PARENT'
-               AND entry_status='MATCHED'
-               AND (exit_status IS NULL OR exit_status<>'MATCHED')
+              WHEN role = 'PARENT'
+               AND entry_status = 'MATCHED'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM orders c
+                    WHERE c.role = 'CHILD'
+                      AND c.hedge_of = orders.id
+                      AND c.entry_status = 'MATCHED'
+               )
               THEN 1 ELSE 0
             END
           ) AS open_trades,
 
+          -- COMPLETED = child matched (parent implicitly matched)
           SUM(
             CASE
-              WHEN role='CHILD'
-               AND entry_status='MATCHED'
+              WHEN role = 'CHILD'
+               AND entry_status = 'MATCHED'
               THEN 1 ELSE 0
             END
-          ) AS completed_trades
+          ) AS completed_trades,
+
+          -- CANCELLED = parent exit_status contains 'CANCELLED'
+          SUM(
+            CASE
+              WHEN role = 'PARENT'
+               AND exit_status IS NOT NULL
+               AND exit_status LIKE '%CANCELLED%'
+              THEN 1 ELSE 0
+            END
+          ) AS cancelled_trades
+
         FROM orders
-        WHERE mode='LIVE'
-          AND date(opened_at)=date('now','utc')
+        WHERE mode = 'LIVE'
+          AND date(opened_at) = date('now','utc')
     """).fetchone()
 
     if row:
         live["summary"]["open_trades"] = int(row["open_trades"] or 0)
         live["summary"]["completed_trades"] = int(row["completed_trades"] or 0)
+        live["summary"]["cancelled_trades"] = int(row["cancelled_trades"] or 0)
+
 
     # --------------------------------------------------
     # Invariant guards — NO UNKNOWN STATES (TODAY)
@@ -5877,39 +5900,6 @@ def place_parent_and_hedge(
             hedge_ticks = 1
     except Exception:
         hedge_ticks = 1
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py : place_parent_and_hedge()
-# 🔎 SEARCH FOR: "if _plan is not None:"  (the COMPAT GLUE block)
-# ⛏ ACTION: Insert THIS block immediately AFTER the COMPAT GLUE normalisation
-# 📆 PATCHED: 2026-01-22 — STOPLOSS Immediate Child Executor for v7
-# ============================================================================
-
-    # --------------------------------------------------------------
-    # STOPLOSS (W-engine) — IMMEDIATE FLATTEN EXIT
-    # --------------------------------------------------------------
-    # STOPLOSS (W-engine) — IMMEDIATE FLATTEN EXIT
-    if _plan and str(_plan.get("engine")).upper() == "OVERWATCHER" \
-              and str(_plan.get("type")).upper() == "STOPLOSS":
-
-        parent_cor = _ctx.get("customerOrderRef") or _plan.get("customerOrderRef")
-        if not parent_cor:
-            parent_cor = _ref("SLP")
-
-        child_id = _place_stoploss_child_now(
-            parent_cor=parent_cor,
-            market_id=str(_plan.get("marketId")),
-            selection_id=str(_plan.get("selectionId")),
-            exit_side="BACK" if (_plan.get("side") or "").upper() == "LAY" else "LAY",
-            exit_odds=float(_plan.get("px")),
-            parent_stake=float(_plan.get("entry_stake") or _plan.get("stake") or 0.0),
-            run_id=_ctx.get("run_id")
-        )
-
-        if not child_id:
-            return None, "STOPLOSS_FAILED"
-
-        return None, parent_cor
 
 
     # 1) queue parent -----------------------------------------------------------
