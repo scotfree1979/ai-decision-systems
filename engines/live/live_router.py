@@ -703,7 +703,9 @@ def _router_enforce_status_authority():
     )
 
     if status_snapshot != _ROUTER_STATUS_LAST:
-        _print_router_full_report(_ROUTER_STATUS, live, inv)
+        _print_router_report(status)
+        _print_router_live_state(live, inv)
+
         _ROUTER_STATUS_LAST = status_snapshot
 
     # Snapshot live DB state separately
@@ -3511,28 +3513,6 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
              WHERE id=?
         """, (parent["engine"], parent_id))
 
-        con.commit()   # 🔑 parent state is now correct and durable
-
-    except Exception as e:
-        _log_event(
-            "ERROR",
-            "live_router",
-            f"parent_matched failed (parent flip) ref={cor}: {e}"
-        )
-        return
-
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 ANCHOR: _orders_update_parent_matched
-# 🧩 ACTION: persist execution truth at detection time
-# ============================================================================
-
         # 🔒 Persist execution truth (ONE-TIME)
         _ensure_execution_events_schema()
 
@@ -3561,11 +3541,21 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
             float(avg_odds or 0.0),
         ))
 
-        con.commit()
+        con.commit()   # 🔑 parent state is now correct and durable
 
-# === PATCH END ==============================================================
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"parent_matched failed (parent flip) ref={cor}: {e}"
+        )
+        return
 
-
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
     # ======================================================================
     # 3️⃣ ENSURE CHILD EXISTS (BEST-EFFORT, NON-BLOCKING)
