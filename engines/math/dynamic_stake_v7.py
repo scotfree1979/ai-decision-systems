@@ -67,6 +67,170 @@ def _fetch_v7_intel(ctx: dict) -> dict:
     except Exception:
         return {}
 
+# -------------------------------------------------------------------
+# FORM (DB-TRUTH, FINAL)
+# -------------------------------------------------------------------
+
+# Last-3 recency weights (most recent first)
+RECENCY_WEIGHTS = [0.5, 0.3, 0.2]
+
+# Race strength (inferred ONLY from market_name text)
+RACE_BUCKET_RANK = {
+    "OPEN": 4,
+    "CLASS": 3,
+    "HANDICAP": 2,
+    "NOVICE": 1,
+}
+
+def _infer_distance_bucket(market_name: str) -> str | None:
+    if not market_name:
+        return None
+    s = market_name.lower()
+    for token in ("5f","6f","7f","1m","1m2f","1m4f","1m6f","2m","3m"):
+        if token in s:
+            return token
+    return None
+
+def _infer_race_bucket(market_name: str) -> str:
+    if not market_name:
+        return "OPEN"
+
+    s = market_name.upper()
+
+    if "NOV" in s or "NHF" in s or "INHF" in s:
+        return "NOVICE"
+    if "HCAP" in s:
+        return "HANDICAP"
+    if "CLASS" in s:
+        return "CLASS"
+
+    return "OPEN"   # open / conditions / no label
+
+def _fetch_runner_form_history(
+    *, selectionId: int, limit: int = 10
+):
+    """
+    DB-verified form query.
+    Returns rows newest → oldest.
+    Must already include:
+      - market_name
+      - event_name
+      - marketStartTime
+      - won (0/1)
+    """
+
+    from engines.config_paths import connect_bets_db
+    import sqlite3
+
+    con = connect_bets_db(ro=True)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    rows = cur.execute("""
+        SELECT
+            b.marketStartTime,
+            b.event_name,
+            b.market_name,
+            CASE
+                WHEN w.selectionId IS NOT NULL THEN 1
+                ELSE 0
+            END AS won
+        FROM bets b
+        LEFT JOIN bf_cleared_orders w
+          ON w.marketId = b.marketId
+         AND w.selectionId = b.selectionId
+        WHERE b.selectionId = ?
+        ORDER BY b.marketStartTime DESC
+        LIMIT ?
+    """, (int(selectionId), int(limit))).fetchall()
+
+    con.close()
+    return rows
+
+def _compute_form_multiplier(
+    *,
+    rows,
+    today_event: str,
+    today_market: str,
+) -> float:
+    """
+    Combine:
+      • recency (last-3 win pattern)
+      • course match
+      • distance match
+      • race bucket strength
+    """
+
+    if not rows:
+        return 1.0
+
+    # --- 1) Recency (last 3 runs) ---
+    score = 0.0
+    for i, w in enumerate(RECENCY_WEIGHTS):
+        if i < len(rows):
+            score += rows[i]["won"] * w
+
+    # --- 2) Course & distance match (any recent WIN) ---
+    today_dist = _infer_distance_bucket(today_market)
+
+    course_bonus = False
+    distance_bonus = False
+
+    for r in rows[:3]:
+        if not r["won"]:
+            continue
+
+        if r["event_name"] == today_event:
+            course_bonus = True
+
+            if today_dist and _infer_distance_bucket(r["market_name"]) == today_dist:
+                distance_bonus = True
+
+    if course_bonus:
+        score *= 1.10
+    if distance_bonus:
+        score *= 1.10   # stacks only if both true
+
+    # --- 3) Race bucket (from MOST RECENT run) ---
+    bucket = _infer_race_bucket(rows[0]["market_name"])
+    rank = RACE_BUCKET_RANK.get(bucket, 2)
+
+    # scale: NOVICE→0.85 … OPEN→1.15
+    bucket_mult = 0.85 + (rank - 1) * (0.30 / 3.0)
+    score *= bucket_mult
+
+    # Clamp (never destructive)
+    return max(0.60, min(score, 1.25))
+
+def get_form_adjustment(
+    *,
+    marketId: str,
+    selectionId: int,
+) -> float:
+    """
+    Public FORM API for Dynamic Stake.
+    Safe, read-only, DB-truthful.
+    """
+
+    try:
+        rows = _fetch_runner_form_history(selectionId=selectionId)
+        if not rows:
+            return 1.0
+
+        today_event  = rows[0]["event_name"]
+        today_market = rows[0]["market_name"]
+
+        return _compute_form_multiplier(
+            rows=rows,
+            today_event=today_event,
+            today_market=today_market,
+        )
+
+    except Exception:
+        return 1.0
+
+
+
 
 # ======================================================================
 # Compute dynamic stake with REAL inputs
@@ -103,6 +267,15 @@ def compute_exploratory_dynamic_stake(*, ctx: dict, engine="MSC_EXPLORATORY") ->
     step_size = (max_cap - lo) / STEP_COUNT
 
     stake = lo + step * step_size
+
+    # FINAL FORM ADJUSTMENT
+    try:
+        stake *= get_form_adjustment(
+            marketId=ctx["marketId"],
+            selectionId=ctx["selectionId"],
+        )
+    except Exception:
+        pass
     return round(stake, 2)
 
 
@@ -185,6 +358,15 @@ def compute_risk_dynamic_stake(*, ctx: dict, engine="MSC_RISK") -> float:
     # Compute stake
     step_size = (hi - lo) / STEP_COUNT
     stake = lo + step * step_size
+
+    # FINAL FORM ADJUSTMENT
+    try:
+        stake *= get_form_adjustment(
+            marketId=marketId,
+            selectionId=selectionId,
+        )
+    except Exception:
+        pass
 
     return round(stake, 2)
 
@@ -299,6 +481,15 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         stake = min_stake
     elif stake > max_stake:
         stake = max_stake
+
+    # FINAL FORM ADJUSTMENT
+    try:
+        stake *= get_form_adjustment(
+            marketId=ctx["marketId"],
+            selectionId=ctx["selectionId"],
+        )
+    except Exception:
+        pass
 
     return round(float(stake), 2)
 
