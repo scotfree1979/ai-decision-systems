@@ -172,8 +172,9 @@ def _collect_router_live_state() -> tuple[dict, dict]:
             WHEN entry_status='PLACING' THEN 'PLACING'
             WHEN entry_status='PLACED' THEN 'PLACED'
             WHEN entry_status='MATCHED'
-                 AND (exit_status IS NULL OR exit_status<>'MATCHED')
+                 AND exit_status IS NULL
                  THEN 'MATCHED'
+            WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
             WHEN exit_status IS NOT NULL THEN 'CLOSED'
           END AS bucket,
           COUNT(*) AS n
@@ -689,20 +690,25 @@ def _router_enforce_status_authority():
             print(f"[ROUTER][STATUS-AUTH][ACTION-FAIL] {act} → {e}")
 
     # --------------------------------------------------
-    # REPORTING (UNCHANGED, NOW STABLE)
+    # REPORTING (STRICTLY POST-ENFORCEMENT)
     # --------------------------------------------------
 
-    # FIX: collect live state BEFORE using it
+    # ALWAYS compute live state first
     live, inv = _collect_router_live_state()
 
+    # Snapshot router status (for spam suppression only)
     global _ROUTER_STATUS_LAST
-    snapshot = tuple(_ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys()))
-    if snapshot != _ROUTER_STATUS_LAST:
-        _print_router_full_report(_ROUTER_STATUS, live, inv)
-        _ROUTER_STATUS_LAST = snapshot
+    status_snapshot = tuple(
+        _ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys())
+    )
 
+    if status_snapshot != _ROUTER_STATUS_LAST:
+        _print_router_full_report(_ROUTER_STATUS, live, inv)
+        _ROUTER_STATUS_LAST = status_snapshot
+
+    # Snapshot live DB state separately
     global _ROUTER_LIVE_LAST
-    snap = (
+    live_snapshot = (
         tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
         tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
         live["summary"]["open_trades"],
@@ -711,10 +717,10 @@ def _router_enforce_status_authority():
         inv["parents_illegal"],
         inv["children_illegal"],
     )
-    if snap != _ROUTER_LIVE_LAST:
-        _print_router_live_state(live, inv)
-        _ROUTER_LIVE_LAST = snap
 
+    if live_snapshot != _ROUTER_LIVE_LAST:
+        _print_router_live_state(live, inv)
+        _ROUTER_LIVE_LAST = live_snapshot
 
 
 def _router_child_worker_loop():
@@ -3498,7 +3504,7 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='MATCHED',
-                   exit_status='MATCHED',
+                   exit_status=NULL,
                    mode='LIVE',
                    role='PARENT',
                    engine=?
