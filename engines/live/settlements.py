@@ -1649,14 +1649,28 @@ def fetch_market_metadata_api(market_ids: List[str]) -> Tuple[int,int]:
 # ──────────────────────────────────────────────────────────────────────────────
 # Reconcile into autoscalp_gui.db.orders
 # ──────────────────────────────────────────────────────────────────────────────
+# ======================================================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 ANCHOR: def reconcile_orders()
+# 🧩 ACTION: Use REAL autoscalp_gui.db writer (not DALWriteProxy)
+# 📆 PATCHED: 2026-02-09 — fix settlement ↔ router DB lock contention
+#
+# RATIONALE:
+# - Router authority writes via open_auto_db(rw=True)
+# - Settlements reconciliation must use the SAME class of connection
+# - DALWriteProxy introduces a second writer with incompatible lifetime
+# - This causes intermittent "database is locked" during LIVE
+#
+# INVARIANT:
+# - Settlement logic unchanged
+# - Still only stamps SETTLED
+# - Exposure release still delegated to router
+# ======================================================================================================
 
-# === PATCH START ===
-# 📍 TARGET: engines/live/settlements.py:reconcile_orders
-# 🔎 SEARCH: def reconcile_orders():
-# 📆 PATCHED: 2025-11-21
-from engines.config_paths import auto_conn as _auto_conn
+from engines.config_paths import open_auto_db
 
-def reconcile_orders() -> Tuple[int,int]:
+
+def reconcile_orders() -> Tuple[int, int]:
     """
     Overwrite orders.realized_pnl/net_pl/exit_status/closed_at where bf_bet_id matches a betId.
     """
@@ -1666,9 +1680,9 @@ def reconcile_orders() -> Tuple[int,int]:
     updated = 0
     pairs_marked = 0
 
-    # settlements DB stays raw; orders DB must use DAL
+    # settlements DB stays raw; orders DB must use REAL sqlite writer
     with connect_db(set_db) as s:
-        o = _auto_conn(rw=True)
+        o = open_auto_db(rw=True)   # 🔑 FIX: was _auto_conn(rw=True)
         o.row_factory = sqlite3.Row
         try:
             # ensure fast lookup in orders
@@ -1816,24 +1830,50 @@ def reconcile_orders() -> Tuple[int,int]:
     except Exception:
         pass
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 ANCHOR: "# --- After daily rollups and before returning ---"
+# 🧩 ACTION: Fix River reinforcement invocation (symbol + safety)
+# 📆 PATCHED: 2026-02-09 — eliminate intermittent River hook failure
+#
+# RATIONALE:
+# - File already imports v7_on_settlement_event at module scope
+# - Re-importing on_settlement_event causes symbol drift + timing issues
+# - A single bad row must not break settlement reconciliation
+#
+# INVARIANT:
+# - River reinforcement remains best-effort
+# - No effect on LIVE trading
+# - No DB writes added
+# ======================================================================================================
+
     # --- After daily rollups and before returning ---
     try:
-        from engines.mastery.train_mastery_v7 import on_settlement_event
         with connect_db(settlements_db_path()) as s2:
             for r in s2.execute("""
-                    SELECT DISTINCT marketId, selectionId, profit
-                      FROM bf_cleared_orders
-                     WHERE settledDate IS NOT NULL
-                       AND datetime(settledDate) >= datetime('now','-10 minute','utc')
-                       AND profit IS NOT NULL
-                """):
-                mid = str(r["marketId"])
-                sid = str(r["selectionId"])
-                pnl = float(r["profit"] or 0.0)
-                v7_on_settlement_event(mid, sid, pnl)
+                SELECT DISTINCT marketId, selectionId, profit
+                  FROM bf_cleared_orders
+                 WHERE settledDate IS NOT NULL
+                   AND datetime(settledDate) >= datetime('now','-10 minute','utc')
+                   AND profit IS NOT NULL
+            """):
+                try:
+                    mid = str(r["marketId"])
+                    sid = str(r["selectionId"])
+                    pnl = float(r["profit"] or 0.0)
+
+                    # 🔑 Canonical v7 hook (imported once at module scope)
+                    v7_on_settlement_event(mid, sid, pnl)
+
+                except Exception as row_err:
+                    print(
+                        f"[settlements-river] warn: skipped row "
+                        f"mid={r['marketId']} sid={r['selectionId']} err={row_err}"
+                    )
 
     except Exception as e:
         print(f"[settlements-river] warn: failed to run River reinforcement — {e}")
+
 
     return updated, pairs_marked
 # === PATCH END ===
