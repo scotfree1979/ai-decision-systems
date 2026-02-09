@@ -13,7 +13,7 @@ from collections import defaultdict
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.market_monitor.monitor import get_market_state
 from engines.micro_scalper_v7.v7_snapshot_helper import get_v7_inplay_snapshot
-
+from engines.bus_route_startup_ctx import StartupCTXBuilder
 
 
 # --- at module level (top of file) ---
@@ -1751,6 +1751,7 @@ def start_bus_loop():
     BUS._route_snapshot = BusRouteSnapshot()
     BUS._route_snapshot.build_route()
     BUS._route_snapshot.partition_into_bus_stops()
+
 
     BUS._route_ctx_map = BUS._route_snapshot.get_ctx_map()
 

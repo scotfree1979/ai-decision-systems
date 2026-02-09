@@ -313,7 +313,7 @@ def _print_router_full_report(status: dict, live: dict, inv: dict):
     _print_router_live_state(live, inv)
 
 
-def _print_router_report(_ROUTER_STATUS: dict):
+def _print_router_report(status: dict):
     now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
 
     invariant_ok = (
@@ -321,6 +321,7 @@ def _print_router_report(_ROUTER_STATUS: dict):
         status["children_already_present"] +
         status["children_blocked"]
     ) == status["parents_bf_matched"]
+
 
 
     print()

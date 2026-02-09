@@ -2584,6 +2584,10 @@ class DecisionBus:
         if self._route_snapshot is None:
             self._route_snapshot = BusRouteSnapshot()
 
+        if self._startup_ctx_builder is None:
+            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
+
+
         # 🔑 LAZY BUILD: build CTX ONCE, only when empty
         if not self._route_snapshot.ctx_map:
             self._route_snapshot.build_route()
