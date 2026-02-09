@@ -50,6 +50,7 @@ _ROUTER_STATUS = {
     "parents_bf_matched": 0,
     "parents_db_promoted": 0,
     "parents_matched": 0,
+    "parents_settled": 0,
     "children_already_present": 0,
     "children_created": 0,
     "children_blocked": 0,
