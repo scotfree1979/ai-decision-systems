@@ -283,41 +283,75 @@ def compute_exploratory_dynamic_stake(*, ctx: dict, engine="MSC_EXPLORATORY") ->
 # IN-PLAY dynamic stake — momentum & position driven (AUTHORITATIVE)
 # ======================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/math/dynamic_stake_v7.py
+# 🔎 SEARCH: def compute_inplay_dynamic_stake(*, ctx: dict, engine="MSC_INPLAY") -> float:
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-09 — MSC_INPLAY £75 LAY ladder + 3-4-5 BACK protection
+#
+# INVARIANTS:
+# - LAY ladder targets £75 total (front-loaded risk)
+# - BACK ladder caps loss ≈ £12 (3-4-5)
+# - Deterministic PX → stake
+# - No confidence, no envelopes, no BankState logic
+# ======================================================================================================
+
 def compute_inplay_dynamic_stake(*, ctx: dict, engine="MSC_INPLAY") -> float:
     """
-    MSC_INPLAY stake is HARD-CODED and PX-based.
-    No confidence scaling. No envelopes.
+    MSC_INPLAY stake is PX-deterministic.
+
+    LAY ladder (profit engine):
+        7  → 21.43
+        8  → 17.86
+        9  → 14.29
+        10 → 10.71
+        11 → 7.14
+        12 → 3.57
+        TOTAL ≈ £75
+
+    BACK protection (loss control only):
+        5 → £6
+        4 → £4
+        3 → £2
+        TOTAL ≈ £12
     """
 
     px = float(ctx.get("px") or 0.0)
     direction = ctx.get("direction")
 
-    # Defensive default
+    # Defensive fallback
     if px <= 0:
-        return 2.0
+        return MIN_STAKE
 
     # --------------------------------------------------
-    # BACK protection — always £2
+    # BACK protection — 3-4-5 ladder
     # --------------------------------------------------
     if direction == "BACK->LAY":
-        return 2.0
+        if px <= 3.0:
+            return 2.0
+        elif px <= 4.0:
+            return 4.0
+        elif px <= 5.0:
+            return 6.0
+        return MIN_STAKE
 
     # --------------------------------------------------
-    # LAY ladder — PX buckets
+    # LAY ladder — £75 total, descending stake
     # --------------------------------------------------
     if px >= 12.0:
-        return 14.0
+        return 3.57
+    elif px >= 11.0:
+        return 7.14
     elif px >= 10.0:
-        return 9.0
+        return 10.71
     elif px >= 9.0:
-        return 7.0
+        return 14.29
     elif px >= 8.0:
-        return 5.0
+        return 17.86
     elif px >= 7.0:
-        return 3.0
+        return 21.43
 
-    # Below ladder → no bet
-    return 2.0
+    return MIN_STAKE
 
 
 

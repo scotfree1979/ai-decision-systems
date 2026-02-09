@@ -116,6 +116,79 @@ def _ensure_execution_events_schema():
         con.close()
 
 # === PATCH END ==============================================================
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: parent promotion / QUEUED → PLACING logic
+# 🧩 ACTION: Add IN-PLAY sequential promotion gate (MSC_INPLAY only)
+# 📆 PATCHED: 2026-04-XX — In-Play ladder execution semantics
+#
+# CONTRACT:
+# - Applies ONLY to engine == 'MSC_INPLAY'
+# - LAY parents: one-at-a-time, lowest PX first
+# - BACK parents: all eligible immediately
+# - Betfair match surface is the ONLY unlock signal
+# - DB lifecycle + exposure logic unchanged
+# ============================================================================
+
+from tools.betfair_match_surface import query_bet_match_surface
+
+
+def _select_inplay_parents_to_promote(rows, *, app_key, token):
+    """
+    Decide which QUEUED MSC_INPLAY parents may be promoted to PLACING.
+
+    rows: list[sqlite3.Row] — QUEUED parents for ONE (marketId, selectionId)
+    returns: list[sqlite3.Row] — subset allowed to promote
+    """
+
+    if not rows:
+        return []
+
+    # Split by side
+    lays  = [r for r in rows if (r["side"] or "").upper() == "LAY"]
+    backs = [r for r in rows if (r["side"] or "").upper() == "BACK"]
+
+    # BACKS: no sequencing — allow all
+    promotable = list(backs)
+
+    if not lays:
+        return promotable
+
+    # Sort LAY parents by lowest odds first
+    lays_sorted = sorted(lays, key=lambda r: float(r["entry_odds"] or 9999))
+
+    # Check if ANY earlier lay has been matched at Betfair
+    unlocked_index = 0
+
+    for i, r in enumerate(lays_sorted):
+        bet_id = r["entry_bet_id"]
+        if not bet_id:
+            break  # never placed yet → cannot unlock further
+
+        try:
+            surf = query_bet_match_surface(
+                bet_id=str(bet_id),
+                app_key=app_key,
+                token=token,
+            )
+        except Exception:
+            break
+
+        matched = float(surf.get("matched") or 0.0)
+        if matched > 0.0:
+            unlocked_index = i + 1
+            continue
+        break
+
+    # Allow exactly ONE next LAY to promote
+    if unlocked_index < len(lays_sorted):
+        promotable.append(lays_sorted[unlocked_index])
+
+    return promotable
+
+
+# === PATCH END ==============================================================
+
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 ANCHOR: rows = cur.execute(...).fetchall()
@@ -175,6 +248,7 @@ def _collect_router_live_state() -> tuple[dict, dict]:
             WHEN entry_status='MATCHED'
                  AND exit_status IS NULL
                  THEN 'MATCHED'
+            WHEN exit_status='MATCHED'   THEN 'CLOSED'
             WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
             WHEN exit_status IS NOT NULL THEN 'CLOSED'
           END AS bucket,
@@ -199,7 +273,10 @@ def _collect_router_live_state() -> tuple[dict, dict]:
             WHEN entry_status='QUEUED' THEN 'QUEUED'
             WHEN entry_status='PLACING' THEN 'PLACING'
             WHEN entry_status='PLACED' THEN 'PLACED'
-            WHEN entry_status='MATCHED' THEN 'MATCHED'
+            WHEN entry_status='MATCHED'
+                 AND exit_status IS NULL THEN 'MATCHED'
+            WHEN entry_status='MATCHED'
+                 AND exit_status='MATCHED' THEN 'CLOSED'
             WHEN exit_status IS NOT NULL THEN 'CLOSED'
           END AS bucket,
           COUNT(*) AS n
@@ -237,8 +314,17 @@ def _collect_router_live_state() -> tuple[dict, dict]:
           -- COMPLETED = child matched (parent implicitly matched)
           SUM(
             CASE
-              WHEN role = 'CHILD'
+              WHEN role = 'PARENT'
                AND entry_status = 'MATCHED'
+               AND exit_status  = 'MATCHED'
+               AND EXISTS (
+                   SELECT 1
+                     FROM orders c
+                    WHERE c.role = 'CHILD'
+                      AND c.hedge_of = orders.id
+                      AND c.entry_status = 'MATCHED'
+                      AND c.exit_status  = 'MATCHED'
+               )
               THEN 1 ELSE 0
             END
           ) AS completed_trades,
@@ -299,7 +385,7 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     return live, invariants
 
 
-GRACE_MINUTES = 15
+GRACE_MINUTES = 120
 
 def _print_router_full_report(status: dict, live: dict, inv: dict):
     """
@@ -1101,15 +1187,28 @@ def _stamp_parent_exit_sql(
 ):
     """
     Canonical parent exit stamper.
-    MUST be called from inside an existing DB context.
 
-    - Uses caller's cursor
-    - Does NOT open/close connections
-    - Idempotent
-    - Never overwrites SETTLED
+    HARD INVARIANT:
+    - exit_status='MATCHED' is ONLY allowed if a CHILD is MATCHED
     """
 
     status = status.upper()
+
+    # 🔒 BLOCK illegal MATCHED exits
+    if status == "MATCHED":
+        row = _q_retry(cur, """
+            SELECT 1
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_status='MATCHED'
+             LIMIT 1
+        """, (int(parent_id),)).fetchone()
+
+        if not row:
+            # Illegal transition — downgrade to SETTLED instead
+            status = "SETTLED"
+            reason = reason or "no_child_matched_guard"
 
     row = _q_retry(cur, """
         SELECT exit_status
@@ -1131,7 +1230,7 @@ def _stamp_parent_exit_sql(
                closed_at     = COALESCE(closed_at, datetime('now','utc')),
                error         = COALESCE(error, ?)
          WHERE id = ?
-           AND role='PARENT'
+           AND role = 'PARENT'
            AND (exit_status IS NULL OR exit_status <> ?)
     """, (
         status,
@@ -1139,6 +1238,7 @@ def _stamp_parent_exit_sql(
         int(parent_id),
         status,
     ))
+
 
 def _guard_cancel_if_matched(*, parent_cor: str, bet_id: str | None) -> bool:
     """
@@ -6073,6 +6173,48 @@ def place_parent_and_hedge(
     ).fetchone()
 
     con.close()
+
+    # ==================================================
+    # MSC_INPLAY SEQUENTIAL PROMOTION GATE (ROUTER AUTH)
+    # ==================================================
+    if engine == "MSC_INPLAY":
+
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+
+        queued_rows = _q_retry(
+            con,
+            """
+            SELECT *
+              FROM orders
+             WHERE role='PARENT'
+               AND engine='MSC_INPLAY'
+               AND marketId=?
+               AND selectionId=?
+               AND entry_status='QUEUED'
+             ORDER BY opened_at ASC
+            """,
+            (market_id, selection_id)
+        ).fetchall()
+
+        con.close()
+
+        allowed = _select_inplay_parents_to_promote(
+            queued_rows,
+            app_key=app_key,
+            token=token,
+        )
+
+        # 🔒 HARD BLOCK — not this parent's turn yet
+        if row not in allowed:
+            _log_event(
+                "INFO",
+                "live_router",
+                f"[INPLAY GATE] blocked parent_ref={parent_ref} "
+                f"mid={market_id} sid={selection_id}"
+            )
+            return None, parent_ref
+
 
     if not row:
         raise RuntimeError(

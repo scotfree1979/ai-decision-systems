@@ -222,8 +222,8 @@ class CadenceController:
         self.window_seconds   = 60
         self.tick_seconds     = 3
         self.ticks_per_window = 10
-        self.plans_per_window = 700
-        self.plans_per_tick   = 70
+        self.plans_per_window = 1200
+        self.plans_per_tick   = 120
 
         # State
         self.window_start_ts = time.time()
@@ -323,8 +323,8 @@ def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
 # ----------------------------------------------------------------------
 # CONFIG — IN-PLAY TIME WINDOW (SAFE DEFAULTS)
 # ----------------------------------------------------------------------
-INPLAY_PRE_OFF_MINUTES  = None   # None = no pre-off gate (debug mode)
-INPLAY_POST_OFF_MINUTES = None   # None = no post-off gate (debug mode)
+INPLAY_PRE_OFF_MINUTES  = 5   # early race priming
+INPLAY_POST_OFF_MINUTES = 120         # 🔑 2 hours
 
 
 def _is_inplay_time_window(market_id: str) -> bool:

@@ -236,7 +236,7 @@ ENGINE_MAX = {
     "LEGACY": 10.00,
     "MSC_EXPLORATORY": 15.00,
     "MSC_RISK": 20.00,
-    "MSC_INPLAY": 14.00,
+    "MSC_INPLAY": 25.00,
 }
 
 
