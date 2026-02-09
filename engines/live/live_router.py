@@ -308,11 +308,11 @@ def _print_router_full_report(status: dict, live: dict, inv: dict):
       1) Router Reconciliation (Betfair truth)
       2) Router Live State (DB truth)
     """
-    _print_router_report(status)
+    _print_router_report(_ROUTER_STATUS)
     _print_router_live_state(live, inv)
 
 
-def _print_router_report(status: dict):
+def _print_router_report(_ROUTER_STATUS: dict):
     now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
 
     invariant_ok = (
@@ -703,7 +703,7 @@ def _router_enforce_status_authority():
     )
 
     if status_snapshot != _ROUTER_STATUS_LAST:
-        _print_router_report(status)
+        _print_router_report(_ROUTER_STATUS)
         _print_router_live_state(live, inv)
 
         _ROUTER_STATUS_LAST = status_snapshot
