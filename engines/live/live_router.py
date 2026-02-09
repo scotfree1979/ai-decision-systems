@@ -691,26 +691,30 @@ def _router_enforce_status_authority():
     # --------------------------------------------------
     # REPORTING (UNCHANGED, NOW STABLE)
     # --------------------------------------------------
-    global _ROUTER_STATUS_LAST
 
+    # FIX: collect live state BEFORE using it
+    live, inv = _collect_router_live_state()
+
+    global _ROUTER_STATUS_LAST
     snapshot = tuple(_ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys()))
     if snapshot != _ROUTER_STATUS_LAST:
         _print_router_full_report(_ROUTER_STATUS, live, inv)
+        _ROUTER_STATUS_LAST = snapshot
 
-
-    live, inv = _collect_router_live_state()
     global _ROUTER_LIVE_LAST
     snap = (
         tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
         tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
         live["summary"]["open_trades"],
         live["summary"]["completed_trades"],
+        live["summary"]["cancelled_trades"],
         inv["parents_illegal"],
         inv["children_illegal"],
     )
     if snap != _ROUTER_LIVE_LAST:
         _print_router_live_state(live, inv)
         _ROUTER_LIVE_LAST = snap
+
 
 
 def _router_child_worker_loop():
