@@ -299,6 +299,18 @@ def _collect_router_live_state() -> tuple[dict, dict]:
 
 GRACE_MINUTES = 15
 
+def _print_router_full_report(status: dict, live: dict, inv: dict):
+    """
+    Unified router report.
+
+    Order is canonical and must never change:
+      1) Router Reconciliation (Betfair truth)
+      2) Router Live State (DB truth)
+    """
+    _print_router_report(status)
+    _print_router_live_state(live, inv)
+
+
 def _print_router_report(status: dict):
     now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
 
@@ -342,65 +354,77 @@ def _print_router_live_state(live: dict, inv: dict):
 
     # ---------------- Parents ----------------
     print("PARENTS — ENTRY / EXIT STATUS (BY ENGINE)")
-    print("-------------------------------------------------------")
-    print("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CLOSED")
-    print("-------------------------------------------------------")
+    print("---------------------------------------------------------------")
+    print("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
+    print("---------------------------------------------------------------")
 
     total = defaultdict(int)
     for engine in sorted(live["parents"].keys()):
         p = live["parents"][engine]
-        q, plg, pld, m, c = (
+        q, plg, pld, m, x, c = (
             _row(p, "QUEUED"),
             _row(p, "PLACING"),
             _row(p, "PLACED"),
             _row(p, "MATCHED"),
+            _row(p, "CANCELLED"),
             _row(p, "CLOSED"),
         )
-        print(f"{engine:<16} {q:>6} {plg:>8} {pld:>8} {m:>8} {c:>8}")
+        print(f"{engine:<16} {q:>6} {plg:>8} {pld:>8} {m:>8} {x:>10} {c:>8}")
         total["QUEUED"] += q
         total["PLACING"] += plg
         total["PLACED"] += pld
         total["MATCHED"] += m
+        total["CANCELLED"] += x
         total["CLOSED"] += c
 
-    print("-------------------------------------------------------")
-    print(f"{'TOTAL':<16} {total['QUEUED']:>6} {total['PLACING']:>8} {total['PLACED']:>8} {total['MATCHED']:>8} {total['CLOSED']:>8}")
-    print("-------------------------------------------------------")
+    print("---------------------------------------------------------------")
+    print(
+        f"{'TOTAL':<16} "
+        f"{total['QUEUED']:>6} {total['PLACING']:>8} {total['PLACED']:>8} "
+        f"{total['MATCHED']:>8} {total['CANCELLED']:>10} {total['CLOSED']:>8}"
+    )
+    print("---------------------------------------------------------------")
     print()
 
     # ---------------- Children ----------------
     print("CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)")
-    print("-------------------------------------------------------")
-    print("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CLOSED")
-    print("-------------------------------------------------------")
+    print("---------------------------------------------------------------")
+    print("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
+    print("---------------------------------------------------------------")
 
     total = defaultdict(int)
     for engine in sorted(live["children"].keys()):
         c = live["children"][engine]
-        q, plg, pld, m, cl = (
+        q, plg, pld, m, x, cl = (
             _row(c, "QUEUED"),
             _row(c, "PLACING"),
             _row(c, "PLACED"),
             _row(c, "MATCHED"),
+            _row(c, "CANCELLED"),
             _row(c, "CLOSED"),
         )
-        print(f"{engine:<16} {q:>6} {plg:>8} {pld:>8} {m:>8} {cl:>8}")
+        print(f"{engine:<16} {q:>6} {plg:>8} {pld:>8} {m:>8} {x:>10} {cl:>8}")
         total["QUEUED"] += q
         total["PLACING"] += plg
         total["PLACED"] += pld
         total["MATCHED"] += m
+        total["CANCELLED"] += x
         total["CLOSED"] += cl
 
-    print("-------------------------------------------------------")
-    print(f"{'TOTAL':<16} {total['QUEUED']:>6} {total['PLACING']:>8} {total['PLACED']:>8} {total['MATCHED']:>8} {total['CLOSED']:>8}")
-    print("-------------------------------------------------------")
+    print("---------------------------------------------------------------")
+    print(
+        f"{'TOTAL':<16} "
+        f"{total['QUEUED']:>6} {total['PLACING']:>8} {total['PLACED']:>8} "
+        f"{total['MATCHED']:>8} {total['CANCELLED']:>10} {total['CLOSED']:>8}"
+    )
+    print("---------------------------------------------------------------")
     print()
 
-    # ---------------- Trade summary ----------------
     print("TRADE SUMMARY")
     print("-------------------------------------------------------")
     print(f"open_trades        : {live['summary']['open_trades']}")
     print(f"completed_trades   : {live['summary']['completed_trades']}")
+    print(f"cancelled_trades   : {live['summary']['cancelled_trades']}")
     print("-------------------------------------------------------")
     print()
 
@@ -671,8 +695,8 @@ def _router_enforce_status_authority():
 
     snapshot = tuple(_ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys()))
     if snapshot != _ROUTER_STATUS_LAST:
-        _print_router_report(_ROUTER_STATUS)
-        _ROUTER_STATUS_LAST = snapshot
+        _print_router_full_report(_ROUTER_STATUS, live, inv)
+
 
     live, inv = _collect_router_live_state()
     global _ROUTER_LIVE_LAST

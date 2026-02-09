@@ -186,10 +186,10 @@ def maybe_emit_stoploss_plan(
     """
 
     opened_at = parent_row.get("opened_at")
-        if opened_at:
-            opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - opened).total_seconds() < 2.0:
-                return None
+    if opened_at:
+        opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - opened).total_seconds() < 2.0:
+            return None
 
 
     # --- required inputs ---
