@@ -125,9 +125,14 @@ class RiskEngine:
     # ======================================================
     def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
-        px = float(ctx.get("last_px") or 0.0)
+        px = float(ctx.get("px") or 0.0)
+
         if px <= 0:
             return None
+
+
+        # 🔑 NORMALISE last_px
+        ctx["last_px"] = px
 
 # ======================================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
@@ -148,7 +153,7 @@ class RiskEngine:
         if px <= 0:
             return None
 
-        anchor = float(ctx.get("legacy_entry_odds") or 0.0)
+        anchor = float(ctx.get("entry_odds") or 0.0)
         if anchor <= 0:
             return None
 
@@ -163,11 +168,11 @@ class RiskEngine:
         # --------------------------------------------------
         if state["microcycle_dir"] == "DOWN" and px >= anchor:
             state["microcycle_dir"] = None
-            state["used_prices"].clear()
+         
 
         elif state["microcycle_dir"] == "UP" and px <= anchor:
             state["microcycle_dir"] = None
-            state["used_prices"].clear()
+           
 
         # --------------------------------------------------
         # 🟢 ARM NEW MICRO-CYCLE
