@@ -538,6 +538,26 @@ def _print_router_live_state(live: dict, inv: dict):
 
     def _row(d, k): return int(d.get(k, 0))
 
+    live_snapshot = (
+        tuple(
+            sorted(
+                (e, _safe_bucket_items(b))
+                for e, b in live["parents"].items()
+            )
+        ),
+        tuple(
+            sorted(
+                (e, _safe_bucket_items(b))
+                for e, b in live["children"].items()
+            )
+        ),
+        live["summary"]["open_trades"],
+        live["summary"]["completed_trades"],
+        live["summary"]["cancelled_trades"],
+        inv["parents_illegal"],
+        inv["children_illegal"],
+    )
+
     print()
     print("================= V7 ROUTER LIVE STATE =================")
     print(f"t={now}   mode=LIVE   stage=POST-RECONCILE")
@@ -647,6 +667,16 @@ def _print_router_live_state(live: dict, inv: dict):
 
 def enqueue_router_child(plan: dict, ctx: dict):
     _ROUTER_CHILD_QUEUE.put_nowait((plan, ctx))
+
+def _safe_bucket_items(d):
+    # normalize None → 'UNKNOWN' purely for reporting
+    return tuple(
+        sorted(
+            (str(k) if k is not None else "UNKNOWN", int(v))
+            for k, v in d.items()
+        )
+    )
+
 
 # ======================================================================
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB
@@ -902,19 +932,26 @@ def _router_enforce_status_authority():
 
     # Snapshot live DB state separately
     global _ROUTER_LIVE_LAST
+
     live_snapshot = (
-        tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["parents"].items())),
-        tuple(sorted((e, tuple(sorted(b.items()))) for e, b in live["children"].items())),
+        tuple(
+            sorted(
+                (e, _safe_bucket_items(b))
+                for e, b in live["parents"].items()
+            )
+        ),
+        tuple(
+            sorted(
+                (e, _safe_bucket_items(b))
+                for e, b in live["children"].items()
+            )
+        ),
         live["summary"]["open_trades"],
         live["summary"]["completed_trades"],
         live["summary"]["cancelled_trades"],
         inv["parents_illegal"],
         inv["children_illegal"],
     )
-
-    if live_snapshot != _ROUTER_LIVE_LAST:
-        _print_router_live_state(live, inv)
-        _ROUTER_LIVE_LAST = live_snapshot
 
 
 def _router_child_worker_loop():

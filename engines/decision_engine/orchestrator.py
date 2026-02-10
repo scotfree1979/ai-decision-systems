@@ -3758,8 +3758,8 @@ def start_live_loop(*args, **kwargs):
     # 6I) START BUS ROUTE LOOP
     # ------------------------------------------------------------------
 
-    from engines.bus_route import start_bus_loop
-    start_bus_loop()
+    from engines.bus_route import start_bus_route_daemon
+    start_bus_route_daemon()
 
 
     # ------------------------------------------------------------------

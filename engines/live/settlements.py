@@ -12,7 +12,9 @@ if _ROOT not in sys.path:
 settlements.py — Settlement pipeline & DB (separate) for AutoScalp
 # === PATCH START ============================================================
 # Ensure we ALWAYS import the correct v7 reinforcement hook
-from engines.mastery.train_mastery_v7 import on_settlement_event as v7_on_settlement_event
+from engines.mastery.train_mastery_v7 import (
+    on_settlement_event as v7_on_settlement_event
+)
 # === PATCH END ==============================================================
 
 Creates data/settlements.db, ingests:

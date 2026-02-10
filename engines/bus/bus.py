@@ -2584,11 +2584,13 @@ class DecisionBus:
         if self._route_snapshot is None:
             self._route_snapshot = BusRouteSnapshot()
 
-        # 🔑 LAZY BUILD: build CTX ONCE, only when empty
+        # DONT BRING THIS BACK AS HANDLED IN BUS ROUTE
+
+        #🔑 LAZY BUILD: build CTX ONCE, only when empty
         #if not self._route_snapshot.ctx_map:
         #    self._route_snapshot.build_route()
         #    self._route_snapshot.partition_into_bus_stops()
- 
+        #    self._route_ctx_map = self._route_snapshot.get_ctx_map()
         # --------------------------------------------------
         # 🔁 REFRESH DYNAMIC ODDS EVERY TICK (IN PLACE)
         # --------------------------------------------------

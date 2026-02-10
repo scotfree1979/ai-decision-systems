@@ -1522,7 +1522,7 @@ def get_v7_inplay_snapshot(market_id: str):
             "odds": float(r["odds"]) if r["odds"] is not None else None,
 
             # intelligence (TYPE NORMALISED)
-            "fav_rank": int(r["fav_rank"]) if r["fav_rank"] is not None else None,
+            "fav_rank": r["fav_rank"],
             "is_favourite": int(r["fav_rank"]) == 1 if r["fav_rank"] is not None else False,
             "success": float(r["success"]) if r["success"] is not None else None,
             "weight": float(r["weight"]) if r["weight"] is not None else None,
@@ -1539,7 +1539,7 @@ def get_v7_inplay_snapshot(market_id: str):
             "race_quartile": race_quartile,
 
             # in-play position (TYPE NORMALISED)
-            "pos_inplay": int(r["pos_inplay"]) if r["pos_inplay"] is not None else None,
+            "pos_inplay": r["pos_inplay"],
 
             # diagnostics
             "ts_utc": now_utc,
@@ -1721,6 +1721,27 @@ def get_runner_odds_map(
 
     return odds_map
 
+_BUS_ROUTE_THREAD = None
+
+def start_bus_route_daemon():
+    """
+    Launch BusRoute lifecycle loop in its own daemon thread.
+    Must NOT block BUS.
+    """
+    global _BUS_ROUTE_THREAD
+
+    if _BUS_ROUTE_THREAD and _BUS_ROUTE_THREAD.is_alive():
+        return
+
+    t = threading.Thread(
+        target=start_bus_loop,
+        name="BusRouteLoop",
+        daemon=True,
+    )
+    t.start()
+    _BUS_ROUTE_THREAD = t
+
+    print("[BUS_ROUTE] daemon started")
 
 
 # ======================================================================================================
@@ -1752,21 +1773,14 @@ ODDS_REFRESH_SECONDS  = 30
 def start_bus_loop():
     """
     Authoritative BusRoute lifecycle loop.
-
-    Responsibilities:
-    - Maintain expanding runner universe
-    - Build successive routes (route 1, 2, 3, ...)
-    - Refresh PX periodically
-    - Stay ahead of BUS consumption
-
-    BUS does NOT control this loop.
     """
 
     from engines.bus.bus import BUS
     from engines.bus_route import BusRouteSnapshot
+    from engines.bus_route_startup_ctx import StartupCTXBuilder
 
     # --------------------------------------------------
-    # INITIALISE SNAPSHOT
+    # INITIALISE SNAPSHOT (BOOTSTRAP)
     # --------------------------------------------------
     snap = BusRouteSnapshot()
     snap.build_route()
@@ -1781,6 +1795,11 @@ def start_bus_loop():
         f"runners={len(snap.ctx_map)}"
     )
 
+    # --------------------------------------------------
+    # INITIALISE DAY-LONG CTX BUILDER (MISSING PIECE)
+    # --------------------------------------------------
+    startup = StartupCTXBuilder(snap)
+
     last_odds_refresh = time.time()
     last_seen_route   = snap.route_id
 
@@ -1792,12 +1811,16 @@ def start_bus_loop():
             now = time.time()
 
             # ----------------------------------------------
-            # 1️⃣ PERIODIC ODDS REFRESH (TIME-BASED)
+            # 0️⃣ INCREMENTAL CTX BUILD (DAY-LONG)
+            # ----------------------------------------------
+            startup.step(max_builds=20)
+
+            # ----------------------------------------------
+            # 1️⃣ PERIODIC ODDS REFRESH
             # ----------------------------------------------
             if now - last_odds_refresh >= ODDS_REFRESH_SECONDS:
                 dt = snap.refresh_ctx_dynamic_fields()
                 BUS._route_ctx_map = snap.get_ctx_map()
-
                 last_odds_refresh = now
 
                 print(
@@ -1811,19 +1834,16 @@ def start_bus_loop():
             # 2️⃣ ROUTE ADVANCE (BUS-STOP-DRIVEN)
             # ----------------------------------------------
             bus_stop = getattr(BUS, "_bus_stop", None)
-
             if bus_stop is None:
                 time.sleep(0.5)
                 continue
 
-            # Trigger next route BEFORE BUS reaches it
             if bus_stop >= ROUTE_REBUILD_BUS_STOP:
                 if snap.route_id == last_seen_route:
                     snap.build_route()
                     snap.partition_into_bus_stops()
 
                     BUS._route_ctx_map = snap.get_ctx_map()
-
                     last_seen_route = snap.route_id
 
                     print(
@@ -1836,7 +1856,6 @@ def start_bus_loop():
             time.sleep(0.5)
 
         except Exception as e:
-            # HARD RULE: BusRoute must NEVER die
             print(f"[BUS_ROUTE][ERR] {e}")
             time.sleep(1.0)
 
