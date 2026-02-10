@@ -245,12 +245,24 @@ def _collect_router_live_state() -> tuple[dict, dict]:
             WHEN entry_status='QUEUED' THEN 'QUEUED'
             WHEN entry_status='PLACING' THEN 'PLACING'
             WHEN entry_status='PLACED' THEN 'PLACED'
-            WHEN entry_status='MATCHED'
-                 AND exit_status IS NULL
-                 THEN 'MATCHED'
-            WHEN exit_status='MATCHED'   THEN 'CLOSED'
+
+              -- ✅ COMPLETED = parent matched AND child matched
+              WHEN entry_status = 'MATCHED'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM orders c
+                       WHERE c.role = 'CHILD'
+                         AND c.hedge_of = orders.id
+                         AND c.entry_status = 'MATCHED'
+                   )
+                   THEN 'CLOSED'
+
+              -- ✅ MATCHED BUT NOT COMPLETED
+              WHEN entry_status = 'MATCHED'
+                   THEN 'MATCHED'
+
             WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
-            WHEN exit_status IS NOT NULL THEN 'CLOSED'
+   
           END AS bucket,
           COUNT(*) AS n
         FROM orders

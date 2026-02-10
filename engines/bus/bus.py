@@ -555,7 +555,7 @@ class DecisionBus:
         self._optional_intel_cache = {}
         # 🔑 REQUIRED — MSC_INPLAY prewarm tracking
         self._inplay_ctx_prewarmed = set()  
-
+    
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -2584,14 +2584,10 @@ class DecisionBus:
         if self._route_snapshot is None:
             self._route_snapshot = BusRouteSnapshot()
 
-        if self._startup_ctx_builder is None:
-            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
-
-
         # 🔑 LAZY BUILD: build CTX ONCE, only when empty
-        if not self._route_snapshot.ctx_map:
-            self._route_snapshot.build_route()
-            self._route_snapshot.partition_into_bus_stops()
+        #if not self._route_snapshot.ctx_map:
+        #    self._route_snapshot.build_route()
+        #    self._route_snapshot.partition_into_bus_stops()
  
         # --------------------------------------------------
         # 🔁 REFRESH DYNAMIC ODDS EVERY TICK (IN PLACE)
