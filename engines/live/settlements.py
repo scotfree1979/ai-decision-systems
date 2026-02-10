@@ -1088,8 +1088,8 @@ def rebuild_runner_day_totals(day_utc: Optional[str] = None) -> int:
           SELECT marketId, selectionId,
                  SUM(CASE WHEN UPPER(entry_status)='PLACED' THEN 1 ELSE 0 END) as p_placed,
                  SUM(CASE WHEN UPPER(entry_status)='MATCHED' THEN 1 ELSE 0 END) as p_matched,
-                 SUM(CASE WHEN UPPER(entry_status)='CANCELLED' THEN 1 ELSE 0 END) as p_cancelled,
-                 SUM(CASE WHEN UPPER(entry_status)='FAILED' THEN 1 ELSE 0 END) as p_failed,
+                 SUM(CASE WHEN UPPER(exit_status)='CANCELLED' THEN 1 ELSE 0 END) as p_cancelled,
+                 SUM(CASE WHEN UPPER(exit_status)='FAILED' THEN 1 ELSE 0 END) as p_failed,
                  SUM(CASE WHEN UPPER(exit_status)='MATCHED' THEN 1 ELSE 0 END) as p_exits,
                  SUM(COALESCE(net_pl,0.0)) as net
           FROM orders

@@ -89,6 +89,100 @@ def _bf_is_matched(surf: dict) -> bool:
 
     return False
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: any UPDATE orders SET entry_status='CANCELLED' WHERE role='CHILD'
+# 🧩 ACTION: ADD guard — forbid illegal child cancellation
+# 📆 PATCHED: 2026-04-XX — Child cancellation invariant enforcement
+#
+# HARD INVARIANT:
+# - A CHILD may ONLY be cancelled if:
+#     (1) Another CHILD for the same parent is MATCHED, OR
+#     (2) The market is FINISHED (past GRACE_MINUTES)
+#
+# - Parent exit_status / parent_closed / completion state ALONE
+#   is NEVER a valid reason to cancel a child.
+# ======================================================================================================
+
+def _child_cancellation_allowed(*, child_id: int) -> bool:
+    """
+    Authoritative guard for CHILD cancellation.
+
+    Returns True ONLY if:
+      1) A sibling CHILD is MATCHED, OR
+      2) Market is finished (past GRACE_MINUTES)
+    """
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        # Load child + parent linkage
+        row = _q_retry(cur, """
+            SELECT
+                c.id          AS child_id,
+                c.hedge_of    AS parent_id,
+                p.marketId    AS marketId
+            FROM orders c
+            JOIN orders p ON p.id = c.hedge_of
+            WHERE c.id = ?
+              AND c.role = 'CHILD'
+            LIMIT 1
+        """, (int(child_id),)).fetchone()
+
+        if not row:
+            return False
+
+        parent_id = int(row["parent_id"])
+        market_id = str(row["marketId"])
+
+        # --------------------------------------------------
+        # 1️⃣ SIBLING MATCHED?
+        # --------------------------------------------------
+        sib = _q_retry(cur, """
+            SELECT 1
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_status='MATCHED'
+               AND id <> ?
+             LIMIT 1
+        """, (parent_id, int(child_id))).fetchone()
+
+        if sib:
+            return True
+
+        # --------------------------------------------------
+        # 2️⃣ MARKET FINISHED?
+        # --------------------------------------------------
+        try:
+            bdb = connect_db(ro=True)
+            bdb.row_factory = sqlite3.Row
+            r = _q_retry(bdb, """
+                SELECT
+                  CAST((julianday('now','utc') - julianday(marketStartTime))*1440 AS INTEGER)
+                  AS mins_after
+                FROM bets
+                WHERE marketId=?
+                LIMIT 1
+            """, (market_id,)).fetchone()
+            bdb.close()
+
+            if r and r["mins_after"] is not None:
+                if int(r["mins_after"]) >= GRACE_MINUTES:
+                    return True
+        except Exception:
+            pass
+
+        # ❌ Otherwise forbidden
+        return False
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -397,7 +491,7 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     return live, invariants
 
 
-GRACE_MINUTES = 120
+GRACE_MINUTES = 4
 
 def _print_router_full_report(status: dict, live: dict, inv: dict):
     """
@@ -680,6 +774,7 @@ def _router_enforce_status_authority():
                  WHERE role='CHILD'
                    AND hedge_of=?
                    AND entry_status='MATCHED'
+                   AND exit_status='MATCHED'
                  LIMIT 1
             """, (parent_id,)).fetchone()
 
@@ -1012,21 +1107,28 @@ def _router_child_worker_loop():
                                     "live_router",
                                     f"[STOPLOSS TIMEOUT] cancelling child_id={child_id}"
                                 )
+                                if _child_cancellation_allowed(child_id=child_id):
+                                    _q_retry(
+                                        _orders_conn(),
+                                        """
 
-                                _q_retry(
-                                    _orders_conn(),
-                                    """
-                                    UPDATE orders
-                                       SET entry_status='CANCELLED',
-                                           exit_kind='STOPLOSS_TIMEOUT',
-                                           closed_at=datetime('now','utc')
-                                     WHERE id=?
-                                    """,
-                                    (int(child_id),)
-                                )
+                                        UPDATE orders
+                                           SET exit_status='CANCELLED',
+                                               exit_kind='STOPLOSS_TIMEOUT',
+                                               closed_at=datetime('now','utc')
+                                         WHERE id=?
+                                        """,
+                                        (int(child_id),)
+                                    )
 
                                 # Allow BUS / Overwatcher to re-emit next tick
-                                continue
+                                else:
+                                    # NO-OP — illegal cancellation
+                                    _log_event(
+                                        "WARN",
+                                        "live_router",
+                                        f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+                                    )
 
                     except Exception:
                         # MUST NEVER block router loop
@@ -1077,18 +1179,36 @@ def _router_child_worker_loop():
 
                         if row and (row["exit_kind"] or "").upper() == "STOPLOSS":
                             if (row["entry_status"] or "").upper() == "MATCHED":
-                                _q_retry(cur, """
-                                    UPDATE orders
-                                       SET entry_status='CANCELLED',
-                                           exit_kind='CANCELLED_BY_STOPLOSS',
-                                           closed_at=datetime('now','utc')
-                                     WHERE role='CHILD'
-                                       AND hedge_of = ?
-                                       AND id <> ?
-                                       AND entry_status IN ('QUEUED','PLACING','PLACED')
-                                """, (int(row["hedge_of"]), int(child_id)))
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: CANCELLED_BY_STOPLOSS sibling update
+# 🧩 ACTION: Enforce child cancellation invariant
+# 📆 PATCHED: 2026-04-XX — stoploss sibling cancel guard
+# ============================================================================
 
-                                con.commit()
+                        if _child_cancellation_allowed(child_id=child_id):
+
+                            _q_retry(cur, """
+                                UPDATE orders
+                                   SET exit_status='CANCELLED',
+                                       exit_kind='CANCELLED_BY_STOPLOSS',
+                                       closed_at=datetime('now','utc')
+                                 WHERE role='CHILD'
+                                   AND hedge_of = ?
+                                   AND id <> ?
+                                   AND entry_status IN ('QUEUED','PLACING','PLACED')
+                            """, (int(row["hedge_of"]), int(child_id)))
+
+                        else:
+                            _log_event(
+                                "WARN",
+                                "live_router",
+                                f"[CANCEL BLOCKED] illegal stoploss sibling cancel id={child_id}"
+                            )
+
+# === PATCH END ==============================================================
+
+                            con.commit()
 
                     except Exception as e:
                         _log_event(
@@ -1214,6 +1334,7 @@ def _stamp_parent_exit_sql(
              WHERE role='CHILD'
                AND hedge_of=?
                AND entry_status='MATCHED'
+               AND exit_status='MATCHED'
              LIMIT 1
         """, (int(parent_id),)).fetchone()
 
@@ -2772,7 +2893,7 @@ def _cancel(app_key: str, token: str, bet_id: str) -> None:
 
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='CANCELLED'
+               SET exit_status='CANCELLED'
              WHERE id=?
         """, (parent_id,))
 
@@ -3808,31 +3929,60 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                              WHERE id=?
                         """, (avg_odds, matched_size, child_id))
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: ROUTER INVARIANT: If ONE child matches, CANCEL ALL sibling children
+# 🧩 ACTION: Fix cancellation guard — enforce child cancellation invariant
+# 📆 PATCHED: 2026-04-XX — Prevent illegal child cancellation
+# ======================================================================================================
+
                         # --------------------------------------------------
                         # ROUTER INVARIANT:
                         # If ONE child matches, CANCEL ALL sibling children
+                        # ONLY if cancellation is legally allowed
                         # --------------------------------------------------
-                        _q_retry(cur, """
-                            UPDATE orders
-                               SET entry_status='CANCELLED',
-                                   exit_kind='CANCELLED_BY_SIBLING_MATCH',
-                                   closed_at=datetime('now','utc')
-                             WHERE role='CHILD'
-                               AND hedge_of = (
-                                   SELECT hedge_of FROM orders WHERE id = ?
-                               )
-                               AND id <> ?
-                               AND entry_status IN ('QUEUED','PLACING','PLACED')
-                        """, (child_id, child_id))
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: UPDATE orders SET entry_status='CANCELLED' WHERE role='CHILD'
+# 🧩 ACTION: Replace entry_status mutation with guarded exit_status cancel
+# 📆 PATCHED: 2026-04-XX — child cancellation invariant (final)
+# ============================================================================
+
+                        if _child_cancellation_allowed(child_id=child_id):
+
+                            _q_retry(cur, """
+                                UPDATE orders
+                                   SET exit_status='CANCELLED',
+                                       exit_kind='CANCELLED_BY_SIBLING_MATCH',
+                                       closed_at=datetime('now','utc')
+                                 WHERE role='CHILD'
+                                   AND hedge_of = (
+                                       SELECT hedge_of FROM orders WHERE id = ?
+                                   )
+                                   AND id <> ?
+                                   AND entry_status IN ('QUEUED','PLACING','PLACED')
+                            """, (child_id, child_id))
+
+                        else:
+                            _log_event(
+                                "WARN",
+                                "live_router",
+                                f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+                            )
+
+# === PATCH END ==============================================================
 
 
-
+                        # --------------------------------------------------
+                        # Parent lifecycle finalisation (SAFE AFTER CHILD)
+                        # --------------------------------------------------
                         _q_retry(cur, """
                             UPDATE orders
                                SET exposure_released = 1,
                                    parent_closed = 1
                              WHERE customerOrderRef = ?
                         """, (parent_ref,))
+
 
                 # --------------------------------------------------
                 # 2️⃣ SAFETY PATH — MARKET FINISHED
@@ -5075,8 +5225,8 @@ def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> Non
 
         _q_retry(cur, """
             UPDATE orders
-               SET entry_status='CANCELLED',
-                   exit_status='CANCELLED',
+               SET exit_status='CANCELLED',
+             
                    closed_at=COALESCE(closed_at, ?),
                    error=COALESCE(error, ?),
                    mode='LIVE'
@@ -5445,21 +5595,43 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
                    AND COALESCE(exposure_released,0)=0
             """, (mid,)).fetchall()
 
-            for r in rows:
-                cor = r["customerOrderRef"]
-                bet_id = r["entry_bet_id"]
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: for mid in sweep_mids:
+# 🧩 ACTION: Guard parent cancellation with Betfair + lifecycle invariant
+# 📆 PATCHED: 2026-04-XX — orphan parent cancellation safety (indent fix)
+# ============================================================================
 
-                # Betfair truth guard
+            for r in rows:
+                cor = str(r["customerOrderRef"])
+
+                row2 = _q_retry(cur, """
+                    SELECT entry_bet_id
+                      FROM orders
+                     WHERE id=?
+                       AND role='PARENT'
+                """, (int(r["id"]),)).fetchone()
+
+                bet_id = row2["entry_bet_id"] if row2 else None
+
+                # 🔒 GUARD: never cancel if already matched at Betfair
                 if not _guard_cancel_if_matched(parent_cor=cor, bet_id=bet_id):
                     continue
 
-                # Canonical cancel
                 _stamp_parent_exit_sql(
                     cur,
                     parent_id=int(r["id"]),
                     status="CANCELLED",
-                    reason="market_sweep",
+                    reason="cleanup_orphan",
                 )
+
+                _log_event(
+                    "WARN",
+                    "live_router",
+                    f"[CLEANUP] orphan parent cancelled ref={cor}"
+                )
+
+# === PATCH END ==============================================================
 
         # B) SETTLE matched parents
         rows = cur.execute(f"""
@@ -6382,15 +6554,17 @@ def place_parent_and_hedge(
                         _q_retry(
                             con,
                             """
+                            
                             UPDATE orders
-                               SET entry_status='CANCELLED',
-                                   exit_status='CANCELLED',
+                               SET exit_status='CANCELLED',
+                   
                                    closed_at=COALESCE(closed_at, datetime('now','utc'))
                              WHERE customerOrderRef=?
                                AND COALESCE(entry_status,'')<>'MATCHED'
                             """,
                             (parent_ref,)
                         )
+
                         con.commit()
                         con.close()
                     except Exception:
@@ -6688,8 +6862,8 @@ def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -
                 # 2️⃣ Mark CANCELLED in DB
                 _q_retry(cur, """
                     UPDATE orders
-                       SET entry_status='CANCELLED',
-                           exit_status='CANCELLED',
+                       SET exit_status='CANCELLED',
+                   
                            closed_at=datetime('now','utc'),
                            error='recycle_timeout'
                      WHERE id=?
@@ -6922,16 +7096,24 @@ def cleanup_orphan_parents() -> int:
         cur = con.cursor()
         for r in rows:
             _q_retry(cur, """
+                
                 UPDATE orders
-                   SET entry_status='CANCELLED',
-                       exit_status='CANCELLED',
+                   SET exit_status='CANCELLED',
+     
                        closed_at=COALESCE(closed_at, datetime('now','utc')),
                        error=COALESCE(error, 'cleanup_orphan'),
                        mode='LIVE'
                  WHERE id=?
             """, (r["id"],))
-            _log_event("WARN", "live_router",
-                       f"[CLEANUP] orphan parent cancelled ref={r['customerOrderRef']}")
+            else:
+                # NO-OP — illegal cancellation
+                _log_event(
+                    "WARN",
+                    "live_router",
+                    f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+                )
+                _log_event("WARN", "live_router",
+                           f"[CLEANUP] orphan parent cancelled ref={r['customerOrderRef']}")
         con.commit(); con.close()
         return len(rows)
     except Exception as e:
