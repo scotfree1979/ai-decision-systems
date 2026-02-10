@@ -1749,7 +1749,7 @@ ROUTE_REBUILD_BUS_STOP = 9
 ODDS_REFRESH_SECONDS  = 30
 
 
-def start_bus_route_loop():
+def start_bus_loop():
     """
     Authoritative BusRoute lifecycle loop.
 
