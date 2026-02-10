@@ -1190,6 +1190,37 @@ def _router_child_worker_loop():
                 _ran_phase1 = False
 
                 # --------------------------------------------------
+                # PROMOTE CHILD → MATCHED (EXCHANGE TRUTH)
+                # --------------------------------------------------
+                if ok:
+                    try:
+                        row = _q_retry(
+                            _orders_conn(),
+                            """
+                            SELECT entry_bet_id
+                              FROM orders
+                             WHERE id=?
+                               AND role='CHILD'
+                               AND entry_status='PLACED'
+                             LIMIT 1
+                            """,
+                            (int(child_id),)
+                        ).fetchone()
+
+                        if row and row["entry_bet_id"]:
+                            if get_bet_status(str(row["entry_bet_id"])) == "EXECUTION_COMPLETE":
+                                _orders_update_child_matched(
+                                    cor=plan.get("parent_cor"),
+                                    hedge_ref=None,
+                                    exit_side=plan.get("side"),
+                                    exit_odds=plan.get("px"),
+                                    exit_stake=plan.get("size"),
+                                )
+                    except Exception:
+                        pass
+                
+
+                # --------------------------------------------------
                 # STOPLOSS MATCHED ⇒ CANCEL ALL SIBLING CHILDREN
                 # --------------------------------------------------
                 if child_id:

@@ -1721,28 +1721,6 @@ def get_runner_odds_map(
 
     return odds_map
 
-_BUS_ROUTE_THREAD = None
-
-def start_bus_route_daemon():
-    """
-    Launch BusRoute lifecycle loop in its own daemon thread.
-    Must NOT block BUS.
-    """
-    global _BUS_ROUTE_THREAD
-
-    if _BUS_ROUTE_THREAD and _BUS_ROUTE_THREAD.is_alive():
-        return
-
-    t = threading.Thread(
-        target=start_bus_loop,
-        name="BusRouteLoop",
-        daemon=True,
-    )
-    t.start()
-    _BUS_ROUTE_THREAD = t
-
-    print("[BUS_ROUTE] daemon started")
-
 
 # ======================================================================================================
 # 📍 TARGET: engines/api_tools.py
@@ -1770,18 +1748,15 @@ ROUTE_REBUILD_BUS_STOP = 9
 ODDS_REFRESH_SECONDS  = 30
 
 
-def start_bus_loop():
-    """
-    Authoritative BusRoute lifecycle loop.
-    """
+# =========================
+# BUS ROUTE LOOP (ONE ONLY)
+# =========================
 
+def start_bus_loop():
     from engines.bus.bus import BUS
     from engines.bus_route import BusRouteSnapshot
     from engines.bus_route_startup_ctx import StartupCTXBuilder
 
-    # --------------------------------------------------
-    # INITIALISE SNAPSHOT (BOOTSTRAP)
-    # --------------------------------------------------
     snap = BusRouteSnapshot()
     snap.build_route()
     snap.partition_into_bus_stops()
@@ -1795,69 +1770,61 @@ def start_bus_loop():
         f"runners={len(snap.ctx_map)}"
     )
 
-    # --------------------------------------------------
-    # INITIALISE DAY-LONG CTX BUILDER (MISSING PIECE)
-    # --------------------------------------------------
+    # 🔑 DAY-LONG CTX BUILDER (THIS WAS NEVER RUNNING)
     startup = StartupCTXBuilder(snap)
 
     last_odds_refresh = time.time()
     last_seen_route   = snap.route_id
 
-    # --------------------------------------------------
-    # MAIN LOOP
-    # --------------------------------------------------
     while True:
         try:
-            now = time.time()
-
-            # ----------------------------------------------
-            # 0️⃣ INCREMENTAL CTX BUILD (DAY-LONG)
-            # ----------------------------------------------
+            # 0️⃣ incremental CTX build
             startup.step(max_builds=20)
 
-            # ----------------------------------------------
-            # 1️⃣ PERIODIC ODDS REFRESH
-            # ----------------------------------------------
+            now = time.time()
+
+            # 1️⃣ odds refresh
             if now - last_odds_refresh >= ODDS_REFRESH_SECONDS:
-                dt = snap.refresh_ctx_dynamic_fields()
+                snap.refresh_ctx_dynamic_fields()
                 BUS._route_ctx_map = snap.get_ctx_map()
                 last_odds_refresh = now
 
-                print(
-                    f"[BUS_ROUTE][ODDS] "
-                    f"route={snap.route_id} "
-                    f"runners={len(snap.ctx_map)} "
-                    f"dt={dt:.3f}s"
-                )
-
-            # ----------------------------------------------
-            # 2️⃣ ROUTE ADVANCE (BUS-STOP-DRIVEN)
-            # ----------------------------------------------
+            # 2️⃣ route advance
             bus_stop = getattr(BUS, "_bus_stop", None)
-            if bus_stop is None:
-                time.sleep(0.5)
-                continue
-
-            if bus_stop >= ROUTE_REBUILD_BUS_STOP:
+            if bus_stop is not None and bus_stop >= ROUTE_REBUILD_BUS_STOP:
                 if snap.route_id == last_seen_route:
                     snap.build_route()
                     snap.partition_into_bus_stops()
-
                     BUS._route_ctx_map = snap.get_ctx_map()
                     last_seen_route = snap.route_id
-
-                    print(
-                        f"[BUS_ROUTE][ADVANCE] "
-                        f"new_route={snap.route_id} "
-                        f"runners={len(snap.ctx_map)} "
-                        f"time={datetime.now(timezone.utc).isoformat()}"
-                    )
 
             time.sleep(0.5)
 
         except Exception as e:
             print(f"[BUS_ROUTE][ERR] {e}")
             time.sleep(1.0)
+
+_BUS_ROUTE_THREAD = None
+
+def start_bus_route_daemon():
+    """
+    Launch BusRoute lifecycle loop in its own daemon thread.
+    Must NOT block BUS.
+    """
+    global _BUS_ROUTE_THREAD
+
+    if _BUS_ROUTE_THREAD and _BUS_ROUTE_THREAD.is_alive():
+        return
+
+    t = threading.Thread(
+        target=start_bus_loop,
+        name="BusRouteLoop",
+        daemon=True,
+    )
+    t.start()
+    _BUS_ROUTE_THREAD = t
+
+    print("[BUS_ROUTE] daemon started")
 
 # -----------------------------
 # ✅ STANDALONE TEST TOOL (SCRAPER)

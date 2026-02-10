@@ -2578,11 +2578,10 @@ class DecisionBus:
         # 4️⃣ ROUTE SNAPSHOT — LAZY BUILD + PER-TICK REFRESH
         # ===============================================================
 
-        from engines.bus_route import BusRouteSnapshot
-
-        # Ensure snapshot object exists
         if self._route_snapshot is None:
-            self._route_snapshot = BusRouteSnapshot()
+            raise RuntimeError(
+                "[BUS INVARIANT] route_snapshot missing — start_bus_loop not running"
+            )
 
         # DONT BRING THIS BACK AS HANDLED IN BUS ROUTE
 
