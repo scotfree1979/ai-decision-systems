@@ -1122,13 +1122,13 @@ def _router_child_worker_loop():
                                     )
 
                                 # Allow BUS / Overwatcher to re-emit next tick
-                                else:
-                                    # NO-OP — illegal cancellation
-                                    _log_event(
-                                        "WARN",
-                                        "live_router",
-                                        f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
-                                    )
+                                
+                                # NO-OP — illegal cancellation
+                                _log_event(
+                                    "WARN",
+                                    "live_router",
+                                    f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+                                )
 
                     except Exception:
                         # MUST NEVER block router loop
@@ -1152,10 +1152,6 @@ def _router_child_worker_loop():
                     # - Recovery is handled by rescue + rehedge loops
                     continue
 
-
-# === PATCH END ==============================================================
-
-
             except queue.Empty:
                 _ran_phase1 = False
 
@@ -1163,8 +1159,6 @@ def _router_child_worker_loop():
                 # STOPLOSS MATCHED ⇒ CANCEL ALL SIBLING CHILDREN
                 # --------------------------------------------------
                 if child_id:
-
-
                     try:
                         con = _orders_conn()
                         con.row_factory = sqlite3.Row
@@ -1177,38 +1171,29 @@ def _router_child_worker_loop():
                                AND role = 'CHILD'
                         """, (int(child_id),)).fetchone()
 
-                        if row and (row["exit_kind"] or "").upper() == "STOPLOSS":
-                            if (row["entry_status"] or "").upper() == "MATCHED":
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: CANCELLED_BY_STOPLOSS sibling update
-# 🧩 ACTION: Enforce child cancellation invariant
-# 📆 PATCHED: 2026-04-XX — stoploss sibling cancel guard
-# ============================================================================
-
-                        if _child_cancellation_allowed(child_id=child_id):
-
-                            _q_retry(cur, """
-                                UPDATE orders
-                                   SET exit_status='CANCELLED',
-                                       exit_kind='CANCELLED_BY_STOPLOSS',
-                                       closed_at=datetime('now','utc')
-                                 WHERE role='CHILD'
-                                   AND hedge_of = ?
-                                   AND id <> ?
-                                   AND entry_status IN ('QUEUED','PLACING','PLACED')
-                            """, (int(row["hedge_of"]), int(child_id)))
-
-                        else:
+                        if (
+                            row
+                            and (row["exit_kind"] or "").upper() == "STOPLOSS"
+                            and (row["entry_status"] or "").upper() == "MATCHED"
+                        ):
+                            if _child_cancellation_allowed(child_id=child_id):
+                                _q_retry(cur, """
+                                    UPDATE orders
+                                       SET exit_status='CANCELLED',
+                                           exit_kind='CANCELLED_BY_STOPLOSS',
+                                           closed_at=datetime('now','utc')
+                                     WHERE role='CHILD'
+                                       AND hedge_of = ?
+                                       AND id <> ?
+                                       AND entry_status IN ('QUEUED','PLACING','PLACED')
+                                """, (int(row["hedge_of"]), int(child_id)))
+                                con.commit()
+                            # optional diagnostic only — no else
                             _log_event(
                                 "WARN",
                                 "live_router",
                                 f"[CANCEL BLOCKED] illegal stoploss sibling cancel id={child_id}"
                             )
-
-# === PATCH END ==============================================================
-
-                            con.commit()
 
                     except Exception as e:
                         _log_event(
@@ -1222,13 +1207,11 @@ def _router_child_worker_loop():
                         except Exception:
                             pass
 
-
-
-            from engines.market_monitor.phase_clock import MarketPhaseClock
-
             # ==================================================
             # PHASE 2 — RESCUE HEDGING (DB + PHASE CLOCK)
             # ==================================================
+            from engines.market_monitor.phase_clock import MarketPhaseClock
+
             con = _orders_conn()
             con.row_factory = sqlite3.Row
             cur = con.cursor()
@@ -3963,12 +3946,12 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                                    AND entry_status IN ('QUEUED','PLACING','PLACED')
                             """, (child_id, child_id))
 
-                        else:
-                            _log_event(
-                                "WARN",
-                                "live_router",
-                                f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
-                            )
+                        
+                        _log_event(
+                            "WARN",
+                            "live_router",
+                            f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+                        )
 
 # === PATCH END ==============================================================
 
@@ -7105,15 +7088,15 @@ def cleanup_orphan_parents() -> int:
                        mode='LIVE'
                  WHERE id=?
             """, (r["id"],))
-            else:
-                # NO-OP — illegal cancellation
-                _log_event(
-                    "WARN",
-                    "live_router",
-                    f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
-                )
-                _log_event("WARN", "live_router",
-                           f"[CLEANUP] orphan parent cancelled ref={r['customerOrderRef']}")
+            
+            # NO-OP — illegal cancellation
+            _log_event(
+                "WARN",
+                "live_router",
+                f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+            )
+            _log_event("WARN", "live_router",
+                       f"[CLEANUP] orphan parent cancelled ref={r['customerOrderRef']}")
         con.commit(); con.close()
         return len(rows)
     except Exception as e:
