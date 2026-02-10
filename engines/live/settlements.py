@@ -1085,15 +1085,63 @@ def rebuild_runner_day_totals(day_utc: Optional[str] = None) -> int:
             return 0
 
         parents = a.execute(f"""
-          SELECT marketId, selectionId,
-                 SUM(CASE WHEN UPPER(entry_status)='PLACED' THEN 1 ELSE 0 END) as p_placed,
-                 SUM(CASE WHEN UPPER(entry_status)='MATCHED' THEN 1 ELSE 0 END) as p_matched,
-                 SUM(CASE WHEN UPPER(exit_status)='CANCELLED' THEN 1 ELSE 0 END) as p_cancelled,
-                 SUM(CASE WHEN UPPER(exit_status)='FAILED' THEN 1 ELSE 0 END) as p_failed,
-                 SUM(CASE WHEN UPPER(exit_status)='MATCHED' THEN 1 ELSE 0 END) as p_exits,
-                 SUM(COALESCE(net_pl,0.0)) as net
+          SELECT
+              marketId,
+              selectionId,
+
+              -- Parents placed
+              SUM(
+                  CASE
+                      WHEN UPPER(entry_status) = 'PLACED'
+                      THEN 1 ELSE 0
+                  END
+              ) AS p_placed,
+
+              -- Parents matched (entry matched, regardless of completion)
+              SUM(
+                  CASE
+                      WHEN UPPER(entry_status) = 'MATCHED'
+                      THEN 1 ELSE 0
+                  END
+              ) AS p_matched,
+
+              -- Parents cancelled
+              SUM(
+                  CASE
+                      WHEN UPPER(exit_status) = 'CANCELLED'
+                      THEN 1 ELSE 0
+                  END
+              ) AS p_cancelled,
+
+              -- Parents failed
+              SUM(
+                  CASE
+                      WHEN UPPER(exit_status) = 'FAILED'
+                      THEN 1 ELSE 0
+                  END
+              ) AS p_failed,
+
+              -- ✅ Parents exited (BACKWARD + FORWARD COMPATIBLE)
+              SUM(
+                  CASE
+                      -- New world: explicit exit
+                      WHEN UPPER(exit_status) = 'MATCHED'
+                      THEN 1
+
+                      -- Legacy world: implicit exit via realized P&L
+                      WHEN UPPER(entry_status) = 'MATCHED'
+                           AND net_pl IS NOT NULL
+                      THEN 1
+
+                      ELSE 0
+                  END
+              ) AS p_exits,
+
+              -- Net P&L
+              SUM(COALESCE(net_pl, 0.0)) AS net
+
           FROM orders
-          WHERE ({link} IS NULL OR {link}='')
+          WHERE ({link} IS NULL OR {link} = '')
             AND date(COALESCE(opened_at, datetime('now'))) = date(?)
           GROUP BY marketId, selectionId
         """, (day_local,)).fetchall()

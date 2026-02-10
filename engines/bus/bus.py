@@ -2868,6 +2868,7 @@ class DecisionBus:
 
             for eng, plan, ctx in plans:
 
+
                 # ------------------------------------------------------------------
                 # 🔒 CRITICAL: RE-BIND CTX TO ROUTE SNAPSHOT (AUTHORITATIVE)
                 # ------------------------------------------------------------------

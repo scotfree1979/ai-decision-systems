@@ -1739,26 +1739,106 @@ def get_runner_odds_map(
 # - Placement worker must already be running
 # - This starts ONLY the BUS loop
 # ======================================================================================================
-def start_bus_loop():
+# engines/bus_route.py
+
+import time
+import threading
+from datetime import datetime, timezone
+
+ROUTE_REBUILD_BUS_STOP = 9
+ODDS_REFRESH_SECONDS  = 30
+
+
+def start_bus_route_loop():
     """
-    Route bootstrap only.
-    No loop.
-    No timing.
-    No ticking.
+    Authoritative BusRoute lifecycle loop.
+
+    Responsibilities:
+    - Maintain expanding runner universe
+    - Build successive routes (route 1, 2, 3, ...)
+    - Refresh PX periodically
+    - Stay ahead of BUS consumption
+
+    BUS does NOT control this loop.
     """
+
     from engines.bus.bus import BUS
+    from engines.bus_route import BusRouteSnapshot
 
-    BUS._route_snapshot = BusRouteSnapshot()
-    BUS._route_snapshot.build_route()
-    BUS._route_snapshot.partition_into_bus_stops()
+    # --------------------------------------------------
+    # INITIALISE SNAPSHOT
+    # --------------------------------------------------
+    snap = BusRouteSnapshot()
+    snap.build_route()
+    snap.partition_into_bus_stops()
 
+    BUS._route_snapshot = snap
+    BUS._route_ctx_map  = snap.get_ctx_map()
 
-    BUS._route_ctx_map = BUS._route_snapshot.get_ctx_map()
+    print(
+        f"[BUS_ROUTE] initial route built "
+        f"route={snap.route_id} "
+        f"runners={len(snap.ctx_map)}"
+    )
 
+    last_odds_refresh = time.time()
+    last_seen_route   = snap.route_id
 
-    print("[BUS_ROUTE] route initialised (no loop)")
+    # --------------------------------------------------
+    # MAIN LOOP
+    # --------------------------------------------------
+    while True:
+        try:
+            now = time.time()
 
+            # ----------------------------------------------
+            # 1️⃣ PERIODIC ODDS REFRESH (TIME-BASED)
+            # ----------------------------------------------
+            if now - last_odds_refresh >= ODDS_REFRESH_SECONDS:
+                dt = snap.refresh_ctx_dynamic_fields()
+                BUS._route_ctx_map = snap.get_ctx_map()
 
+                last_odds_refresh = now
+
+                print(
+                    f"[BUS_ROUTE][ODDS] "
+                    f"route={snap.route_id} "
+                    f"runners={len(snap.ctx_map)} "
+                    f"dt={dt:.3f}s"
+                )
+
+            # ----------------------------------------------
+            # 2️⃣ ROUTE ADVANCE (BUS-STOP-DRIVEN)
+            # ----------------------------------------------
+            bus_stop = getattr(BUS, "_bus_stop", None)
+
+            if bus_stop is None:
+                time.sleep(0.5)
+                continue
+
+            # Trigger next route BEFORE BUS reaches it
+            if bus_stop >= ROUTE_REBUILD_BUS_STOP:
+                if snap.route_id == last_seen_route:
+                    snap.build_route()
+                    snap.partition_into_bus_stops()
+
+                    BUS._route_ctx_map = snap.get_ctx_map()
+
+                    last_seen_route = snap.route_id
+
+                    print(
+                        f"[BUS_ROUTE][ADVANCE] "
+                        f"new_route={snap.route_id} "
+                        f"runners={len(snap.ctx_map)} "
+                        f"time={datetime.now(timezone.utc).isoformat()}"
+                    )
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            # HARD RULE: BusRoute must NEVER die
+            print(f"[BUS_ROUTE][ERR] {e}")
+            time.sleep(1.0)
 
 # -----------------------------
 # ✅ STANDALONE TEST TOOL (SCRAPER)

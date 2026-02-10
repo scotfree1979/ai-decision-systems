@@ -334,35 +334,34 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     # --------------------------------------------------
     rows = _q_retry(cur, """
         SELECT
-          engine,
-          CASE
-            WHEN entry_status='QUEUED' THEN 'QUEUED'
-            WHEN entry_status='PLACING' THEN 'PLACING'
-            WHEN entry_status='PLACED' THEN 'PLACED'
+            engine,
+            CASE
+                -- PRE-EXECUTION
+                WHEN entry_status = 'QUEUED'  THEN 'QUEUED'
+                WHEN entry_status = 'PLACING' THEN 'PLACING'
+                WHEN entry_status = 'PLACED'  THEN 'PLACED'
 
-              -- ✅ COMPLETED = parent matched AND child matched
-              WHEN entry_status = 'MATCHED'
-                   AND EXISTS (
-                       SELECT 1
-                       FROM orders c
-                       WHERE c.role = 'CHILD'
-                         AND c.hedge_of = orders.id
-                         AND c.entry_status = 'MATCHED'
-                   )
-                   THEN 'CLOSED'
+                -- CANCELLED (authoritative)
+                WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
 
-              -- ✅ MATCHED BUT NOT COMPLETED
-              WHEN entry_status = 'MATCHED'
-                   THEN 'MATCHED'
+                -- COMPLETED = child EXIT matched
+                WHEN EXISTS (
+                    SELECT 1
+                      FROM orders c
+                     WHERE c.role = 'CHILD'
+                       AND c.hedge_of = orders.id
+                       AND c.exit_status = 'MATCHED'
+                )
+                THEN 'CLOSED'
 
-            WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
-   
-          END AS bucket,
-          COUNT(*) AS n
+                -- ACTIVE = parent matched, child not yet matched
+                WHEN entry_status = 'MATCHED' THEN 'MATCHED'
+            END AS bucket,
+            COUNT(*) AS n
         FROM orders
-        WHERE role='PARENT'
-          AND mode='LIVE'
-          AND date(opened_at)=date('now','utc')
+        WHERE role = 'PARENT'
+          AND mode = 'LIVE'
+          AND date(opened_at) = date('now','utc')
         GROUP BY engine, bucket
     """).fetchall()
 
@@ -374,22 +373,25 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     # --------------------------------------------------
     rows = _q_retry(cur, """
         SELECT
-          engine,
-          CASE
-            WHEN entry_status='QUEUED' THEN 'QUEUED'
-            WHEN entry_status='PLACING' THEN 'PLACING'
-            WHEN entry_status='PLACED' THEN 'PLACED'
-            WHEN entry_status='MATCHED'
-                 AND exit_status IS NULL THEN 'MATCHED'
-            WHEN entry_status='MATCHED'
-                 AND exit_status='MATCHED' THEN 'CLOSED'
-            WHEN exit_status IS NOT NULL THEN 'CLOSED'
-          END AS bucket,
-          COUNT(*) AS n
+            engine,
+            CASE
+                -- PRE-EXECUTION
+                WHEN entry_status = 'QUEUED'  THEN 'QUEUED'
+                WHEN entry_status = 'PLACING' THEN 'PLACING'
+                WHEN entry_status = 'PLACED'  THEN 'PLACED'
+
+                -- ACTIVE MATCH
+                WHEN entry_status = 'MATCHED'
+                     AND exit_status IS NULL THEN 'MATCHED'
+
+                -- CLOSED (matched or cancelled)
+                WHEN exit_status IS NOT NULL THEN 'CLOSED'
+            END AS bucket,
+            COUNT(*) AS n
         FROM orders
-        WHERE role='CHILD'
-          AND mode='LIVE'
-          AND date(opened_at)=date('now','utc')
+        WHERE role = 'CHILD'
+          AND mode = 'LIVE'
+          AND date(opened_at) = date('now','utc')
         GROUP BY engine, bucket
     """).fetchall()
 
@@ -401,60 +403,54 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     # --------------------------------------------------
     row = _q_retry(cur, """
         SELECT
-          -- OPEN = parent matched AND no matched child yet
-          SUM(
-            CASE
-              WHEN role = 'PARENT'
-               AND entry_status = 'MATCHED'
-               AND NOT EXISTS (
-                   SELECT 1
-                     FROM orders c
-                    WHERE c.role = 'CHILD'
-                      AND c.hedge_of = orders.id
-                      AND c.entry_status = 'MATCHED'
-               )
-              THEN 1 ELSE 0
-            END
-          ) AS open_trades,
+            -- OPEN = parent matched, child not yet matched
+            SUM(
+                CASE
+                    WHEN role = 'PARENT'
+                     AND entry_status = 'MATCHED'
+                     AND NOT EXISTS (
+                         SELECT 1
+                           FROM orders c
+                          WHERE c.role = 'CHILD'
+                            AND c.hedge_of = orders.id
+                            AND c.exit_status = 'MATCHED'
+                     )
+                    THEN 1 ELSE 0
+                END
+            ) AS open_trades,
 
-          -- COMPLETED = child matched (parent implicitly matched)
-          SUM(
-            CASE
-              WHEN role = 'PARENT'
-               AND entry_status = 'MATCHED'
-               AND exit_status  = 'MATCHED'
-               AND EXISTS (
-                   SELECT 1
-                     FROM orders c
-                    WHERE c.role = 'CHILD'
-                      AND c.hedge_of = orders.id
-                      AND c.entry_status = 'MATCHED'
-                      AND c.exit_status  = 'MATCHED'
-               )
-              THEN 1 ELSE 0
-            END
-          ) AS completed_trades,
+            -- COMPLETED = child exit matched
+            SUM(
+                CASE
+                    WHEN role = 'PARENT'
+                     AND EXISTS (
+                         SELECT 1
+                           FROM orders c
+                          WHERE c.role = 'CHILD'
+                            AND c.hedge_of = orders.id
+                            AND c.exit_status = 'MATCHED'
+                     )
+                    THEN 1 ELSE 0
+                END
+            ) AS completed_trades,
 
-          -- CANCELLED = parent exit_status contains 'CANCELLED'
-          SUM(
-            CASE
-              WHEN role = 'PARENT'
-               AND exit_status IS NOT NULL
-               AND exit_status LIKE '%CANCELLED%'
-              THEN 1 ELSE 0
-            END
-          ) AS cancelled_trades
-
+            -- CANCELLED = parent exit cancelled
+            SUM(
+                CASE
+                    WHEN role = 'PARENT'
+                     AND exit_status LIKE '%CANCELLED%'
+                    THEN 1 ELSE 0
+                END
+            ) AS cancelled_trades
         FROM orders
         WHERE mode = 'LIVE'
           AND date(opened_at) = date('now','utc')
     """).fetchone()
 
     if row:
-        live["summary"]["open_trades"] = int(row["open_trades"] or 0)
+        live["summary"]["open_trades"]      = int(row["open_trades"] or 0)
         live["summary"]["completed_trades"] = int(row["completed_trades"] or 0)
         live["summary"]["cancelled_trades"] = int(row["cancelled_trades"] or 0)
-
 
     # --------------------------------------------------
     # Invariant guards — NO UNKNOWN STATES (TODAY)
@@ -462,29 +458,30 @@ def _collect_router_live_state() -> tuple[dict, dict]:
     row = _q_retry(cur, """
         SELECT COUNT(*) AS bad
         FROM orders
-        WHERE role='PARENT'
-          AND mode='LIVE'
-          AND date(opened_at)=date('now','utc')
+        WHERE role = 'PARENT'
+          AND mode = 'LIVE'
+          AND date(opened_at) = date('now','utc')
           AND NOT (
-            entry_status IN ('QUEUED','PLACING','PLACED')
-            OR (entry_status='MATCHED'
-                AND (exit_status IS NULL OR exit_status<>'MATCHED'))
-            OR exit_status IS NOT NULL
+                entry_status IN ('QUEUED','PLACING','PLACED')
+             OR entry_status = 'MATCHED'
+             OR exit_status IS NOT NULL
           )
     """).fetchone()
+
     invariants["parents_illegal"] = int(row["bad"] or 0)
 
     row = _q_retry(cur, """
         SELECT COUNT(*) AS bad
         FROM orders
-        WHERE role='CHILD'
-          AND mode='LIVE'
-          AND date(opened_at)=date('now','utc')
+        WHERE role = 'CHILD'
+          AND mode = 'LIVE'
+          AND date(opened_at) = date('now','utc')
           AND NOT (
-            entry_status IN ('QUEUED','PLACING','PLACED','MATCHED')
-            OR exit_status IS NOT NULL
+                entry_status IN ('QUEUED','PLACING','PLACED','MATCHED')
+             OR exit_status IS NOT NULL
           )
     """).fetchone()
+
     invariants["children_illegal"] = int(row["bad"] or 0)
 
     con.close()
@@ -1532,10 +1529,9 @@ def process_stoploss(payload: dict, *, max_chase_ticks: int = 3, poll_s: float =
 
         # ---- missed → cancel + reprice ----
         if bet_id:
-            try:
-                _cancel(app_key, token, bet_id)
-            except Exception:
-                pass
+    
+            cancel_bet_canonical(bet_id=bet_id)
+       
 
         chase += 1
 
@@ -2815,6 +2811,157 @@ def _list_current(app_key: str, token: str, bet_id: str) -> dict:
     )
 # === PATCH END ===
 
+def cancel_bet_canonical(*, bet_id: str) -> bool:
+    """
+    SINGLE SOURCE OF TRUTH for Betfair cancellations.
+
+    DB-FIRST. ROLE-AWARE. INVARIANT-LOCKED.
+
+    Returns True if cancel was executed.
+    Returns False if cancel was blocked.
+    """
+
+    if not bet_id:
+        return False
+
+    # --------------------------------------------------
+    # 1️⃣ Resolve order from DB (authoritative)
+    # --------------------------------------------------
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        row = _q_retry(cur, """
+            SELECT
+                id,
+                role,
+                hedge_of,
+                marketId,
+                customerOrderRef,
+                entry_status,
+                exit_status
+            FROM orders
+            WHERE entry_bet_id = ?
+            LIMIT 1
+        """, (str(bet_id),)).fetchone()
+
+        con.close()
+
+        if not row:
+            return False
+
+    except Exception:
+        return False
+
+    role        = (row["role"] or "").upper()
+    order_id    = int(row["id"])
+    market_id   = str(row["marketId"])
+    parent_cor  = str(row["customerOrderRef"])
+
+    # --------------------------------------------------
+    # 2️⃣ ROLE RULES
+    # --------------------------------------------------
+
+    # ── PARENT ─────────────────────────────────────────
+    if role == "PARENT":
+        # never cancel if already matched at Betfair
+        if not _guard_cancel_if_matched(
+            parent_cor=parent_cor,
+            bet_id=str(bet_id),
+        ):
+            return False
+
+        allowed = True
+
+    # ── CHILD ──────────────────────────────────────────
+    elif role == "CHILD":
+        allowed = False
+
+        # A) sibling child already matched?
+        if _child_cancellation_allowed(child_id=order_id):
+            allowed = True
+        else:
+            # B) market finished?
+            try:
+                bdb = connect_db(ro=True)
+                bdb.row_factory = sqlite3.Row
+                r = _q_retry(bdb, """
+                    SELECT
+                      CAST(
+                        (julianday('now','utc') - julianday(marketStartTime)) * 1440
+                        AS INTEGER
+                      ) AS mins_after
+                    FROM bets
+                    WHERE marketId=?
+                    LIMIT 1
+                """, (market_id,)).fetchone()
+                bdb.close()
+
+                if r and r["mins_after"] is not None:
+                    if int(r["mins_after"]) >= GRACE_MINUTES:
+                        allowed = True
+
+            except Exception:
+                pass
+
+        if not allowed:
+            _log_event(
+                "WARN",
+                "live_router",
+                f"[CANCEL BLOCKED] child bet_id={bet_id} market={market_id}"
+            )
+            return False
+
+    else:
+        return False
+
+    # --------------------------------------------------
+    # 3️⃣ Cancel at Betfair (best effort)
+    # --------------------------------------------------
+    try:
+        app_key, token = _keys()
+        _rpc(app_key, token, "cancelOrders", {"betIds": [str(bet_id)]})
+    except Exception:
+        pass
+
+    # --------------------------------------------------
+    # 4️⃣ Persist DB state (DB is lock)
+    # --------------------------------------------------
+    try:
+        con = _orders_conn()
+        cur = con.cursor()
+
+        if role == "PARENT":
+            _stamp_parent_exit_sql(
+                cur,
+                parent_id=order_id,
+                status="CANCELLED",
+                reason="betfair_cancel",
+            )
+            _release_parent_exposure_db(order_id)
+
+        else:  # CHILD
+            _q_retry(cur, """
+                UPDATE orders
+                   SET exit_status='CANCELLED',
+                       exit_kind='BETFAIR_CANCEL',
+                       closed_at=datetime('now','utc')
+                 WHERE id=?
+            """, (order_id,))
+
+        con.commit()
+        con.close()
+
+        return True
+
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"cancel_bet_canonical failed bet_id={bet_id}: {e}"
+        )
+        return False
 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -6526,10 +6673,10 @@ def place_parent_and_hedge(
                 interval_s=2.0
             ):
                 # Parent never matched
-                try:
-                    _cancel(app_key, token, bf_parent_id)
-                except Exception:
-                    pass
+               
+                cancel_bet_canonical(bet_id=bet_id)
+
+           
 
                 if parent_persistence.upper() == "LAPSE":
                     try:
@@ -6836,9 +6983,9 @@ def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -
                          LIMIT 1
                     """, (int(r["id"]),)).fetchone()
 
-                    if row and row["entry_bet_id"]:
-                        app_key, token = _keys()
-                        _cancel(app_key, token, str(row["entry_bet_id"]))
+                    
+                    cancel_bet_canonical(bet_id=bet_id)
+
                 except Exception:
                     pass  # never block recycle
 
