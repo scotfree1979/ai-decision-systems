@@ -2954,7 +2954,22 @@ class DecisionBus:
 
                     from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
 
-                    parent_px  = ctx.get("legacy_entry_odds") or ctx.get("entry_odds")
+                    from engines.config_paths import open_auto_db
+
+                    con = open_auto_db(rw=False)
+                    row = con.execute("""
+                        SELECT entry_odds, entry_stake
+                        FROM orders
+                        WHERE id=?
+                        LIMIT 1
+                    """, (legacy_parent_id,)).fetchone()
+                    con.close()
+
+                    if not row:
+                        continue
+
+                    parent_px = float(row["entry_odds"])
+
                     # 🔁 PX REFRESH (BUS AUTHORITY)
                     if not self._ensure_px_from_route(ctx):
                         plan["_bus_block"] = "risk_missing_px"
