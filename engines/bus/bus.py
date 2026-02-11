@@ -1790,11 +1790,19 @@ class DecisionBus:
             # 2️⃣ Emit ranked top-N
             ranked_plans = exp.flush_ranked()
 
-            for plan in ranked_plans:
-                plans.append(("MSC_EXPLORATORY", plan, None))
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 CONTEXT: LANE 4 ranked emission
+# 🧩 ACTION: pass ctx forward correctly
+# 📆 PATCHED: 2026-04-01
+# ==============================================================================
+
+            for plan, ctx_l in ranked_plans:
+                plans.append(("MSC_EXPLORATORY", plan, ctx_l))
                 engine_report["MSC_EXPLORATORY"]["fired"] += 1
                 lane_counts[4] += 1
 
+# === PATCH END ==============================================================
 
         # --------------------------------------------------
         # 🟥 LANE 5 — OVERWATCHER (STOPLOSS)
@@ -2856,8 +2864,7 @@ class DecisionBus:
 # 📆 PATCHED: 2026-03-10 — Route plans through cadence controller
 # ======================================================================================================
 
-            # Feed ALL generated plans into cadence controller
-            self._cadence.enqueue(plans)
+
 
             # ------------------------------------
             # RAW PLAN CAPTURE (analysis visibility)
@@ -3296,9 +3303,6 @@ class DecisionBus:
                 final_plans.append((eng, plan, ctx))
                 tick_ctx["plans_enriched"].append(plan)
 
-
-
-
             # --------------------------------------------------
             # PHASE 2 REPORT — ENRICHMENT
             # --------------------------------------------------
@@ -3364,6 +3368,10 @@ class DecisionBus:
 
             # Routing
             from engines.decision_engine.decide_once.placement import enqueue_for_placement
+
+            # enrichment loop ends
+
+            self._cadence.enqueue(final_plans)
 
             admitted = self._cadence.admit_for_tick()
 

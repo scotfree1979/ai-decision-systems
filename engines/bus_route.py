@@ -294,18 +294,6 @@ class BusRouteSnapshot:
         WARMUP_LIMIT = 50      # max new CTX builds per build_route() call
         built_this_pass = 0
 
-        # --------------------------------------------------
-        # CTX FOR RUNNER TREND
-        # --------------------------------------------------
-
-        from engines.market_monitor.trend_surface import compute_market_trend
-
-        trend_map = compute_market_trend(book)
-
-        for (mid, sid), ctx in self.ctx_map.items():
-            if sid in trend_map:
-                ctx["runner_trend"] = trend_map[sid]
-
 
         # --------------------------------------------------
         # Build CTX ONLY for unseen runners
@@ -1646,59 +1634,135 @@ def get_legacy_snapshot():
 # ============================================================================
 # CANONICAL ODDS LOOKUP — BUS_ROUTE AUTHORITY
 # ============================================================================
-def get_runner_odds_map(
-    pairs: List[Tuple[str, str]],
-    session_token: str | None = None,
-):
-    """
-    Canonical odds resolver for BUS.
+# ======================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_runner_odds_map(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-02 — Market-batched odds refresh (performance fix)
+#
+# WHY:
+# - Previous implementation called Betfair per runner
+# - Caused O(n) HTTP calls per tick
+# - Now batches per market (O(markets))
+#
+# INVARIANTS:
+# - Same return shape
+# - Same fail-open behaviour
+# - No engine changes
+# - No BUS changes
+# ======================================================================
 
-    Given a list of (marketId, selectionId), return the
-    best-known odds using the BusRoute odds stack.
+    def get_runner_odds_map(
+        pairs: List[Tuple[str, str]],
+        session_token: str | None = None,
+    ):
+        """
+        Canonical odds resolver for BUS (MARKET-BATCHED).
 
-    - Betfair API via fetch_live_odds
-    - No Scope
-    - No MarketMonitor
-    - No DB dependency
-    - Safe to call every tick
+        Given a list of (marketId, selectionId),
+        performs ONE API call per marketId.
 
-    Returns:
-        dict[(marketId, selectionId)] = {
-            "px": float,
-            "back": float | None,
-            "lay": float | None,
+        Returns:
+            dict[(marketId, selectionId)] = {
+                "px": float,
+                "back": float | None,
+                "lay": float | None,
+            }
+        """
+
+        odds_map = {}
+
+        if not pairs:
+            return odds_map
+
+        from collections import defaultdict
+        grouped = defaultdict(list)
+
+        # --------------------------------------------------
+        # Group runners by market
+        # --------------------------------------------------
+        for mid, sid in pairs:
+            grouped[str(mid)].append(str(sid))
+
+        # --------------------------------------------------
+        # Resolve session token
+        # --------------------------------------------------
+        tok = (
+            session_token
+            or os.getenv("SESSION_TOKEN")
+            or os.getenv("BETFAIR_SESSION_TOKEN")
+        )
+
+        if not tok:
+            return odds_map  # fail-open
+
+        from engines.daily_config import get_app_key
+        app_key = get_app_key()
+
+        if not app_key:
+            return odds_map  # fail-open
+
+        url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+        headers = {
+            "X-Application": app_key,
+            "X-Authentication": tok,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
         }
-    """
 
-    odds_map = {}
+        # --------------------------------------------------
+        # ONE CALL PER MARKET
+        # --------------------------------------------------
+        for mid, sids in grouped.items():
+            try:
+                payload = json.dumps([{
+                    "jsonrpc": "2.0",
+                    "method": "SportsAPING/v1.0/listMarketBook",
+                    "params": {
+                        "marketIds": [mid],
+                        "priceProjection": {
+                            "priceData": ["EX_BEST_OFFERS"],
+                            "virtualise": True
+                        }
+                    },
+                    "id": 1
+                }])
 
-    for mid, sid in pairs:
-        try:
-            odds = fetch_live_odds(
-                session_token=session_token,
-                marketId=str(mid),
-                selectionId=str(sid),
-            ) or {}
+                resp = _session.post(url, headers=headers, data=payload, timeout=8)
+                resp.raise_for_status()
+                data = resp.json()
 
-            back = odds.get("back")
-            lay  = odds.get("lay")
+                runners = (
+                    data[0]
+                    .get("result", [{}])[0]
+                    .get("runners", [])
+                )
 
-            # Choose execution px
-            px = back or lay
-            if px is None:
+                for r in runners:
+                    sid = str(r.get("selectionId"))
+                    if sid not in sids:
+                        continue
+
+                    ex = r.get("ex", {}) or {}
+                    back = (ex.get("availableToBack") or [{}])[0].get("price")
+                    lay  = (ex.get("availableToLay") or [{}])[0].get("price")
+
+                    px = back or lay
+                    if px is None:
+                        continue
+
+                    odds_map[(mid, sid)] = {
+                        "px": float(px),
+                        "back": back,
+                        "lay": lay,
+                    }
+
+            except Exception:
+                # Fail-open per market
                 continue
 
-            odds_map[(str(mid), str(sid))] = {
-                "px": float(px),
-                "back": back,
-                "lay": lay,
-            }
+        return odds_map
 
-        except Exception:
-            # Fail silent — BUS will simply not evaluate this runner
-            continue
-
-    return odds_map
 
 # -----------------------------
 # ✅ STANDALONE TEST TOOL (SCRAPER)

@@ -72,11 +72,12 @@ class ExploratoryEngine:
 
         return score
 
-# ======================================================================
+# === PATCH START ==============================================================
 # 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
-# 🧩 ACTION: ADD flush_ranked
-# 📆 PATCHED: 2026-04-01 — Emit top-N ranked exploratory plans
-# ======================================================================
+# 🔎 SEARCH: def flush_ranked(self)
+# 🧩 ACTION: return plan + ctx
+# 📆 PATCHED: 2026-04-01
+# ==============================================================================
 
     def flush_ranked(self) -> list:
         if not self._rank_buffer:
@@ -90,32 +91,33 @@ class ExploratoryEngine:
 
         selected = ranked[:self._max_per_tick]
 
-        plans = []
+        output = []
 
         for score, ctx in selected:
+
             size = compute_dynamic_stake(
                 ctx=ctx,
                 engine="MSC_EXPLORATORY"
             )
 
-            plans.append({
+            plan = {
                 "enter": True,
                 "engine": "MSC_EXPLORATORY",
                 "role": "PARENT",
-                "direction": ctx["msc_direction"],
-                "target_ticks": ctx.get("msc_entry_ticks", 1),
-                "stop_ticks": ctx.get("msc_stop_ticks", 4),
+                "direction": ctx.get("msc_direction"),
+                "target_ticks": 1,
+                "stop_ticks": 4,
                 "px": ctx.get("px"),
                 "size": float(size),
-                "rank_score": score,
                 "why": "exploratory_ranked",
-            })
+            }
+
+            output.append((plan, ctx))
 
         self._rank_buffer.clear()
+        return output
 
-        return plans
-
-
+# === PATCH END ==============================================================
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
