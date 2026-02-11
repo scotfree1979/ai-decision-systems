@@ -955,325 +955,97 @@ def _router_enforce_status_authority():
 
 
 def _router_child_worker_loop():
-    
+
     from engines.live.live_router import (
         _attempt_place_child_with_retry,
-        _orders_insert_child_queued,
     )
 
     import time
-    import sqlite3
+    import queue
+    import traceback
 
-
-    RESCUE_DELAY_SECONDS = 120  # 2 minutes
+    RESCUE_DELAY_SECONDS = 120
 
     while True:
+
+        # ==================================================
+        # PHASE 0 — STATUS AUTHORITY (ALWAYS FIRST)
+        # ==================================================
         _router_enforce_status_authority()
-        child_id = None   # ← THIS LINE IS REQUIRED
-        _ran_phase1 = False   # ✅ DEFINE IT
+
         try:
+
             # ==================================================
-            # PHASE 1 — NORMAL CHILD EXECUTION PATH
+            # PHASE 1 — EXECUTE ONE CHILD FROM QUEUE (IF ANY)
             # ==================================================
             try:
                 plan, ctx = _ROUTER_CHILD_QUEUE.get_nowait()
-                _ran_phase1 = True
-                parent_cor = plan.get("parent_cor")
-                if parent_cor:
-                    child_id = plan.get("child_id")
-                    if child_id:
-                        plan["child_id"] = child_id
+            except queue.Empty:
+                plan = None
+                ctx = None
 
-                # --------------------------------------------------
-                # GUARANTEE CHILD ROW EXISTS (DB-FIRST)
-                # --------------------------------------------------
+            if plan:
+
                 child_id = plan.get("child_id")
+                parent_cor = plan.get("parent_cor")
 
-                # 🔒 ENSURE EXECUTION IDENTITY (router responsibility)
-                if "marketId" not in plan or "selectionId" not in plan:
+                # --------------------------------------------------
+                # Ensure identity
+                # --------------------------------------------------
+                if not child_id and parent_cor:
+                    child_id = _ensure_child_queued_for_matched_parent(parent_cor)
 
-                    parent_cor = plan.get("parent_cor")
-                    if not parent_cor:
-                        raise RuntimeError(
-                            "router child worker: missing marketId/selectionId and no parent_cor"
-                        )
+                if not child_id:
+                    _ROUTER_CHILD_QUEUE.task_done()
+                    continue
 
+                # --------------------------------------------------
+                # Execute placement
+                # --------------------------------------------------
+                placed = _attempt_place_child_with_retry(int(child_id))
+
+                if not placed:
+                    _ROUTER_CHILD_QUEUE.task_done()
+                    continue
+
+                # ==================================================
+                # PHASE 1.5 — PROMOTE TO MATCHED (EXCHANGE TRUTH)
+                # ==================================================
+                try:
                     con = _orders_conn()
                     con.row_factory = sqlite3.Row
 
-                    row = con.execute(
+                    row = _q_retry(
+                        con,
                         """
-                        SELECT id, marketId, selectionId
+                        SELECT entry_bet_id
                           FROM orders
-                         WHERE customerOrderRef = ?
-                           AND role = 'PARENT'
+                         WHERE id=?
+                           AND role='CHILD'
+                           AND entry_status='PLACED'
                          LIMIT 1
                         """,
-                        (str(parent_cor),)
+                        (int(child_id),)
                     ).fetchone()
 
                     con.close()
 
-                    if not row:
-                        raise RuntimeError(
-                            f"router child worker: failed to hydrate identity from parent_cor={parent_cor}"
-                        )
-
-                    # 🔑 Authoritative identity from DB
-                    plan["parent_id"]   = int(row["id"])
-                    plan["marketId"]    = row["marketId"]
-                    plan["selectionId"] = row["selectionId"]
-
-
-                if not child_id:
-                    parent_cor = plan.get("parent_cor")
-                    if not parent_cor:
-                        raise RuntimeError(
-                            "router child worker: missing child_id and parent_cor"
-                        )
-
-                
-                    # 🔑 ROUTER AUTHORITY: ENSURE CHILD EXISTS
-                    child_id = _ensure_child_queued_for_matched_parent(parent_cor)
-
-
-                    if not child_id:
-                        # Parent not eligible (cancelled / unmatched / closed)
-                        continue
-
-                    # Persist identity for downstream steps
-                    plan["child_id"] = child_id
-
-
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ok = _attempt_place_child_with_retry(int(child_id))
-# 🧩 ACTION: INSERT GUARD IMMEDIATELY BEFORE CHILD PLACEMENT
-# 📆 PATCHED: 2026-03-05 — Router-enforced child price separation invariant
-#
-# RATIONALE:
-# - ONLY Overwatcher may place children at the same price as the parent
-# - All other engines must place children at least 1 tick away
-# - This is enforced at the final authority boundary (router child worker)
-# - Fixes target_ticks=1 collapse, replay/live drift, and recovery anomalies
-# ==============================================================================
-
-                # --------------------------------------------------
-                # ROUTER INVARIANT — CHILD PRICE SEPARATION
-                # --------------------------------------------------
-                try:
-                    con = _orders_conn()
-                    con.row_factory = sqlite3.Row
-                    cur = con.cursor()
-
-                    child = _q_retry(cur, """
-                        SELECT id, entry_odds, hedge_of
-                          FROM orders
-                         WHERE id=?
-                           AND role='CHILD'
-                         LIMIT 1
-                    """, (int(child_id),)).fetchone()
-
-                    if child:
-                        parent = _q_retry(cur, """
-                            SELECT side, entry_odds, engine
-                              FROM orders
-                             WHERE id=?
-                               AND role='PARENT'
-                             LIMIT 1
-                        """, (int(child["hedge_of"]),)).fetchone()
-
-                        if parent:
-                            enforced_px = _enforce_child_price_separation(
-                                engine=parent["engine"],
-                                exit_kind=plan.get("exit_kind"),
-                                parent_side=parent["side"],
-                                parent_odds=float(parent["entry_odds"]),
-                                child_odds=float(child["entry_odds"]),
+                    if row and row["entry_bet_id"]:
+                        if get_bet_status(str(row["entry_bet_id"])) == "EXECUTION_COMPLETE":
+                            _orders_update_child_matched(
+                                cor=parent_cor,
+                                hedge_ref=None,
+                                exit_side=plan.get("side"),
+                                exit_odds=plan.get("px"),
+                                exit_stake=plan.get("size"),
                             )
-
-                            enforced_px = _round_odds(float(enforced_px))
-
-                            if enforced_px != float(child["entry_odds"]):
-                                _q_retry(cur, """
-                                    UPDATE orders
-                                       SET entry_odds=?
-                                     WHERE id=?
-                                """, (enforced_px, int(child_id)))
-                                con.commit()
-
-                    con.close()
                 except Exception:
-                    # invariant enforcement must NEVER block execution
-                    try:
-                        con.close()
-                    except Exception:
-                        pass
+                    pass
 
-                # --------------------------------------------------
-                # STOPLOSS TIMEOUT GUARD (ROUTER AUTHORITY)
-                # --------------------------------------------------
-                if plan.get("exit_kind") == "STOPLOSS":
-                    try:
-                        con = _orders_conn()
-                        con.row_factory = sqlite3.Row
-
-                        row = _q_retry(con, """
-                            SELECT opened_at
-                              FROM orders
-                             WHERE id = ?
-                               AND role = 'CHILD'
-                               AND UPPER(exit_kind) = 'STOPLOSS'
-                        """, (int(child_id),)).fetchone()
-
-                        con.close()
-
-                        if row and row["opened_at"]:
-                            opened = datetime.fromisoformat(
-                                row["opened_at"].replace("Z", "+00:00")
-                            )
-                            age_s = (datetime.now(timezone.utc) - opened).total_seconds()
-
-                            # HARD RULE: stoploss must NOT linger
-                            if age_s >= 60:
-                                _log_event(
-                                    "INFO",
-                                    "live_router",
-                                    f"[STOPLOSS TIMEOUT] cancelling child_id={child_id}"
-                                )
-                                if _child_cancellation_allowed(child_id=child_id):
-                                    _q_retry(
-                                        _orders_conn(),
-                                        """
-
-                                        UPDATE orders
-                                           SET exit_status='CANCELLED',
-                                               exit_kind='STOPLOSS_TIMEOUT',
-                                               closed_at=datetime('now','utc')
-                                         WHERE id=?
-                                        """,
-                                        (int(child_id),)
-                                    )
-
-                                # Allow BUS / Overwatcher to re-emit next tick
-                                
-                                # NO-OP — illegal cancellation
-                                _log_event(
-                                    "WARN",
-                                    "live_router",
-                                    f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
-                                )
-
-                    except Exception:
-                        # MUST NEVER block router loop
-                        pass
-
-
-
-                # --------------------------------------------------
-                # EXECUTE CHILD (PLACE + RETRY)
-                # --------------------------------------------------
-                ok = _attempt_place_child_with_retry(int(child_id))
-                if not ok:
-                    _log_event(
-                        "WARN",
-                        "live_router",
-                        f"[CHILD PLACE FAILED] id={child_id} — marked FAILED, will retry/rescue later"
-                    )
-                    # IMPORTANT:
-                    # - DO NOT raise
-                    # - DO NOT crash worker
-                    # - Recovery is handled by rescue + rehedge loops
-                    continue
-
-            except queue.Empty:
-                _ran_phase1 = False
-
-                # --------------------------------------------------
-                # PROMOTE CHILD → MATCHED (EXCHANGE TRUTH)
-                # --------------------------------------------------
-                if ok:
-                    try:
-                        row = _q_retry(
-                            _orders_conn(),
-                            """
-                            SELECT entry_bet_id
-                              FROM orders
-                             WHERE id=?
-                               AND role='CHILD'
-                               AND entry_status='PLACED'
-                             LIMIT 1
-                            """,
-                            (int(child_id),)
-                        ).fetchone()
-
-                        if row and row["entry_bet_id"]:
-                            if get_bet_status(str(row["entry_bet_id"])) == "EXECUTION_COMPLETE":
-                                _orders_update_child_matched(
-                                    cor=plan.get("parent_cor"),
-                                    hedge_ref=None,
-                                    exit_side=plan.get("side"),
-                                    exit_odds=plan.get("px"),
-                                    exit_stake=plan.get("size"),
-                                )
-                    except Exception:
-                        pass
-                
-
-                # --------------------------------------------------
-                # STOPLOSS MATCHED ⇒ CANCEL ALL SIBLING CHILDREN
-                # --------------------------------------------------
-                if child_id:
-                    try:
-                        con = _orders_conn()
-                        con.row_factory = sqlite3.Row
-                        cur = con.cursor()
-
-                        row = _q_retry(cur, """
-                            SELECT hedge_of, exit_kind, entry_status
-                              FROM orders
-                             WHERE id = ?
-                               AND role = 'CHILD'
-                        """, (int(child_id),)).fetchone()
-
-                        if (
-                            row
-                            and (row["exit_kind"] or "").upper() == "STOPLOSS"
-                            and (row["entry_status"] or "").upper() == "MATCHED"
-                        ):
-                            if _child_cancellation_allowed(child_id=child_id):
-                                _q_retry(cur, """
-                                    UPDATE orders
-                                       SET exit_status='CANCELLED',
-                                           exit_kind='CANCELLED_BY_STOPLOSS',
-                                           closed_at=datetime('now','utc')
-                                     WHERE role='CHILD'
-                                       AND hedge_of = ?
-                                       AND id <> ?
-                                       AND entry_status IN ('QUEUED','PLACING','PLACED')
-                                """, (int(row["hedge_of"]), int(child_id)))
-                                con.commit()
-                            # optional diagnostic only — no else
-                            _log_event(
-                                "WARN",
-                                "live_router",
-                                f"[CANCEL BLOCKED] illegal stoploss sibling cancel id={child_id}"
-                            )
-
-                    except Exception as e:
-                        _log_event(
-                            "WARN",
-                            "live_router",
-                            f"stoploss sibling cancel failed child_id={child_id}: {e}"
-                        )
-                    finally:
-                        try:
-                            con.close()
-                        except Exception:
-                            pass
+                _ROUTER_CHILD_QUEUE.task_done()
 
             # ==================================================
-            # PHASE 2 — RESCUE HEDGING (DB + PHASE CLOCK)
+            # PHASE 2 — RESCUE UNHEDGED MATCHED PARENTS
             # ==================================================
             from engines.market_monitor.phase_clock import MarketPhaseClock
 
@@ -1302,43 +1074,15 @@ def _router_child_worker_loop():
 
             for r in rows:
                 try:
-                    mid = str(r["marketId"])
-
-                    # 🔑 AUTHORITATIVE MARKET STATE
-                    phase, _ = MarketPhaseClock.get(mid)
-
                     parent_cor = str(r["customerOrderRef"])
-
-                    # ❌ MARKET TOO LATE — RELEASE EXPOSURE
-                    secs_to_off = _secs_to_off(mid)
-
-
-                    # ✅ MARKET STILL HEDGEABLE — RESCUE
                     _ensure_child_queued_for_matched_parent(parent_cor)
-
-
-
-
-                except Exception as e:
-                    _log_event(
-                        "ERROR",
-                        "live_router",
-                        f"rescue hedge failed parent_ref={r['customerOrderRef']}: {e}"
-                    )
-
+                except Exception:
+                    pass
 
         except Exception:
             print("[ROUTER][CHILD][ERR]")
             traceback.print_exc()
 
-        finally:
-            if _ran_phase1:
-                try:
-                    _ROUTER_CHILD_QUEUE.task_done()
-                except Exception:
-                    pass
-
-        # Prevent tight loop
         time.sleep(1.0)
 
 # ======================================================================
