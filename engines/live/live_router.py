@@ -1914,6 +1914,80 @@ def _router_child_recovery_sweep():
 
     con.close()
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ADD: child match reconciliation sweep
+# 📆 PATCHED: 2026-02-XX — enforce child MATCHED lifecycle
+#
+# PURPOSE:
+#   • Query Betfair surface for CHILD orders in PLACED state
+#   • If matched, flip:
+#         entry_status='MATCHED'
+#         exit_status='MATCHED'
+#   • Trigger parent close + exposure release
+#
+# INVARIANT:
+#   Betfair truth > DB state
+# ======================================================================
+
+def _sync_child_matches(limit: int = 100) -> int:
+    fixed = 0
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        rows = _q_retry(cur, """
+            SELECT id, entry_bet_id, hedge_of
+              FROM orders
+             WHERE role='CHILD'
+               AND entry_status='PLACED'
+               AND entry_bet_id IS NOT NULL
+             ORDER BY opened_at DESC
+             LIMIT ?
+        """, (int(limit),)).fetchall()
+
+        for r in rows:
+            bet_id = str(r["entry_bet_id"])
+
+            status = get_bet_status(bet_id)
+
+            if status != "EXECUTION_COMPLETE":
+                continue
+
+            child_id = int(r["id"])
+            parent_id = int(r["hedge_of"])
+
+            # Flip CHILD
+            _q_retry(cur, """
+                UPDATE orders
+                   SET entry_status='MATCHED',
+                       exit_status='MATCHED',
+                       closed_at=datetime('now','utc')
+                 WHERE id=?
+            """, (child_id,))
+
+            # Close PARENT
+            _stamp_parent_exit_sql(
+                cur,
+                parent_id=parent_id,
+                status="MATCHED",
+            )
+
+            con.commit()
+
+            # Release exposure
+            _release_parent_exposure_db(parent_id)
+
+            fixed += 1
+
+        return fixed
+
+    finally:
+        con.close()
+
+
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: def _sync_all_matches(limit: int = 100) -> int:
@@ -3069,6 +3143,7 @@ def _rehedge_loop(period_s: float = 10.0, default_ticks: int = 1):
 
         try:
             _sync_parent_matches(limit=50)
+            _sync_child_matches(limit=100)
         except Exception as e:
             _log_event("ERROR", "live_router", f"sync_parent_matches error: {e}")
 
@@ -5679,10 +5754,15 @@ def get_bet_status(bet_id: str) -> str:
             return "UNKNOWN"
 
         # EXECUTION_COMPLETE = matched at exchange
+        matched = float(surf.get("matched") or 0.0)
+        state   = str(surf.get("state") or "").upper()
+        source  = str(surf.get("source") or "").upper()
+
+        # 🔒 Canonical MATCHED truth
         if (
-            (surf.get("matched") or 0.0) > 0.0
-            or str(surf.get("state") or "").upper() in ("TERMINAL", "EXECUTION_COMPLETE")
-            or str(surf.get("source") or "").upper() == "CLEARED"
+            matched > 0.0
+            or state in ("TERMINAL", "EXECUTION_COMPLETE")
+            or source == "CLEARED"
         ):
             return "EXECUTION_COMPLETE"
 
