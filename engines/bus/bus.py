@@ -2950,36 +2950,41 @@ class DecisionBus:
                 # --------------------------------------------------
                 # MSC_RISK — mechanical sizing (BUS-owned)
                 # --------------------------------------------------
+                # ======================================================================
+                # 📍 TARGET: engines/bus/bus.py
+                # 🔎 SEARCH: if engine == "MSC_RISK":
+                # 🛠 ACTION: REPLACE BLOCK
+                # 📆 PATCHED: 2026-02-11 — Fix legacy_parent_id resolution for MSC_RISK
+                #
+                # WHY:
+                # - legacy_parent_id was referenced as a free variable
+                # - Risk parent metrics must be sourced from ctx (Lane 2 injection)
+                # - BUS must never depend on undefined variables
+                #
+                # GUARANTEE:
+                # - Risk always resolves parent anchor from ctx
+                # - No DB lookup required here
+                # - Eliminates name 'legacy_parent_id' is not defined
+                # ======================================================================
+
                 if engine == "MSC_RISK":
 
                     from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
 
-                    from engines.config_paths import open_auto_db
+                    legacy_parent_id   = ctx.get("legacy_parent_id")
+                    legacy_entry_odds  = ctx.get("legacy_entry_odds")
+                    legacy_entry_stake = ctx.get("legacy_entry_stake")
 
-                    con = open_auto_db(rw=False)
-                    row = con.execute("""
-                        SELECT entry_odds, entry_stake
-                        FROM orders
-                        WHERE id=?
-                        LIMIT 1
-                    """, (legacy_parent_id,)).fetchone()
-                    con.close()
+                    # Hard invariant — risk cannot operate without anchor
+                    if not legacy_parent_id or not legacy_entry_odds:
+                        plan["_bus_block"] = "risk_missing_parent_anchor"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "risk_missing_parent_anchor")
+                        )
+                        continue  # 🔴 DO NOT ROUTE
 
-                    if not row:
-                        continue
-
-                    parent_px = float(row["entry_odds"])
-
-                    # 🔁 PX REFRESH (BUS AUTHORITY)
+                    # Ensure px exists (BUS authority)
                     if not self._ensure_px_from_route(ctx):
-                        plan["_bus_block"] = "risk_missing_px"
-                        tick_ctx["plans_route_failed"].append((plan, "risk_missing_px"))
-                        continue
-
-                    current_px = ctx["px"]
-
-
-                    if not parent_px or not current_px:
                         plan["_bus_block"] = "risk_missing_px"
                         tick_ctx["plans_route_failed"].append(
                             (plan, "risk_missing_px")

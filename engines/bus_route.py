@@ -800,7 +800,7 @@ def get_risk_legacy_parent_pairs():
               AND p.role = 'PARENT'
               AND p.engine IN ('LEGACY', 'MSC_EXPLORATORY')
               AND UPPER(p.entry_status) = 'MATCHED'
-              AND (p.exit_status IS NULL OR UPPER(p.exit_status) != 'MATCHED')
+           
               AND date(p.opened_at) = date('now','utc')
             """
         ).fetchall()
