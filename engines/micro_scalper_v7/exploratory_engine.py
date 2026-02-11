@@ -34,9 +34,88 @@ class ExploratoryEngine:
         • router rehedge/match loops
     """
 
+# ======================================================================
+# 📍 TARGET: exploratory_engine.py
+# 🧩 ACTION: add ranking buffer
+# ======================================================================
+
     def __init__(self):
-        # No internal state in v7
-        pass
+        self._rank_buffer = []     # (score, ctx_snapshot)
+        self._max_per_tick = 15    # configurable cap
+
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
+# 🧩 ACTION: ADD _score_runner
+# 📆 PATCHED: 2026-04-01 — Runner ranking intelligence
+# ======================================================================
+
+    def _score_runner(self, ctx: Dict[str, Any], msc: Dict[str, Any]) -> float:
+        score = 0.0
+
+        trend = ctx.get("runner_trend") or {}
+
+        # Direction alignment with market truth
+        if trend.get("direction") == msc.get("direction"):
+            score += 3.0
+
+        # Tick movement magnitude
+        score += min(5.0, float(trend.get("ticks_moved", 0.0)))
+
+        # Favourite weighting
+        if ctx.get("fav_rank") == 1:
+            score += 1.0
+
+        # Pre-off sweet zone
+        mto = float(ctx.get("mto_minutes") or 999)
+        if 3 <= mto <= 20:
+            score += 1.0
+
+        return score
+
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
+# 🧩 ACTION: ADD flush_ranked
+# 📆 PATCHED: 2026-04-01 — Emit top-N ranked exploratory plans
+# ======================================================================
+
+    def flush_ranked(self) -> list:
+        if not self._rank_buffer:
+            return []
+
+        ranked = sorted(
+            self._rank_buffer,
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        selected = ranked[:self._max_per_tick]
+
+        plans = []
+
+        for score, ctx in selected:
+            size = compute_dynamic_stake(
+                ctx=ctx,
+                engine="MSC_EXPLORATORY"
+            )
+
+            plans.append({
+                "enter": True,
+                "engine": "MSC_EXPLORATORY",
+                "role": "PARENT",
+                "direction": ctx["msc_direction"],
+                "target_ticks": ctx.get("msc_entry_ticks", 1),
+                "stop_ticks": ctx.get("msc_stop_ticks", 4),
+                "px": ctx.get("px"),
+                "size": float(size),
+                "rank_score": score,
+                "why": "exploratory_ranked",
+            })
+
+        self._rank_buffer.clear()
+
+        return plans
+
+
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
@@ -83,54 +162,40 @@ class ExploratoryEngine:
 # - Uses dynamic stake with engine min/max clamp
 # ======================================================================================================
 
-    def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/exploratory_engine.py
+# 🔎 SEARCH: def tick(self, ctx:
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-01 — Convert to ranked collector
+#
+# CONTRACT:
+# - No direct emission
+# - Collect candidate + score
+# - flush_ranked() emits top-N
+# ======================================================================
+
+    def tick(self, ctx: Dict[str, Any]) -> None:
         """
-        Exploratory scout tick.
-        Always emits a plan for a runnable runner.
+        Collect exploratory candidate.
+        Emission handled via flush_ranked().
         """
 
         try:
-            # --------------------------------------------------
-            # Direction & mode inference (authoritative)
-            # --------------------------------------------------
             from .direction_engine import compute_msc_decision
             msc = compute_msc_decision(ctx)
 
-            # --------------------------------------------------
-            # Enrich ctx (telemetry / downstream use)
-            # --------------------------------------------------
-            ctx["msc_decision"]    = msc
-            ctx["msc_direction"]   = msc["direction"]
-            ctx["msc_mode"]        = msc["mode"]
-            ctx["msc_entry_ticks"] = msc["entry_ticks"]
-            ctx["msc_stop_ticks"]  = msc["stop_ticks"]
+            ctx_snapshot = dict(ctx)
+            ctx_snapshot["msc_direction"] = msc["direction"]
+            ctx_snapshot["msc_entry_ticks"] = msc["entry_ticks"]
+            ctx_snapshot["msc_stop_ticks"] = msc["stop_ticks"]
 
-            # --------------------------------------------------
-            # Stake (engine-level min/max enforced downstream)
-            # --------------------------------------------------
-            size = compute_dynamic_stake(
-                ctx=ctx,
-                engine="MSC_EXPLORATORY",
-            )
+            score = self._score_runner(ctx_snapshot, msc)
 
-            # --------------------------------------------------
-            # Emit parent plan (no blockers)
-            # --------------------------------------------------
-            return {
-                "enter": True,
-                "engine": "MSC_EXPLORATORY",
-                "role": "PARENT",
-                "direction": msc["direction"],
-                "entry_ticks": msc["entry_ticks"],
-                "target_ticks": msc["entry_ticks"],
-                "stop_ticks": msc["stop_ticks"],
-                "px": ctx.get("px"),
-                "size": float(size),
-                "why": "exploratory_scout",
-            }
+            self._rank_buffer.append((score, ctx_snapshot))
+
+            return None
 
         except Exception as e:
-            # Telemetry only — NEVER block
             try:
                 emit("msc_exploratory.exception", {
                     "error": str(e),
@@ -140,20 +205,7 @@ class ExploratoryEngine:
             except Exception:
                 pass
 
-            # Fail-open fallback: minimal scout probe
-            return {
-                "enter": True,
-                "engine": "MSC_EXPLORATORY",
-                "role": "PARENT",
-                "direction": "LAY->BACK",
-                "entry_ticks": 1,
-                "target_ticks": 1,
-                "stop_ticks": 4,
-                "px": ctx.get("px"),
-                "size": float(compute_dynamic_stake(ctx, "MSC_EXPLORATORY")),
-                "why": "exploratory_fallback",
-            }
-
+            return None
 
     # --------------------------------------------------
     # INTERNAL: NO-SIGNAL helper

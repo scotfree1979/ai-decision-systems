@@ -295,6 +295,19 @@ class BusRouteSnapshot:
         built_this_pass = 0
 
         # --------------------------------------------------
+        # CTX FOR RUNNER TREND
+        # --------------------------------------------------
+
+        from engines.market_monitor.trend_surface import compute_market_trend
+
+        trend_map = compute_market_trend(book)
+
+        for (mid, sid), ctx in self.ctx_map.items():
+            if sid in trend_map:
+                ctx["runner_trend"] = trend_map[sid]
+
+
+        # --------------------------------------------------
         # Build CTX ONLY for unseen runners
         # --------------------------------------------------
         for mid, sid in self.runner_pool:
@@ -757,36 +770,14 @@ def get_risk_cycle_exclusions():
 # ======================================================================================================
 
 def get_risk_legacy_parent_pairs():
-    """
-    Return TODAY's MATCHED parents eligible for MSC_RISK.
-
-    SOURCES:
-      • LEGACY parents
-      • MSC_EXPLORATORY parents
-
-    EXCLUSIONS (DIFFERENT BY ENGINE):
-      • LEGACY        → get_risk_cycle_exclusions()   (parent_id based)
-      • EXPLORATORY   → get_exploratory_active_parent_pairs() (mid,sid based)
-    """
 
     from engines.config_paths import open_auto_db
-    from engines.bus_route import (
-        get_risk_cycle_exclusions,
-        get_exploratory_active_parent_pairs,
-    )
     import sqlite3
 
     con = open_auto_db(rw=False)
     con.row_factory = sqlite3.Row
 
     try:
-        # --- exclusion sets (authoritative) ---
-        legacy_blocked_parent_ids = get_risk_cycle_exclusions()
-        exploratory_active_pairs  = {
-            (str(mid), str(sid))
-            for (mid, sid) in get_exploratory_active_parent_pairs()
-        }
-
         rows = con.execute(
             """
             SELECT
@@ -794,53 +785,29 @@ def get_risk_legacy_parent_pairs():
                 p.selectionId,
                 p.id         AS parent_id,
                 p.entry_odds AS anchor_px,
-                p.engine     AS engine
+                p.engine
             FROM orders p
             WHERE p.mode = 'LIVE'
               AND p.role = 'PARENT'
-              AND p.engine IN ('LEGACY', 'MSC_EXPLORATORY')
+              AND p.engine IN ('LEGACY','MSC_EXPLORATORY')
               AND UPPER(p.entry_status) = 'MATCHED'
-           
               AND date(p.opened_at) = date('now','utc')
             """
         ).fetchall()
 
-        out = []
-
-        for r in rows:
-            mid = str(r["marketId"])
-            sid = str(r["selectionId"])
-            pid = int(r["parent_id"])
-            eng = r["engine"]
-
-            # ------------------------------------
-            # LEGACY exclusion → risk cycle blocked
-            # ------------------------------------
-            if eng == "LEGACY":
-                if pid in legacy_blocked_parent_ids:
-                    continue
-
-            # ------------------------------------
-            # EXPLORATORY exclusion → already active
-            # ------------------------------------
-            elif eng == "MSC_EXPLORATORY":
-                if (mid, sid) in exploratory_active_pairs:
-                    continue
-
-            out.append(
-                (
-                    mid,
-                    sid,
-                    pid,
-                    float(r["anchor_px"]),
-                )
+        return [
+            (
+                str(r["marketId"]),
+                str(r["selectionId"]),
+                int(r["parent_id"]),
+                float(r["anchor_px"]),
             )
-
-        return out
+            for r in rows
+            if r["marketId"] and r["selectionId"] and r["anchor_px"] is not None
+        ]
 
     finally:
         con.close()
-
 
 
 # ============================================================================

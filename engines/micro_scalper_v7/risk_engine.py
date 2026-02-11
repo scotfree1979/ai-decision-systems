@@ -10,10 +10,27 @@ class RiskEngine:
     # ======================================================
     # INIT — per-parent lifecycle
     # ======================================================
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🔎 SEARCH: def __init__(self):
+# 🧩 ACTION: ADD engine-scoped exclusion state
+# 📆 PATCHED: 2026-03-29 — move exclusions from BusRoute to RiskEngine
+#
+# PURPOSE:
+# - BusRoute becomes pure matched-parent surface
+# - RiskEngine owns ALL eligibility gating
+# ======================================================================
+
     def __init__(self):
         # parent_id -> state dict
         self._parents: dict[int, dict] = {}
+
+        # 🔒 Engine-owned exclusions
+        self._legacy_cycle_blocked: set[int] = set()
+        self._exploratory_active: set[tuple[str, str]] = set()
+
         self.mode = "MODERATE"
+
 
     # ======================================================
     # Per-parent state accessor
@@ -42,6 +59,36 @@ class RiskEngine:
             "last_px": None,
         }
 
+# ======================================================================
+# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
+# 🧩 ADD: exclusion refresh (engine-owned)
+# 📆 PATCHED: 2026-03-29
+# ======================================================================
+
+    def _refresh_exclusions(self):
+        """
+        Pull exclusion surfaces directly from DB helpers.
+
+        These are ENGINE decisions.
+        BusRoute must not exclude.
+        """
+        try:
+            from engines.bus_route import (
+                get_risk_cycle_exclusions,
+                get_exploratory_active_parent_pairs,
+            )
+
+            self._legacy_cycle_blocked = set(get_risk_cycle_exclusions())
+
+            self._exploratory_active = {
+                (str(mid), str(sid))
+                for (mid, sid) in get_exploratory_active_parent_pairs()
+            }
+
+        except Exception:
+            # Fail-open — risk must never crash
+            self._legacy_cycle_blocked = set()
+            self._exploratory_active = set()
 
 
 
@@ -133,6 +180,32 @@ class RiskEngine:
 
         # 🔑 NORMALISE last_px
         ctx["last_px"] = px
+
+        # --------------------------------------------------
+        # 🔒 ENGINE-OWNED EXCLUSIONS
+        # --------------------------------------------------
+
+        self._refresh_exclusions()
+
+        pid = ctx.get("legacy_parent_id")
+        mid = str(ctx.get("marketId"))
+        sid = str(ctx.get("selectionId"))
+        engine = ctx.get("engine")
+
+        # ------------------------------------
+        # LEGACY: block if cycle blocked
+        # ------------------------------------
+        if engine == "LEGACY":
+            if pid in self._legacy_cycle_blocked:
+                return None
+
+        # ------------------------------------
+        # EXPLORATORY: block if already active
+        # ------------------------------------
+        if engine == "MSC_EXPLORATORY":
+            if (mid, sid) in self._exploratory_active:
+                return None
+
 
 # ======================================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py

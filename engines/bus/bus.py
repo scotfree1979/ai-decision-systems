@@ -1759,36 +1759,42 @@ class DecisionBus:
         # --------------------------------------------------
         # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)
         # --------------------------------------------------
+        # ======================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: 🟩 LANE 4 — MSC_EXPLORATORY
+        # 🧩 ACTION: REPLACE LANE 4 LOGIC
+        # 📆 PATCHED: 2026-04-01 — Ranked exploratory integration
+        # ======================================================================
+
         engine_report["MSC_EXPLORATORY"]["evaluated"] = True
 
         from engines.bus_route import get_exploratory_active_parent_pairs
 
         exclusions = get_exploratory_active_parent_pairs()
- 
         exp = self.engines.get("MSC_EXPLORATORY")
 
         if exp:
+            # 1️⃣ Collect candidates
             for (mid, sid), ctx in self._route_ctx_map.items():
                 if (mid, sid) in exclusions or ctx.get("px") is None:
                     continue
 
                 ctx_l = dict(ctx)
-
-                # --------------------------------------------------
-                # PROMINENCE NORMALISATION (BUS AUTHORITY)
-                # --------------------------------------------------
                 _normalize_ctx_enums(ctx_l)
 
                 try:
-                    r = exp.tick(ctx_l)
-                    if r and r.get("enter"):
-                        plan = dict(r)
-                        plan["engine"] = "MSC_EXPLORATORY"
-                        plans.append(("MSC_EXPLORATORY", plan, ctx_l))
-                        engine_report["MSC_EXPLORATORY"]["fired"] += 1
-                        lane_counts[4] += 1
+                    exp.tick(ctx_l)
                 except Exception:
                     _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
+
+            # 2️⃣ Emit ranked top-N
+            ranked_plans = exp.flush_ranked()
+
+            for plan in ranked_plans:
+                plans.append(("MSC_EXPLORATORY", plan, None))
+                engine_report["MSC_EXPLORATORY"]["fired"] += 1
+                lane_counts[4] += 1
+
 
         # --------------------------------------------------
         # 🟥 LANE 5 — OVERWATCHER (STOPLOSS)
