@@ -2517,15 +2517,6 @@ class DecisionBus:
             self.live_run_id = f"LIVE-{int(time.time())}"
         base_ctx["run_id"] = self.live_run_id
 
-
-        # ===============================================================
-        # 3️⃣ ROUTE / BUS STOP ADVANCEMENT
-        # ===============================================================
-        self._bus_stop += 1
-        if self._bus_stop > 10:
-            self._bus_stop = 1
-            self._route_id += 1
-
         # --------------------------------------------------
         # 🧠 RISK CONFIDENCE (READ-ONLY, PHASE 2)
         # --------------------------------------------------
@@ -2575,53 +2566,67 @@ class DecisionBus:
 
 
         # ===============================================================
-        # 4️⃣ ROUTE SNAPSHOT — LAZY BUILD + PER-TICK REFRESH
+        # 4️⃣ ROUTE SNAPSHOT — BUS-OWNED CONTROL (NO LAZY LOOP)
         # ===============================================================
 
-        if self._route_snapshot is None:
-            raise RuntimeError(
-                "[BUS INVARIANT] route_snapshot missing — start_bus_loop not running"
-            )
+        from engines.bus_route import BusRouteSnapshot
+        from engines.bus_route_startup_ctx import StartupCTXBuilder
 
-        # DONT BRING THIS BACK AS HANDLED IN BUS ROUTE
-
-        #🔑 LAZY BUILD: build CTX ONCE, only when empty
-        #if not self._route_snapshot.ctx_map:
-        #    self._route_snapshot.build_route()
-        #    self._route_snapshot.partition_into_bus_stops()
-        #    self._route_ctx_map = self._route_snapshot.get_ctx_map()
         # --------------------------------------------------
-        # 🔁 REFRESH DYNAMIC ODDS EVERY TICK (IN PLACE)
+        # INIT SNAPSHOT + STARTUP CTX BUILDER (ONCE)
+        # --------------------------------------------------
+        if self._route_snapshot is None:
+            self._route_snapshot = BusRouteSnapshot()
+            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
+
+        # --------------------------------------------------
+        # DERIVE ROUTE + BUS STOP FROM TICK (AUTHORITATIVE)
+        # --------------------------------------------------
+        self._route_id = ((self.tick_id - 1) // 10) + 1
+        self._bus_stop = ((self.tick_id - 1) % 10) + 1
+
+        # --------------------------------------------------
+        # ROUTE BUILD — ONLY AT ROUTE BOUNDARY
+        # --------------------------------------------------
+        if self._bus_stop == 1:
+            self._route_snapshot.build_route()
+            self._route_snapshot.partition_into_bus_stops()
+
+        # --------------------------------------------------
+        # CTX BATCH BUILDER — PROGRESSIVE WARM-UP
+        # --------------------------------------------------
+        if hasattr(self, "_startup_ctx_builder"):
+            self._startup_ctx_builder.step(max_builds=25)
+
+        # --------------------------------------------------
+        # REFRESH ODDS — EVERY TICK (AUTHORITATIVE)
         # --------------------------------------------------
         dt = self._route_snapshot.refresh_ctx_dynamic_fields()
 
-        # 🔗 Bind refreshed CTX map (same object, updated values)
+        # --------------------------------------------------
+        # BIND CTX MAP (AUTHORITATIVE SNAPSHOT)
+        # --------------------------------------------------
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
 
-
-        # ------------------------------------------------------------------
-        # 🔒 HARD INVARIANT: normalize ALL route CTX enums ONCE per tick
-        # ------------------------------------------------------------------
+        # --------------------------------------------------
+        # NORMALISE ENUMS (BUS AUTHORITY)
+        # --------------------------------------------------
         for ctx in self._route_ctx_map.values():
             _normalize_ctx_enums(ctx)
 
         self._ctx_refresh_times.append(dt)
 
         print(
-            f"[BUS][CTX_REFRESH][PRE] "
+            f"[BUS][CTX_REFRESH] "
             f"tick={self.tick_id} "
-            f"runners={len(self._route_snapshot.ctx_map)} "
+            f"route={self._route_id} "
+            f"bus_stop={self._bus_stop} "
+            f"runners={len(self._route_ctx_map)} "
             f"dt={dt:.4f}s"
         )
 
         # ===============================================================
-        # 6️⃣ LEGACY BUS STOP SLICE (ROUTE-PROVIDED)
-        # ===============================================================
-        #
-        # NOTE:
-        # - bus stop membership is precomputed by the route helper
-        # - BUS does NOT alter or filter this list
-        #
+        # 6️⃣ BUS STOP SLICE (ROUTE-PROVIDED)
         # ===============================================================
 
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []

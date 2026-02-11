@@ -541,6 +541,18 @@ class BusRouteSnapshot:
     def get_all_runners(self):
         return self.runner_pool
 
+    def run_live2(self, hz: float = 1.0):
+        interval = max(0.05, 1.0 / max(0.1, hz))
+        print(f"[BUS ROUTE] live loop started (hz={hz})")
+
+        while True:
+            try:
+                self.tick()
+            except Exception as e:
+                print(f"[BUS ROUTE][ERR] tick failed: {e}")
+
+            time.sleep(interval)
+
 # ============================================================================
 # CANONICAL ROOT CTX RUNNER SET
 # ============================================================================
@@ -1720,111 +1732,6 @@ def get_runner_odds_map(
             continue
 
     return odds_map
-
-
-# ======================================================================================================
-# 📍 TARGET: engines/api_tools.py
-# 🔎 ANCHOR: end of file (before __main__ or final EOF)
-# 🧩 ACTION: ADD
-# 📆 PATCHED: 2026-03-15 — BUS live loop starter (authoritative)
-#
-# PURPOSE:
-# - Allow api_tools users to start BUS without orchestrator
-# - Ensure BUS ticks advance when api_tools is imported or run
-# - Preserve orchestrator ownership in production
-#
-# CONTRACT:
-# - BUS remains execution authority
-# - Placement worker must already be running
-# - This starts ONLY the BUS loop
-# ======================================================================================================
-# engines/bus_route.py
-
-import time
-import threading
-from datetime import datetime, timezone
-
-ROUTE_REBUILD_BUS_STOP = 9
-ODDS_REFRESH_SECONDS  = 30
-
-
-# =========================
-# BUS ROUTE LOOP (ONE ONLY)
-# =========================
-
-def start_bus_loop():
-    from engines.bus.bus import BUS
-    from engines.bus_route import BusRouteSnapshot
-    from engines.bus_route_startup_ctx import StartupCTXBuilder
-
-    snap = BusRouteSnapshot()
-    snap.build_route()
-    snap.partition_into_bus_stops()
-
-    BUS._route_snapshot = snap
-    BUS._route_ctx_map  = snap.get_ctx_map()
-
-    print(
-        f"[BUS_ROUTE] initial route built "
-        f"route={snap.route_id} "
-        f"runners={len(snap.ctx_map)}"
-    )
-
-    # 🔑 DAY-LONG CTX BUILDER (THIS WAS NEVER RUNNING)
-    startup = StartupCTXBuilder(snap)
-
-    last_odds_refresh = time.time()
-    last_seen_route   = snap.route_id
-
-    while True:
-        try:
-            # 0️⃣ incremental CTX build
-            startup.step(max_builds=20)
-
-            now = time.time()
-
-            # 1️⃣ odds refresh
-            if now - last_odds_refresh >= ODDS_REFRESH_SECONDS:
-                snap.refresh_ctx_dynamic_fields()
-                BUS._route_ctx_map = snap.get_ctx_map()
-                last_odds_refresh = now
-
-            # 2️⃣ route advance
-            bus_stop = getattr(BUS, "_bus_stop", None)
-            if bus_stop is not None and bus_stop >= ROUTE_REBUILD_BUS_STOP:
-                if snap.route_id == last_seen_route:
-                    snap.build_route()
-                    snap.partition_into_bus_stops()
-                    BUS._route_ctx_map = snap.get_ctx_map()
-                    last_seen_route = snap.route_id
-
-            time.sleep(0.5)
-
-        except Exception as e:
-            print(f"[BUS_ROUTE][ERR] {e}")
-            time.sleep(1.0)
-
-_BUS_ROUTE_THREAD = None
-
-def start_bus_route_daemon():
-    """
-    Launch BusRoute lifecycle loop in its own daemon thread.
-    Must NOT block BUS.
-    """
-    global _BUS_ROUTE_THREAD
-
-    if _BUS_ROUTE_THREAD and _BUS_ROUTE_THREAD.is_alive():
-        return
-
-    t = threading.Thread(
-        target=start_bus_loop,
-        name="BusRouteLoop",
-        daemon=True,
-    )
-    t.start()
-    _BUS_ROUTE_THREAD = t
-
-    print("[BUS_ROUTE] daemon started")
 
 # -----------------------------
 # ✅ STANDALONE TEST TOOL (SCRAPER)
