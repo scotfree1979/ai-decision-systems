@@ -306,7 +306,14 @@ def persist_surface(surface_rows):
         )
     """)
 
+    seen_bet_ids = set()
+
+    # --------------------------------------------
+    # 1️⃣ UPSERT CURRENT SNAPSHOT
+    # --------------------------------------------
     for r in surface_rows:
+
+        seen_bet_ids.add(r["bet_id"])
 
         cur.execute("""
             INSERT INTO betfair_execution_surface(
@@ -341,8 +348,37 @@ def persist_surface(surface_rows):
             r["source"],
         ))
 
+    # --------------------------------------------
+    # 2️⃣ DOWNGRADE STALE CURRENT ROWS
+    # --------------------------------------------
+    # If a bet was CURRENT before but is not seen now,
+    # it must no longer be live exposure.
+    #
+    # We mark it CLEARED with zero exposure.
+    # --------------------------------------------
+
+    cur.execute("""
+        SELECT bet_id
+        FROM betfair_execution_surface
+        WHERE source='CURRENT'
+    """)
+    existing_current = {row[0] for row in cur.fetchall()}
+
+    stale = existing_current - seen_bet_ids
+
+    for bet_id in stale:
+        cur.execute("""
+            UPDATE betfair_execution_surface
+               SET source='CLEARED',
+                   matched_size=0,
+                   avg_price=0,
+                   last_seen=datetime('now','utc')
+             WHERE bet_id=?
+        """, (bet_id,))
+
     con.commit()
     con.close()
+
 
 
 # --------------------------------------------------

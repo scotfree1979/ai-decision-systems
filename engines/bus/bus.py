@@ -1114,6 +1114,35 @@ class DecisionBus:
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
+        # ==================================================
+        # 🔒 HARD PX INVARIANT (BUS AUTHORITY)
+        # Every CTX must have px before lanes execute
+        # ==================================================
+
+        missing_px = [
+            (mid, sid)
+            for (mid, sid), ctx in self._route_ctx_map.items()
+            if ctx.get("px") is None
+        ]
+
+        if missing_px:
+            # One forced refresh pass
+            self._route_snapshot.refresh_ctx_dynamic_fields()
+            self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
+            # Re-check
+            still_missing = [
+                (mid, sid)
+                for (mid, sid), ctx in self._route_ctx_map.items()
+                if ctx.get("px") is None
+            ]
+
+            if still_missing:
+                print(
+                    f"[BUS][PX][WARN] still missing px for {len(still_missing)} runners"
+                )
+        
         # === PATCH START ============================================================
         # 📍 TARGET: engines/bus/bus.py
         # 🔎 SEARCH: _normalize_ctx_enums(ctx)
@@ -2794,16 +2823,15 @@ class DecisionBus:
 # ======================================================================================================
 
         # --------------------------------------------------
-        # 🔑 INITIAL ROUTE BUILD (FIRST TICK ONLY)
+        # 🔑 INITIAL ROUTE BUILD (FIRST USE ONLY)
         # --------------------------------------------------
-        if self.tick_id == 1:
+        if not hasattr(self, "_route_initialised"):
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
             self._route_snapshot.refresh_ctx_dynamic_fields()
 
+            self._route_initialised = True
             print("[BUS][ROUTE] initial route built")
-
-
         # --------------------------------------------------
         # DERIVE ROUTE + BUS STOP FROM TICK (AUTHORITATIVE)
         # --------------------------------------------------
@@ -3265,12 +3293,15 @@ class DecisionBus:
 
 
                     # Hard invariant — risk cannot operate without anchor
-                    if not legacy_parent_id or not legacy_entry_odds:
+                    anchor_parent_id   = ctx.get("anchor_parent_id")
+                    anchor_entry_odds  = ctx.get("anchor_entry_odds")
+
+                    if not anchor_parent_id or not anchor_entry_odds:
                         plan["_bus_block"] = "risk_missing_parent_anchor"
                         tick_ctx["plans_route_failed"].append(
-                            (plan, "risk_missing_parent_anchor")
+                           (plan, "risk_missing_parent_anchor")
                         )
-                        continue  # 🔴 DO NOT ROUTE
+                        continue # 🔴 DO NOT ROUTE
 
                     # Ensure px exists (BUS authority)
                     if not self._ensure_px_from_route(ctx):
