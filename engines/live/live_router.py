@@ -1945,7 +1945,7 @@ def _sync_child_matches(limit: int = 100) -> int:
             _stamp_parent_exit_sql(
                 cur,
                 parent_id=parent_id,
-                status="MATCHED",
+                exit_status="MATCHED",
             )
 
             con.commit()
@@ -3549,7 +3549,7 @@ def _orders_update_parent_failed(cor, error_msg):
             _stamp_parent_exit_sql(
                 cur,
                 parent_id=int(parent["id"]),
-                status="FAILED",
+                exit_status="FAILED",
                 reason=error_msg,
             )
         con.commit()
@@ -4621,7 +4621,7 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
         _stamp_parent_exit_sql(
             cur,
             parent_id=parent_id,
-            status="MATCHED",
+            exit_status="MATCHED",
         )
 
 
@@ -5435,7 +5435,7 @@ def _place_stoploss_child_now(
         _stamp_parent_exit_sql(
             cur,
             parent_id=pid,
-            status="MATCHED",
+            exit_status="MATCHED",
             reason="stoploss",
         )
 
@@ -5627,7 +5627,7 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
             _stamp_parent_exit_sql(
                 cur,
                 parent_id=int(r["id"]),
-                status="SETTLED",
+                exit_status="SETTLED",
             )
 
         con.commit()
