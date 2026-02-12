@@ -1525,9 +1525,12 @@ class DecisionBus:
             last_px = ctx.get("px")
             if last_px is None:
                 # Try one last authoritative refresh
-                if not self._ensure_px_from_route(ctx):
-                    if not self._force_px_refresh(mid, sid, ctx):
-                        continue
+                # Force hydrate PX (never gate)
+                self._ensure_px_from_route(ctx)
+                self._force_px_refresh(mid, sid, ctx)
+
+                if ctx.get("px") is None:
+                    continue
                 last_px = ctx.get("px")
                 if last_px is None:
                     continue
@@ -3453,9 +3456,7 @@ class DecisionBus:
 
                 # Price (execution truth — MUST already exist)
                 if "px" not in p or p["px"] is None:
-                    raise RuntimeError(
-                        f"[BUS] missing px for {p['marketId']}:{p['selectionId']}"
-                    )
+                    continue
 
                 # Stake (execution truth — MUST already exist)
                 if "size" not in p or p["size"] is None or p["size"] <= 0:
