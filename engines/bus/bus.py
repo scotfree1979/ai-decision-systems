@@ -1488,10 +1488,8 @@ class DecisionBus:
         # --------------------------------------------------
         engine_report["MSC_RISK"]["evaluated"] = True
 
-        from engines.bus_route import (
-            get_risk_legacy_parent_pairs,
-            get_risk_cycle_exclusions,
-        )
+        from engines.bus_route import get_risk_legacy_parent_pairs
+
         from tools.betfair_match_surface import query_bet_match_surface
         from tools.betfair_runner_trend_surface import get_runner_trend
         import os
@@ -1506,18 +1504,9 @@ class DecisionBus:
 
         # --------------------------------------------------
         # BUS-AUTHORITATIVE EXCLUSIONS (PER LEGACY PARENT)
-        # --------------------------------------------------
-        excluded_legacy_parents = get_risk_cycle_exclusions()
+   
 
         for mid, sid, legacy_parent_id, anchor_px in get_risk_legacy_parent_pairs():
-
-            # --------------------------------------------------
-            # 🔒 ONLY VALID GATE:
-            # One risk parent per risk cycle
-            # (cycle = legacy_parent_id)
-            # --------------------------------------------------
-            if legacy_parent_id in excluded_legacy_parents:
-                continue
 
             # --------------------------------------------------
             # CTX MUST COME FROM ROUTE (AUTHORITATIVE)
