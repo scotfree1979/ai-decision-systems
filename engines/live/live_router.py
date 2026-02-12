@@ -1087,53 +1087,28 @@ def _router_child_worker_loop():
 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🧩 ADD: Canonical parent exit stamper (single source of truth)
-# 📆 PATCHED: 2026-04-XX — unify all parent exit transitions
-#
-# CONTRACT:
-# - ONLY stamps PARENT rows
-# - Idempotent
-# - Never touches CHILD rows
-# - Settlement is excluded (handled elsewhere)
-# ======================================================================
-
-# ======================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🧩 ADD: canonical parent exit stamper
+# 🔎 SEARCH: def _stamp_parent_exit_sql(
+# 🧩 ACTION: FIX exit_status handling + remove illegal status var
+# 📆 PATCHED: 2026-04-12 — canonical parent exit stamping fix
 # ======================================================================
 
 def _stamp_parent_exit_sql(
     cur,
     *,
     parent_id: int,
-    status: str,
+    exit_status: str,
     reason: str | None = None,
 ):
     """
     Canonical parent exit stamper.
 
-    HARD INVARIANT:
-    - exit_status='MATCHED' is ONLY allowed if a CHILD is MATCHED
+    HARD RULE:
+    - Only mutates exit_status
+    - Never mutates entry_status
+    - Idempotent
     """
 
-    status = status.upper()
-
-    # 🔒 BLOCK illegal MATCHED exits
-    if status == "MATCHED":
-        row = _q_retry(cur, """
-            SELECT 1
-              FROM orders
-             WHERE role='CHILD'
-               AND hedge_of=?
-               AND entry_status='MATCHED'
-               AND exit_status='MATCHED'
-             LIMIT 1
-        """, (int(parent_id),)).fetchone()
-
-        if not row:
-            # Illegal transition — downgrade to SETTLED instead
-            status = "SETTLED"
-            reason = reason or "no_child_matched_guard"
+    status = str(exit_status or "").upper()
 
     row = _q_retry(cur, """
         SELECT exit_status
@@ -1145,7 +1120,7 @@ def _stamp_parent_exit_sql(
     if not row:
         return
 
-    if (row["exit_status"] or "").upper() == "SETTLED":
+    if (row["exit_status"] or "").upper() == status:
         return
 
     _q_retry(cur, """
@@ -1156,12 +1131,10 @@ def _stamp_parent_exit_sql(
                error         = COALESCE(error, ?)
          WHERE id = ?
            AND role = 'PARENT'
-           AND (exit_status IS NULL OR exit_status <> ?)
     """, (
         status,
         reason,
         int(parent_id),
-        status,
     ))
 
 
@@ -2822,7 +2795,7 @@ def cancel_bet_canonical(*, bet_id: str) -> bool:
             _stamp_parent_exit_sql(
                 cur,
                 parent_id=order_id,
-                status="CANCELLED",
+                exit_status="CANCELLED",
                 reason="betfair_cancel",
             )
             _release_parent_exposure_db(order_id)
@@ -2904,19 +2877,20 @@ def _cancel(app_key: str, token: str, bet_id: str) -> None:
     # 2️⃣ Mark CANCELLED in DB
     # --------------------------------------------------
     try:
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: # 2️⃣ Mark CANCELLED in DB
+# 🧩 ACTION: Remove direct UPDATE, use canonical stamper only
+# 📆 PATCHED: 2026-04-XX
+# ======================================================================
+
         con = _orders_conn()
         cur = con.cursor()
-
-        _q_retry(cur, """
-            UPDATE orders
-               SET exit_status='CANCELLED'
-             WHERE id=?
-        """, (parent_id,))
 
         _stamp_parent_exit_sql(
             cur,
             parent_id=parent_id,
-            status="CANCELLED",
+            exit_status="CANCELLED",
             reason="betfair_cancel",
         )
 
@@ -2924,6 +2898,7 @@ def _cancel(app_key: str, token: str, bet_id: str) -> None:
         con.close()
 
         _release_parent_exposure_db(parent_id)
+
 
         _log_event(
             "INFO","bankstate",
@@ -5221,58 +5196,45 @@ def _active_parents_count_per_letter(market_id: str, selection_id: str, letter: 
 
 # === PATCH END ============================================================
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _orders_update_parent_cancelled(
+# 🧩 ACTION: Ensure exit_status only
+# 📆 PATCHED: 2026-04-XX
+# ======================================================================
+
 def _orders_update_parent_cancelled(cor: str, *, reason: str = "timeout") -> None:
     _ensure_orders_schema()
-    con = _orders_conn(); cur = con.cursor()
+    con = _orders_conn()
+    cur = con.cursor()
 
     try:
         row = _q_retry(cur, """
-            SELECT entry_bet_id
+            SELECT id
               FROM orders
              WHERE customerOrderRef=?
                AND role='PARENT'
              LIMIT 1
         """, (str(cor),)).fetchone()
 
-        bet_id = row["entry_bet_id"] if row else None
-
-        # 🔒 GUARD: never cancel if already matched
-        if not _guard_cancel_if_matched(parent_cor=cor, bet_id=bet_id):
+        if not row:
             return
 
-        _q_retry(cur, """
-            UPDATE orders
-               SET exit_status='CANCELLED',
-             
-                   closed_at=COALESCE(closed_at, ?),
-                   error=COALESCE(error, ?),
-                   mode='LIVE'
-             WHERE customerOrderRef=?
-        """, (_utcnow_str(), reason[:200], str(cor)))
+        parent_id = int(row["id"])
+
+        _stamp_parent_exit_sql(
+            cur,
+            parent_id=parent_id,
+            exit_status="CANCELLED",
+            reason=reason,
+        )
 
         con.commit()
 
     finally:
         con.close()
 
-    # 🔓 Exposure release (unchanged)
-    try:
-        con = _orders_conn()
-        con.row_factory = sqlite3.Row
-        row = _q_retry(con, """
-            SELECT id FROM orders
-             WHERE customerOrderRef=?
-               AND role='PARENT'
-             LIMIT 1
-        """, (str(cor),)).fetchone()
-        con.close()
-
-        if row:
-            _release_parent_exposure_db(int(row["id"]))
-
-    except Exception as e:
-        _log_event("ERROR","bankstate",
-                   f"[CANCEL EXPOSURE RELEASE FAILED] ref={cor}: {e}")
+    _release_unmatched_parent_exposure(cor)
 
 
 
@@ -5638,7 +5600,7 @@ def _sweep_close_finished_markets(grace_min: int = 6) -> tuple[int, int]:
                 _stamp_parent_exit_sql(
                     cur,
                     parent_id=int(r["id"]),
-                    status="CANCELLED",
+                    exit_status="CANCELLED",
                     reason="cleanup_orphan",
                 )
 
@@ -6892,13 +6854,19 @@ def _recycle_stale_unmatched_parents(limit: int = 50, *, max_age_min: int = 5) -
                        AND UPPER(entry_status)='PLACED'
                 """, (int(r["id"]),))
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: recycle_timeout
+# 🧩 ACTION: Use canonical stamper only
+# 📆 PATCHED: 2026-04-XX
+# ======================================================================
+
                 _stamp_parent_exit_sql(
                     cur,
                     parent_id=int(r["id"]),
-                    status="CANCELLED",
+                    exit_status="CANCELLED",
                     reason="recycle_timeout",
                 )
-
                 con.commit()
 
                 # 3️⃣ Release exposure (authoritative)
@@ -7116,26 +7084,27 @@ def cleanup_orphan_parents() -> int:
         if not rows:
             return 0
         cur = con.cursor()
+        # ======================================================================
+        # 📍 TARGET: engines/live/live_router.py
+        # 🔎 SEARCH: def cleanup_orphan_parents(
+        # 🧩 ACTION: Fix orphan cancellation
+        # 📆 PATCHED: 2026-04-XX
+        # ======================================================================
+
         for r in rows:
-            _q_retry(cur, """
-                
-                UPDATE orders
-                   SET exit_status='CANCELLED',
-     
-                       closed_at=COALESCE(closed_at, datetime('now','utc')),
-                       error=COALESCE(error, 'cleanup_orphan'),
-                       mode='LIVE'
-                 WHERE id=?
-            """, (r["id"],))
-            
-            # NO-OP — illegal cancellation
+            _stamp_parent_exit_sql(
+                cur,
+                parent_id=int(r["id"]),
+                exit_status="CANCELLED",
+                reason="cleanup_orphan",
+            )
+
             _log_event(
                 "WARN",
                 "live_router",
-                f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
+                f"[CLEANUP] orphan parent cancelled ref={r['customerOrderRef']}"
             )
-            _log_event("WARN", "live_router",
-                       f"[CLEANUP] orphan parent cancelled ref={r['customerOrderRef']}")
+
         con.commit(); con.close()
         return len(rows)
     except Exception as e:
