@@ -370,20 +370,13 @@ class BusRouteSnapshot:
             # Fail-open: pruning must never break route build
             pass
 
-
         # --------------------------------------------------
-        # 🔒 CUMULATIVE ROUTE MEMBERSHIP (DAY-LONG)
+        # 🔁 TIME-RELATIVE ROUTE MEMBERSHIP (AUTHORITATIVE)
         # --------------------------------------------------
+        # Route must reflect CURRENT scope only.
+        # No cumulative day-long accumulation.
 
-        new_pairs = _order_runner_pool_by_market_time(raw_pairs)
-
-        existing = set(self.runner_pool)
-
-        for mid, sid in new_pairs:
-            key = (str(mid), str(sid))
-            if key not in existing:
-                self.runner_pool.append(key)
-                existing.add(key)
+        self.runner_pool = ordered.copy()
 
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
@@ -743,9 +736,14 @@ def get_root_ctx_runner_pairs():
               AND date(opened_at) = date('now','utc')
         """).fetchall()
 
+        scope_mids = {mid for (mid, _sid) in pairs}
+
         for r in rows:
-            if r["marketId"] and r["selectionId"]:
-                pairs.add((str(r["marketId"]), str(r["selectionId"])))
+            mid = str(r["marketId"])
+            sid = str(r["selectionId"])
+            if mid in scope_mids:
+                pairs.add((mid, sid))
+
 
     except Exception:
         pass
@@ -759,13 +757,11 @@ def get_root_ctx_runner_pairs():
     # 2️⃣ RISK parent runners (LEGACY + EXPLORATORY)
     # 🔑 CRITICAL: MUST be present for px refresh
     # --------------------------------------------------
-    try:
-        for mid, sid, _pid, _anchor_px in get_risk_legacy_parent_pairs():
-            if mid and sid:
-                pairs.add((str(mid), str(sid)))
-    except Exception:
-        pass
+    scope_mids = {mid for (mid, _sid) in pairs}
 
+    for mid, sid, _pid, _anchor_px in get_risk_legacy_parent_pairs():
+        if mid in scope_mids:
+            pairs.add((mid, sid))
     # --------------------------------------------------
     # 3️⃣ Exploratory exclusions (already active parents)
     # --------------------------------------------------

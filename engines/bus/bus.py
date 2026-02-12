@@ -2796,15 +2796,16 @@ class DecisionBus:
                 next_snapshot = BusRouteSnapshot()
                 next_snapshot.build_route()
                 next_snapshot.partition_into_bus_stops()
+   
+                # 🔑 CRITICAL — hydrate PX BEFORE swap
+                next_snapshot.refresh_ctx_dynamic_fields()
 
                 self._next_route_snapshot = next_snapshot
 
-                print(f"[BUS][ROUTE] prebuilt next route at bus_stop=7")
+                print(f"[BUS][ROUTE] prebuilt next route at bus_stop=7 (px hydrated)")
 
             except Exception:
-                # Never block BUS
                 pass
-
 
         # --------------------------------------------------
         # ROUTE SWITCH (FAST POINTER SWAP)
