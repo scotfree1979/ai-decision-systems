@@ -2552,7 +2552,32 @@ class DecisionBus:
         # 0️⃣ BUS IDENTITY
         # ===============================================================
         self.tick_id += 1
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside def tick(self): immediately after self.tick_id += 1
+# 🧩 ACTION: ADD BankState floor reconciliation call (driver authority)
+# 📆 PATCHED: 2026-02-12 — BUS enforces BankState refresh every tick
+#
+# PURPOSE:
+# - BUS is the system driver
+# - BankState exposure floor must refresh every tick
+# - Prevent stale floor / reconciliation drift
+#
+# SAFETY:
+# - Idempotent
+# - No mutation beyond BankState internal logic
+# - Fail-open (never block tick)
+# ======================================================================================================
 
+        # ==================================================
+        # 🟦 BANKSTATE FLOOR REFRESH (BUS DRIVER AUTHORITY)
+        # ==================================================
+        try:
+            from engines.live.bank_state import _reconcile_market_exposure_live
+            _reconcile_market_exposure_live()
+        except Exception:
+            # BUS must never die due to reconciliation
+            pass
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: def tick(self):
@@ -2743,9 +2768,55 @@ class DecisionBus:
         # --------------------------------------------------
         # ROUTE BUILD — ONLY AT ROUTE BOUNDARY
         # --------------------------------------------------
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 ANCHOR: inside def tick(self): route management section
+        # 🧩 ACTION: PRE-BUILD NEXT ROUTE AT BUS STOP 7
+        # 📆 PATCHED: 2026-04-12 — Non-blocking route rollover
+        #
+        # MODEL:
+        # - Route runs for 10 bus stops
+        # - At bus_stop 7, we build next route in advance
+        # - At bus_stop 1, we simply switch snapshot reference
+        # - No blocking build at route boundary
+        #
+        # INVARIANT:
+        # - Route build NEVER occurs at bus_stop 1
+        # - Route build NEVER blocks first tick of cycle
+        # ======================================================================================================
+
+        # --------------------------------------------------
+        # PRE-BUILD NEXT ROUTE (NON-BLOCKING)
+        # --------------------------------------------------
+        if self._bus_stop == 7:
+
+            try:
+                from engines.bus_route import BusRouteSnapshot
+
+                next_snapshot = BusRouteSnapshot()
+                next_snapshot.build_route()
+                next_snapshot.partition_into_bus_stops()
+
+                self._next_route_snapshot = next_snapshot
+
+                print(f"[BUS][ROUTE] prebuilt next route at bus_stop=7")
+
+            except Exception:
+                # Never block BUS
+                pass
+
+
+        # --------------------------------------------------
+        # ROUTE SWITCH (FAST POINTER SWAP)
+        # --------------------------------------------------
         if self._bus_stop == 1:
-            self._route_snapshot.build_route()
-            self._route_snapshot.partition_into_bus_stops()
+
+            if hasattr(self, "_next_route_snapshot"):
+                self._route_snapshot = self._next_route_snapshot
+                del self._next_route_snapshot
+
+                print(f"[BUS][ROUTE] switched to prebuilt route")
+
 
         # --------------------------------------------------
         # CTX BATCH BUILDER — PROGRESSIVE WARM-UP

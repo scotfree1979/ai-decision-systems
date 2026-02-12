@@ -182,6 +182,43 @@ def _filter_valid_markets(
 
     return out
 
+def _get_current_anchor_market():
+    from engines.config_paths import connect_db
+    import sqlite3
+
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+
+    try:
+        row = con.execute(
+            """
+            SELECT marketId
+            FROM bets
+            WHERE date(marketStartTime)=date('now','utc')
+              AND julianday(marketStartTime) >= julianday('now','utc') - (120.0/1440.0)
+            ORDER BY ABS(julianday(marketStartTime) - julianday('now','utc')) ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        con.close()
+
+    return str(row["marketId"]) if row else None
+
+def _rotate_from_market(pairs, anchor_mid):
+    if not anchor_mid:
+        return pairs
+
+    # find first index of anchor market
+    idx = next(
+        (i for i, (mid, _sid) in enumerate(pairs) if str(mid) == str(anchor_mid)),
+        None
+    )
+
+    if idx is None:
+        return pairs
+
+    return pairs[idx:] + pairs[:idx]
 
 def _build_runner_pool():
     """
@@ -251,6 +288,8 @@ class BusRouteSnapshot:
         self.route_id += 1
         raw_pairs = list(get_root_ctx_runner_pairs())
         ordered = _order_runner_pool_by_market_time(raw_pairs)
+        anchor_mid = _get_current_anchor_market()
+        ordered = _rotate_from_market(ordered, anchor_mid)
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus_route.py
