@@ -2788,31 +2788,35 @@ def cancel_bet_canonical(*, bet_id: str) -> bool:
     # 4️⃣ Persist DB state (DB is lock)
     # --------------------------------------------------
     try:
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: # 4️⃣ Persist DB state (DB is lock)
+# 🧩 ACTION: Scope cancellation strictly by bet_id
+# 📆 PATCHED: 2026-04-XX — Fix multi-parent child deletion bug
+# ============================================================================
+
         con = _orders_conn()
         cur = con.cursor()
 
-        if role == "PARENT":
-            _stamp_parent_exit_sql(
-                cur,
-                parent_id=order_id,
-                exit_status="CANCELLED",
-                reason="betfair_cancel",
-            )
-            _release_parent_exposure_db(order_id)
-
-        else:  # CHILD
-            _q_retry(cur, """
-                UPDATE orders
-                   SET exit_status='CANCELLED',
-                       exit_kind='BETFAIR_CANCEL',
-                       closed_at=datetime('now','utc')
-                 WHERE id=?
-            """, (order_id,))
+        _q_retry(cur, """
+            UPDATE orders
+               SET exit_status='CANCELLED',
+                   parent_closed=CASE WHEN role='PARENT' THEN 1 ELSE parent_closed END,
+                   exit_kind='BETFAIR_CANCEL',
+                   closed_at=COALESCE(closed_at, datetime('now','utc'))
+             WHERE entry_bet_id = ?
+        """, (str(bet_id),))
 
         con.commit()
         con.close()
 
+        if role == "PARENT":
+            _release_parent_exposure_db(order_id)
+
         return True
+
+# === PATCH END ==============================================================
+
 
     except Exception as e:
         _log_event(
@@ -2839,28 +2843,36 @@ def _cancel(app_key: str, token: str, bet_id: str) -> None:
     # Resolve parent FIRST
     # --------------------------------------------------
     try:
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: # 2️⃣ Mark CANCELLED in DB
+# 🧩 ACTION: Scope cancellation strictly by bet_id
+# 📆 PATCHED: 2026-04-XX — Fix cross-runner cancellation bug
+#
+# HARD INVARIANT:
+#   Cancellation MUST affect only the row with this exact entry_bet_id.
+# ============================================================================
+
         con = _orders_conn()
-        con.row_factory = sqlite3.Row
         cur = con.cursor()
 
-        parent = _q_retry(cur, """
-            SELECT id, customerOrderRef, entry_status
-              FROM orders
-             WHERE entry_bet_id=?
-               AND role='PARENT'
-             LIMIT 1
-        """, (str(bet_id),)).fetchone()
+        _q_retry(cur, """
+            UPDATE orders
+               SET exit_status='CANCELLED',
+                   parent_closed=CASE WHEN role='PARENT' THEN 1 ELSE parent_closed END,
+                   closed_at=COALESCE(closed_at, datetime('now','utc'))
+             WHERE entry_bet_id = ?
+        """, (str(bet_id),))
+
+        con.commit()
         con.close()
 
-        if not parent:
-            return
+        if role == "PARENT":
+            _release_parent_exposure_db(order_id)
 
-        parent_id  = int(parent["id"])
-        parent_cor = str(parent["customerOrderRef"])
+# === PATCH END ==============================================================
 
-        # 🔒 GUARD: never cancel matched bets
-        if not _guard_cancel_if_matched(parent_cor=parent_cor, bet_id=bet_id):
-            return
+
 
     except Exception:
         return
