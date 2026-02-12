@@ -226,7 +226,8 @@ class RiskEngine:
         if px <= 0:
             return None
 
-        anchor = float(ctx.get("entry_odds") or 0.0)
+        anchor = float(ctx.get("legacy_entry_odds") or 0.0)
+
         if anchor <= 0:
             return None
 

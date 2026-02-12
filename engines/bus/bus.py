@@ -40,6 +40,8 @@ LEGACY_LETTER_TO_STRATEGY = {
     "A": "ALWAYS_ON",
 }
 
+INPLAY_PRE_OFF_MINUTES  = 5
+INPLAY_POST_OFF_MINUTES = 120
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -1605,7 +1607,7 @@ class DecisionBus:
                     (julianday(marketStartTime) - julianday('now','utc')) * 1440.0 AS mins_to_off
                 FROM bets
                 WHERE
-                    (julianday(marketStartTime) - julianday('now','utc')) <= 5.0
+                    (julianday(marketStartTime) - julianday('now','utc')) <= (5.0 / 1440.0)
                     AND (julianday(marketStartTime) - julianday('now','utc')) > 0.0
                 """
             ).fetchall()
@@ -1652,7 +1654,10 @@ class DecisionBus:
                     (julianday(marketStartTime) - julianday('now','utc')) * 1440.0 AS mins_to_off
                 FROM bets
                 WHERE
-                    julianday(marketStartTime) <= julianday('now','utc')
+                    (julianday(marketStartTime) - julianday('now','utc')) <= 0.0
+                  AND
+                    (julianday(marketStartTime) - julianday('now','utc')) >= -(120.0 / 1440.0)
+
                 """
             ).fetchall()
         finally:
@@ -1745,16 +1750,62 @@ class DecisionBus:
                 # --------------------------------------------------
                 # PURE ENGINE DECISION
                 # --------------------------------------------------
+                # ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside _evaluate_runner → LANE 3 MSC_INPLAY
+# 🧩 ACTION: EXPAND MSC_INPLAY batch into individual parent plans
+# 📆 PATCHED: 2026-04-XX — Normalize MSC_INPLAY to standard parent contract
+#
+# PURPOSE:
+# - Convert batch emission into standard per-plan entries
+# - Preserve engine intelligence
+# - Keep router + placement logic unchanged
+# - No retries, no sequencing here
+#
+# CONTRACT:
+# - If p["batch"] == True → expand p["plans"]
+# - Each child plan becomes normal ("PARENT") plan
+# - Router handles sequential unlock
+# ======================================================================================================
+
                 try:
                     p = inplay.tick(ctx_l)
-                    if p and p.get("enter"):
+
+                    if not p:
+                        _record_reason(engine_report, "MSC_INPLAY", "no_plan")
+                        continue
+
+                    if not p.get("enter"):
+                        _record_reason(
+                            engine_report,
+                            "MSC_INPLAY",
+                            p.get("reason") or p.get("why") or "note",
+                        )
+                        continue
+
+                    # --------------------------------------------------
+                    # 🔁 BATCH EXPANSION (NEW)
+                    # --------------------------------------------------
+                    if p.get("batch") and isinstance(p.get("plans"), list):
+
+                        for subplan in p["plans"]:
+                            plan = dict(subplan)
+                            plan["engine"] = "MSC_INPLAY"
+                            plans.append(("MSC_INPLAY", plan, ctx_l))
+                            engine_report["MSC_INPLAY"]["fired"] += 1
+                            lane_counts[3] += 1
+
+                    else:
+                        # Legacy single-plan behaviour (safe fallback)
                         plan = dict(p)
                         plan["engine"] = "MSC_INPLAY"
                         plans.append(("MSC_INPLAY", plan, ctx_l))
                         engine_report["MSC_INPLAY"]["fired"] += 1
                         lane_counts[3] += 1
+
                 except Exception:
                     _record_reason(engine_report, "MSC_INPLAY", "tick_error")
+
 
         # --------------------------------------------------
         # 🟩 LANE 4 — MSC_EXPLORATORY (ROUTE − EXCLUSIONS)

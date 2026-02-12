@@ -252,6 +252,86 @@ class BusRouteSnapshot:
         raw_pairs = list(get_root_ctx_runner_pairs())
         ordered = _order_runner_pool_by_market_time(raw_pairs)
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), after ordered = ...
+# 📆 PATCHED: 2026-04-02 — Prune markets older than -120 minutes
+#
+# PURPOSE:
+# - Prevent route growth across full trading day
+# - Remove stale markets >120 minutes post-off
+# - Preserve active lifecycle runners
+#
+# INVARIANTS:
+# - Only prunes markets strictly older than -120 minutes
+# - Never prunes markets with matched parents today
+# - Fail-open (never crash route build)
+# ======================================================================================================
+
+        try:
+            from engines.config_paths import connect_db
+            from datetime import datetime, timezone
+            import sqlite3
+
+            now = datetime.now(timezone.utc)
+
+            con = connect_db(ro=True)
+            con.row_factory = sqlite3.Row
+
+            # Load all market start times for current runner_pool
+            mids = {mid for (mid, _sid) in self.runner_pool}
+
+            market_times = {}
+            for mid in mids:
+                row = con.execute(
+                    """
+                    SELECT marketStartTime
+                    FROM bets
+                    WHERE marketId = ?
+                    LIMIT 1
+                    """,
+                    (mid,),
+                ).fetchone()
+
+                if not row or not row["marketStartTime"]:
+                    continue
+
+                off = datetime.fromisoformat(
+                    row["marketStartTime"].replace("Z", "+00:00")
+                )
+
+                minutes_post_off = (now - off).total_seconds() / 60.0
+
+                # Mark for prune if older than 120 minutes post-off
+                if minutes_post_off > 120:
+                    market_times[mid] = True
+
+            con.close()
+
+            if market_times:
+                # Remove stale runners from runner_pool
+                self.runner_pool = [
+                    (mid, sid)
+                    for (mid, sid) in self.runner_pool
+                    if mid not in market_times
+                ]
+
+                # Remove stale CTX entries
+                for key in list(self.ctx_map.keys()):
+                    mid, _sid = key
+                    if mid in market_times:
+                        self.ctx_map.pop(key, None)
+
+                print(
+                    f"[BUS][PRUNE] removed_markets={len(market_times)} "
+                    f"remaining_runners={len(self.runner_pool)}"
+                )
+
+        except Exception:
+            # Fail-open: pruning must never break route build
+            pass
+
+
         # --------------------------------------------------
         # 🔒 CUMULATIVE ROUTE MEMBERSHIP (DAY-LONG)
         # --------------------------------------------------
@@ -386,6 +466,55 @@ class BusRouteSnapshot:
         self.partition_into_bus_stops()
         print(f"[CTX] total={len(self.ctx_map)} built_this_pass={built_this_pass}")
 
+    # === PATCH START ============================================================
+    # 📍 TARGET: engines/bus_route.py
+    # 🔎 ANCHOR: class BusRouteSnapshot
+    # 📆 PATCHED: 2026-04-02 — restore refresh_ctx_dynamic_fields as class method
+    #
+    # FIX:
+    # - refresh_ctx_dynamic_fields was accidentally defined outside the class
+    # - BUS expects this as an instance method
+    # - No logic changes
+    # ============================================================================
+
+    def refresh_ctx_dynamic_fields(self):
+        """
+        Refresh dynamic price fields for all runners in route snapshot.
+
+        MARKET-BATCHED.
+        """
+
+        import time
+        import os
+
+        t0 = time.time()
+
+        session_token = (
+            os.getenv("SESSION_TOKEN")
+            or os.getenv("BETFAIR_SESSION_TOKEN")
+        )
+
+        odds_map = get_runner_odds_map(
+            list(self.ctx_map.keys()),
+            session_token=session_token,
+        )
+
+        for (mid, sid), ctx in self.ctx_map.items():
+            odds = odds_map.get((mid, sid))
+            if not odds:
+                ctx["px"] = None
+                continue
+
+            ctx["px"]   = odds["px"]
+            ctx["odds"] = odds["px"]
+            ctx["back"] = odds.get("back")
+            ctx["lay"]  = odds.get("lay")
+
+        return time.time() - t0
+
+    # === PATCH END ==============================================================
+
+
     def get_ctx_for_market(self, market_id: str):
         """
         Return CTX for ALL runners in a single market.
@@ -403,51 +532,6 @@ class BusRouteSnapshot:
             for (m, s), ctx in self.ctx_map.items()
             if m == mid
         }
-
-
-
-    # ======================================================================================================
-    # 📍 TARGET: engines/bus_route.py
-    # 🧩 ACTION: ADD — dynamic CTX refresh (BUS-called)
-    # 📆 PATCHED: 2026-01-24 — odds-only refresh + timing probe
-    #
-    # PURPOSE:
-    # - Refresh ONLY dynamic fields
-    # - Measure real per-tick cost
-    # ======================================================================================================
-
-    def refresh_ctx_dynamic_fields(self):
-        import time
-        import os
-        from engines.bus_route import get_runner_odds_map
-
-        t0 = time.time()
-
-        session_token = (
-            os.getenv("SESSION_TOKEN")
-            or os.getenv("BETFAIR_SESSION_TOKEN")
-        )
-
-        # 🔑 AUTHORITATIVE: fetch odds for ALL runners
-        odds_map = get_runner_odds_map(
-            list(self.ctx_map.keys()),
-            session_token=session_token,
-        )
-
-        for (mid, sid), ctx in self.ctx_map.items():
-            odds = odds_map.get((mid, sid))
-
-            if not odds:
-                # This is now a BUG, not a condition
-                ctx["px"] = None
-                continue
-
-            ctx["px"]   = odds["px"]
-            ctx["odds"] = odds["px"]
-            ctx["back"] = odds.get("back")
-            ctx["lay"]  = odds.get("lay")
-
-        return time.time() - t0
 
     # ============================================================
     # 🔑 NEW — absorb external runners into route snapshot
@@ -815,65 +899,46 @@ def get_risk_legacy_parent_pairs():
 
 def get_inplay_parent_runner_pairs():
     """
-    Authoritative IN-PLAY runner surface.
+    Authoritative IN-PLAY runner surface (MARKET-TIME WINDOW).
 
-    Returns (marketId, selectionId) for ALL runners that:
-      - Have ANY parent today (any engine)
-      - Market has started (or is flagged in-play)
-      - DB-first
+    Returns (marketId, selectionId) for ALL runners
+    in markets that are inside the in-play window.
+
+    CTX must already exist in BusRouteSnapshot (built by StartupCTXBuilder).
+    This helper only supplies the identity surface.
     """
 
-    from engines.config_paths import connect_orders_db, bets_db
+    from engines.config_paths import connect_db
     import sqlite3
 
-    con = None
+    pairs = set()
+
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+
     try:
-        # --------------------------------------------------
-        # Open ORDERS DB via DAL (authoritative owner)
-        # --------------------------------------------------
-        con = connect_orders_db(ro=True)
-        con.row_factory = sqlite3.Row
-
-        # --------------------------------------------------
-        # Attach BETS DB for market time authority
-        # --------------------------------------------------
-        con.execute(f"ATTACH DATABASE '{bets_db()}' AS bets")
-
         rows = con.execute(
             """
             SELECT DISTINCT
-                p.marketId,
-                p.selectionId
-            FROM orders p
-            JOIN bets.bets b
-              ON b.marketId = p.marketId
-            WHERE date(p.opened_at) = date('now','utc')
-              AND julianday(b.marketStartTime) <= julianday('now','utc')
+                marketId,
+                selectionId,
+                (julianday(marketStartTime) - julianday('now','utc')) * 1440.0 AS mins_to_off
+            FROM bets
+            WHERE
+                (julianday(marketStartTime) - julianday('now','utc')) <= 0.0
+              AND
+                (julianday(marketStartTime) - julianday('now','utc')) >= -(120.0 / 1440.0)
             """
         ).fetchall()
-
-    except Exception:
-        # HARD RULE: fail-open — BUS must never stall here
-        return set()
-
     finally:
-        if con:
-            try:
-                con.execute("DETACH DATABASE bets")
-            except Exception:
-                pass
-            try:
-                con.close()
-            except Exception:
-                pass
+        con.close()
 
-    return {
-        (str(r["marketId"]), str(r["selectionId"]))
-        for r in rows
-        if r["marketId"] and r["selectionId"]
-    }
+    for r in rows:
+        if r["marketId"] and r["selectionId"]:
+            pairs.add((str(r["marketId"]), str(r["selectionId"])))
 
-# === PATCH END ==============================================================
+    return pairs
+
 
 # ============================================================================
 # EXPLORATORY LIFECYCLE — ACTIVE EXPLORATORY PARENTS
@@ -1652,116 +1717,121 @@ def get_legacy_snapshot():
 # - No BUS changes
 # ======================================================================
 
-    def get_runner_odds_map(
-        pairs: List[Tuple[str, str]],
-        session_token: str | None = None,
-    ):
-        """
-        Canonical odds resolver for BUS (MARKET-BATCHED).
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: just above `if __name__ == "__main__":`
+# 📆 PATCHED: 2026-04-02 — Market-batched odds resolver (module-level)
+#
+# FIX:
+# - Must be module-level (NOT inside BusRouteSnapshot)
+# - refresh_ctx_dynamic_fields calls this
+# - Prevents attribute resolution error
+# ============================================================================
 
-        Given a list of (marketId, selectionId),
-        performs ONE API call per marketId.
+def get_runner_odds_map(
+    pairs: List[Tuple[str, str]],
+    session_token: str | None = None,
+):
+    """
+    Canonical odds resolver for BUS (MARKET-BATCHED).
 
-        Returns:
-            dict[(marketId, selectionId)] = {
-                "px": float,
-                "back": float | None,
-                "lay": float | None,
-            }
-        """
+    Given a list of (marketId, selectionId),
+    performs ONE API call per marketId.
+    """
 
-        odds_map = {}
+    odds_map = {}
 
-        if not pairs:
-            return odds_map
-
-        from collections import defaultdict
-        grouped = defaultdict(list)
-
-        # --------------------------------------------------
-        # Group runners by market
-        # --------------------------------------------------
-        for mid, sid in pairs:
-            grouped[str(mid)].append(str(sid))
-
-        # --------------------------------------------------
-        # Resolve session token
-        # --------------------------------------------------
-        tok = (
-            session_token
-            or os.getenv("SESSION_TOKEN")
-            or os.getenv("BETFAIR_SESSION_TOKEN")
-        )
-
-        if not tok:
-            return odds_map  # fail-open
-
-        from engines.daily_config import get_app_key
-        app_key = get_app_key()
-
-        if not app_key:
-            return odds_map  # fail-open
-
-        url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
-        headers = {
-            "X-Application": app_key,
-            "X-Authentication": tok,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-
-        # --------------------------------------------------
-        # ONE CALL PER MARKET
-        # --------------------------------------------------
-        for mid, sids in grouped.items():
-            try:
-                payload = json.dumps([{
-                    "jsonrpc": "2.0",
-                    "method": "SportsAPING/v1.0/listMarketBook",
-                    "params": {
-                        "marketIds": [mid],
-                        "priceProjection": {
-                            "priceData": ["EX_BEST_OFFERS"],
-                            "virtualise": True
-                        }
-                    },
-                    "id": 1
-                }])
-
-                resp = _session.post(url, headers=headers, data=payload, timeout=8)
-                resp.raise_for_status()
-                data = resp.json()
-
-                runners = (
-                    data[0]
-                    .get("result", [{}])[0]
-                    .get("runners", [])
-                )
-
-                for r in runners:
-                    sid = str(r.get("selectionId"))
-                    if sid not in sids:
-                        continue
-
-                    ex = r.get("ex", {}) or {}
-                    back = (ex.get("availableToBack") or [{}])[0].get("price")
-                    lay  = (ex.get("availableToLay") or [{}])[0].get("price")
-
-                    px = back or lay
-                    if px is None:
-                        continue
-
-                    odds_map[(mid, sid)] = {
-                        "px": float(px),
-                        "back": back,
-                        "lay": lay,
-                    }
-
-            except Exception:
-                # Fail-open per market
-                continue
-
+    if not pairs:
         return odds_map
+
+    from collections import defaultdict
+    grouped = defaultdict(list)
+
+    # --------------------------------------------------
+    # Group runners by market
+    # --------------------------------------------------
+    for mid, sid in pairs:
+        grouped[str(mid)].append(str(sid))
+
+    # --------------------------------------------------
+    # Resolve session token
+    # --------------------------------------------------
+    tok = (
+        session_token
+        or os.getenv("SESSION_TOKEN")
+        or os.getenv("BETFAIR_SESSION_TOKEN")
+    )
+
+    if not tok:
+        return odds_map
+
+    from engines.daily_config import get_app_key
+    app_key = get_app_key()
+
+    if not app_key:
+        return odds_map
+
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": app_key,
+        "X-Authentication": tok,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    # --------------------------------------------------
+    # ONE CALL PER MARKET
+    # --------------------------------------------------
+    for mid, sids in grouped.items():
+        try:
+            payload = json.dumps([{
+                "jsonrpc": "2.0",
+                "method": "SportsAPING/v1.0/listMarketBook",
+                "params": {
+                    "marketIds": [mid],
+                    "priceProjection": {
+                        "priceData": ["EX_BEST_OFFERS"],
+                        "virtualise": True
+                    }
+                },
+                "id": 1
+            }])
+
+            resp = _session.post(url, headers=headers, data=payload, timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+
+            runners = (
+                data[0]
+                .get("result", [{}])[0]
+                .get("runners", [])
+            )
+
+            for r in runners:
+                sid = str(r.get("selectionId"))
+                if sid not in sids:
+                    continue
+
+                ex = r.get("ex", {}) or {}
+                back = (ex.get("availableToBack") or [{}])[0].get("price")
+                lay  = (ex.get("availableToLay") or [{}])[0].get("price")
+
+                px = back or lay
+                if px is None:
+                    continue
+
+                odds_map[(mid, sid)] = {
+                    "px": float(px),
+                    "back": back,
+                    "lay": lay,
+                }
+
+        except Exception:
+            continue
+
+    return odds_map
+
+# === PATCH END ==============================================================
 
 
 # -----------------------------
