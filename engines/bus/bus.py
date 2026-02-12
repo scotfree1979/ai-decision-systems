@@ -2553,6 +2553,104 @@ class DecisionBus:
         # ===============================================================
         self.tick_id += 1
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: def tick(self):
+# 🧩 ACTION: INSERT — Pre-route DB integrity repair (Lane 6 DB-only)
+# 📆 PATCHED: 2026-04-XX — Always-on child + lifecycle repair
+#
+# PURPOSE:
+# - Run DB-only invariant repairs BEFORE route hydration
+# - Remove restart dependency for missing child fixes
+# - Keep risk gap fill in route-dependent Lane 6
+#
+# INVARIANTS:
+# - No CTX usage
+# - No PX usage
+# - No route dependency
+# - Idempotent
+# ======================================================================================================
+
+        # ==================================================
+        # 🟥 PRE-ROUTE DB INTEGRITY REPAIR (ALWAYS-ON)
+        # ==================================================
+        try:
+            from engines.config_paths import open_auto_db
+            import sqlite3
+
+            con = open_auto_db(rw=True)
+            con.row_factory = sqlite3.Row
+
+            # --------------------------------------------------
+            # 1️⃣ Ensure every MATCHED parent has at least one child
+            # --------------------------------------------------
+            parents = con.execute("""
+                SELECT p.id
+                FROM orders p
+                WHERE p.mode='LIVE'
+                  AND p.role='PARENT'
+                  AND UPPER(p.entry_status)='MATCHED'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM orders c
+                      WHERE c.hedge_of=p.id
+                        AND c.role='CHILD'
+                  )
+            """).fetchall()
+
+            for row in parents:
+                parent_id = int(row["id"])
+
+                # Mark parent as needing repair (idempotent flag only)
+                con.execute("""
+                    UPDATE orders
+                       SET needs_child_repair = 1
+                     WHERE id = ?
+                """, (parent_id,))
+
+            # --------------------------------------------------
+            # 2️⃣ Collapse duplicate children (keep first MATCHED)
+            # --------------------------------------------------
+            children = con.execute("""
+                SELECT
+                    c.id,
+                    c.hedge_of,
+                    c.entry_status
+                FROM orders c
+                WHERE c.role='CHILD'
+                  AND c.mode='LIVE'
+            """).fetchall()
+
+            by_parent = {}
+            for c in children:
+                by_parent.setdefault(c["hedge_of"], []).append(c)
+
+            for parent_id, rows in by_parent.items():
+                matched = [
+                    r for r in rows
+                    if (r["entry_status"] or "").upper() == "MATCHED"
+                ]
+
+                if len(matched) <= 1:
+                    continue
+
+                # Keep first matched, cancel others
+                for r in matched[1:]:
+                    con.execute("""
+                        UPDATE orders
+                           SET entry_status='CANCELLED',
+                               exit_kind='CANCELLED_BY_DB_REPAIR',
+                               closed_at=datetime('now','utc')
+                         WHERE id=?
+                    """, (int(r["id"]),))
+
+            con.commit()
+            con.close()
+
+        except Exception:
+            # Never block BUS tick
+            pass
+
+
         # ==================================================
         # PHASE 0 — LIVE DB TRUTH (READ-ONLY)
         # ==================================================
