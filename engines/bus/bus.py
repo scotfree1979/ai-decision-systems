@@ -2141,22 +2141,41 @@ class DecisionBus:
         # ------------------------------------------------------------------
         # RISC CONTRACT INJECTION (AUTHORITATIVE — BUS RESPONSIBILITY)
         # ------------------------------------------------------------------
-        ctx["legacy_parent_id"] = None
-        ctx["legacy_entry_side"] = None
-        ctx["legacy_entry_odds"] = None
-        ctx["legacy_entry_stake"] = None
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside _build_ctx_for_market(), replace legacy-only anchor injection
+# 🧩 ACTION: REPLACE — introduce engine-neutral anchor fields
+# 📆 PATCHED: 2026-02-12 — Risk shadow engine-neutral anchor support
+#
+# PURPOSE:
+# - Risk must shadow BOTH LEGACY and MSC_EXPLORATORY parents
+# - Anchor semantics must not depend on engine name
+# - Replace legacy_* fields with anchor_* canonical fields
+#
+# INVARIANT:
+# - Any MATCHED parent today becomes a valid anchor
+# - No engine-specific assumptions
+# ======================================================================================================
+
+        # ------------------------------------------------------------------
+        # 🔑 ENGINE-NEUTRAL ANCHOR INJECTION (BUS AUTHORITY)
+        # ------------------------------------------------------------------
+        ctx["anchor_parent_id"] = None
+        ctx["anchor_entry_odds"] = None
+        ctx["anchor_entry_stake"] = None
+        ctx["anchor_engine"] = None
 
         for o in ctx.get("orders_by_runner", []):
             if (
-                o.get("engine") == "LEGACY"
-                and o.get("role") == "PARENT"
+                o.get("role") == "PARENT"
                 and o.get("entry_status") == "MATCHED"
             ):
-                ctx["legacy_parent_id"] = o["id"]
-                ctx["legacy_entry_side"] = o.get("side")
-                ctx["legacy_entry_odds"] = o.get("entry_odds")
-                ctx["legacy_entry_stake"] = o.get("entry_stake")
+                ctx["anchor_parent_id"] = o["id"]
+                ctx["anchor_entry_odds"] = o.get("entry_odds")
+                ctx["anchor_entry_stake"] = o.get("entry_stake")
+                ctx["anchor_engine"] = o.get("engine")
                 break
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -2675,7 +2694,6 @@ class DecisionBus:
             # Never block BUS tick
             pass
 
-
         # ==================================================
         # PHASE 0 — LIVE DB TRUTH (READ-ONLY)
         # ==================================================
@@ -2758,6 +2776,33 @@ class DecisionBus:
         if self._route_snapshot is None:
             self._route_snapshot = BusRouteSnapshot()
             self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside tick(), immediately after snapshot initialisation block
+# 🧩 ACTION: ADD — initial route build binding (correct location)
+# 📆 PATCHED: 2026-02-12 — Ensure snapshot exists before build
+#
+# PURPOSE:
+# - Guarantee first route is built once snapshot exists
+# - Prevent NoneType build_route crash
+# - Maintain prebuild-at-7 logic unchanged
+#
+# INVARIANT:
+# - Snapshot must exist before build_route is called
+# - Build occurs exactly once at first tick
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # 🔑 INITIAL ROUTE BUILD (FIRST TICK ONLY)
+        # --------------------------------------------------
+        if self.tick_id == 1:
+            self._route_snapshot.build_route()
+            self._route_snapshot.partition_into_bus_stops()
+            self._route_snapshot.refresh_ctx_dynamic_fields()
+
+            print("[BUS][ROUTE] initial route built")
+
 
         # --------------------------------------------------
         # DERIVE ROUTE + BUS STOP FROM TICK (AUTHORITATIVE)
@@ -3026,8 +3071,11 @@ class DecisionBus:
         print("────────────────────────────────────────────────────────")
 
         print("SCOPE")
-        print(f"  markets_seen   : {len(mids)}")
-        print(f"  runners_seen   : {runner_count}")
+        route_runners = self._route_snapshot.get_all_runners() or []
+        route_mids = {mid for (mid, _sid) in route_runners}
+
+        print(f"  markets_seen   : {len(route_mids)}")
+        print(f"  runners_seen   : {len(route_runners)}")
 
         evaluated = len(engine_report)
         fired = sum(1 for r in engine_report.values() if r.get("fired"))
@@ -3197,9 +3245,24 @@ class DecisionBus:
 
                     from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
 
-                    legacy_parent_id   = ctx.get("legacy_parent_id")
-                    legacy_entry_odds  = ctx.get("legacy_entry_odds")
-                    legacy_entry_stake = ctx.get("legacy_entry_stake")
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside MSC_RISK stake computation block
+# 🧩 ACTION: REPLACE — use engine-neutral anchor fields
+# 📆 PATCHED: 2026-02-12 — Risk shadow engine-neutral anchor support
+# ======================================================================================================
+
+                    anchor_parent_id   = ctx.get("anchor_parent_id")
+                    anchor_entry_odds  = ctx.get("anchor_entry_odds")
+                    anchor_entry_stake = ctx.get("anchor_entry_stake")
+
+                    if not anchor_parent_id or not anchor_entry_odds:
+                        plan["_bus_block"] = "risk_missing_parent_anchor"
+                        tick_ctx["plans_route_failed"].append(
+                            (plan, "risk_missing_parent_anchor")
+                        )
+                        continue
+
 
                     # Hard invariant — risk cannot operate without anchor
                     if not legacy_parent_id or not legacy_entry_odds:
@@ -3785,7 +3848,14 @@ class DecisionBus:
             )
 
             print("────────────────────────────────────────────────────────")
-            print(f"[BUS][TICK] #{self.tick_id} #{self._route_id} #{self._bus_stop} markets={len(mids)} runners={runner_count}")
+            route_runners = self._route_snapshot.get_all_runners() or []
+            route_mids = {mid for (mid, _sid) in route_runners}
+
+            print(
+                f"[BUS][TICK] #{self.tick_id} #{self._route_id} #{self._bus_stop} "
+                f"markets={len(route_mids)} runners={len(route_runners)}"
+            )
+
             print("────────────────────────────────────────────────────────\n")
 
             print("ENGINE SUMMARY")

@@ -206,25 +206,28 @@ class RiskEngine:
             if (mid, sid) in self._exploratory_active:
                 return None
 
-
-# ======================================================================
+# ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 SEARCH: def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-# 🧩 ACTION: INSERT AFTER px VALIDATION
-# 📆 PATCHED: 2026-03-29 — Anchor-cross microcycle control
+# 🔎 ANCHOR: inside tick(), replace legacy_* field usage
+# 🧩 ACTION: REPLACE — use engine-neutral anchor fields
+# 📆 PATCHED: 2026-04-12 — Risk shadow engine-neutral anchor support
 #
-# RULES:
-# - Anchor cross RESETS microcycle
-# - Reversal WITHOUT anchor cross FREEZES trading
-# - used_prices is microcycle-scoped
-# ======================================================================
+# PURPOSE:
+# - Remove dependency on LEGACY naming
+# - Allow Risk to shadow exploratory parents
+#
+# INVARIANT:
+# - Risk requires a matched anchor parent
+# - Anchor fields are engine-neutral
+# ======================================================================================================
 
-        pid = ctx.get("legacy_parent_id")
-        state = self._parents.setdefault(pid, self._state(pid))
+        pid = ctx.get("anchor_parent_id")
+        anchor = float(ctx.get("anchor_entry_odds") or 0.0)
+        parent_stake = float(ctx.get("anchor_entry_stake") or 0.0)
 
-        px = float(ctx.get("last_px") or 0.0)
-        if px <= 0:
+        if not pid or anchor <= 0:
             return None
+
 
         anchor = float(ctx.get("legacy_entry_odds") or 0.0)
 
