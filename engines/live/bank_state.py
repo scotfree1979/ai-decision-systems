@@ -48,6 +48,8 @@ def init_bank_state():
     """
     try:
         init_from_budget_allocations()
+        rebuild_live_exposure_from_db()   # ← ADD THIS
+        _restore_risk_bank_from_market_exposure()
         if _is_simulation():
             print("[BankState] initialised from budget_allocations")
     except Exception as e:
@@ -93,6 +95,124 @@ _REPORT_THREAD = None
 # - Availability = pot − used
 # - No scope-derived scaling of capital
 # ======================================================================================================
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ADD: restart-safe risk envelope rebuild
+# 📆 PATCHED: 2026-02-12 — market-level exposure reconstruction
+# ======================================================================
+
+def _restore_risk_bank_from_market_exposure():
+    """
+    Restart-safe capital reconstruction.
+
+    Betfair balance is net of exposure.
+    We must restore true working capital:
+
+        risk_bank = betfair_balance + market_worst_case_exposure
+
+    Uses authoritative market worst-case logic.
+    """
+
+    global _ENGINE_POTS
+
+    try:
+        from engines.daily_config import fetch_available_budget
+
+        betfair_balance = float(fetch_available_budget())
+    except Exception:
+        return
+
+    # --------------------------------------------------
+    # Compute TRUE worst-case exposure per market
+    # --------------------------------------------------
+    rows = _compute_market_over_reserve_today()
+
+    market_floor = {}
+
+    for r in rows:
+        mid = r["marketId"]
+        true_exp = float(r["true_market_exposure"] or 0.0)
+        market_floor[mid] = max(
+            market_floor.get(mid, 0.0),
+            true_exp
+        )
+
+    total_worst_case = sum(market_floor.values())
+
+    # --------------------------------------------------
+    # Restore risk bank
+    # --------------------------------------------------
+    risk_bank = betfair_balance + total_worst_case
+
+    # Scale existing pots proportionally
+    total_pct = sum(_ENGINE_POTS.values()) or 1.0
+
+    for engine in _ENGINE_POTS:
+        pct = _ENGINE_POTS[engine] / total_pct
+        _ENGINE_POTS[engine] = pct * risk_bank
+
+    print(
+        f"[BankState] restart risk rebuild | "
+        f"betfair={betfair_balance:.2f} "
+        f"+ worst_case={total_worst_case:.2f} "
+        f"→ risk_bank={risk_bank:.2f}"
+    )
+
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ADD: exposure rehydration on restart
+# 📆 PATCHED: 2026-04-12 — restart-safe exposure rebuild
+# ======================================================================
+
+def rebuild_live_exposure_from_db():
+    """
+    Reconstruct engine exposure + open exposure from DB.
+
+    MUST be called at startup AFTER init_from_budget_allocations().
+
+    Rules:
+    - Only MATCHED parents
+    - Only exposure_released = 0
+    - Use required_exposure (authoritative)
+    - Do NOT mutate pots
+    """
+
+    global _ENGINE_USED, _OPEN_EXPOSURE
+
+    from engines.config_paths import open_auto_db
+
+    con = open_auto_db(rw=False)
+    con.row_factory = None
+    cur = con.cursor()
+
+    rows = cur.execute("""
+        SELECT engine,
+               SUM(required_exposure)
+        FROM orders
+        WHERE role='PARENT'
+          AND entry_status='MATCHED'
+          AND COALESCE(exposure_released,0)=0
+          AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+          AND date(opened_at)=date('now','utc')
+        GROUP BY engine
+    """).fetchall()
+
+    con.close()
+
+    with _LOCK:
+        # reset runtime exposure only
+        _ENGINE_USED = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
+        _OPEN_EXPOSURE = 0.0
+
+        for engine, total in rows:
+            amount = _clamp(total or 0.0)
+
+            _ENGINE_USED[engine] = amount
+            _OPEN_EXPOSURE += amount
+
+        print(
+            f"[BankState] exposure rebuilt | open={_OPEN_EXPOSURE:.2f}"
+        )
 
 # ======================================================================
 # 📍 TARGET: engines/live/bank_state.py

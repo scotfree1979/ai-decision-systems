@@ -95,28 +95,50 @@ def load_today_betids_by_role() -> Dict[str, Dict[str, Dict[str, Any]]]:
 # --------------------------------------------------
 # Fetch CURRENT orders (live)
 # --------------------------------------------------
-def fetch_current(app_key: str, token: str, bet_ids):
-    res = bf_rpc(app_key, token, "listCurrentOrders", {"betIds": bet_ids})
-    return {o["betId"]: o for o in (res.get("currentOrders") or [])}
+def fetch_current(app_key: str, token: str, bet_ids, chunk_size: int = 150):
+    out = {}
 
+    for i in range(0, len(bet_ids), chunk_size):
+        chunk = bet_ids[i:i+chunk_size]
 
-def fetch_cleared(app_key: str, token: str):
+        res = bf_rpc(
+            app_key,
+            token,
+            "listCurrentOrders",
+            {"betIds": chunk}
+        )
+
+        for o in (res.get("currentOrders") or []):
+            out[o["betId"]] = o
+
+    return out
+
+def fetch_cleared(app_key: str, token: str, bet_ids, chunk_size: int = 150):
     frm = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
     to  = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
 
-    res = bf_rpc(
-        app_key,
-        token,
-        "listClearedOrders",
-        {
-            "betStatus": "CANCELLED",   # ← REQUIRED
-            "settledDateRange": {"from": frm, "to": to},
-            "includeItemDescription": True
-        }
-    )
+    out = {}
 
-    cleared = res.get("clearedOrders") or []
-    return {str(o.get("betId")): o for o in cleared}
+    for i in range(0, len(bet_ids), chunk_size):
+        chunk = bet_ids[i:i+chunk_size]
+
+        res = bf_rpc(
+            app_key,
+            token,
+            "listClearedOrders",
+            {
+                "betStatus": "CANCELLED",
+                "settledDateRange": {"from": frm, "to": to},
+                "betIds": chunk,
+                "includeItemDescription": True
+            }
+        )
+
+        for o in (res.get("clearedOrders") or []):
+            out[str(o.get("betId"))] = o
+
+    return out
+
 
 # ============================================================
 # 📍 TARGET: tools/betfair_match_surface.py
@@ -370,7 +392,7 @@ def main():
     all_bet_ids = list(parents.keys()) + list(children.keys())
 
     current = fetch_current(app_key, token, all_bet_ids)
-    cleared = fetch_cleared(app_key, token)
+    cleared = fetch_cleared(app_key, token, all_bet_ids)
 
     print(f"Parents in DB today  : {len(parents)}")
     print(f"Children in DB today : {len(children)}")
