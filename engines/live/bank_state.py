@@ -78,73 +78,28 @@ import time
 
 _REPORT_THREAD = None
 
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: get_engine_pot / get_engine_available / _bankstate_report_loop
-# 🧩 ACTION: Remove divisor from capital math, retain divisor for reporting only
-# 📆 PATCHED: 2026-01-16 — Decouple BankState capital from scope divisor
-#
-# RATIONALE:
-# - BUS now enforces market concurrency and routing
-# - Divisor no longer protects against any real failure mode
-# - Capital must reflect true pot availability
-# - Divisor is retained ONLY as a diagnostic signal
-#
-# INVARIANT:
-# - Pots mutate ONLY via realised P&L
-# - Availability = pot − used
-# - No scope-derived scaling of capital
-# ======================================================================================================
-# ======================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🧩 ADD: restart-safe risk envelope rebuild
-# 📆 PATCHED: 2026-02-12 — market-level exposure reconstruction
-# ======================================================================
-
 def _restore_risk_bank_from_market_exposure():
     """
-    Restart-safe capital reconstruction.
-
-    Betfair balance is net of exposure.
-    We must restore true working capital:
-
-        risk_bank = betfair_balance + market_worst_case_exposure
-
-    Uses authoritative market worst-case logic.
+    Restart-safe capital reconstruction using Betfair floor.
     """
 
     global _ENGINE_POTS
 
     try:
         from engines.daily_config import fetch_available_budget
-
         betfair_balance = float(fetch_available_budget())
     except Exception:
         return
 
-    # --------------------------------------------------
-    # Compute TRUE worst-case exposure per market
-    # --------------------------------------------------
-    rows = _compute_market_over_reserve_today()
+    rows = _compute_market_floor_from_betfair_surface()
 
-    market_floor = {}
+    floor = sum(
+        float(r.get("true_market_exposure") or 0.0)
+        for r in rows
+    )
 
-    for r in rows:
-        mid = r["marketId"]
-        true_exp = float(r["true_market_exposure"] or 0.0)
-        market_floor[mid] = max(
-            market_floor.get(mid, 0.0),
-            true_exp
-        )
+    risk_bank = betfair_balance + floor
 
-    total_worst_case = sum(market_floor.values())
-
-    # --------------------------------------------------
-    # Restore risk bank
-    # --------------------------------------------------
-    risk_bank = betfair_balance + total_worst_case
-
-    # Scale existing pots proportionally
     total_pct = sum(_ENGINE_POTS.values()) or 1.0
 
     for engine in _ENGINE_POTS:
@@ -154,9 +109,10 @@ def _restore_risk_bank_from_market_exposure():
     print(
         f"[BankState] restart risk rebuild | "
         f"betfair={betfair_balance:.2f} "
-        f"+ worst_case={total_worst_case:.2f} "
+        f"+ floor={floor:.2f} "
         f"→ risk_bank={risk_bank:.2f}"
     )
+
 
 # ======================================================================
 # 📍 TARGET: engines/live/bank_state.py
@@ -213,6 +169,115 @@ def rebuild_live_exposure_from_db():
         print(
             f"[BankState] exposure rebuilt | open={_OPEN_EXPOSURE:.2f}"
         )
+
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: def _compute_market_over_reserve_today(
+# 🧩 ACTION: ADD NEW BETFAIR FLOOR FUNCTION (NON-DESTRUCTIVE)
+# 📆 PATCHED: 2026-04-XX — Betfair Execution Surface Floor
+#
+# PURPOSE:
+# - Replace SQL parent-based floor
+# - Use authoritative Betfair execution surface
+# - Only count source='CURRENT'
+# - Maintain exact BankState return contract
+# - No mutation
+# - No redistribution here
+# ======================================================================
+
+def _compute_market_floor_from_betfair_surface():
+    """
+    Authoritative floor from Betfair execution surface.
+
+    Uses:
+        betfair_execution_surface
+    Filters:
+        source = 'CURRENT'
+
+    Returns same structure as _compute_market_over_reserve_today()
+    but only includes:
+        marketId
+        true_market_exposure
+    """
+
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+    from collections import defaultdict
+
+    con = sqlite3.connect(autoscalp_db())
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    rows = cur.execute("""
+        SELECT
+            marketId,
+            selectionId,
+            side,
+            matched_size,
+            avg_price
+        FROM betfair_execution_surface
+        WHERE source='CURRENT'
+    """).fetchall()
+
+    con.close()
+
+    if not rows:
+        return []
+
+    # --------------------------------------------------
+    # Build per-market runner set
+    # --------------------------------------------------
+    runners_by_market = defaultdict(set)
+    for r in rows:
+        runners_by_market[r["marketId"]].add(r["selectionId"])
+
+    # --------------------------------------------------
+    # Simulate worst-case per market
+    # --------------------------------------------------
+    market_pnl = defaultdict(lambda: defaultdict(float))
+
+    for r in rows:
+
+        mid = r["marketId"]
+        sid = r["selectionId"]
+        side = (r["side"] or "").upper()
+        matched = float(r["matched_size"] or 0.0)
+        odds = float(r["avg_price"] or 0.0)
+
+        if matched <= 0 or odds <= 0:
+            continue
+
+        for winner in runners_by_market[mid]:
+
+            if winner == sid:
+                if side == "LAY":
+                    pnl = -matched * (odds - 1)
+                else:
+                    pnl = matched * (odds - 1)
+            else:
+                if side == "LAY":
+                    pnl = matched
+                else:
+                    pnl = -matched
+
+            market_pnl[mid][winner] += pnl
+
+    results = []
+
+    for mid, outcomes in market_pnl.items():
+
+        worst_loss = 0.0
+
+        for pnl in outcomes.values():
+            if pnl < worst_loss:
+                worst_loss = pnl
+
+        results.append({
+            "marketId": mid,
+            "true_market_exposure": -worst_loss
+        })
+
+    return results
 
 # ======================================================================
 # 📍 TARGET: engines/live/bank_state.py
@@ -352,86 +417,72 @@ def _compute_market_over_reserve_today():
 
 # ======================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🧩 ADD: market-aware exposure reconciliation (AUTHORITATIVE)
-# 📆 PATCHED: 2026-02-05
+# 🔎 SEARCH: def _reconcile_market_exposure_live(
+# 🛠 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-XX — Betfair Floor Only Model
 #
-# INVARIANT:
-# - BankState overrides router pessimism
-# - Engine used + open exposure are corrected to TRUE market risk
-# - Idempotent per tick
+# MODEL:
+# - Authoritative exposure floor = Betfair execution surface
+# - _OPEN_EXPOSURE must never fall below this floor
+# - Excess is refunded proportionally across engines
+# - No SQL exposure math
+# - No DB writes
 # ======================================================================
 
 def _reconcile_market_exposure_live():
     """
-    Correct BankState exposure to true market worst-case exposure.
+    Pure Betfair-floor reconciliation.
 
-    Invariant (CRITICAL):
-    - Total open exposure MUST NEVER fall below the sum of
-      per-market true worst-case exposure.
-    - Refunds are capped so this floor is always held.
+    Invariant:
+        _OPEN_EXPOSURE >= Betfair floor
+
+    If _OPEN_EXPOSURE > floor:
+        refund excess proportionally across engines.
     """
+
     global _OPEN_EXPOSURE
 
-    rows = _compute_market_over_reserve_today()
+    rows = _compute_market_floor_from_betfair_surface()
     if not rows:
         return []
 
-    report = {}
+    floor = sum(
+        float(r.get("true_market_exposure") or 0.0)
+        for r in rows
+    )
 
-    # --------------------------------------------------
-    # 1️⃣ Compute authoritative exposure FLOOR
-    #     (sum of true worst-case per market)
-    # --------------------------------------------------
-    market_floor = {}
-    for r in rows:
-        mid = r["marketId"]
-        floor = float(r["true_market_exposure"] or 0.0)
-        market_floor[mid] = max(market_floor.get(mid, 0.0), floor)
-
-    required_open_exposure = sum(market_floor.values())
-
-    # --------------------------------------------------
-    # 2️⃣ Apply refunds, CLAMPED to exposure floor
-    # --------------------------------------------------
     with _LOCK:
-        for r in rows:
-            market_id = r["marketId"]
-            engine    = r["engine"]
-            refund    = float(r["engine_should_be_returned"] or 0.0)
 
-            if refund <= 0:
-                continue
+        current_open = float(_OPEN_EXPOSURE)
 
-            used = _ENGINE_USED.get(engine, 0.0)
+        if current_open <= floor:
+            return rows
+
+        excess = current_open - floor
+        if excess <= 0:
+            return rows
+
+        total_used = sum(_ENGINE_USED.values())
+        if total_used <= 0:
+            return rows
+
+        for engine, used in _ENGINE_USED.items():
+
             if used <= 0:
                 continue
 
-            # 🔒 HARD INVARIANT:
-            # never refund below true market exposure floor
-            max_refundable = max(0.0, _OPEN_EXPOSURE - required_open_exposure)
-            actual_refund = min(refund, max_refundable)
+            share = used / total_used
+            refund = round(excess * share, 2)
 
-            if actual_refund <= 0:
-                continue
+            actual_refund = min(refund, _ENGINE_USED[engine])
 
-            _ENGINE_USED[engine] = max(0.0, used - actual_refund)
+            _ENGINE_USED[engine] -= actual_refund
             _OPEN_EXPOSURE -= actual_refund
 
-            # --- accumulate report ---
-            rep = report.setdefault(market_id, {
-                "bankstate_exposure": float(r["bankstate_exposure"]),
-                "true_market_exposure": float(r["true_market_exposure"]),
-                "over_reserved": float(r["over_reserved"]),
-                "by_engine": {}
-            })
+        # Final safety clamp
+        _OPEN_EXPOSURE = max(floor, _OPEN_EXPOSURE)
 
-            rep["by_engine"][engine] = rep["by_engine"].get(engine, 0.0) + actual_refund
-
-    return [
-        {"marketId": mid, **data}
-        for mid, data in report.items()
-    ]
-
+    return rows
 
 # -------------------------------------------------------------------
 # OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
@@ -514,38 +565,20 @@ def _bankstate_report_loop(interval_s: int = 60):
                 print("==============================================")
 
             # ======================================================
-            # REPORT 3 — MARKET EXPOSURE RECONCILIATION (NEW)
+            # REPORT 3 — BETFAIR FLOOR (AUTHORITATIVE)
             # ======================================================
-            rec = _compute_market_over_reserve_today()
+            rec = _compute_market_floor_from_betfair_surface()
             if rec:
-                print("\n====== MARKET EXPOSURE RECONCILIATION ======")
-                print("(top over-reserved markets)\n")
+                print("\n====== BETFAIR FLOOR (EXECUTION SURFACE) ======\n")
 
-                shown = set()
-                for r in rec:
-                    mid = r["marketId"]
-                    if mid in shown:
-                        continue
-                    shown.add(mid)
-
+                for r in rec[:5]:
                     print(
-                        f"market={mid}\n"
-                        f"  bank={r['bankstate_exposure']:.2f}   "
-                        f"true={r['true_market_exposure']:.2f}   "
-                        f"over={r['over_reserved']:.2f}"
+                        f"market={r['marketId']} "
+                        f"floor={float(r['true_market_exposure']):.2f}"
                     )
 
-                    for e in rec:
-                        if e["marketId"] == mid:
-                            print(
-                                f"  ↳ {e['engine']:<15} "
-                                f"returned={e['engine_should_be_returned']:.2f}"
-                            )
-
-                    if len(shown) >= 3:
-                        break
-
                 print("===========================================")
+
 
         except Exception as e:
             print(f"[BankState][REPORT][WARN] {e}")
