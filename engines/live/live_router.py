@@ -789,10 +789,34 @@ def _router_enforce_status_authority():
         # --------------------------------------------------
         # DB says MATCHED but Betfair does NOT
         # --------------------------------------------------
-        if r["entry_status"] == "MATCHED" and not bf_matched:
-            actions.append(("DEMOTE_MATCHED", parent_id, cor))
-            _ROUTER_STATUS["parents_matched"] += 1
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: # DB says MATCHED but Betfair does NOT
+# 🧩 ACTION: Make MATCHED one-way unless explicitly EXECUTABLE
+# 📆 PATCHED: 2026-04-XX — DB lifecycle authority enforced
+#
+# INVARIANT:
+#   • MATCHED is one-way.
+#   • NEVER demote on UNKNOWN.
+#   • ONLY demote if Betfair explicitly returns EXECUTABLE.
+# ======================================================================
+
+        # --------------------------------------------------
+        # DB says MATCHED but Betfair does NOT
+        # --------------------------------------------------
+        if r["entry_status"] == "MATCHED":
+
+            # If Betfair explicitly says order is EXECUTABLE (not matched),
+            # then demotion is legitimate.
+            if status == "EXECUTABLE":
+                actions.append(("DEMOTE_MATCHED", parent_id, cor))
+                _ROUTER_STATUS["parents_matched"] += 1
+
+            # Otherwise:
+            #   UNKNOWN, TERMINAL, CLEARED, or any transient state
+            #   → DO NOT DEMOTE
             continue
+
 
         # --------------------------------------------------
         # Betfair MATCHED but DB not updated
