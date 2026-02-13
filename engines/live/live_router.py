@@ -992,12 +992,12 @@ def _router_child_worker_loop():
 
         try:
             from engines.live.bank_state import _compute_market_floor_from_betfair_surface
-            from engines.config_paths import open_auto_db
+      
 
             floors = _compute_market_floor_from_betfair_surface()
             if floors:
 
-                con = open_auto_db(rw=True)
+                con = _orders_conn()
                 con.row_factory = sqlite3.Row
                 cur = con.cursor()
 
