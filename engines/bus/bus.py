@@ -2093,56 +2093,48 @@ class DecisionBus:
             "errors": [],
         }
 
+    # ======================================================================
+    # CTX BUILDER — ROUTE-AUTHORITATIVE (FINAL)
+    # ======================================================================
+    # 📍 TARGET: engines/bus/bus.py
+    # 🔎 REPLACES: _build_ctx_for_market + _run_engines_for_tick
+    # 📆 PATCHED: 2026-04-XX — Route-aligned CTX world (final)
+    #
+    # ARCHITECTURE:
+    # - RouteSnapshot owns identity + px + band
+    # - BUS owns lifecycle + sizing + routing
+    # - Engines are pure plan emitters
+    #
+    # INVARIANTS:
+    # - NO MarketMonitor usage
+    # - NO odds fetching
+    # - NO px mutation
+    # - Anchor fields injected from DB (correct columns)
+    # ======================================================================
 
-    # ======================================================================
-    # CTX BUILDER — MarketMonitor authoritative (Scope provides MIDs only)
-    # ======================================================================
     def _build_ctx_for_market(self, base_ctx, mid, sid):
-        """
-        Build a per-runner execution context.
-
-        Architectural contract:
-        - Scope provides marketIds ONLY
-        - MarketMonitor provides runners + prices
-        - BUS joins them here
-        """
-
-        from engines.market_monitor.monitor import get_market_state
-
-        def _refresh_ctx_odds(self, ctx):
-            st = get_market_state(ctx["marketId"]) or {}
-            runners = st.get("runners") or {}
-            rn = runners.get(ctx["selectionId"])
-
-            if not rn:
-                return  # runner vanished; engine will no-op safely
-
-            px = rn.get("px")
-            if px is None:
-                return
-
-            ctx["px"] = px
-            ctx["odds"] = px
-            ctx["ltp"] = px
 
         ctx = dict(base_ctx)
+
         if not self.live_run_id:
             self.live_run_id = f"BOOT-{int(time.time())}"
+
         ctx["run_id"] = self.live_run_id
-
-
-        ctx["marketId"] = mid
-        ctx["selectionId"] = sid
+        ctx["marketId"] = str(mid)
+        ctx["selectionId"] = str(sid)
 
         # --------------------------------------------------
-        # RUNNER ORDERS SNAPSHOT (for lifecycle engines)
+        # DB Lifecycle Snapshot (AUTHORITATIVE)
         # --------------------------------------------------
         try:
             from engines.config_paths import open_auto_db
-            con = open_auto_db(rw=False)
-            con.row_factory = None
+            import sqlite3
 
-            rows = con.execute("""
+            con = open_auto_db(rw=False)
+            con.row_factory = sqlite3.Row
+
+            rows = con.execute(
+                """
                 SELECT
                     id,
                     engine,
@@ -2151,215 +2143,138 @@ class DecisionBus:
                     exit_status,
                     hedge_of,
                     marketId,
-                    selectionId
+                    selectionId,
+                    entry_odds,
+                    entry_stake
                 FROM orders
                 WHERE marketId = ?
                   AND selectionId = ?
-            """, (mid, sid)).fetchall()
+                """,
+                (str(mid), str(sid)),
+            ).fetchall()
 
-            ctx["orders_by_runner"] = [
-                {
-                    "id": r[0],
-                    "engine": r[1],
-                    "role": r[2],
-                    "entry_status": r[3],
-                    "exit_status": r[4],
-                    "hedge_of": r[5],
-                    "marketId": r[6],
-                    "selectionId": r[7],
-                }
-                for r in rows
-            ]
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
 
-        except Exception:
-            # Fail-safe: lifecycle engines will no-op
-            ctx["orders_by_runner"] = []
+        ctx["orders_by_runner"] = [dict(r) for r in rows] if rows else []
 
-        # ------------------------------------------------------------------
-        # RISC CONTRACT INJECTION (AUTHORITATIVE — BUS RESPONSIBILITY)
-        # ------------------------------------------------------------------
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: inside _build_ctx_for_market(), replace legacy-only anchor injection
-# 🧩 ACTION: REPLACE — introduce engine-neutral anchor fields
-# 📆 PATCHED: 2026-02-12 — Risk shadow engine-neutral anchor support
-#
-# PURPOSE:
-# - Risk must shadow BOTH LEGACY and MSC_EXPLORATORY parents
-# - Anchor semantics must not depend on engine name
-# - Replace legacy_* fields with anchor_* canonical fields
-#
-# INVARIANT:
-# - Any MATCHED parent today becomes a valid anchor
-# - No engine-specific assumptions
-# ======================================================================================================
-
-        # ------------------------------------------------------------------
-        # 🔑 ENGINE-NEUTRAL ANCHOR INJECTION (BUS AUTHORITY)
-        # ------------------------------------------------------------------
+        # --------------------------------------------------
+        # ENGINE-NEUTRAL ANCHOR INJECTION (FINAL)
+        # --------------------------------------------------
         ctx["anchor_parent_id"] = None
         ctx["anchor_entry_odds"] = None
         ctx["anchor_entry_stake"] = None
         ctx["anchor_engine"] = None
 
-        for o in ctx.get("orders_by_runner", []):
+        for o in ctx["orders_by_runner"]:
             if (
                 o.get("role") == "PARENT"
-                and o.get("entry_status") == "MATCHED"
+                and str(o.get("entry_status")).upper() == "MATCHED"
             ):
-                ctx["anchor_parent_id"] = o["id"]
+                ctx["anchor_parent_id"] = o.get("id")
                 ctx["anchor_entry_odds"] = o.get("entry_odds")
                 ctx["anchor_entry_stake"] = o.get("entry_stake")
                 ctx["anchor_engine"] = o.get("engine")
                 break
 
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: def _build_ctx_for_market(self, base_ctx, mid, sid):
-# 🧩 ACTION: REMOVE phase clock dependency entirely
-# 📆 PATCHED: 2026-03-18 — BUS trusts route helper; remove OC/phase logic
-#
-# WHY:
-# - Runner identity + lifecycle are owned by BusRouteSnapshot
-# - Temporal correctness is upstream (Scope + MarketMonitor + inbound OC cache)
-# - BUS only requires fresh odds + DB lifecycle truth
-#
-# EFFECT:
-# - Removes MarketPhaseClock dependency
-# - Eliminates None unpack crash
-# - Simplifies BUS responsibility to routing only
-# ======================================================================================================
-
-        # ❌ REMOVED:
-        # MarketPhaseClock.get()
-        # oc_phase
-        # minutes_to_off
-        # phase
-        # in_play
-        # tto_window
+        return ctx
 
 
     # ======================================================================
-    # NEW FUNCTION 2 — extracted engine plan collection
-    # EXACT logic lifted from your working BUS, unchanged
+    # ENGINE PLAN COLLECTION — PURE (FINAL)
     # ======================================================================
+
     def _run_engines_for_tick(self, mid, sid, ctx, engine_report):
 
         plans = []
 
-        # --------------------------------------------------
-        # Helper — engine decision surface capture ONLY
-        # (no behavioural impact)
-        # --------------------------------------------------
         def _record(engine, evaluated=True, fired=False, why=None):
             eng = engine_report.setdefault(engine, {})
             eng["evaluated"] = evaluated
             eng["fired"] = eng.get("fired", 0) + (1 if fired else 0)
-
             if why:
                 reasons = eng.setdefault("reasons", {})
                 reasons[why] = reasons.get(why, 0) + 1
 
-        # ============================
-        # MSC Exploratory
-        # ============================
+        # --------------------------------------------------
+        # MSC_EXPLORATORY
+        # --------------------------------------------------
         try:
             eng = self.engines.get("MSC_EXPLORATORY")
             if eng:
                 p = eng.tick(ctx)
-
-                if p is None:
-                    _record("MSC_EXPLORATORY", evaluated=True, fired=False, why="no_plan")
-                elif p.get("enter"):
+                if p and p.get("enter"):
                     p["engine"] = "MSC_EXPLORATORY"
-                    _record("MSC_EXPLORATORY", evaluated=True, fired=True)
                     plans.append(("MSC_EXPLORATORY", p, ctx))
+                    _record("MSC_EXPLORATORY", True, True)
                 else:
-                    _record(
-                        "MSC_EXPLORATORY",
-                        evaluated=True,
-                        fired=False,
-                        why=p.get("reason") or p.get("why") or "note",
-                    )
+                    _record("MSC_EXPLORATORY", True, False)
         except Exception as e:
-            _record("MSC_EXPLORATORY", evaluated=False, fired=False, why=str(e))
+            _record("MSC_EXPLORATORY", False, False, str(e))
 
-        # ============================
-        # MSC In-Play
-        # ============================
+        # --------------------------------------------------
+        # MSC_INPLAY
+        # --------------------------------------------------
         try:
             eng = self.engines.get("MSC_INPLAY")
             if eng:
-
-                # BUS no longer gates in-play.
-                # Helper + engine decide eligibility.
                 p = eng.tick(ctx)
-
-                if p is None:
-                    _record(
-                        "MSC_INPLAY",
-                        evaluated=True,
-                        fired=False,
-                        why="no_plan",
-                    )
-                elif p.get("enter"):
+                if p and p.get("enter"):
                     p["engine"] = "MSC_INPLAY"
-                    _record("MSC_INPLAY", evaluated=True, fired=True)
                     plans.append(("MSC_INPLAY", p, ctx))
+                    _record("MSC_INPLAY", True, True)
                 else:
-                    _record(
-                        "MSC_INPLAY",
-                        evaluated=True,
-                        fired=False,
-                        why=p.get("reason") or p.get("why") or "note",
-                    )
+                    _record("MSC_INPLAY", True, False)
         except Exception as e:
-            _record("MSC_INPLAY", evaluated=False, fired=False, why=str(e))
+            _record("MSC_INPLAY", False, False, str(e))
 
+        # --------------------------------------------------
+        # MSC_RISK
+        # --------------------------------------------------
+        try:
+            eng = self.engines.get("MSC_RISK")
+            if eng:
+                p = eng.tick(ctx)
+                if p and p.get("enter"):
+                    p["engine"] = "MSC_RISK"
+                    plans.append(("MSC_RISK", p, ctx))
+                    _record("MSC_RISK", True, True)
+                else:
+                    _record("MSC_RISK", True, False)
+        except Exception as e:
+            _record("MSC_RISK", False, False, str(e))
 
-        # ============================
-        # OVERWATCHER (STOPLOSS)
-        # ============================
+        # --------------------------------------------------
+        # OVERWATCHER STOPLOSS
+        # --------------------------------------------------
         try:
             eng = self.engines.get("OVERWATCHER")
-            if eng:
+            if eng and ctx.get("anchor_entry_odds") and ctx.get("anchor_entry_stake"):
+
                 from engines.price_math import walk_ticks
 
-                entry_odds  = ctx.get("entry_odds")
-                stop_ticks  = ctx.get("stop_ticks")
-                side        = ctx.get("side")
-                px          = ctx.get("px")
-                entry_stake = ctx.get("entry_stake")
+                side = ctx.get("side")
+                px = ctx.get("px")
+                entry_odds = ctx.get("anchor_entry_odds")
+                entry_stake = ctx.get("anchor_entry_stake")
 
-                # Must have full stop-loss inputs
-                if not entry_odds or not stop_ticks or not side or px is None:
-                    _record(
-                        "OVERWATCHER",
-                        evaluated=True,
-                        fired=False,
-                        why="missing_stop_inputs",
-                    )
-                else:
-                    side = side.upper()
+                if side and px and entry_odds and entry_stake:
+
+                    side = str(side).upper()
 
                     if side == "LAY":
-                        stop_px = walk_ticks(entry_odds, stop_ticks, direction="up")
-                        hit = px >= stop_px
+                        stop_px = walk_ticks(entry_odds, 3, direction="down")
+                        hit = px <= stop_px
                         exit_side = "BACK"
                     else:
-                        stop_px = walk_ticks(entry_odds, stop_ticks, direction="down")
-                        hit = px <= stop_px
+                        stop_px = walk_ticks(entry_odds, 3, direction="up")
+                        hit = px >= stop_px
                         exit_side = "LAY"
 
-                    if not hit:
-                        _record(
-                            "OVERWATCHER",
-                            evaluated=True,
-                            fired=False,
-                            why="stop_not_hit",
-                        )
-                    else:
+                    if hit:
                         plan = {
                             "engine": "OVERWATCHER",
                             "role": "CHILD",
@@ -2367,20 +2282,18 @@ class DecisionBus:
                             "marketId": mid,
                             "selectionId": sid,
                             "side": exit_side,
-                            "px": px,          # ✅ USE LIVE PX
+                            "px": px,
                             "size": entry_stake,
                         }
-
                         plans.append(("OVERWATCHER", plan, ctx))
-                        _record("OVERWATCHER", evaluated=True, fired=True)
+                        _record("OVERWATCHER", True, True)
+                    else:
+                        _record("OVERWATCHER", True, False)
 
         except Exception as e:
-            _record("OVERWATCHER", evaluated=False, fired=False, why=str(e))
+            _record("OVERWATCHER", False, False, str(e))
 
-
-        # ✅ RETURN MUST BE HERE (same indent as `plans = []`)
         return plans
-
 
     # ======================================================================
     # analytics_report() — unchanged

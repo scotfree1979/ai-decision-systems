@@ -200,7 +200,8 @@ def _ensure_execution_events_schema():
                 bet_id TEXT,
                 role TEXT,
                 matched_size REAL,
-                matched_odds REAL,
+                placed_size REAL,
+                fully_matched INTEGER DEFAULT 0,
                 seen_at TEXT,
                 source TEXT
             )
@@ -780,11 +781,16 @@ def _router_enforce_status_authority():
         if not isinstance(surf, dict):
             continue
 
-        bf_matched = (
-            (surf.get("matched") or 0) > 0
-            or str(surf.get("state") or "").upper() in ("EXECUTION_COMPLETE", "TERMINAL")
-            or str(surf.get("source") or "").upper() == "CLEARED"
-        )
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: bf_matched = (
+# 🧩 ACTION: REPLACE inline Betfair logic with canonical status call
+# 📆 PATCHED: 2026-04-XX — Router must use get_bet_status only
+# ======================================================================
+
+        status = get_bet_status(str(bet_id))
+
+        bf_matched = (status == "EXECUTION_COMPLETE")
 
         bf_market_cleared = (
             str(surf.get("source") or "").upper() == "CLEARED"
@@ -2014,36 +2020,27 @@ def _sync_all_matches(limit: int = 100) -> int:
 
     for r in rows:
         try:
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _sync_all_matches(limit: int = 100) -> int:
+# 🧩 ACTION: FIX status variable + canonical match check
+# 📆 PATCHED: 2026-04-XX — Fix parent match sweep bug
+# ======================================================================
+
             bet_id = str(r["entry_bet_id"])
-            row = _q_retry(cur, """
-                SELECT 1 FROM execution_events
-                 WHERE bet_id = ?
-                 LIMIT 1
-            """, (str(bet_id),)).fetchone()
 
-            if row:
-                # ✅ execution already proven — DO NOT query Betfair
-                matched = True
-            else:
-                # 🔁 only then ask Betfair
-                matched = (get_bet_status(bet_id) == "EXECUTION_COMPLETE")
-
+            status = get_bet_status(bet_id)
 
             if status != "EXECUTION_COMPLETE":
                 continue
 
             parent_cor = str(r["customerOrderRef"])
 
-            # 🔒 CANONICAL MATCHED HANDLER (guarantees CHILD)
             _orders_update_parent_matched(parent_cor, bet_id)
             _ensure_child_queued_for_matched_parent(parent_cor)
-            _log_event(
-                "INFO",
-                "live_router",
-                f"[SYNC-ALL] parent matched via canonical handler ref={parent_cor}"
-            )
 
             fixed += 1
+
 
         except Exception as e:
             _log_event(
@@ -3079,103 +3076,45 @@ import threading, time
 
 def _start_reconcile_loop(period_s: int = 30):
     """
-    Launch a background thread that runs repair_missing_betids + reconcile_live_orders
-    every period_s seconds while LIVE mode is active.
-    This keeps entry_status in sync with Betfair fills.
+    Background reconciliation loop.
+
+    LIVE RULES:
+    - NEVER write entry_status='MATCHED'
+    - Router owns MATCHED lifecycle
+    - This loop may only:
+        • repair missing betIds
+        • trigger router match sweeps
     """
-    from engines.live import repair_missing_betids, reconcile_live_orders
+
+    from engines.live import repair_missing_betids
     stop_evt = threading.Event()
 
     def loop():
         while not stop_evt.is_set():
             try:
-                # 1️⃣ back-fill any missing betIds (rare after 2025-10 patch)
+                # 1️⃣ Back-fill missing Betfair IDs (safe)
                 try:
                     repair_missing_betids.main(silent=True)
                 except Exception:
                     pass
 
-                # 2️⃣ mark matched orders
+                # 2️⃣ Trigger router canonical match sweeps
                 try:
-                    reconcile_live_orders.main(silent=True)
+                    _sync_all_matches(limit=100)
+                    _sync_child_matches(limit=100)
                 except Exception:
                     pass
+
             except Exception as e:
                 _log_event("ERROR", "live_router", f"[reconcile_loop] {e}")
+
             time.sleep(period_s)
 
     t = threading.Thread(target=loop, name="ReconcileLoop", daemon=True)
     t.start()
     _log_event("INFO", "live_router", f"Reconcile loop started (period={period_s}s)")
+
     return stop_evt
-
-
-# === PATCH END ===
-
-def _ensure_child_executed(parent_cor: str) -> int | None:
-    """
-    Authoritative child execution invariant.
-
-    Guarantees:
-    - Parent is MATCHED
-    - A CHILD row exists
-    - CHILD has a Betfair entry_bet_id
-    - If not, child is (re)queued for execution
-
-    Returns child_id if execution is in-flight or placed.
-    """
-
-    con = _orders_conn()
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
-    try:
-        # Load matched parent
-        parent = _q_retry(cur, """
-            SELECT id
-              FROM orders
-             WHERE customerOrderRef=?
-               AND role='PARENT'
-               AND entry_status='MATCHED'
-             LIMIT 1
-        """, (str(parent_cor),)).fetchone()
-
-        if not parent:
-            return None
-
-        parent_id = int(parent["id"])
-
-        # Load child (if any)
-        child = _q_retry(cur, """
-            SELECT id, entry_status, entry_bet_id
-              FROM orders
-             WHERE role='CHILD'
-               AND hedge_of=?
-             LIMIT 1
-        """, (parent_id,)).fetchone()
-
-        # No child at all → create + enqueue
-        if not child:
-            child_id = _ensure_child_queued_for_matched_parent(parent_cor)
-            if child_id:
-                enqueue_router_child({"parent_cor": parent_cor}, {})
-            return child_id
-
-        child_id = int(child["id"])
-
-        # Child exists but was never placed
-        if not child["entry_bet_id"]:
-            enqueue_router_child({"parent_cor": parent_cor}, {})
-            return child_id
-
-        # Child has Betfair ID → authoritative
-        return child_id
-
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
 
 
 # 📍 TARGET: engines/live/live_router.py
