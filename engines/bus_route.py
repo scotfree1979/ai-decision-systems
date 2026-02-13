@@ -664,9 +664,46 @@ class BusRouteSnapshot:
         """
         return self.bus_stops.get(tick, [])
 
+    # === PATCH START ==============================================================
+    # 📍 TARGET: engines/bus_route.py
+    # 🔎 SEARCH: def partition_into_bus_stops(self):
+    # 🛠 ACTION: Replace entire function
+    # 📆 PATCHED: 2026-04-XX — Exclude IGNORED from bus stop scheduling only
+    #
+    # PURPOSE:
+    # - runner_pool remains full identity surface
+    # - IGNORED runners excluded from execution rotation
+    # - ctx_map untouched
+    # - lifecycle injections still possible
+    #
+    # INVARIANT:
+    # - runner_pool contains ALL runners
+    # - bus_stops contain ACTIVE + PASSIVE only
+    # ==============================================================================
+
     def partition_into_bus_stops(self):
-        n = len(self.runner_pool)
+
+        if not self.runner_pool:
+            return
+
+        # --------------------------------------------------
+        # 🔒 Filter execution-eligible runners ONLY
+        # --------------------------------------------------
+        eligible = []
+
+        for mid, sid in self.runner_pool:
+            ctx = self.ctx_map.get((str(mid), str(sid)))
+            if not ctx:
+                continue
+
+            band = ctx.get("band")
+
+            if band in ("ACTIVE", "PASSIVE"):
+                eligible.append((mid, sid))
+
+        n = len(eligible)
         if n == 0:
+            self.bus_stops = {}
             return
 
         base = n // TICKS_PER_CYCLE
@@ -677,8 +714,11 @@ class BusRouteSnapshot:
 
         for tick in range(1, TICKS_PER_CYCLE + 1):
             size = base + (1 if tick <= remainder else 0)
-            self.bus_stops[tick] = self.runner_pool[idx:idx+size]
+            self.bus_stops[tick] = eligible[idx:idx + size]
             idx += size
+
+    # === PATCH END ==============================================================
+
 
     def get_bus_stop(self, tick):
         return self.bus_stops.get(tick, [])
