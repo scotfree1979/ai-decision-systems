@@ -103,6 +103,35 @@ def load_today_orders_by_role() -> Dict[str, Dict[str, Dict[str, Any]]]:
 
     return out
 
+def load_today_betids_by_role() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    con = sqlite3.connect(autoscalp_db())
+    con.row_factory = sqlite3.Row
+    rows = con.execute("""
+        SELECT
+            role,
+            id              AS order_id,
+            customerOrderRef,
+            entry_bet_id,
+            marketId,
+            selectionId,
+            side,
+            entry_stake,
+            entry_odds,
+            opened_at
+        FROM orders
+        WHERE role IN ('PARENT','CHILD')
+          AND entry_bet_id IS NOT NULL
+          AND date(opened_at)=date('now','utc')
+        ORDER BY opened_at ASC
+    """).fetchall()
+    con.close()
+
+    out = {"PARENT": {}, "CHILD": {}}
+    for r in rows:
+        bet_id = str(r["entry_bet_id"]).strip()
+        out[r["role"]][bet_id] = dict(r)
+
+    return out
 
 
 # --------------------------------------------------
@@ -126,31 +155,24 @@ def fetch_current(app_key: str, token: str, bet_ids, chunk_size: int = 150):
 
     return out
 
-def fetch_cleared(app_key: str, token: str, bet_ids, chunk_size: int = 150):
+def fetch_cleared(app_key: str, token: str):
     frm = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
     to  = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
 
-    out = {}
+    res = bf_rpc(
+        app_key,
+        token,
+        "listClearedOrders",
+        {
+            "betStatus": "CANCELLED",
+            "settledDateRange": {"from": frm, "to": to},
+            "includeItemDescription": True
+        }
+    )
 
-    for i in range(0, len(bet_ids), chunk_size):
-        chunk = bet_ids[i:i+chunk_size]
+    cleared = res.get("clearedOrders") or []
+    return {str(o.get("betId")): o for o in cleared}
 
-        res = bf_rpc(
-            app_key,
-            token,
-            "listClearedOrders",
-            {
-                "betStatus": "CANCELLED",
-                "settledDateRange": {"from": frm, "to": to},
-                "betIds": chunk,
-                "includeItemDescription": True
-            }
-        )
-
-        for o in (res.get("clearedOrders") or []):
-            out[str(o.get("betId"))] = o
-
-    return out
 
 
 # ============================================================
@@ -382,6 +404,117 @@ def get_direction_confidence(marketId: str, selectionId: str) -> float:
     imbalance_ratio = abs(n_lb - n_bl) / total
     return round(min(1.0, imbalance_ratio), 3)
 
+# --------------------------------------------------
+# AUTO-REPAIR — Stamp missing betIds from Betfair
+# --------------------------------------------------
+def repair_missing_betids(app_key: str, token: str):
+    """
+    Deterministic repair using customerOrderRef (authoritative join).
+    """
+
+    print("\n[REPAIR] Checking for missing betIds...\n")
+
+    con = sqlite3.connect(autoscalp_db())
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    # 1️⃣ Load DB parents missing betId
+    db_rows = cur.execute("""
+        SELECT id, customerOrderRef
+        FROM orders
+        WHERE role='PARENT'
+          AND entry_bet_id IS NULL
+          AND date(opened_at)=date('now','utc')
+    """).fetchall()
+
+    if not db_rows:
+        con.close()
+        print("[REPAIR] No missing betIds.\n")
+        return
+
+    # 2️⃣ Pull ALL Betfair current orders
+    current = bf_rpc(app_key, token, "listCurrentOrders", {})
+    current_orders = current.get("currentOrders") or []
+
+    # 3️⃣ Pull ALL Betfair settled today
+    frm = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+    to  = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+
+    cleared = bf_rpc(
+        app_key,
+        token,
+        "listClearedOrders",
+        {
+            "betStatus": "SETTLED",
+            "settledDateRange": {"from": frm, "to": to},
+            "includeItemDescription": True
+        }
+    ).get("clearedOrders") or []
+
+    stamped = 0
+
+    # Combine surfaces
+    surface = current_orders + cleared
+
+    # 4️⃣ Deterministic join on customerOrderRef
+    for o in surface:
+        cor = str(o.get("customerOrderRef") or "").strip()
+        bet_id = str(o.get("betId") or "").strip()
+
+        if not cor or not bet_id:
+            continue
+
+        for r in db_rows:
+            if r["customerOrderRef"] == cor:
+                cur.execute("""
+                    UPDATE orders
+                    SET entry_bet_id=?
+                    WHERE id=?
+                """, (bet_id, r["id"]))
+                stamped += 1
+
+    con.commit()
+    con.close()
+
+    print(f"[REPAIR] Stamped {stamped} missing betIds.\n")
+
+
+def fetch_full_account_surface(app_key: str, token: str):
+    """
+    Phase 0 — Pure Betfair account surface.
+    No DB usage.
+    Returns (current_orders, cleared_orders)
+    """
+
+    # CURRENT (no filter)
+    cur = bf_rpc(
+        app_key,
+        token,
+        "listCurrentOrders",
+        {}
+    )
+    current_orders = cur.get("currentOrders") or []
+
+    # CLEARED (today only)
+    frm = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+    to  = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+
+    clr = bf_rpc(
+        app_key,
+        token,
+        "listClearedOrders",
+        {
+            "betStatus": "SETTLED",   # use SETTLED not CANCELLED
+            "settledDateRange": {"from": frm, "to": to},
+            "includeItemDescription": True
+        }
+    )
+
+    cleared_orders = clr.get("clearedOrders") or []
+
+    return current_orders, cleared_orders
+
+
 
 # --------------------------------------------------
 # Main
@@ -397,74 +530,103 @@ def main():
     if not token:
         raise RuntimeError("SESSION_TOKEN not available")
 
-    by_role = load_today_orders_by_role()
+    # --------------------------------------------------
+    # STEP 0 — Auto Repair Before Tables
+    # --------------------------------------------------
+    repair_missing_betids(app_key, token)
+
+
+    # ============================================================
+    # TABLE 1 — LEGACY WORKING SURFACE (AUTHORITATIVE)
+    # ============================================================
+
+    by_role = load_today_betids_by_role()
 
     parents  = by_role["PARENT"]
     children = by_role["CHILD"]
 
-    # Only query Betfair for rows that actually have betIds
-    bet_ids = [
-        r["entry_bet_id"]
-        for role in by_role.values()
-        for r in role.values()
-        if r.get("entry_bet_id")
-    ]
+    all_bet_ids = list(parents.keys()) + list(children.keys())
 
-    current = fetch_current(app_key, token, bet_ids)
-    cleared = fetch_cleared(app_key, token, bet_ids)
+    # 🔥 DO NOT FILTER BETFAIR BY DB STATE
+    current = fetch_current(app_key, token, all_bet_ids)
+    cleared = fetch_cleared(app_key, token)
+
+    # ============================================================
+    # TABLE 1 — BETFAIR ACCOUNT SURFACE (AUTHORITATIVE)
+    # ============================================================
+
+    print("============================================================")
+    print("TABLE 1 — BETFAIR ACCOUNT SURFACE (AUTHORITATIVE)")
+    print("============================================================\n")
+
+    current_orders, cleared_orders = fetch_full_account_surface(app_key, token)
+
+    print(f"Current Orders  : {len(current_orders)}")
+    print(f"Cleared Orders  : {len(cleared_orders)}\n")
+
+    print("---- LIVE ORDERS ----")
+    for o in current_orders:
+        print(
+            f"LIVE | betId={o.get('betId')} "
+            f"status={o.get('orderStatus')} "
+            f"matched={o.get('sizeMatched')} "
+            f"price={o.get('priceSize', {}).get('price')} "
+            f"marketId={o.get('marketId')} "
+            f"selectionId={o.get('selectionId')}"
+        )
+
+    print("\n---- CLEARED ORDERS ----")
+    for o in cleared_orders:
+        print(
+            f"CLEARED | betId={o.get('betId')} "
+            f"matched={o.get('sizeSettled') or o.get('sizeMatched')} "
+            f"price={o.get('priceMatched')} "
+            f"marketId={o.get('marketId')} "
+            f"selectionId={o.get('selectionId')}"
+        )
+
+    print("\n============================================================\n")
 
 
-    print(f"Parents in DB today  : {len(parents)}")
-    print(f"Children in DB today : {len(children)}")
-    print(f"Current orders       : {len(current)}")
-    print(f"Cleared ledger hits  : {len(cleared)}\n")
+    # ============================================================
+    # TABLE 2 — EXTENDED SURFACE (DERIVED FROM TABLE 1)
+    # ============================================================
 
-    def print_section(title, items):
+    print("============================================================")
+    print("TABLE 2 — EXTENDED MATCH SURFACE (DERIVED)")
+    print("============================================================\n")
+
+    def print_extended(title, items):
         print(f"=== {title} ===")
 
-        for order_id, p in items.items():
+        for bet_id, p in items.items():
 
-            if str(p.get("entry_status", "")).upper() == "TIMEOUT":
-                continue
+            surf = query_bet_match_surface(
+                bet_id=str(bet_id),
+                app_key=app_key,
+                token=token,
+            )
 
-            bet_id = p.get("entry_bet_id")
-
-            if bet_id and bet_id in current:
-                o = current[bet_id]
-                size_matched = float(o.get("sizeMatched") or 0.0)
-                size_placed  = float(o.get("sizePlaced") or 0.0) or float(p.get("entry_stake") or 0.0)
-                state, source = "LIVE", "CURRENT"
-
-            elif bet_id and bet_id in cleared:
-                o = cleared[bet_id]
-                size_matched = float(o.get("sizeSettled") or o.get("sizeMatched") or 0.0)
-                size_placed  = float(p.get("entry_stake") or 0.0)
-                state, source = "TERMINAL", "CLEARED"
-
-            else:
-                size_matched = 0.0
-                size_placed  = float(p.get("entry_stake") or 0.0)
-                state, source = "UNKNOWN", "NONE"
-
-            frac = (size_matched / size_placed) if size_placed > 0 else 0.0
+            matched = float(surf.get("matched") or 0.0)
+            placed  = float(surf.get("placed") or p.get("entry_stake") or 0.0)
+            frac    = (matched / placed) if placed > 0 else 0.0
 
             print(
-                f"orderId={order_id} | "
-                f"betId={bet_id or '—'} | "
-                f"matched={size_matched:.2f}/{size_placed:.2f} "
+                f"betId={bet_id} | "
+                f"matched={matched:.2f}/{placed:.2f} "
                 f"({frac:.0%}) | "
-                f"state={state} | source={source} | "
-                f"market={p['marketId']} sid={p['selectionId']}"
+                f"state={surf.get('state')} | "
+                f"source={surf.get('source')} | "
+                f"fraction={surf.get('fraction'):.3f}"
             )
 
         print()
 
-
-
-    print_section("PARENT ORDERS", parents)
-    print_section("CHILD ORDERS", children)
+    print_extended("PARENT ORDERS", parents)
+    print_extended("CHILD ORDERS", children)
 
     print("=== End Match Surface ===\n")
+
 
 
 

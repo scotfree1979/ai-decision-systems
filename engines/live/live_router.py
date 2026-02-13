@@ -5665,24 +5665,23 @@ def get_bet_status(bet_id: str) -> str:
         if not isinstance(surf, dict):
             return "UNKNOWN"
 
-        # EXECUTION_COMPLETE = matched at exchange
         matched = float(surf.get("matched") or 0.0)
-        state   = str(surf.get("state") or "").upper()
         source  = str(surf.get("source") or "").upper()
 
-        # 🔒 Canonical MATCHED truth
-        if (
-            matched > 0.0
-            or state in ("TERMINAL", "EXECUTION_COMPLETE")
-            or source == "CLEARED"
-        ):
+        # ANY MONEY MATCHED = EXECUTION_COMPLETE
+        if matched > 0.0:
             return "EXECUTION_COMPLETE"
 
-        # Still live / executable
+        # CLEARED ALWAYS EXECUTION_COMPLETE
+        if source == "CLEARED":
+            return "EXECUTION_COMPLETE"
+
+        # Otherwise still executable
         if str(surf.get("state") or "").upper() == "LIVE":
             return "EXECUTABLE"
 
         return "UNKNOWN"
+
 
     except Exception:
         return "UNKNOWN"
