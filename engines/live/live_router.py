@@ -973,6 +973,90 @@ def _router_child_worker_loop():
         # ==================================================
         _router_enforce_status_authority()
 
+# ======================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: inside _router_child_worker_loop() main while True loop
+# 🧩 ACTION: Floor-based child promotion gate
+# 📆 PATCHED: 2026-04-XX — Market-level child promotion via Betfair floor
+#
+# PURPOSE:
+#   Promote ONE queued child per market
+#   ONLY when current exposure > Betfair floor
+#
+# INVARIANT:
+#   - Parents always create queued children
+#   - Router decides when to promote
+#   - Exposure logic untouched
+#   - BankState remains authoritative
+# ======================================================================
+
+        try:
+            from engines.live.bank_state import _compute_market_floor_from_betfair_surface
+            from engines.config_paths import open_auto_db
+
+            floors = _compute_market_floor_from_betfair_surface()
+            if floors:
+
+                con = open_auto_db(rw=True)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                for f in floors:
+                    mid = str(f["marketId"])
+                    floor = float(f["true_market_exposure"] or 0.0)
+
+                    # Current exposure for this market
+                    row = cur.execute("""
+                        SELECT SUM(required_exposure) AS exp
+                          FROM orders
+                         WHERE role='PARENT'
+                           AND entry_status='MATCHED'
+                           AND marketId=?
+                           AND COALESCE(exposure_released,0)=0
+                    """, (mid,)).fetchone()
+
+                    exposure = float(row["exp"] or 0.0)
+
+                    # 🔥 Promotion condition
+                    if exposure > floor:
+
+                        # Promote ONE oldest queued child
+                        child = cur.execute("""
+                            SELECT id
+                              FROM orders
+                             WHERE role='CHILD'
+                               AND entry_status='QUEUED'
+                               AND marketId=?
+                             ORDER BY opened_at ASC
+                             LIMIT 1
+                        """, (mid,)).fetchone()
+
+                        if child:
+                            _q_retry(cur, """
+                                UPDATE orders
+                                   SET entry_status='PLACING'
+                                 WHERE id=?
+                                   AND entry_status='QUEUED'
+                            """, (int(child["id"]),))
+
+                            con.commit()
+
+                            _log_event(
+                                "INFO",
+                                "live_router",
+                                f"[FLOOR-PROMOTE] child_id={child['id']} "
+                                f"mid={mid} exposure={exposure:.2f} "
+                                f"floor={floor:.2f}"
+                            )
+
+                con.close()
+
+        except Exception as e:
+            _log_event("ERROR", "live_router", f"[FLOOR GATE] {e}")
+
+# ======================================================================
+
+
         try:
 
             # ==================================================

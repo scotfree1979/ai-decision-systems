@@ -61,9 +61,19 @@ def resolve_session_token() -> str:
 # --------------------------------------------------
 # Load today's betIds from DB (PARENTS + CHILDREN)
 # --------------------------------------------------
-def load_today_betids_by_role() -> Dict[str, Dict[str, Dict[str, Any]]]:
+def load_today_orders_by_role() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    DB-FIRST loader.
+
+    IMPORTANT:
+    - DO NOT filter on entry_bet_id
+    - Surface must show parents even before betId stamping
+    - Betfair query happens conditionally later
+    """
+
     con = sqlite3.connect(autoscalp_db())
     con.row_factory = sqlite3.Row
+
     rows = con.execute("""
         SELECT
             role,
@@ -75,21 +85,24 @@ def load_today_betids_by_role() -> Dict[str, Dict[str, Dict[str, Any]]]:
             side,
             entry_stake,
             entry_odds,
+            entry_status,
             opened_at
         FROM orders
         WHERE role IN ('PARENT','CHILD')
-          AND entry_bet_id IS NOT NULL
           AND date(opened_at)=date('now','utc')
         ORDER BY opened_at ASC
     """).fetchall()
+
     con.close()
 
     out = {"PARENT": {}, "CHILD": {}}
+
     for r in rows:
-        bet_id = str(r["entry_bet_id"]).strip()
-        out[r["role"]][bet_id] = dict(r)
+        key = str(r["order_id"])  # use DB identity, not betId
+        out[r["role"]][key] = dict(r)
 
     return out
+
 
 
 # --------------------------------------------------
@@ -384,15 +397,22 @@ def main():
     if not token:
         raise RuntimeError("SESSION_TOKEN not available")
 
-    by_role = load_today_betids_by_role()
+    by_role = load_today_orders_by_role()
 
     parents  = by_role["PARENT"]
     children = by_role["CHILD"]
 
-    all_bet_ids = list(parents.keys()) + list(children.keys())
+    # Only query Betfair for rows that actually have betIds
+    bet_ids = [
+        r["entry_bet_id"]
+        for role in by_role.values()
+        for r in role.values()
+        if r.get("entry_bet_id")
+    ]
 
-    current = fetch_current(app_key, token, all_bet_ids)
-    cleared = fetch_cleared(app_key, token, all_bet_ids)
+    current = fetch_current(app_key, token, bet_ids)
+    cleared = fetch_cleared(app_key, token, bet_ids)
+
 
     print(f"Parents in DB today  : {len(parents)}")
     print(f"Children in DB today : {len(children)}")
@@ -402,19 +422,20 @@ def main():
     def print_section(title, items):
         print(f"=== {title} ===")
 
-        for bet_id, p in items.items():
+        for order_id, p in items.items():
 
-            # 🔒 Policy filter: hide TIMEOUT rows
             if str(p.get("entry_status", "")).upper() == "TIMEOUT":
                 continue
 
-            if bet_id in current:
+            bet_id = p.get("entry_bet_id")
+
+            if bet_id and bet_id in current:
                 o = current[bet_id]
                 size_matched = float(o.get("sizeMatched") or 0.0)
                 size_placed  = float(o.get("sizePlaced") or 0.0) or float(p.get("entry_stake") or 0.0)
                 state, source = "LIVE", "CURRENT"
 
-            elif bet_id in cleared:
+            elif bet_id and bet_id in cleared:
                 o = cleared[bet_id]
                 size_matched = float(o.get("sizeSettled") or o.get("sizeMatched") or 0.0)
                 size_placed  = float(p.get("entry_stake") or 0.0)
@@ -428,7 +449,8 @@ def main():
             frac = (size_matched / size_placed) if size_placed > 0 else 0.0
 
             print(
-                f"betId={bet_id} | "
+                f"orderId={order_id} | "
+                f"betId={bet_id or '—'} | "
                 f"matched={size_matched:.2f}/{size_placed:.2f} "
                 f"({frac:.0%}) | "
                 f"state={state} | source={source} | "
@@ -436,6 +458,7 @@ def main():
             )
 
         print()
+
 
 
     print_section("PARENT ORDERS", parents)
