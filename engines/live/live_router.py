@@ -283,41 +283,24 @@ def _select_inplay_parents_to_promote(rows, *, app_key, token):
 
 
 # === PATCH END ==============================================================
-
-# ======================================================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 ANCHOR: rows = cur.execute(...).fetchall()
-# 🧩 ACTION: Normalize DB rows to safe dicts (tuple-safe, Row-safe)
-# 📆 PATCHED: 2026-02-08 — stop router status oscillation (tuple / dict / closed-db)
-#
-# RATIONALE:
-# - sqlite3.Row, tuple rows, and retry-wrapped rows all appear here
-# - dict(row) crashes on tuples
-# - row["id"] crashes on tuples
-# - Normalizing ONCE prevents all three recurring errors
-#
-# INVARIANT:
-# - After this block, router logic ONLY touches dicts
-# - No assumptions about sqlite internals
-# ======================================================================================================
-
-
-
 def _collect_router_live_state() -> tuple[dict, dict]:
     """
     Collect TODAY-ONLY router live state from DB.
 
-    Returns:
-      (live_state, invariants)
+    HARD GUARANTEES:
+    - No NULL buckets
+    - No NULL engines
+    - No sorting crashes
+    - Never raises (authority loop must survive)
     """
+
     live = {
         "parents": defaultdict(lambda: defaultdict(int)),
         "children": defaultdict(lambda: defaultdict(int)),
         "summary": {
             "open_trades": 0,
-            "cancelled_trades": 0,   # 👈 ADD
+            "cancelled_trades": 0,
             "completed_trades": 0,
-            
         },
     }
 
@@ -326,168 +309,155 @@ def _collect_router_live_state() -> tuple[dict, dict]:
         "children_illegal": 0,
     }
 
-    con = _orders_conn()
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
+    try:
+        con = _orders_conn()
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
 
-    # --------------------------------------------------
-    # Parents by engine × lifecycle bucket (TODAY ONLY)
-    # --------------------------------------------------
-    rows = _q_retry(cur, """
-        SELECT
-            engine,
-            CASE
-                -- PRE-EXECUTION
-                WHEN entry_status = 'QUEUED'  THEN 'QUEUED'
-                WHEN entry_status = 'PLACING' THEN 'PLACING'
-                WHEN entry_status = 'PLACED'  THEN 'PLACED'
-
-                -- CANCELLED (authoritative)
-                WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
-
-                -- COMPLETED = child EXIT matched
-                WHEN EXISTS (
-                    SELECT 1
-                      FROM orders c
-                     WHERE c.role = 'CHILD'
-                       AND c.hedge_of = orders.id
-                       AND c.exit_status = 'MATCHED'
-                )
-                THEN 'CLOSED'
-
-                -- ACTIVE = parent matched, child not yet matched
-                WHEN entry_status = 'MATCHED' THEN 'MATCHED'
-            END AS bucket,
-            COUNT(*) AS n
-        FROM orders
-        WHERE role = 'PARENT'
-          AND mode = 'LIVE'
-          AND date(opened_at) = date('now','utc')
-        GROUP BY engine, bucket
-    """).fetchall()
-
-    for r in rows:
-        live["parents"][r["engine"]][r["bucket"]] += int(r["n"] or 0)
-
-    # --------------------------------------------------
-    # Children by engine × lifecycle bucket (TODAY ONLY)
-    # --------------------------------------------------
-    rows = _q_retry(cur, """
-        SELECT
-            engine,
-            CASE
-                -- PRE-EXECUTION
-                WHEN entry_status = 'QUEUED'  THEN 'QUEUED'
-                WHEN entry_status = 'PLACING' THEN 'PLACING'
-                WHEN entry_status = 'PLACED'  THEN 'PLACED'
-
-                -- ACTIVE MATCH
-                WHEN entry_status = 'MATCHED'
-                     AND exit_status IS NULL THEN 'MATCHED'
-
-                -- CLOSED (matched or cancelled)
-                WHEN exit_status IS NOT NULL THEN 'CLOSED'
-            END AS bucket,
-            COUNT(*) AS n
-        FROM orders
-        WHERE role = 'CHILD'
-          AND mode = 'LIVE'
-          AND date(opened_at) = date('now','utc')
-        GROUP BY engine, bucket
-    """).fetchall()
-
-    for r in rows:
-        live["children"][r["engine"]][r["bucket"]] += int(r["n"] or 0)
-
-    # --------------------------------------------------
-    # Trade summary (TODAY ONLY)
-    # --------------------------------------------------
-    row = _q_retry(cur, """
-        SELECT
-            -- OPEN = parent matched, child not yet matched
-            SUM(
+        # --------------------------------------------------
+        # PARENTS
+        # --------------------------------------------------
+        rows = _q_retry(cur, """
+            SELECT
+                COALESCE(engine, 'UNKNOWN') AS engine,
                 CASE
-                    WHEN role = 'PARENT'
-                     AND entry_status = 'MATCHED'
-                     AND NOT EXISTS (
-                         SELECT 1
-                           FROM orders c
-                          WHERE c.role = 'CHILD'
-                            AND c.hedge_of = orders.id
-                            AND c.exit_status = 'MATCHED'
-                     )
-                    THEN 1 ELSE 0
-                END
-            ) AS open_trades,
+                    WHEN entry_status = 'QUEUED'  THEN 'QUEUED'
+                    WHEN entry_status = 'PLACING' THEN 'PLACING'
+                    WHEN entry_status = 'PLACED'  THEN 'PLACED'
+                    WHEN exit_status LIKE '%CANCELLED%' THEN 'CANCELLED'
+                    WHEN EXISTS (
+                        SELECT 1 FROM orders c
+                         WHERE c.role='CHILD'
+                           AND c.hedge_of = orders.id
+                           AND c.exit_status='MATCHED'
+                    ) THEN 'CLOSED'
+                    WHEN entry_status = 'MATCHED' THEN 'MATCHED'
+                    ELSE 'UNKNOWN'
+                END AS bucket,
+                COUNT(*) AS n
+            FROM orders
+            WHERE role='PARENT'
+              AND mode='LIVE'
+              AND date(opened_at)=date('now','utc')
+            GROUP BY engine, bucket
+        """).fetchall()
 
-            -- COMPLETED = child exit matched
-            SUM(
+        for r in rows:
+            engine = r["engine"] or "UNKNOWN"
+            bucket = r["bucket"] or "UNKNOWN"
+            live["parents"][engine][bucket] += int(r["n"] or 0)
+
+        # --------------------------------------------------
+        # CHILDREN
+        # --------------------------------------------------
+        rows = _q_retry(cur, """
+            SELECT
+                COALESCE(engine, 'UNKNOWN') AS engine,
                 CASE
-                    WHEN role = 'PARENT'
-                     AND EXISTS (
-                         SELECT 1
-                           FROM orders c
-                          WHERE c.role = 'CHILD'
-                            AND c.hedge_of = orders.id
-                            AND c.exit_status = 'MATCHED'
-                     )
-                    THEN 1 ELSE 0
-                END
-            ) AS completed_trades,
+                    WHEN entry_status = 'QUEUED'  THEN 'QUEUED'
+                    WHEN entry_status = 'PLACING' THEN 'PLACING'
+                    WHEN entry_status = 'PLACED'  THEN 'PLACED'
+                    WHEN entry_status = 'MATCHED'
+                         AND exit_status IS NULL THEN 'MATCHED'
+                    WHEN exit_status IS NOT NULL THEN 'CLOSED'
+                    ELSE 'UNKNOWN'
+                END AS bucket,
+                COUNT(*) AS n
+            FROM orders
+            WHERE role='CHILD'
+              AND mode='LIVE'
+              AND date(opened_at)=date('now','utc')
+            GROUP BY engine, bucket
+        """).fetchall()
 
-            -- CANCELLED = parent exit cancelled
-            SUM(
-                CASE
-                    WHEN role = 'PARENT'
-                     AND exit_status LIKE '%CANCELLED%'
-                    THEN 1 ELSE 0
-                END
-            ) AS cancelled_trades
-        FROM orders
-        WHERE mode = 'LIVE'
-          AND date(opened_at) = date('now','utc')
-    """).fetchone()
+        for r in rows:
+            engine = r["engine"] or "UNKNOWN"
+            bucket = r["bucket"] or "UNKNOWN"
+            live["children"][engine][bucket] += int(r["n"] or 0)
 
-    if row:
-        live["summary"]["open_trades"]      = int(row["open_trades"] or 0)
-        live["summary"]["completed_trades"] = int(row["completed_trades"] or 0)
-        live["summary"]["cancelled_trades"] = int(row["cancelled_trades"] or 0)
+        # --------------------------------------------------
+        # TRADE SUMMARY
+        # --------------------------------------------------
+        row = _q_retry(cur, """
+            SELECT
+                SUM(
+                    CASE
+                        WHEN role='PARENT'
+                         AND entry_status='MATCHED'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM orders c
+                              WHERE c.role='CHILD'
+                                AND c.hedge_of=orders.id
+                                AND c.exit_status='MATCHED'
+                         )
+                        THEN 1 ELSE 0
+                    END
+                ) AS open_trades,
 
-    # --------------------------------------------------
-    # Invariant guards — NO UNKNOWN STATES (TODAY)
-    # --------------------------------------------------
-    row = _q_retry(cur, """
-        SELECT COUNT(*) AS bad
-        FROM orders
-        WHERE role = 'PARENT'
-          AND mode = 'LIVE'
-          AND date(opened_at) = date('now','utc')
-          AND NOT (
-                entry_status IN ('QUEUED','PLACING','PLACED')
-             OR entry_status = 'MATCHED'
-             OR exit_status IS NOT NULL
-          )
-    """).fetchone()
+                SUM(
+                    CASE
+                        WHEN role='PARENT'
+                         AND EXISTS (
+                             SELECT 1 FROM orders c
+                              WHERE c.role='CHILD'
+                                AND c.hedge_of=orders.id
+                                AND c.exit_status='MATCHED'
+                         )
+                        THEN 1 ELSE 0
+                    END
+                ) AS completed_trades,
 
-    invariants["parents_illegal"] = int(row["bad"] or 0)
+                SUM(
+                    CASE
+                        WHEN role='PARENT'
+                         AND exit_status LIKE '%CANCELLED%'
+                        THEN 1 ELSE 0
+                    END
+                ) AS cancelled_trades
+            FROM orders
+            WHERE mode='LIVE'
+              AND date(opened_at)=date('now','utc')
+        """).fetchone()
 
-    row = _q_retry(cur, """
-        SELECT COUNT(*) AS bad
-        FROM orders
-        WHERE role = 'CHILD'
-          AND mode = 'LIVE'
-          AND date(opened_at) = date('now','utc')
-          AND NOT (
-                entry_status IN ('QUEUED','PLACING','PLACED','MATCHED')
-             OR exit_status IS NOT NULL
-          )
-    """).fetchone()
+        if row:
+            live["summary"]["open_trades"]      = int(row["open_trades"] or 0)
+            live["summary"]["completed_trades"] = int(row["completed_trades"] or 0)
+            live["summary"]["cancelled_trades"] = int(row["cancelled_trades"] or 0)
 
-    invariants["children_illegal"] = int(row["bad"] or 0)
+        # --------------------------------------------------
+        # INVARIANT CHECKS
+        # --------------------------------------------------
+        row = _q_retry(cur, """
+            SELECT COUNT(*) AS bad
+            FROM orders
+            WHERE role='PARENT'
+              AND mode='LIVE'
+              AND date(opened_at)=date('now','utc')
+              AND entry_status NOT IN ('QUEUED','PLACING','PLACED','MATCHED')
+              AND exit_status IS NULL
+        """).fetchone()
 
-    con.close()
+        invariants["parents_illegal"] = int(row["bad"] or 0)
+
+        row = _q_retry(cur, """
+            SELECT COUNT(*) AS bad
+            FROM orders
+            WHERE role='CHILD'
+              AND mode='LIVE'
+              AND date(opened_at)=date('now','utc')
+              AND entry_status NOT IN ('QUEUED','PLACING','PLACED','MATCHED')
+              AND exit_status IS NULL
+        """).fetchone()
+
+        invariants["children_illegal"] = int(row["bad"] or 0)
+
+        con.close()
+
+    except Exception as e:
+        # AUTHORITY MUST NEVER DIE
+        print("[ROUTER][COLLECT][ERROR]", e)
+
     return live, invariants
-
 
 GRACE_MINUTES = 4
 
