@@ -220,13 +220,30 @@ def _rotate_from_market(pairs, anchor_mid):
 
     return pairs[idx:] + pairs[:idx]
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def _build_runner_pool():
+# 📆 PATCHED: 2026-04-XX — Remove band filtering (Route identity invariant)
+#
+# PURPOSE:
+# - Route identity must NOT depend on band
+# - ALL runners in scope markets must exist in route snapshot
+# - Engine gating handled downstream in BUS
+#
+# INVARIANT:
+# - Route never removes a runner because of band
+# - CTX/PX completeness guaranteed
+# ======================================================================================================
+
 def _build_runner_pool():
     """
     Authoritative runner pool:
-    - scope markets
-    - active / passive runners only
-    - no filtering by engine
+    - Scope markets
+    - ALL runners included
+    - No band filtering
+    - No engine filtering
     """
+
     scope = build_and_maintain_scope()
     markets = scope.get("markets", []) or []
 
@@ -237,11 +254,11 @@ def _build_runner_pool():
         st = get_market_state(mid) or {}
         runners = st.get("runners") or {}
 
-        for sid, r in runners.items():
-            if r.get("band") in ("ACTIVE", "PASSIVE"):
-                pool.append((mid, str(sid)))
+        for sid in runners.keys():
+            pool.append((mid, str(sid)))
 
     return pool
+
 
 class RunnerRotation:
     def __init__(self):
@@ -531,16 +548,26 @@ class BusRouteSnapshot:
             session_token=session_token,
         )
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def refresh_ctx_dynamic_fields(self):
+# 📆 PATCHED: 2026-04-XX — Preserve PX on missing odds
+#
+# PURPOSE:
+# - Prevent PX wipe on transient fetch miss
+# - Maintain stable execution identity
+# ======================================================================================================
+
         for (mid, sid), ctx in self.ctx_map.items():
             odds = odds_map.get((mid, sid))
             if not odds:
-                ctx["px"] = None
-                continue
+                continue  # 🔒 DO NOT WIPE PX
 
             ctx["px"]   = odds["px"]
             ctx["odds"] = odds["px"]
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
+
 
         return time.time() - t0
 
@@ -604,7 +631,8 @@ class BusRouteSnapshot:
                 )
 
                 # Dynamic fields — BUS owns refresh later
-                ctx.setdefault("px",   None)
+                # Preserve snapshot px if exists, else initialise as None
+                ctx.setdefault("px", ctx.get("odds"))
                 ctx.setdefault("odds", None)
                 ctx.setdefault("back", None)
                 ctx.setdefault("lay",  None)
@@ -2143,3 +2171,152 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"❌ Error: {e}")
+
+# ============================================================================
+# DAY RUNNER SURFACE — AUTHORITATIVE PX + BAND FOR FULL DAY
+# ============================================================================
+# PURPOSE:
+# - Full-day runner surface
+# - Independent of scope
+# - Independent of route
+# - Independent of MarketMonitor
+# - Cached + periodically refreshed
+# ============================================================================
+
+from datetime import datetime, timezone
+from engines.config_paths import connect_db
+from engines.strategy_config import CONFIG
+from typing import Dict, Tuple
+import threading
+import time
+
+
+class DayRunnerSurface:
+
+    _REFRESH_SECONDS = 10  # refresh cadence
+
+    def __init__(self):
+        self._surface: Dict[Tuple[str, str], dict] = {}
+        self._last_refresh = 0.0
+        self._lock = threading.Lock()
+
+    # --------------------------------------------------
+    # PUBLIC API
+    # --------------------------------------------------
+
+    def get_surface(self) -> Dict[Tuple[str, str], dict]:
+        self._refresh_if_needed()
+        return self._surface
+
+    def get_runner(self, mid: str, sid: str) -> dict | None:
+        self._refresh_if_needed()
+        return self._surface.get((str(mid), str(sid)))
+
+    def force_refresh(self):
+        with self._lock:
+            self._refresh()
+
+    # --------------------------------------------------
+    # INTERNAL
+    # --------------------------------------------------
+
+    def _refresh_if_needed(self):
+        now = time.time()
+        if now - self._last_refresh >= self._REFRESH_SECONDS:
+            with self._lock:
+                if now - self._last_refresh >= self._REFRESH_SECONDS:
+                    self._refresh()
+
+    def _refresh(self):
+        """
+        Full-day rebuild.
+        """
+
+        # --------------------------------------------------
+        # 1️⃣ Enumerate ALL today's markets
+        # --------------------------------------------------
+        con = connect_db(ro=True)
+        con.row_factory = None
+
+        try:
+            rows = con.execute("""
+                SELECT DISTINCT marketId
+                FROM bets
+                WHERE date(marketStartTime) = date('now','utc')
+            """).fetchall()
+        finally:
+            con.close()
+
+        if not rows:
+            return
+
+        market_ids = [str(r[0]) for r in rows if r and r[0]]
+
+        # --------------------------------------------------
+        # 2️⃣ Fetch ALL runners from market state
+        # --------------------------------------------------
+        pairs = []
+
+        for mid in market_ids:
+            st = get_market_state(mid) or {}
+            runners = st.get("runners") or {}
+            for sid in runners.keys():
+                pairs.append((mid, str(sid)))
+
+        if not pairs:
+            return
+
+        # --------------------------------------------------
+        # 3️⃣ Batched PX fetch
+        # --------------------------------------------------
+        odds_map = get_runner_odds_map(pairs)
+
+        # --------------------------------------------------
+        # 4️⃣ Deterministic band classification
+        # --------------------------------------------------
+        bands_cfg = CONFIG["bands"]
+        active_min  = float(bands_cfg["active_min"])
+        active_max  = float(bands_cfg["active_max"])
+        passive_max = float(bands_cfg["passive_max"])
+
+        def classify(px: float | None) -> str:
+            if px is None:
+                return "UNKNOWN"
+            if px < active_min:
+                return "ACTIVE"
+            if px <= active_max:
+                return "ACTIVE"
+            if px <= passive_max:
+                return "PASSIVE"
+            return "IGNORED"
+
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        # --------------------------------------------------
+        # 5️⃣ Update surface (never wipe missing PX)
+        # --------------------------------------------------
+        for mid, sid in pairs:
+            odds = odds_map.get((mid, sid))
+            if not odds:
+                continue
+
+            px = odds.get("px")
+            if px is None:
+                continue
+
+            self._surface[(mid, sid)] = {
+                "px": float(px),
+                "band": classify(float(px)),
+                "back": odds.get("back"),
+                "lay": odds.get("lay"),
+                "ts": ts,
+            }
+
+        self._last_refresh = time.time()
+
+
+# --------------------------------------------------
+# GLOBAL SINGLETON
+# --------------------------------------------------
+
+DAY_RUNNER_SURFACE = DayRunnerSurface()

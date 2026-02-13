@@ -2826,100 +2826,9 @@ def cancel_bet_canonical(*, bet_id: str) -> bool:
         )
         return False
 
-# ======================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: def _cancel(app_key: str, token: str, bet_id: str) -> None:
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-04-01 — Cancel ⇒ release parent exposure (authoritative)
-#
-# INVARIANT:
-# - If a parent is cancelled at Betfair, it will NEVER match
-# - Exposure MUST be released immediately
-# - DB is the lock; BankState mutation is idempotent
-# ======================================================================
-
 def _cancel(app_key: str, token: str, bet_id: str) -> None:
-    # --------------------------------------------------
-    # Resolve parent FIRST
-    # --------------------------------------------------
-    try:
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: # 2️⃣ Mark CANCELLED in DB
-# 🧩 ACTION: Scope cancellation strictly by bet_id
-# 📆 PATCHED: 2026-04-XX — Fix cross-runner cancellation bug
-#
-# HARD INVARIANT:
-#   Cancellation MUST affect only the row with this exact entry_bet_id.
-# ============================================================================
+    cancel_bet_canonical(bet_id=str(bet_id))
 
-        con = _orders_conn()
-        cur = con.cursor()
-
-        _q_retry(cur, """
-            UPDATE orders
-               SET exit_status='CANCELLED',
-                   parent_closed=CASE WHEN role='PARENT' THEN 1 ELSE parent_closed END,
-                   closed_at=COALESCE(closed_at, datetime('now','utc'))
-             WHERE entry_bet_id = ?
-        """, (str(bet_id),))
-
-        con.commit()
-        con.close()
-
-        if role == "PARENT":
-            _release_parent_exposure_db(order_id)
-
-# === PATCH END ==============================================================
-
-
-
-    except Exception:
-        return
-
-    # --------------------------------------------------
-    # 1️⃣ Cancel at Betfair (best effort)
-    # --------------------------------------------------
-    try:
-        _rpc(app_key, token, "cancelOrders", {"betIds": [str(bet_id)]})
-    except Exception:
-        pass
-
-    # --------------------------------------------------
-    # 2️⃣ Mark CANCELLED in DB
-    # --------------------------------------------------
-    try:
-# ======================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: # 2️⃣ Mark CANCELLED in DB
-# 🧩 ACTION: Remove direct UPDATE, use canonical stamper only
-# 📆 PATCHED: 2026-04-XX
-# ======================================================================
-
-        con = _orders_conn()
-        cur = con.cursor()
-
-        _stamp_parent_exit_sql(
-            cur,
-            parent_id=parent_id,
-            exit_status="CANCELLED",
-            reason="betfair_cancel",
-        )
-
-        con.commit()
-        con.close()
-
-        _release_parent_exposure_db(parent_id)
-
-
-        _log_event(
-            "INFO","bankstate",
-            f"[CANCEL→RELEASE] parent_ref={parent_cor}"
-        )
-
-    except Exception as e:
-        _log_event("ERROR","bankstate",
-                   f"[CANCEL RELEASE FAILED] bet_id={bet_id}: {e}")
 
 
 
@@ -3949,30 +3858,42 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
 # 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: UPDATE orders SET entry_status='CANCELLED' WHERE role='CHILD'
 # 🧩 ACTION: Replace entry_status mutation with guarded exit_status cancel
-# 📆 PATCHED: 2026-04-XX — child cancellation invariant (final)
+# 📆 PATCHED: 2026-04-13 — child cancellation invariant (final)
 # ============================================================================
 
-                        if _child_cancellation_allowed(child_id=child_id):
+                        # --------------------------------------------------
+                        # ROUTER INVARIANT:
+                        # If ONE child matches, CANCEL ALL sibling children
+                        # --------------------------------------------------
 
+                        siblings = _q_retry(cur, """
+                            SELECT id, entry_bet_id
+                              FROM orders
+                             WHERE role='CHILD'
+                               AND hedge_of = (
+                                   SELECT hedge_of FROM orders WHERE id = ?
+                               )
+                               AND id <> ?
+                               AND entry_status IN ('QUEUED','PLACING','PLACED')
+                        """, (child_id, child_id)).fetchall()
+
+                        for sib in siblings:
+                            sib_id = int(sib["id"])
+                            sib_bet_id = sib["entry_bet_id"]
+
+                            # 1️⃣ Cancel at Betfair if placed
+                            if sib_bet_id:
+                                cancel_bet_canonical(bet_id=str(sib_bet_id))
+
+                            # 2️⃣ Ensure DB reflects cancellation
                             _q_retry(cur, """
                                 UPDATE orders
                                    SET exit_status='CANCELLED',
                                        exit_kind='CANCELLED_BY_SIBLING_MATCH',
                                        closed_at=datetime('now','utc')
-                                 WHERE role='CHILD'
-                                   AND hedge_of = (
-                                       SELECT hedge_of FROM orders WHERE id = ?
-                                   )
-                                   AND id <> ?
-                                   AND entry_status IN ('QUEUED','PLACING','PLACED')
-                            """, (child_id, child_id))
+                                 WHERE id=?
+                            """, (sib_id,))
 
-                        
-                        _log_event(
-                            "WARN",
-                            "live_router",
-                            f"[CANCEL BLOCKED] illegal child cancel id={child_id}"
-                        )
 
 # === PATCH END ==============================================================
 

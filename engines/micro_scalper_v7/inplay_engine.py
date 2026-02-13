@@ -63,9 +63,45 @@ class InPlayEngine:
     # ----------------------------
 
     def tick(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        mid = ctx.get("marketId")
-        sid = ctx.get("selectionId")
-        px  = ctx.get("px")
+
+
+# ============================================================================
+# 📍 TARGET: <engine_file_here>
+# 🔎 SEARCH: def tick(self, ctx):
+# 🧩 ACTION: INSERT — Band Guard (IGNORED filter)
+# 📆 PATCHED: 2026-04-14 — Enforce IGNORED runner exclusion
+#
+# PURPOSE:
+# - Engines must never process IGNORED band runners
+# - BusRoute supplies full-day surface
+# - Engine owns eligibility decision
+#
+# INVARIANT:
+# - If ctx["band"] == "IGNORED", engine returns None
+# - No execution logic runs for ignored runners
+# ============================================================================
+
+        from engines.bus_route import DAY_RUNNER_SURFACE
+
+        mid = str(ctx.get("marketId"))
+        sid = str(ctx.get("selectionId"))
+
+        runner = DAY_RUNNER_SURFACE.get_runner(mid, sid)
+
+        if runner:
+            if ctx.get("px") is None:
+                ctx["px"] = runner["px"]
+            ctx["band"] = runner["band"]
+
+        px = float(ctx.get("px") or 0.0)
+        if px <= 0:
+            return self._no_signal("ignored_band")
+
+
+        if ctx.get("band") == "IGNORED":
+            return self._no_signal("ignored_band")
+
+
 
         if not mid or not sid or not px or px <= 0:
             return self._no_signal("missing_identity_or_px")

@@ -123,13 +123,13 @@ class RiskEngine:
                 )
                 VALUES(date('now','utc'),?,?,?,?,?,?,?,?)
             """, (
-                ctx.get("legacy_parent_id"),
+                ctx.get("anchor_parent_id"),
                 ctx.get("marketId"),
                 ctx.get("selectionId"),
-                float(ctx.get("legacy_entry_odds")),
+                float(ctx.get("anchor_entry_odds")),
                 float(px),
                 direction,
-                ctx.get("legacy_entry_side"),
+                ctx.get("anchor_engine"),
                 ctx.get("run_id"),
             ))
             con.commit()
@@ -151,7 +151,7 @@ class RiskEngine:
         if px <= 0:
             return None
 
-        parent_stk = float(ctx.get("legacy_entry_stake") or 0.0)
+        parent_stk = float(ctx.get("anchor_entry_stake") or 0.0)
         if parent_stk <= 0:
             return None
 
@@ -159,7 +159,7 @@ class RiskEngine:
             "enter": True,
             "engine": "OVERWATCHER",
             "type": "STOPLOSS",
-            "parent_id": ctx.get("legacy_parent_id"),
+            "parent_id": ctx.get("anchor_parent_id"),
             "marketId": ctx.get("marketId"),
             "selectionId": ctx.get("selectionId"),
             "px": px,
@@ -170,56 +170,34 @@ class RiskEngine:
     # ======================================================
     # ENTRYPOINT — CALLED EACH TICK
     # ======================================================
-    def tick(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def tick(self, ctx):
+
+        from engines.bus_route import DAY_RUNNER_SURFACE
+
+        # --------------------------------------------------
+        # 🔁 Authoritative PX + Band Fallback
+        # --------------------------------------------------
+        mid = str(ctx.get("marketId"))
+        sid = str(ctx.get("selectionId"))
+
+        runner = DAY_RUNNER_SURFACE.get_runner(mid, sid)
+
+        if runner:
+            if ctx.get("px") is None:
+                ctx["px"] = runner["px"]
+            ctx["band"] = runner["band"]
 
         px = float(ctx.get("px") or 0.0)
-
         if px <= 0:
             return None
 
-
-        # 🔑 NORMALISE last_px
-        ctx["last_px"] = px
+        if ctx.get("band") == "IGNORED":
+            return None
 
         # --------------------------------------------------
-        # 🔒 ENGINE-OWNED EXCLUSIONS
+        # 🔒 Engine-owned exclusions
         # --------------------------------------------------
-
         self._refresh_exclusions()
-
-        pid = ctx.get("legacy_parent_id")
-        mid = str(ctx.get("marketId"))
-        sid = str(ctx.get("selectionId"))
-        engine = ctx.get("engine")
-
-        # ------------------------------------
-        # LEGACY: block if cycle blocked
-        # ------------------------------------
-        if engine == "LEGACY":
-            if pid in self._legacy_cycle_blocked:
-                return None
-
-        # ------------------------------------
-        # EXPLORATORY: block if already active
-        # ------------------------------------
-        if engine == "MSC_EXPLORATORY":
-            if (mid, sid) in self._exploratory_active:
-                return None
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 ANCHOR: inside tick(), replace legacy_* field usage
-# 🧩 ACTION: REPLACE — use engine-neutral anchor fields
-# 📆 PATCHED: 2026-04-12 — Risk shadow engine-neutral anchor support
-#
-# PURPOSE:
-# - Remove dependency on LEGACY naming
-# - Allow Risk to shadow exploratory parents
-#
-# INVARIANT:
-# - Risk requires a matched anchor parent
-# - Anchor fields are engine-neutral
-# ======================================================================================================
 
         pid = ctx.get("anchor_parent_id")
         anchor = float(ctx.get("anchor_entry_odds") or 0.0)
@@ -228,10 +206,15 @@ class RiskEngine:
         if not pid or anchor <= 0:
             return None
 
+        state = self._parents.setdefault(pid, self._state(pid))
 
-        anchor = float(ctx.get("legacy_entry_odds") or 0.0)
+        # ------------------------------------
+        # Block shadow if cycle excluded
+        # ------------------------------------
+        if pid in self._legacy_cycle_blocked:
+            return None
 
-        if anchor <= 0:
+        if (mid, sid) in self._exploratory_active:
             return None
 
         # --------------------------------------------------
@@ -245,11 +228,9 @@ class RiskEngine:
         # --------------------------------------------------
         if state["microcycle_dir"] == "DOWN" and px >= anchor:
             state["microcycle_dir"] = None
-         
 
         elif state["microcycle_dir"] == "UP" and px <= anchor:
             state["microcycle_dir"] = None
-           
 
         # --------------------------------------------------
         # 🟢 ARM NEW MICRO-CYCLE
@@ -258,18 +239,6 @@ class RiskEngine:
             state["microcycle_dir"] = "DOWN" if px < anchor else "UP"
             state["used_prices"].clear()
             state["last_px"] = px
-            # allow first trade in new microcycle
-
-# ======================================================================
-# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 SEARCH: direction = ctx.get("risk_direction")
-# 🧩 ACTION: REPLACE PRICE ELIGIBILITY LOGIC
-# 📆 PATCHED: 2026-03-29 — Monotonic microcycle enforcement
-#
-# INVARIANT:
-# - Trade ONLY while moving monotonically away from anchor
-# - Freeze on retrace until anchor cross
-# ======================================================================
 
         # --------------------------------------------------
         # ⛔ FREEZE ON RETRACE (no anchor cross)
@@ -286,19 +255,12 @@ class RiskEngine:
         if px in state["used_prices"]:
             return None
 
-        # --------------------------------------------------
-        # Record price use
-        # --------------------------------------------------
         state["used_prices"].add(px)
         state["last_px"] = px
 
-# ======================================================================
-# 📍 TARGET: engines/micro_scalper_v7/risk_engine.py
-# 🔎 SEARCH: return {
-# 🧩 ACTION: REPLACE FINAL EMISSION
-# 📆 PATCHED: 2026-03-29 — Anchor-relative risk emission
-# ======================================================================
-
+        # --------------------------------------------------
+        # Emit parent plan (anchor-relative)
+        # --------------------------------------------------
         if px > anchor:
             direction = "LAY->BACK"
         elif px < anchor:
@@ -310,9 +272,9 @@ class RiskEngine:
             "enter": True,
             "role": "PARENT",
             "engine": "MSC_RISK",
-            "parent_id": ctx["legacy_parent_id"],
-            "marketId": ctx["marketId"],
-            "selectionId": ctx["selectionId"],
+            "parent_id": pid,
+            "marketId": mid,
+            "selectionId": sid,
             "direction": direction,
             "px": px,
             "why": "risk_shadow_microcycle",
@@ -357,7 +319,7 @@ class RiskEngine:
             "enter": True,
             "role": "PARENT",
             "engine": "MSC_RISK",
-            "parent_id": ctx.get("legacy_parent_id"),
+            "parent_id": ctx.get("anchor_parent_id"),
             "direction": plan_dir,
             "target_ticks": entry_ticks,
             "stop_ticks": stop_ticks,
@@ -459,7 +421,8 @@ class RiskEngine:
     def _open_new(self, direction, px, entry_ticks, stop_ticks, size, reason, ctx):
         from engines.price_math import walk_ticks
 
-        pid = ctx.get("legacy_parent_id")
+        pid = ctx.get("anchor_parent_id")
+
         if pid is None:
             return None
 
@@ -487,14 +450,14 @@ class RiskEngine:
     # STAKE LOGIC (unchanged)
     # ======================================================
     def _stake(self, ctx, stake_mult, entry_ticks):
-        parent_stake = float(ctx.get("legacy_entry_stake") or 0.0)
+        parent_stake = float(ctx.get("anchor_entry_stake") or 0.0)
         if parent_stake <= 0:
             return 0.0
 
         mode_mult = 1.25 if self.mode == "AGGRESSIVE" else 0.6 if self.mode == "CONSERVATIVE" else 1.0
         base = parent_stake * mode_mult
 
-        entry_odds = float(ctx.get("legacy_entry_odds") or 0.0)
+        entry_odds = float(ctx.get("anchor_entry_odds") or 0.0)
         odds_mult = 0.4 if entry_odds >= 12 else 0.55 if entry_odds >= 10 else 0.85 if entry_odds >= 7 else 1.0
         base *= odds_mult
         base *= max(1.0, float(entry_ticks))

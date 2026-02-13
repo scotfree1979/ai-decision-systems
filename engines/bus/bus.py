@@ -1200,8 +1200,16 @@ class DecisionBus:
             if not ctx:
                 continue
 
-            if not self._ensure_px_from_route(ctx):
+            if ctx.get("band") == 0:
+                _record_reason(engine_report, "LEGACY", "ignored_band")
                 continue
+
+            if not self._ensure_px_from_route(ctx):
+                self._force_px_refresh(mid, sid, ctx)
+                if ctx.get("px") is None:
+                    _record_reason(engine_report, "LEGACY", "missing_px_after_refresh")
+                    continue
+
 
             # --------------------------------------------------
             # 🧠 BLUEPRINT MATERIALISATION (BUS AUTHORITY)
@@ -3305,11 +3313,13 @@ class DecisionBus:
 
                     # Ensure px exists (BUS authority)
                     if not self._ensure_px_from_route(ctx):
-                        plan["_bus_block"] = "risk_missing_px"
-                        tick_ctx["plans_route_failed"].append(
-                            (plan, "risk_missing_px")
-                        )
-                        continue  # 🔴 DO NOT ROUTE
+                        self._force_px_refresh(mid, sid, ctx)
+                        if ctx.get("px") is None:
+                            plan["_bus_block"] = "risk_missing_px"
+                            tick_ctx["plans_route_failed"].append(
+                                (plan, "risk_missing_px")
+                            )
+                            continue # 🔴 DO NOT ROUTE
 
                     raw_stake = compute_risk_dynamic_stake(
                         ctx=ctx,
