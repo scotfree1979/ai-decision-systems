@@ -1583,9 +1583,9 @@ class DecisionBus:
             # --------------------------------------------------
             ctx_l = dict(ctx)
             ctx_l.update({
-                "legacy_parent_id":   legacy_parent_id,
-                "legacy_entry_odds":  float(anchor_px),
-                "legacy_entry_stake": ctx.get("legacy_entry_stake"),
+                "anchor_parent_id":   legacy_parent_id,
+                "anchor_entry_odds":  float(anchor_px),
+                "anchor_entry_stake": ctx.get("anchor_entry_stake"),
                 "last_px":            float(last_px),
                 "risk_direction":     trend.get("direction"),
                 "risk_ticks_moved":   trend.get("ticks_moved"),

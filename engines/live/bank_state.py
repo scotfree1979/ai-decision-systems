@@ -208,7 +208,28 @@ def _compute_market_floor_from_betfair_surface():
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
-    rows = cur.execute("""
+# ======================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: rows = cur.execute("""
+# 🧩 ACTION: REPLACE SQL BLOCK ONLY (ATTACH bets + time filter)
+# 📆 PATCHED: 2026-02-14 — filter floor by bets.marketStartTime (+ grace)
+#
+# PURPOSE:
+# - Keep existing floor logic unchanged
+# - Attach bets.db explicitly
+# - Exclude markets past off + grace
+# - No renames
+# - No restructuring
+# ======================================================================
+
+    from engines.config_paths import bets_db_path
+
+    # Attach bets database (separate physical DB)
+    cur.execute(f"ATTACH DATABASE '{bets_db_path()}' AS bets_db")
+
+    GRACE_MINUTES = 6
+
+    rows = cur.execute(f"""
         SELECT
             marketId,
             selectionId,
@@ -217,7 +238,15 @@ def _compute_market_floor_from_betfair_surface():
             avg_price
         FROM betfair_execution_surface
         WHERE source='CURRENT'
+          AND marketId IN (
+                SELECT marketId
+                FROM bets_db.bets
+                WHERE (
+                    (julianday(marketStartTime) - julianday('now','utc')) * 1440.0
+                ) >= -{GRACE_MINUTES}
+          )
     """).fetchall()
+
 
     con.close()
 

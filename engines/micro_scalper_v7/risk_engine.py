@@ -25,9 +25,7 @@ class RiskEngine:
         # parent_id -> state dict
         self._parents: dict[int, dict] = {}
 
-        # 🔒 Engine-owned exclusions
-        self._legacy_cycle_blocked: set[int] = set()
-        self._exploratory_active: set[tuple[str, str]] = set()
+
 
         self.mode = "MODERATE"
 
@@ -172,32 +170,22 @@ class RiskEngine:
     # ======================================================
     def tick(self, ctx):
 
-        from engines.bus_route import DAY_RUNNER_SURFACE
-
-        # --------------------------------------------------
-        # 🔁 Authoritative PX + Band Fallback
-        # --------------------------------------------------
         mid = str(ctx.get("marketId"))
         sid = str(ctx.get("selectionId"))
 
-        runner = DAY_RUNNER_SURFACE.get_runner(mid, sid)
+        px = ctx.get("px")
+        if px is None:
+            return None
 
-        if runner:
-            if ctx.get("px") is None:
-                ctx["px"] = runner["px"]
-            ctx["band"] = runner["band"]
-
-        px = float(ctx.get("px") or 0.0)
+        px = float(px)
         if px <= 0:
             return None
 
-        if ctx.get("band") == "IGNORED":
-            return None
 
         # --------------------------------------------------
         # 🔒 Engine-owned exclusions
         # --------------------------------------------------
-        self._refresh_exclusions()
+
 
         pid = ctx.get("anchor_parent_id")
         anchor = float(ctx.get("anchor_entry_odds") or 0.0)
@@ -208,14 +196,7 @@ class RiskEngine:
 
         state = self._parents.setdefault(pid, self._state(pid))
 
-        # ------------------------------------
-        # Block shadow if cycle excluded
-        # ------------------------------------
-        if pid in self._legacy_cycle_blocked:
-            return None
 
-        if (mid, sid) in self._exploratory_active:
-            return None
 
         # --------------------------------------------------
         # Anchor binding (one-time)
@@ -239,15 +220,6 @@ class RiskEngine:
             state["microcycle_dir"] = "DOWN" if px < anchor else "UP"
             state["used_prices"].clear()
             state["last_px"] = px
-
-        # --------------------------------------------------
-        # ⛔ FREEZE ON RETRACE (no anchor cross)
-        # --------------------------------------------------
-        if state["last_px"] is not None:
-            if state["microcycle_dir"] == "DOWN" and px >= state["last_px"]:
-                return None
-            if state["microcycle_dir"] == "UP" and px <= state["last_px"]:
-                return None
 
         # --------------------------------------------------
         # ⛔ USED PRICE (microcycle scoped)
@@ -347,54 +319,61 @@ class RiskEngine:
     # ======================================================
     def _scalp_tick(self, state, px, entry_ticks, stop_ticks, stake_mult, ctx):
 
-        entry_px = state["entry_px"]
-        entry_side = state["entry_side"]
-
-        # --------------------------------------------------
-        # PRICE ELIGIBILITY (AUTHORITATIVE)
-        # --------------------------------------------------
-        if px == entry_px:
+        anchor = state.get("anchor_px")
+        if anchor is None:
             return None
 
-        if px in state["used_prices"] and state.get("active_plan"):
+        # --------------------------------------------------
+        # BLOCK ANCHOR PRICE
+        # --------------------------------------------------
+        if px == anchor:
             return None
 
-        state["used_prices"].add(px)
+        # --------------------------------------------------
+        # BLOCK IF PRICE ALREADY USED IN THIS MICRO-CYCLE
+        # --------------------------------------------------
+        if px in state["used_prices"]:
+            return None
 
+        # --------------------------------------------------
+        # ENSURE PRICE IS STILL ON SAME SIDE OF ANCHOR
+        # (Do NOT require anchor cross to re-arm)
+        # --------------------------------------------------
+        direction_side = None
 
-        if px > entry_px:
-            # price ABOVE parent
-            direction = "BACK"
-        elif px < entry_px:
-            # price BELOW parent
-            direction = "LAY"
+        if px > anchor:
+            direction_side = "UP"
+        elif px < anchor:
+            direction_side = "DOWN"
         else:
-            return None  # exactly parent PX
+            return None
 
+        # If microcycle direction exists, enforce consistency
+        if state["microcycle_dir"] and state["microcycle_dir"] != direction_side:
+            return None
+
+        # If no microcycle yet, arm it
+        if state["microcycle_dir"] is None:
+            state["microcycle_dir"] = direction_side
+            state["used_prices"].clear()
+
+        # --------------------------------------------------
+        # ACCEPT NEW UNUSED PRICE (NO ANCHOR CROSS REQUIRED)
+        # --------------------------------------------------
+        state["used_prices"].add(px)
+        state["last_px"] = px
 
         size = self._stake(ctx, stake_mult, entry_ticks)
-        self._record_px_use(ctx, px, "UP" if px > entry_px else "DOWN")
 
         # --------------------------------------------------
-        # DIRECTION + REASON (PARENT-RELATIVE, AUTHORITATIVE)
+        # DIRECTION (ANCHOR RELATIVE)
         # --------------------------------------------------
-        entry_px   = state["entry_px"]
-        entry_side = state["entry_side"]
-
-        if entry_side == "LAY":
-            if px < entry_px:
-                direction = "BACK"   # favourable
-                reason = "risk_stack"
-            else:
-                direction = "LAY"    # adverse
-                reason = "risk_hedge"
-        else:  # BACK parent
-            if px > entry_px:
-                direction = "LAY"    # favourable
-                reason = "risk_stack"
-            else:
-                direction = "BACK"   # adverse
-                reason = "risk_hedge"
+        if px > anchor:
+            direction = "LAY->BACK"
+            reason = "risk_shadow_drift"
+        else:
+            direction = "BACK->LAY"
+            reason = "risk_shadow_steam"
 
         return self._open_new(
             direction,
@@ -405,8 +384,6 @@ class RiskEngine:
             reason,
             ctx,
         )
-
-
 
     # ======================================================
     # MONITOR
