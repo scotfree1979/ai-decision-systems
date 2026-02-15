@@ -11,7 +11,7 @@ DEFAULT_BANDS = {
     "EXTENDED_MAX": 15.00,   # EXTENDED: 12–15
 }
 
-}
+
 DEFAULT_POLICY = {
     # Which bands are allowed per letter; '*' is the fallback for unspecified letters.
     "A": ("ACTIVE",),           # A only on ACTIVE

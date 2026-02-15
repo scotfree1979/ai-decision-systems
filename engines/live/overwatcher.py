@@ -2019,17 +2019,29 @@ def _synthetic_match_child(parent_id: int) -> bool:
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/overwatcher.py
-# 🔎 SEARCH: def start_overwatcher(
-# 🧩 ACTION: MODIFY LOOP TO RETURN PLANS TO BUS
-# 📆 PATCHED: 2026-04-XX — Overwatch short-circuited
+# 🔎 SEARCH: def start_overwatcher(hz: int = 2):
+# 🧩 ACTION: Add backward-compatible kwargs support
+# 📆 PATCHED: 2026-04-XX — Fix unexpected keyword argument stop_ticks_default
 #
-# PURPOSE:
-# - Overwatch emits plans only
-# - No execution
-# - BUS must collect returned plans
+# WHY:
+# - Existing callers still pass stop_ticks_default
+# - Overwatch no longer uses it
+# - We must not break legacy bootstrap wiring
+#
+# INVARIANT:
+# - stop_ticks_default is ignored
+# - No behavioural change
+# - Prevents launch failure
 # ======================================================================================================
 
-def start_overwatcher(hz: int = 2):
+def start_overwatcher(hz: int = 2, **kwargs):
+    """
+    Overwatcher bootstrap.
+
+    Backward compatibility:
+        Accepts legacy arguments (e.g. stop_ticks_default)
+        but ignores them safely.
+    """
 
     def loop():
         while True:
@@ -2056,6 +2068,3 @@ def start_overwatcher(hz: int = 2):
     t = threading.Thread(target=loop, name="OverwatcherLoop", daemon=True)
     t.start()
     return t
-
-
-
