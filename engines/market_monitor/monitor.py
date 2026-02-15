@@ -5,11 +5,12 @@ import sqlite3, math, time
 
 # --- config (overridable via engines.daily_config.MARKET_MONITOR) ---
 DEFAULT_BANDS = {
-    # Treat <1.50 as ACTIVE by default (safer for strong favs).
     "ACTIVE_MIN": 1.50,
-    "ACTIVE_MAX": 8.00,   # ACTIVE:  [1.50, 8.00)
-    "PASSIVE_MAX": 12.00, # PASSIVE: [8.00, 12.00)
-    # IGNORED: >= 12.00
+    "ACTIVE_MAX": 9.00,      # ACTIVE:   <= 9
+    "PASSIVE_MAX": 12.00,    # PASSIVE:  9–12
+    "EXTENDED_MAX": 15.00,   # EXTENDED: 12–15
+}
+
 }
 DEFAULT_POLICY = {
     # Which bands are allowed per letter; '*' is the fallback for unspecified letters.
@@ -254,7 +255,9 @@ BANDS = {
     "ACTIVE_MIN": float(CONFIG["bands"]["active_min"]),
     "ACTIVE_MAX": float(CONFIG["bands"]["active_max"]),
     "PASSIVE_MAX": float(CONFIG["bands"]["passive_max"]),
+    "EXTENDED_MAX": float(CONFIG["bands"].get("extended_max", 15.00)),
 }
+
 
 def _classify_price(px):
     import math
@@ -263,12 +266,15 @@ def _classify_price(px):
     lo  = float(BANDS.get("ACTIVE_MIN", 1.50))
     hi  = float(BANDS.get("ACTIVE_MAX", 8.00))
     hi2 = float(BANDS.get("PASSIVE_MAX", 12.00))
+    hi3 = float(BANDS.get("EXTENDED_MAX", 15.00))
     if px < lo:
         return "ACTIVE"
     if px <= hi:            # 8.00 is ACTIVE
         return "ACTIVE"
     if px <= hi2:
         return "PASSIVE"
+    if px <= hi3:
+        return "EXTENDED"
     return "IGNORED"
 
 # === PATCH BLOCK: movement detection + signal accessor

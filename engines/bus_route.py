@@ -447,6 +447,16 @@ class BusRouteSnapshot:
                 # --------------------------------------------------
                 ctx, _ = build_context_for_runner(mid, sid, source="LIVE")
 
+                # Inject MarketMonitor band (authoritative)
+                st = get_market_state(mid) or {}
+                runner_state = (st.get("runners") or {}).get(str(sid))
+
+                if runner_state:
+                    ctx["band"] = runner_state.get("band")
+                else:
+                    ctx["band"] = "UNKNOWN"
+
+
                 # --------------------------------------------------
                 # 🔧 DYNAMIC FIELDS — CLEARED HERE (BUS OWNS REFRESH)
                 # --------------------------------------------------
@@ -726,7 +736,7 @@ class BusRouteSnapshot:
 
             band = ctx.get("band")
 
-            if band in ("ACTIVE", "PASSIVE"):
+            if band in ("ACTIVE", "PASSIVE", "EXTENDED"):
                 eligible.append((mid, sid))
 
         n = len(eligible)

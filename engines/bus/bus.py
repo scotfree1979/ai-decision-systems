@@ -54,12 +54,14 @@ INPLAY_POST_OFF_MINUTES = 120
 # ============================================================
 
 _BAND_MAP = {
-    "LEADING":  3,   # strongest / best position
-    "ACTIVE":   2,
-    "PASSIVE":  1,
+    "LEADING":  4,
+    "ACTIVE":   3,
+    "PASSIVE":  2,
+    "EXTENDED": 1,
     "IGNORED":  0,
     "UNKNOWN": -1,
 }
+
 
 # PROMINENCE is positional / tactical.
 # LEADING is valid here and MUST be mapped.
@@ -665,10 +667,14 @@ class DecisionBus:
         # IGNORED = 0
 
         if engine in ("LEGACY", "MSC_EXPLORATORY"):
-            return band >= 2   # ACTIVE only
+            return band >= 3   # ACTIVE only
 
-        if engine in ("MSC_RISK", "MSC_INPLAY"):
-            return band >= 1   # ACTIVE + PASSIVE
+        
+        if engine == "MSC_INPLAY":
+            return band >= 2   # ACTIVE + PASSIVE
+
+        if engine == "MSC_RISK":
+            return band >= 1  # ACTIVE + PASSIVE + EXTENDED
 
         # OVERWATCHER and others
         return True
