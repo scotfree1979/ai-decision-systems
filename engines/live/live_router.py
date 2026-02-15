@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 from engines import price_math as pm
 from collections import defaultdict
+from engines.config_paths import open_auto_db
 
 _ROUTER_LIVE_STATE = {
     "parents":  defaultdict(lambda: defaultdict(int)),
@@ -44,6 +45,23 @@ import traceback
 _ROUTER_CHILD_QUEUE: "queue.Queue[tuple[dict, dict]]" = queue.Queue()
 _ROUTER_CHILD_WORKER = None
 child_id = None
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py (module scope)
+# 🧩 ADD: Progressive lock factor (first hedge only)
+# 📆 PATCHED: 2026-04-XX — First-child partial green-up
+#
+# PURPOSE:
+# - First hedge child locks only a percentage of full green-up
+# - Compression ladder remains full-green from that base
+#
+# RULE:
+# - 0.20 = 20% initial lock
+# - Can tune later
+# ======================================================================================================
+
+PROGRESSIVE_LOCK_FACTOR = 0.20  # 20% of full hedge
+
 
 _ROUTER_STATUS = {
     "parents_checked": 0,
@@ -973,92 +991,8 @@ def _router_child_worker_loop():
         # ==================================================
         _router_enforce_status_authority()
 
-# ======================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 ANCHOR: inside _router_child_worker_loop() main while True loop
-# 🧩 ACTION: Floor-based child promotion gate
-# 📆 PATCHED: 2026-04-XX — Market-level child promotion via Betfair floor
-#
-# PURPOSE:
-#   Promote ONE queued child per market
-#   ONLY when current exposure > Betfair floor
-#
-# INVARIANT:
-#   - Parents always create queued children
-#   - Router decides when to promote
-#   - Exposure logic untouched
-#   - BankState remains authoritative
-# ======================================================================
 
         try:
-            from engines.live.bank_state import _compute_market_floor_from_betfair_surface
-      
-
-            floors = _compute_market_floor_from_betfair_surface()
-            if floors:
-
-                con = _orders_conn()
-                con.row_factory = sqlite3.Row
-                cur = con.cursor()
-
-                for f in floors:
-                    mid = str(f["marketId"])
-                    floor = float(f["true_market_exposure"] or 0.0)
-
-                    # Current exposure for this market
-                    row = cur.execute("""
-                        SELECT SUM(required_exposure) AS exp
-                          FROM orders
-                         WHERE role='PARENT'
-                           AND entry_status='MATCHED'
-                           AND marketId=?
-                           AND COALESCE(exposure_released,0)=0
-                    """, (mid,)).fetchone()
-
-                    exposure = float(row["exp"] or 0.0)
-
-                    # 🔥 Promotion condition
-                    if exposure > floor:
-
-                        # Promote ONE oldest queued child
-                        child = cur.execute("""
-                            SELECT id
-                              FROM orders
-                             WHERE role='CHILD'
-                               AND entry_status='QUEUED'
-                               AND marketId=?
-                             ORDER BY opened_at ASC
-                             LIMIT 1
-                        """, (mid,)).fetchone()
-
-                        if child:
-                            _q_retry(cur, """
-                                UPDATE orders
-                                   SET entry_status='PLACING'
-                                 WHERE id=?
-                                   AND entry_status='QUEUED'
-                            """, (int(child["id"]),))
-
-                            con.commit()
-
-                            _log_event(
-                                "INFO",
-                                "live_router",
-                                f"[FLOOR-PROMOTE] child_id={child['id']} "
-                                f"mid={mid} exposure={exposure:.2f} "
-                                f"floor={floor:.2f}"
-                            )
-
-                con.close()
-
-        except Exception as e:
-            _log_event("ERROR", "live_router", f"[FLOOR GATE] {e}")
-
-# ======================================================================
-
-
-        try:
-
             # ==================================================
             # PHASE 1 — EXECUTE ONE CHILD FROM QUEUE (IF ANY)
             # ==================================================
@@ -1067,6 +1001,24 @@ def _router_child_worker_loop():
             except queue.Empty:
                 plan = None
                 ctx = None
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: inside _router_child_worker_loop(), before normal queue handling
+# 🧩 ACTION: Immediate execution for emergency children
+# 📆 PATCHED: 2026-04-XX — Overwatch emergency fast lane
+#
+# RULE:
+# - If plan['priority']=='IMMEDIATE'
+# - Place child instantly (no delay)
+# ======================================================================================================
+
+            if plan and plan.get("priority") == "IMMEDIATE":
+                child_id = plan.get("child_id")
+                if child_id:
+                    _attempt_place_child_with_retry(int(child_id))
+                _ROUTER_CHILD_QUEUE.task_done()
+                continue
 
             if plan:
 
@@ -1461,6 +1413,113 @@ def _enforce_child_price_separation(
     else:
         # hedge LAY must be lower
         return pm.walk_ticks(parent_odds, -1)
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: below def _orders_update_child_matched
+# 🧩 ACTION: ADD progressive compression helper
+# 📆 PATCHED: 2026-04-15 — Sequential compression ladder (7–12 zone)
+#
+# PURPOSE:
+# - Replace sibling profit lock model
+# - Sequentially promote compression child one level at a time
+# - Only ONE active compression child per parent
+#
+# RULES:
+# - Operates only in compression zone (7.0 – 12.0)
+# - When child matches at X → queue next at X+1
+# - Never pre-queues multiple children
+# - Idempotent
+# ======================================================================================================
+
+def _progressive_compression_next(parent_row, *, cor: str, exit_odds: float):
+
+    from engines.price_math import odds_plus_ticks
+    from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+    COMPRESSION_LOW  = 7.0
+    COMPRESSION_HIGH = 12.0
+
+    parent_id    = int(parent_row["id"])
+    parent_side  = parent_row["side"].upper()
+    entry_odds   = float(parent_row["entry_odds"])
+    entry_stake  = float(parent_row["entry_stake"])
+    market_id    = str(parent_row["marketId"])
+    selection_id = str(parent_row["selectionId"])
+    source       = parent_row["source"]
+    engine       = parent_row["engine"]
+
+    current_level = float(exit_odds)
+
+    # Only operate in compression zone
+    if current_level < COMPRESSION_LOW:
+        return
+
+    if current_level >= COMPRESSION_HIGH:
+        return
+
+    # Ensure no active queued/placed compression child already exists
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    matched = _q_retry(cur, """
+        SELECT 1
+          FROM orders
+         WHERE role='CHILD'
+           AND hedge_of=?
+           AND entry_status='MATCHED'
+         LIMIT 1
+    """, (parent_id,)).fetchone()
+
+    if not matched:
+        return
+
+
+    existing = _q_retry(cur, """
+        SELECT 1
+          FROM orders
+         WHERE role='CHILD'
+           AND hedge_of=?
+           AND entry_status IN ('QUEUED','PLACING','PLACED')
+         LIMIT 1
+    """, (parent_id,)).fetchone()
+
+    con.close()
+
+    if existing:
+        return
+
+    # Compute next compression level
+    next_level = odds_plus_ticks(current_level, +1)
+
+    if next_level > COMPRESSION_HIGH:
+        return
+
+    full_hedge_stake = calc_greenup_stake(
+        parent_side,
+        entry_odds,
+        entry_stake,
+        float(next_level)
+    )
+
+    # Compression = FULL hedge (no progressive reduction here)
+    hedge_stake = round(float(full_hedge_stake), 2)
+
+    if hedge_stake < 1.0:
+        hedge_stake = 1.0
+
+
+    child_id = _orders_insert_child_queued(cor)
+
+
+
+    _log_event(
+        "INFO",
+        "live_router",
+        f"[COMPRESSION] parent_ref={cor} next_level={next_level}"
+    )
+
 
 
 def _release_matched_parent_exposure(parent_cor: str) -> None:
@@ -1949,12 +2008,18 @@ def _router_child_recovery_sweep():
 
             hedge_odds = _round_odds(float(hedge_odds))
 
-            hedge_stake = calc_greenup_stake(
+            full_hedge_stake = calc_greenup_stake(
                 parent_side,
-                float(r["entry_odds"]),
-                float(r["entry_stake"]),
+                entry_odds,
+                entry_stake,
                 hedge_odds
             )
+
+            hedge_stake = round(float(full_hedge_stake) * PROGRESSIVE_LOCK_FACTOR, 2)
+
+            if hedge_stake < 1.0:
+                hedge_stake = 1.0
+
 
             # NOTE:
             # _orders_insert_child_queued is POSITIONAL.
@@ -3418,7 +3483,7 @@ def _release_unmatched_parent_exposure(parent_cor: str) -> None:
         cur = con.cursor()
 
         parent = _q_retry(cur, """
-            SELECT engine, entry_odds, entry_stake, entry_status
+            SELECT id, engine, entry_odds, entry_stake, entry_status
               FROM orders
              WHERE customerOrderRef=?
                AND role='PARENT'
@@ -3754,12 +3819,18 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         )
         hedge_odds = _round_odds(float(hedge_odds))
 
-        hedge_stake = calc_greenup_stake(
+        full_hedge_stake = calc_greenup_stake(
             parent_side,
             float(parent["entry_odds"]),
             float(parent["entry_stake"]),
             hedge_odds
         )
+
+        hedge_stake = round(float(full_hedge_stake) * PROGRESSIVE_LOCK_FACTOR, 2)
+
+        # Safety: never below £1 minimum
+        if hedge_stake < 1.0:
+            hedge_stake = 1.0
 
         # Insert CHILD (QUEUED)
         child_id = _ensure_child_queued_for_matched_parent(cor)
@@ -3859,60 +3930,6 @@ def _finalize_children_and_release_exposure(limit: int = 100) -> int:
                              WHERE id=?
                         """, (avg_odds, matched_size, child_id))
 
-# ======================================================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: ROUTER INVARIANT: If ONE child matches, CANCEL ALL sibling children
-# 🧩 ACTION: Fix cancellation guard — enforce child cancellation invariant
-# 📆 PATCHED: 2026-04-XX — Prevent illegal child cancellation
-# ======================================================================================================
-
-                        # --------------------------------------------------
-                        # ROUTER INVARIANT:
-                        # If ONE child matches, CANCEL ALL sibling children
-                        # ONLY if cancellation is legally allowed
-                        # --------------------------------------------------
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: UPDATE orders SET entry_status='CANCELLED' WHERE role='CHILD'
-# 🧩 ACTION: Replace entry_status mutation with guarded exit_status cancel
-# 📆 PATCHED: 2026-04-13 — child cancellation invariant (final)
-# ============================================================================
-
-                        # --------------------------------------------------
-                        # ROUTER INVARIANT:
-                        # If ONE child matches, CANCEL ALL sibling children
-                        # --------------------------------------------------
-
-                        siblings = _q_retry(cur, """
-                            SELECT id, entry_bet_id
-                              FROM orders
-                             WHERE role='CHILD'
-                               AND hedge_of = (
-                                   SELECT hedge_of FROM orders WHERE id = ?
-                               )
-                               AND id <> ?
-                               AND entry_status IN ('QUEUED','PLACING','PLACED')
-                        """, (child_id, child_id)).fetchall()
-
-                        for sib in siblings:
-                            sib_id = int(sib["id"])
-                            sib_bet_id = sib["entry_bet_id"]
-
-                            # 1️⃣ Cancel at Betfair if placed
-                            if sib_bet_id:
-                                cancel_bet_canonical(bet_id=str(sib_bet_id))
-
-                            # 2️⃣ Ensure DB reflects cancellation
-                            _q_retry(cur, """
-                                UPDATE orders
-                                   SET exit_status='CANCELLED',
-                                       exit_kind='CANCELLED_BY_SIBLING_MATCH',
-                                       closed_at=datetime('now','utc')
-                                 WHERE id=?
-                            """, (sib_id,))
-
-
-# === PATCH END ==============================================================
 
 
                         # --------------------------------------------------
@@ -4322,12 +4339,19 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
         hedge_odds = walk_ticks(float(parent["entry_odds"]), tick_dir)
         hedge_odds = _round_odds(float(hedge_odds))
 
-        hedge_stake = calc_greenup_stake(
+        full_hedge_stake = calc_greenup_stake(
             parent_side,
             float(parent["entry_odds"]),
             float(parent["entry_stake"]),
             hedge_odds
         )
+
+        # FIRST hedge only = progressive factor
+        hedge_stake = round(float(full_hedge_stake) * PROGRESSIVE_LOCK_FACTOR, 2)
+
+        # Safety: never below £1 minimum
+        if hedge_stake < 1.0:
+            hedge_stake = 1.0
 
         # Insert CHILD (DB-first, QUEUED)
         _q_retry(cur, """
@@ -4554,8 +4578,6 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
                AND entry_bet_id IS NOT NULL
         """, (realized, realized, pid))
         con.commit()
-      
-
 
         # ======================================================================
         # 📍 TARGET: engines/live/live_router.py
@@ -4573,6 +4595,79 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
             parent_id=parent_id,
             exit_status="MATCHED",
         )
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: inside _orders_update_child_matched (after parent close logic)
+# 🧩 ACTION: ADD isolated compression ladder (no sibling cancel, no exposure logic)
+# 📆 PATCHED: 2026-04-XX — Compression only (isolated)
+#
+# PURPOSE:
+# - Sequential compression in passive zone (7.0 – 12.0)
+# - Queue ONE next child level only
+# - No other lifecycle changes
+#
+# INVARIANT:
+# - Core parent/child logic remains unchanged
+# - BankState untouched
+# - Stoploss untouched
+# ======================================================================================================
+
+        try:
+            COMPRESSION_LOW  = 7.0
+            COMPRESSION_HIGH = 12.0
+
+            current_level = float(exit_odds)
+
+            # Only operate in passive compression zone
+            if COMPRESSION_LOW <= current_level < COMPRESSION_HIGH:
+
+                from engines.price_math import odds_plus_ticks
+
+                next_level = odds_plus_ticks(current_level, +1)
+
+                if next_level <= COMPRESSION_HIGH:
+
+                    # Ensure no queued/placed child already exists
+                    row_existing = _q_retry(cur, """
+                        SELECT 1
+                          FROM orders
+                         WHERE role='CHILD'
+                           AND hedge_of=?
+                           AND entry_status IN ('QUEUED','PLACING','PLACED')
+                         LIMIT 1
+                    """, (pid,)).fetchone()
+
+                    if not row_existing:
+
+                        from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+                        full_hedge = calc_greenup_stake(
+                            parent_side,
+                            float(parent["entry_odds"]),
+                            float(parent["entry_stake"]),
+                            float(next_level)
+                        )
+
+                        hedge_stake = round(float(full_hedge), 2)
+
+                        if hedge_stake < 1.0:
+                            hedge_stake = 1.0
+
+                        _orders_insert_child_queued(cor)
+
+                        _log_event(
+                            "INFO",
+                            "live_router",
+                            f"[COMPRESSION] parent_ref={cor} next_level={next_level}"
+                        )
+
+        except Exception as e:
+            _log_event(
+                "ERROR",
+                "live_router",
+                f"[COMPRESSION ERROR] ref={cor}: {e}"
+            )
 
 
 # === PATCH START ============================================================
@@ -5354,33 +5449,9 @@ def _place_stoploss_child_now(
         if not child_id:
             return None
 
-        _q_retry(cur, """
-            INSERT INTO orders(
-              customerOrderRef, run_id, mode,
-              marketId, selectionId,
-              side, entry_odds, entry_stake,
-              entry_status, opened_at, entry_bet_id,
-              role, hedge_of, source, exit_kind
-            ) VALUES (
-              ?, ?, 'LIVE',
-              ?, ?,
-              ?, ?, ?,
-              'MATCHED', datetime('now','utc'), ?,
-              'CHILD', ?, 'S', 'STOPLOSS'
-            )
-        """, (
-            cref,
-            fk,
-            str(market_id),
-            str(selection_id),
-            exit_side.upper(),
-            float(exit_odds),
-            float(parent_stake),
-            str(bet_id),
-            pid
-        ))
+        child_id = _ensure_child_queued_for_matched_parent(parent_cor)
 
-        child_id = int(cur.lastrowid)
+
 
         _stamp_parent_exit_sql(
             cur,
@@ -5389,7 +5460,7 @@ def _place_stoploss_child_now(
             reason="stoploss",
         )
 
-
+        return child_id
         con.commit()
 
         # Optional diagnostic proof
@@ -5796,12 +5867,18 @@ def _orders_insert_child_queued(parent_cor: str) -> int | None:
         )
         hedge_odds = _round_odds(float(hedge_odds))
 
-        hedge_stake = calc_greenup_stake(
+        full_hedge_stake = calc_greenup_stake(
             parent_side,
             float(parent["entry_odds"]),
             float(parent["entry_stake"]),
             hedge_odds
         )
+
+        hedge_stake = round(float(full_hedge_stake) * PROGRESSIVE_LOCK_FACTOR, 2)
+
+        # Safety: never below £1 minimum
+        if hedge_stake < 1.0:
+            hedge_stake = 1.0
 
         # 4️⃣ Insert CHILD (DB-first, QUEUED)
         _q_retry(cur, """
@@ -6706,23 +6783,21 @@ def ensure_hedges_for_open_parents(*, max_to_fix: int = 20, default_ticks: int =
             hedge_odds = odds_plus_ticks(entry_odds, delta)
             hedge_odds = _round_odds(float(hedge_odds))
 
-            hedge_stake = calc_greenup_stake(
+            full_hedge_stake = calc_greenup_stake(
                 parent_side,
                 entry_odds,
                 entry_stake,
                 hedge_odds
             )
 
-            child_id = _orders_insert_child_queued(
-                parent_cor=str(r["cor"]),
-                market_id=str(r["marketId"]),
-                selection_id=str(r["selectionId"]),
-                side=hedge_side,
-                odds=float(hedge_odds),
-                stake=float(hedge_stake),
-                source=source,
-                exit_kind="HEDGE",
-            )
+            hedge_stake = round(float(full_hedge_stake) * PROGRESSIVE_LOCK_FACTOR, 2)
+
+            # Safety: never below £1 minimum
+            if hedge_stake < 1.0:
+                hedge_stake = 1.0
+
+            child_id = _orders_insert_child_queued(str(r["cor"]))
+
 
             if child_id:
                 fixed += 1

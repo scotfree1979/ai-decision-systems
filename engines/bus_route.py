@@ -477,12 +477,40 @@ class BusRouteSnapshot:
                 parent = legacy_parent_by_runner.get((str(mid), str(sid)))
 
                 if parent:
-                    ctx["legacy_parent_id"]   = parent["parent_id"]
-                    ctx["legacy_entry_odds"]  = parent["entry_odds"]
-                    ctx["legacy_entry_side"]  = parent["side"]
-                    ctx["legacy_entry_stake"] = parent.get("entry_stake")
+
+                    # --------------------------------------------------
+                    # ENGINE-NEUTRAL PARENT BINDING (STATIC FOR ROUTE)
+                    # --------------------------------------------------
+                    parent_id   = parent.get("parent_id")
+                    entry_odds  = parent.get("entry_odds")
+                    entry_side  = parent.get("side")
+                    entry_stake = parent.get("entry_stake")
+                    parent_eng  = parent.get("engine")
+
+                    # --- Backwards compatibility (legacy naming) ---
+                    ctx["legacy_parent_id"]   = parent_id
+                    ctx["legacy_entry_odds"]  = entry_odds
+                    ctx["legacy_entry_side"]  = entry_side
+                    ctx["legacy_entry_stake"] = entry_stake
+
+                    # --- Engine-neutral canonical naming ---
+                    ctx["anchor_parent_id"]   = parent_id
+                    ctx["anchor_entry_odds"]  = entry_odds
+                    ctx["anchor_entry_stake"] = entry_stake
+                    ctx["anchor_engine"]      = parent_eng
+
                 else:
-                    ctx["legacy_parent_id"] = None
+                    # Clear both naming conventions
+                    ctx["legacy_parent_id"]   = None
+                    ctx["legacy_entry_odds"]  = None
+                    ctx["legacy_entry_side"]  = None
+                    ctx["legacy_entry_stake"] = None
+
+                    ctx["anchor_parent_id"]   = None
+                    ctx["anchor_entry_odds"]  = None
+                    ctx["anchor_entry_stake"] = None
+                    ctx["anchor_engine"]      = None
+
 
 
                 # --------------------------------------------------

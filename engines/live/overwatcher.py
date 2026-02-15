@@ -57,6 +57,35 @@ from engines.live.live_router import _keys
 
 # overwatcher.py (patched)
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 ANCHOR: helper section (above evaluate_overwatch_market_control)
+# 🧩 ACTION: ADD progressive lock configuration + state tracking
+# 📆 PATCHED: 2026-04-XX — Progressive profit lock schedule
+#
+# PURPOSE:
+# - Define staged lock percentages
+# - Track per-runner lock progress
+# - Allow dynamic recalculation every tick
+#
+# INVARIANT:
+# - No DB mutation here
+# - Pure control-layer state
+# ======================================================================================================
+
+# Progressive lock schedule (percent of available positive pnl)
+_LOCK_STAGES = [0.10, 0.25, 0.35, 0.45, 0.55, 0.60]
+
+# Risk trigger percent of engine pot
+_RISK_PCT = 0.15
+
+# Runtime lock state:
+# key: (marketId, selectionId)
+# value: {
+#   "locked_amount": float,
+#   "stage_index": int
+# }
+_LOCK_STATE = {}
 
 # === PATCH START ===
 # 📍 TARGET: engines/live/overwatcher.py
@@ -166,6 +195,142 @@ def evaluate_redistribution(ctx: dict) -> dict:
 
     except Exception:
         return {}
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 ANCHOR: helper section (below _open_orders)
+# 🧩 ACTION: Add synthetic compression executor
+# 📆 PATCHED: 2026-04-15 — Overwatch synthetic child match
+#
+# PURPOSE:
+# - Consume existing queued hedge child
+# - Promote to MATCHED without Betfair
+# - Trigger canonical parent close + exposure release
+#
+# INVARIANT:
+# - No direct parent mutation
+# - No BankState direct mutation
+# - Uses existing router canonical functions
+# ======================================================================================================
+
+def _synthetic_match_child(parent_id: int) -> bool:
+    """
+    Promote queued hedge child to MATCHED synthetically.
+    """
+
+    from engines.live.live_router import (
+        _stamp_parent_exit_sql,
+        _release_parent_exposure_db,
+    )
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        # Find queued hedge child
+        row = cur.execute("""
+            SELECT id
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_status='QUEUED'
+               AND UPPER(exit_kind)='HEDGE'
+             ORDER BY opened_at ASC
+             LIMIT 1
+        """, (int(parent_id),)).fetchone()
+
+        if not row:
+            return False
+
+        child_id = int(row["id"])
+
+        # 1️⃣ Promote child to MATCHED
+        cur.execute("""
+            UPDATE orders
+               SET entry_status='MATCHED',
+                   exit_status='MATCHED',
+                   exit_kind='SYNTHETIC_LOCK',
+                   closed_at=datetime('now','utc')
+             WHERE id=?
+        """, (child_id,))
+
+        # 2️⃣ Canonical parent close
+        _stamp_parent_exit_sql(
+            cur,
+            parent_id=parent_id,
+            exit_status="MATCHED",
+        )
+
+        con.commit()
+
+        # 3️⃣ Release exposure (canonical)
+        _release_parent_exposure_db(parent_id)
+
+        print(f"[OVERWATCH][SYNTH] parent_id={parent_id} compressed")
+
+        return True
+
+    except Exception as e:
+        print(f"[OVERWATCH][SYNTH][ERR] {e}")
+        return False
+
+    finally:
+        con.close()
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: def evaluate_progressive_lock(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-15 — Convert to BUS-native plan emitter (no router call)
+#
+# PURPOSE:
+# - Emit progressive lock CHILD plan
+# - No DB writes
+# - No router calls
+# - No stake computation
+# - BUS handles sizing + routing
+# ======================================================================================================
+
+def evaluate_progressive_lock(
+    *,
+    market_id: str,
+    selection_id: str,
+    runner_pnl: float,
+):
+
+    if runner_pnl <= 0:
+        return None
+
+    key = (market_id, selection_id)
+
+    state = _LOCK_STATE.setdefault(
+        key,
+        {"locked_amount": 0.0, "stage_index": 0}
+    )
+
+    if state["stage_index"] >= len(_LOCK_STAGES):
+        return None
+
+    target_pct = _LOCK_STAGES[state["stage_index"]]
+    target_amount = runner_pnl * target_pct
+
+    if state["locked_amount"] >= target_amount:
+        return None
+
+    # Advance stage immediately (prevents duplicate emission)
+    state["locked_amount"] = target_amount
+    state["stage_index"] += 1
+
+    return {
+        "enter": True,
+        "engine": "OVERWATCHER",
+        "role": "CHILD",
+        "exit_kind": "PROGRESSIVE_LOCK",
+        "marketId": market_id,
+        "selectionId": selection_id,
+        "why": f"progressive_lock_stage_{state['stage_index']}",
+    }
 
 # ======================================================================
 # STOPLOSS → BUS PLAN EMITTER (CANONICAL)
@@ -1698,46 +1863,184 @@ def _evaluate_liability_alerts(conn: sqlite3.Connection):
         print(f"[OVERWATCHER][LIAB] warn: {e}")
 # === PATCH END ===
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: def evaluate_overwatch_market_control(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-15 — Pure plan emission
+#
+# PURPOSE:
+# - Iterate active markets
+# - Evaluate progressive lock
+# - Collect plans
+# - Return list
+# - No execution
+# ======================================================================================================
 
-def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
+def evaluate_overwatch_market_control(conn):
+
+    from engines.live.live_router import analyze_market_pnl
+
+    plans = []
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+
+    markets = _q_retry(con, """
+        SELECT DISTINCT marketId
+        FROM orders
+        WHERE role='PARENT'
+          AND entry_status='MATCHED'
+          AND exit_status IS NULL
+    """).fetchall()
+
+    con.close()
+
+    if not markets:
+        return plans
+
+    for m in markets:
+
+        mid = str(m["marketId"])
+        pnl_vec = analyze_market_pnl(_orders_conn(), mid)
+
+        if not pnl_vec:
+            continue
+
+        for sid, runner_pnl in pnl_vec.items():
+
+            plan = evaluate_progressive_lock(
+                market_id=mid,
+                selection_id=str(sid),
+                runner_pnl=float(runner_pnl),
+            )
+
+            if plan:
+                plans.append(plan)
+
+    return plans
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: def _synthetic_match_child(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-XX — Canonical synthetic compression using router exposure release
+#
+# PURPOSE:
+# - Promote existing QUEUED hedge child to MATCHED (synthetic)
+# - Close parent lifecycle canonically
+# - Release exposure via router DB-first authority
+#
+# INVARIANT:
+# - No direct BankState mutation
+# - No manual exposure math
+# - Router remains single exposure authority
+# ======================================================================================================
+
+def _synthetic_match_child(parent_id: int) -> bool:
     """
-    Unified Overwatcher loop:
-      - Market Guardian (profit/loss envelope 16/32/90)
-      - Diagnostic micro-scalper evaluator
-      - MLM liability enforcement
-      - Stop-loss enforcement
-      - Cooldown and greenup enforcement
+    Synthetic compression:
+    - Promote one existing hedge CHILD to MATCHED
+    - Close parent
+    - Release exposure via canonical router path
     """
 
-    # ✅ start diagnostic micro loop once
-    start_micro_scalper_diag()
-    print(
-        "[OVERWATCHER] startup check → "
-        "StopLoss ✅  MLM ✅  MicroScalper ✅  Guardian ✅  Bridge ✅"
+    from engines.live.live_router import (
+        _stamp_parent_exit_sql,
+        _release_parent_exposure_db,
+        _orders_conn,
     )
 
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        # --------------------------------------------------
+        # 1️⃣ Find QUEUED hedge child
+        # --------------------------------------------------
+        row = cur.execute("""
+            SELECT id
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_status='QUEUED'
+               AND UPPER(exit_kind)='HEDGE'
+             ORDER BY opened_at ASC
+             LIMIT 1
+        """, (int(parent_id),)).fetchone()
+
+        if not row:
+            return False
+
+        child_id = int(row["id"])
+
+        # --------------------------------------------------
+        # 2️⃣ Promote CHILD → MATCHED (synthetic lock)
+        # --------------------------------------------------
+        cur.execute("""
+            UPDATE orders
+               SET entry_status='MATCHED',
+                   exit_status='MATCHED',
+                   exit_kind='SYNTHETIC_LOCK',
+                   closed_at=datetime('now','utc')
+             WHERE id=?
+        """, (child_id,))
+
+        # --------------------------------------------------
+        # 3️⃣ Close PARENT lifecycle (canonical)
+        # --------------------------------------------------
+        _stamp_parent_exit_sql(
+            cur,
+            parent_id=int(parent_id),
+            exit_status="MATCHED",
+        )
+
+        con.commit()
+
+        # --------------------------------------------------
+        # 4️⃣ Canonical exposure release (DB-first)
+        # --------------------------------------------------
+        _release_parent_exposure_db(int(parent_id))
+
+        print(f"[OVERWATCH][SYNTH] parent_id={parent_id} compressed")
+
+        return True
+
+    except Exception as e:
+        print(f"[OVERWATCH][SYNTH][ERR] {e}")
+        return False
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: def start_overwatcher(
+# 🧩 ACTION: MODIFY LOOP TO RETURN PLANS TO BUS
+# 📆 PATCHED: 2026-04-XX — Overwatch short-circuited
+#
+# PURPOSE:
+# - Overwatch emits plans only
+# - No execution
+# - BUS must collect returned plans
+# ======================================================================================================
+
+def start_overwatcher(hz: int = 2):
 
     def loop():
         while True:
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/overwatcher.py:start_overwatcher loop
-# 📆 PATCHED: 2025-12-04 — Correct try/finally and DAL-safe connection
-# ============================================================================
-
             try:
-                # DALReadProxy does NOT support `with`, so use explicit open/close
                 conn = open_auto_db(rw=False)
 
-                # Core guardian / liability / micro-scalper diagnostics
+                plans = evaluate_overwatch_market_control(conn)
 
-
-                # MSC-Exploratory only trailing stop-loss
-                enforce_msc_exploratory_stoploss()
-
-
-                # Legacy boundary exits
-                enforce_legacy_boundaries_and_trailing()
-                
+                # Emit to event sink so BUS can pick them up
+                for p in plans:
+                    event_sink.on_decision(p)
 
             except Exception as e:
                 print("[OVERWATCHER] loop error", e)
@@ -1747,15 +2050,12 @@ def start_overwatcher(hz: int = 2, stop_ticks_default: int = 4):
                     conn.close()
                 except:
                     pass
-# === PATCH END ============================================================
-
-
 
             time.sleep(max(1.0 / hz, 0.5))
 
     t = threading.Thread(target=loop, name="OverwatcherLoop", daemon=True)
     t.start()
     return t
-   
+
 
 

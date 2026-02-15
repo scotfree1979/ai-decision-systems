@@ -529,6 +529,58 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
 
 
 # === PATCH END ================================================================
+# =====================================================================
+# OVERWATCHER — Progressive Lock Stake
+# =====================================================================
+
+_PROGRESSIVE_STATE = {}
+
+def compute_overwatch_dynamic_stake(ctx: dict) -> float:
+    """
+    Progressive compression stake calculator.
+
+    - Uses existing matched child exposure
+    - Locks additional % each stage
+    - Ensures stake >= dynamic minimum
+    """
+
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    parent_stake = float(ctx.get("anchor_entry_stake") or 0.0)
+    px = float(ctx.get("px") or 0.0)
+
+    if not parent_stake or px <= 0:
+        return 0.0
+
+    key = (mid, sid)
+
+    state = _PROGRESSIVE_STATE.setdefault(
+        key,
+        {
+            "stage": 0,
+            "locked_pct": 0.0,
+        }
+    )
+
+    stages = [0.10, 0.25, 0.35, 0.45, 0.55, 0.60]
+
+    if state["stage"] >= len(stages):
+        return 0.0
+
+    target_pct = stages[state["stage"]]
+    delta_pct = target_pct - state["locked_pct"]
+
+    if delta_pct <= 0:
+        return 0.0
+
+    # Green-up math reused
+    stake = (parent_stake * delta_pct * ctx.get("anchor_entry_odds")) / px
+
+    state["locked_pct"] = target_pct
+    state["stage"] += 1
+
+    return round(max(stake, 0.0), 2)
+
 # ===============================================================
 # Dynamic Stake v7 — Unified sizing & greening
 # ===============================================================

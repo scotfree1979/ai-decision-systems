@@ -641,6 +641,39 @@ class DecisionBus:
             # BUS must fail-open, never crash a tick
             return False
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside class DecisionBus (helper section)
+# 🧩 ACTION: ADD engine-specific band eligibility
+# 📆 PATCHED: 2026-04-XX — ACTIVE/PASSIVE policy v2
+#
+# POLICY:
+#   LEGACY + MSC_EXPLORATORY → ACTIVE only (band >= 2)
+#   MSC_RISK + MSC_INPLAY   → ACTIVE + PASSIVE (band >= 1)
+#   OVERWATCHER             → no restriction
+# ======================================================================================================
+
+    def _engine_band_allowed(self, engine: str, ctx: dict) -> bool:
+        band = ctx.get("band")
+
+        # No band = fail safe
+        if band is None:
+            return False
+
+        # ACTIVE or LEADING = 2+
+        # PASSIVE = 1
+        # IGNORED = 0
+
+        if engine in ("LEGACY", "MSC_EXPLORATORY"):
+            return band >= 2   # ACTIVE only
+
+        if engine in ("MSC_RISK", "MSC_INPLAY"):
+            return band >= 1   # ACTIVE + PASSIVE
+
+        # OVERWATCHER and others
+        return True
+
+
     def _ensure_px_from_route(self, ctx: dict) -> bool:
         """
         HARD INVARIANT:
@@ -950,88 +983,6 @@ class DecisionBus:
         }
 
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: class DecisionBus
-# 🧩 ACTION: ADD method (bind lifecycle gate to BUS instance)
-# 📆 PATCHED: 2026-03-18 — Fix missing _engine_ctx_allowed binding
-#
-# WHY:
-# - _engine_ctx_allowed was defined at module scope
-# - BUS calls it as an instance method (self._engine_ctx_allowed)
-# - This caused a runtime AttributeError during live ticks
-#
-# CONTRACT:
-# - Behaviour unchanged
-# - DB-first lifecycle gate preserved
-# - MSC + LEGACY semantics untouched
-# ======================================================================================================
-
-    def _engine_ctx_allowed(self, engine: str, ctx: dict) -> bool:
-        """
-        DB-authoritative per-engine CTX gate.
-
-        Rules:
-        - LEGACY always allowed
-        - Other engines:
-            • no matched parent → allow
-            • matched parent + matched child → allow
-            • matched parent + unmatched child → block
-        """
-
-        if engine == "LEGACY":
-            return True
-
-        mid = ctx.get("marketId")
-        sid = ctx.get("selectionId")
-
-        if not mid or not sid:
-            return True
-
-        try:
-            from engines.config_paths import open_auto_db
-
-            con = open_auto_db(rw=False)
-
-            row = con.execute(
-                """
-                SELECT
-                    p.id,
-                    p.entry_status,
-                    c.exit_status
-                FROM orders p
-                LEFT JOIN orders c
-                  ON c.hedge_of = p.id
-                WHERE p.engine = ?
-                  AND p.marketId = ?
-                  AND p.selectionId = ?
-                  AND p.role = 'PARENT'
-                  AND UPPER(p.entry_status) = 'MATCHED'
-                LIMIT 1
-                """,
-                (engine, mid, sid),
-            ).fetchone()
-
-            if row is None:
-                return True
-
-            _pid, _parent_status, child_exit_status = row
-
-            if not child_exit_status or str(child_exit_status).upper() != "MATCHED":
-                return False
-
-            return True
-
-        except Exception:
-            return True
-
-        finally:
-            try:
-                con.close()
-            except Exception:
-                pass
-
-
 
     # 🔑 THIS MUST BE HERE — SAME INDENT AS tick(), _build_ctx_for_market(), etc.
     def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
@@ -1200,8 +1151,8 @@ class DecisionBus:
             if not ctx:
                 continue
 
-            if ctx.get("band") == 0:
-                _record_reason(engine_report, "LEGACY", "ignored_band")
+            if not self._engine_band_allowed("LEGACY", ctx):
+                _record_reason(engine_report, "LEGACY", "inactive_band")
                 continue
 
             if not self._ensure_px_from_route(ctx):
@@ -1594,6 +1545,10 @@ class DecisionBus:
 
             _normalize_ctx_enums(ctx_l)
 
+            if not self._engine_band_allowed("MSC_RISK", ctx):
+                _record_reason(engine_report, "MSC_RISK", "inactive_band")
+                continue
+
             # --------------------------------------------------
             # RISK ENGINE — PURE PLAN EMITTER
             # --------------------------------------------------
@@ -1776,6 +1731,11 @@ class DecisionBus:
                 except Exception:
                     ctx_l["prominent"] = False
 
+                if not self._engine_band_allowed("MSC_INPLAY", ctx_l):
+                    _record_reason(engine_report, "MSC_INPLAY", "inactive_band")
+                    continue
+
+
                 # --------------------------------------------------
                 # PURE ENGINE DECISION
                 # --------------------------------------------------
@@ -1862,6 +1822,11 @@ class DecisionBus:
                 ctx_l = dict(ctx)
                 _normalize_ctx_enums(ctx_l)
 
+                if not self._engine_band_allowed("MSC_EXPLORATORY", ctx):
+                    _record_reason(engine_report, "MSC_EXPLORATORY", "inactive_band")
+                    continue
+
+
                 try:
                     exp.tick(ctx_l)
                 except Exception:
@@ -1885,106 +1850,42 @@ class DecisionBus:
 # === PATCH END ==============================================================
 
         # --------------------------------------------------
-        # 🟥 LANE 5 — OVERWATCHER (STOPLOSS)
+        # 🟥 LANE 5 — OVERWATCHER (PLAN EMITTER ONLY)
         # --------------------------------------------------
         engine_report["OVERWATCHER"]["evaluated"] = True
-
-        from engines.price_math import walk_ticks
-        from engines.bus_route import get_stoploss_parent_surfaces
 
         overwatcher = self.engines.get("OVERWATCHER")
 
         if overwatcher:
-            for p in get_stoploss_parent_surfaces():
-                mid = p["marketId"]
-                sid = p["selectionId"]
-
-                ctx = self._route_ctx_map.get((mid, sid))
-
-                if not ctx:
-                    try:
-                        ctx = self._build_ctx_for_market(base_ctx, mid, sid)
-                        if ctx:
-                            self._route_ctx_map[(mid, sid)] = ctx
-                    except Exception:
-                        continue
+            for (mid, sid), ctx in self._route_ctx_map.items():
 
                 ctx_l = dict(ctx)
-
-                # --------------------------------------------------
-                # PROMINENCE NORMALISATION (BUS AUTHORITY)
-                # --------------------------------------------------
                 _normalize_ctx_enums(ctx_l)
 
-                px = ctx_l.get("px")
-                if px is None:
-                    continue
+                try:
+                    p = overwatcher.tick(ctx_l)
 
+                    if not p:
+                        _record_reason(engine_report, "OVERWATCHER", "no_plan")
+                        continue
 
-                # 🔑 authoritative parent fields from helper
-                entry_odds  = p["entry_odds"]
-                stop_ticks  = p["stop_ticks"]
-                side        = p["side"].upper()
-                entry_stake = p["entry_stake"]
+                    if not p.get("enter"):
+                        _record_reason(
+                            engine_report,
+                            "OVERWATCHER",
+                            p.get("reason") or p.get("why") or "note",
+                        )
+                        continue
 
-                # Must have full stop-loss inputs
-                if not entry_odds or not stop_ticks or not side:
-                    continue
+                    plan = dict(p)
+                    plan["engine"] = "OVERWATCHER"
 
+                    plans.append(("OVERWATCHER", plan, ctx_l))
+                    engine_report["OVERWATCHER"]["fired"] += 1
+                    lane_counts[5] += 1
 
-                # --------------------------------------------------
-                # STOPLOSS DIRECTION — CANONICAL TRADING TRUTH
-                #
-                # LAY first  → profit on DRIFT (px ↑)
-                #            → stop-loss on STEAM (px ↓)
-                #
-                # BACK first → profit on STEAM (px ↓)
-                #            → stop-loss on DRIFT (px ↑)
-                # --------------------------------------------------
-
-                if side == "LAY":
-                    # Stop-loss BELOW entry
-                    stop_px = walk_ticks(entry_odds, stop_ticks, direction="down")
-                    hit = px <= stop_px
-                    exit_side = "BACK"
-
-                else:  # BACK
-                    # Stop-loss ABOVE entry
-                    stop_px = walk_ticks(entry_odds, stop_ticks, direction="up")
-                    hit = px >= stop_px
-                    exit_side = "LAY"
-
-                if not hit:
-                    continue
-
-                # Emit STOPLOSS child plan
-                from engines.live.overwatcher import maybe_emit_stoploss_plan
-                from engines.live.child_rescue import ensure_single_child_for_parent
-
-                plan = maybe_emit_stoploss_plan(
-                    parent_row=p,
-                    current_px=px,
-                )
-
-                if not plan:
-                    continue
-
-                # STOPLOSS is an emergency CHILD — DB first, no placement
-                ensure_single_child_for_parent(
-                    parent_id   = int(p["parent_id"]),
-                    marketId    = p["marketId"],
-                    selectionId = p["selectionId"],
-                    side        = plan["side"],          # BACK or LAY (already computed)
-                    px          = plan["px"],            # live px
-                    stake       = float(p["entry_stake"]),
-                    exit_kind   = "STOPLOSS",
-                    lane        = 5,
-                    engine      = "OVERWATCHER",
-                    reason      = "lane5_overwatcher_stoploss",
-                )
-
-                engine_report["OVERWATCHER"]["fired"] += 1
-                lane_counts[5] += 1
+                except Exception:
+                    _record_reason(engine_report, "OVERWATCHER", "tick_error")
 
 
         return plans, lane_counts
@@ -3267,21 +3168,13 @@ class DecisionBus:
                 # --------------------------------------------------
                 elif engine == "OVERWATCHER":
 
-                    # STOPLOSS is a CHILD exit.
-                    # Stake must flatten parent exposure, not be recomputed.
+                    from engines.math.dynamic_stake_v7 import compute_overwatch_dynamic_stake
 
-                    parent_stake = ctx.get("entry_stake")
-
-                    if not parent_stake or parent_stake <= 0:
-                        plan["_bus_block"] = "overwatcher_missing_entry_stake"
-                        tick_ctx["plans_route_failed"].append(
-                            (plan, "overwatcher_missing_entry_stake")
-                        )
-                        continue  # 🔴 DO NOT ROUTE
-
-                    # BUS authority: enforce stake = parent entry stake
-                    raw_stake = float(parent_stake)
-
+                    raw_stake = compute_overwatch_dynamic_stake(
+                        ctx=ctx,
+                        engine=engine,
+                        plan=plan,
+                    )
 
                 # --------------------------------------------------
                 # LEGACY + FALLBACK — envelope-based dynamic stake

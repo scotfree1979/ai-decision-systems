@@ -25,10 +25,10 @@ def ensure_single_child_for_parent(
     reason: str,
 ):
     """
-    HARD INVARIANT:
-    - Exactly ONE active CHILD per hedge_of (parent_id)
-
-    PX is NOT identity.
+    HARD INVARIANT (UPDATED):
+    - Multiple CHILD rows allowed per hedge_of (progressive compression)
+    - Only ONE active (PLACED) child at a time
+    - QUEUED children allowed
     """
 
     now = time.time()
@@ -46,7 +46,7 @@ def ensure_single_child_for_parent(
             FROM orders
             WHERE role = 'CHILD'
               AND hedge_of = ?
-              AND (exit_status IS NULL OR UPPER(exit_status) <> 'MATCHED')
+              AND entry_status IN ('PLACED')
             ORDER BY id DESC
             """,
             (parent_id,),

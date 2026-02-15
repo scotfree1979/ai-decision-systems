@@ -210,26 +210,21 @@ def _compute_market_floor_from_betfair_surface():
 
 # ======================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: rows = cur.execute("""
-# 🧩 ACTION: REPLACE SQL BLOCK ONLY (ATTACH bets + time filter)
-# 📆 PATCHED: 2026-02-14 — filter floor by bets.marketStartTime (+ grace)
+# 🔎 ANCHOR: inside _compute_market_floor_from_betfair_surface()
+# 📆 PATCHED: 2026-04-XX — Restore unconditional Betfair floor surface
 #
 # PURPOSE:
-# - Keep existing floor logic unchanged
-# - Attach bets.db explicitly
-# - Exclude markets past off + grace
-# - No renames
-# - No restructuring
+# - Remove marketStartTime time gate
+# - Restore floor emission for ALL current Betfair markets
+# - Prevent silent zero-floor state
+#
+# INVARIANT:
+# - Floor is computed ONLY from betfair_execution_surface
+# - No DB time filtering
+# - No scope filtering
 # ======================================================================
 
-    from engines.config_paths import bets_db_path
-
-    # Attach bets database (separate physical DB)
-    cur.execute(f"ATTACH DATABASE '{bets_db_path()}' AS bets_db")
-
-    GRACE_MINUTES = 6
-
-    rows = cur.execute(f"""
+    rows = cur.execute("""
         SELECT
             marketId,
             selectionId,
@@ -238,14 +233,8 @@ def _compute_market_floor_from_betfair_surface():
             avg_price
         FROM betfair_execution_surface
         WHERE source='CURRENT'
-          AND marketId IN (
-                SELECT marketId
-                FROM bets_db.bets
-                WHERE (
-                    (julianday(marketStartTime) - julianday('now','utc')) * 1440.0
-                ) >= -{GRACE_MINUTES}
-          )
     """).fetchall()
+
 
 
     con.close()
@@ -444,74 +433,70 @@ def _compute_market_over_reserve_today():
     con.close()
     return rows
 
-# ======================================================================
+# ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
 # 🔎 SEARCH: def _reconcile_market_exposure_live(
-# 🛠 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-04-XX — Betfair Floor Only Model
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-15 — Per-market proportional refund (engine-accurate)
+#
+# PURPOSE:
+# - Remove global exposure scaling
+# - Refund over-reserved capital per market, per engine
+# - Preserve engine-level capital integrity
+# - Align exactly with router pessimistic reservation model
 #
 # MODEL:
-# - Authoritative exposure floor = Betfair execution surface
-# - _OPEN_EXPOSURE must never fall below this floor
-# - Excess is refunded proportionally across engines
-# - No SQL exposure math
-# - No DB writes
-# ======================================================================
+#   1) Router reserves required_exposure per parent
+#   2) BankState accumulates per-engine reservations
+#   3) Betfair floor computes true_market_exposure per market
+#   4) Over-reserve = reserved - true_floor
+#   5) Refund distributed proportionally to engines that funded that market
+#
+# INVARIANTS:
+# - No global scaling
+# - No cross-market mixing
+# - Never refund more than engine_used
+# - _OPEN_EXPOSURE always matches sum(_ENGINE_USED)
+# - Idempotent
+# ======================================================================================================
 
 def _reconcile_market_exposure_live():
-    """
-    Pure Betfair-floor reconciliation.
-
-    Invariant:
-        _OPEN_EXPOSURE >= Betfair floor
-
-    If _OPEN_EXPOSURE > floor:
-        refund excess proportionally across engines.
-    """
 
     global _OPEN_EXPOSURE
 
-    rows = _compute_market_floor_from_betfair_surface()
+    rows = _compute_market_over_reserve_today()
     if not rows:
         return []
 
-    floor = sum(
-        float(r.get("true_market_exposure") or 0.0)
-        for r in rows
-    )
+    total_refund = 0.0
 
     with _LOCK:
 
-        current_open = float(_OPEN_EXPOSURE)
+        for r in rows:
 
-        if current_open <= floor:
-            return rows
+            engine = r["engine"]
+            refund = float(r.get("engine_should_be_returned") or 0.0)
 
-        excess = current_open - floor
-        if excess <= 0:
-            return rows
-
-        total_used = sum(_ENGINE_USED.values())
-        if total_used <= 0:
-            return rows
-
-        for engine, used in _ENGINE_USED.items():
-
-            if used <= 0:
+            if refund <= 0.0:
                 continue
 
-            share = used / total_used
-            refund = round(excess * share, 2)
+            used = _ENGINE_USED.get(engine, 0.0)
 
-            actual_refund = min(refund, _ENGINE_USED[engine])
+            # Safety clamp — never refund more than used
+            refund = min(refund, used)
 
-            _ENGINE_USED[engine] -= actual_refund
-            _OPEN_EXPOSURE -= actual_refund
+            if refund <= 0.0:
+                continue
 
-        # Final safety clamp
-        _OPEN_EXPOSURE = max(floor, _OPEN_EXPOSURE)
+            _ENGINE_USED[engine] = _clamp(used - refund)
+            total_refund += refund
+
+        # Adjust global open exposure once
+        if total_refund > 0.0:
+            _OPEN_EXPOSURE = _clamp(_OPEN_EXPOSURE - total_refund)
 
     return rows
+
 
 # -------------------------------------------------------------------
 # OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
@@ -925,16 +910,11 @@ def on_parent_placed(
     refunds = _reconcile_market_exposure_live()
 
     if refunds:
-        total_returned = 0.0
-
-        for m in refunds:
-            for eng, refunded in m["by_engine"].items():
-                total_returned += refunded
-
         print(
-            f"[BankState] +REFUND total={total_returned:.2f} "
+            f"[BankState] reconciliation applied | "
             f"open={_OPEN_EXPOSURE:.2f}"
         )
+
 
 def can_place(engine: str, required: float) -> bool:
     with _LOCK:
