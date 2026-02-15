@@ -208,21 +208,20 @@ def _compute_market_floor_from_betfair_surface():
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
-# ======================================================================
+# === PATCH START ==============================================================
 # 📍 TARGET: engines/live/bank_state.py
 # 🔎 ANCHOR: inside _compute_market_floor_from_betfair_surface()
-# 📆 PATCHED: 2026-04-XX — Restore unconditional Betfair floor surface
+# 🧩 ACTION: Add UTC date filter to execution surface
+# 📆 PATCHED: 2026-02-15 — Floor restricted to TODAY only
 #
 # PURPOSE:
-# - Remove marketStartTime time gate
-# - Restore floor emission for ALL current Betfair markets
-# - Prevent silent zero-floor state
+# - Prevent historical execution surface from inflating floor
+# - Floor must reflect TODAY only
 #
 # INVARIANT:
-# - Floor is computed ONLY from betfair_execution_surface
-# - No DB time filtering
-# - No scope filtering
-# ======================================================================
+# - source='CURRENT'
+# - date(last_seen) = date('now','utc')
+# ==============================================================================
 
     rows = cur.execute("""
         SELECT
@@ -233,9 +232,10 @@ def _compute_market_floor_from_betfair_surface():
             avg_price
         FROM betfair_execution_surface
         WHERE source='CURRENT'
+          AND date(last_seen) = date('now','utc')
     """).fetchall()
 
-
+# === PATCH END ==============================================================
 
     con.close()
 
