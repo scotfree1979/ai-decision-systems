@@ -847,8 +847,8 @@ def get_root_ctx_runner_pairs():
         for r in rows:
             mid = str(r["marketId"])
             sid = str(r["selectionId"])
-            if mid in scope_mids:
-                pairs.add((mid, sid))
+            
+            pairs.add((mid, sid))
 
 
     except Exception:
@@ -866,8 +866,8 @@ def get_root_ctx_runner_pairs():
     scope_mids = {mid for (mid, _sid) in pairs}
 
     for mid, sid, _pid, _anchor_px in get_risk_legacy_parent_pairs():
-        if mid in scope_mids:
-            pairs.add((mid, sid))
+        
+        pairs.add((mid, sid))
     # --------------------------------------------------
     # 3️⃣ Exploratory exclusions (already active parents)
     # --------------------------------------------------

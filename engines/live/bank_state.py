@@ -232,7 +232,7 @@ def _compute_market_floor_from_betfair_surface():
             avg_price
         FROM betfair_execution_surface
         WHERE source='CURRENT'
-          AND date(last_seen) = date('now','utc')
+
     """).fetchall()
 
 # === PATCH END ==============================================================

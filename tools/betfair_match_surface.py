@@ -514,6 +514,45 @@ def fetch_full_account_surface(app_key: str, token: str):
 
     return current_orders, cleared_orders
 
+import threading
+import time
+
+_SURFACE_THREAD = None
+_SURFACE_STOP = None
+
+def _execution_surface_loop(period_s: float = 2.0):
+    from engines.daily_config import get_app_key
+    from engines.live.live_router import _keys
+
+    while not _SURFACE_STOP.is_set():
+        try:
+            app_key, token = _keys()
+            repair_missing_betids(app_key, token)
+        except Exception:
+            pass
+
+        time.sleep(period_s)
+
+
+def start_execution_surface_loop(period_s: float = 2.0):
+    global _SURFACE_THREAD, _SURFACE_STOP
+
+    if _SURFACE_THREAD and _SURFACE_THREAD.is_alive():
+        return
+
+    _SURFACE_STOP = threading.Event()
+
+    t = threading.Thread(
+        target=_execution_surface_loop,
+        args=(period_s,),
+        name="ExecutionSurfaceLoop",
+        daemon=True,
+    )
+
+    t.start()
+    _SURFACE_THREAD = t
+
+    print(f"[EXECUTION SURFACE] started (period={period_s}s)")
 
 
 # --------------------------------------------------

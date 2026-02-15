@@ -3748,8 +3748,11 @@ def start_live_loop(*args, **kwargs):
         print(f"[EXPOSURE-GUARDIAN] failed to start: {e}")
 
     # ------------------------------------------------------------------
-    # 6H.1) AFTER BankState.init_bank_state()
+    # 6H.1) START EXECUTION SURFACE LOOP
     # ------------------------------------------------------------------
+    from tools.betfair_match_surface import start_execution_surface_loop
+
+    start_execution_surface_loop(period_s=2.0)
 
 
 
