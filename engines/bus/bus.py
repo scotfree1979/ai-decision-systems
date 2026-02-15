@@ -1543,17 +1543,23 @@ class DecisionBus:
                 "anchor_parent_id":   legacy_parent_id,
                 "anchor_entry_odds":  float(anchor_px),
                 "anchor_entry_stake": ctx.get("anchor_entry_stake"),
-                "last_px":            float(last_px),
+                "anchor_engine":      ctx.get("anchor_engine"),        # 🔑 added
+                "last_px":            float(last_px) if last_px is not None else None,
                 "risk_direction":     trend.get("direction"),
                 "risk_ticks_moved":   trend.get("ticks_moved"),
                 "risk_confidence":    trend.get("confidence"),
             })
+
+            # 🔑 ensure anchor stake fallback (prevents missing_parent_anchor edge case)
+            if ctx_l.get("anchor_entry_stake") is None:
+                ctx_l["anchor_entry_stake"] = ctx.get("anchor_entry_stake")
 
             _normalize_ctx_enums(ctx_l)
 
             if not self._engine_band_allowed("MSC_RISK", ctx):
                 _record_reason(engine_report, "MSC_RISK", "inactive_band")
                 continue
+
 
             # --------------------------------------------------
             # RISK ENGINE — PURE PLAN EMITTER

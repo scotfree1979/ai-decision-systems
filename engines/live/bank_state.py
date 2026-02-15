@@ -435,68 +435,122 @@ def _compute_market_over_reserve_today():
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: def _reconcile_market_exposure_live(
-# 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-04-15 — Per-market proportional refund (engine-accurate)
+# 🔎 SEARCH: def _reconcile_market_exposure_live():
+# 🛠 ACTION: Replace reconciliation source with Betfair floor
+# 📆 PATCHED: 2026-02-15 — Floor now execution-surface authoritative
 #
 # PURPOSE:
-# - Remove global exposure scaling
-# - Refund over-reserved capital per market, per engine
-# - Preserve engine-level capital integrity
-# - Align exactly with router pessimistic reservation model
+# - Stop using SQL parent model for floor
+# - Use betfair_execution_surface as sole floor authority
+# - Refund based on true market exposure
 #
-# MODEL:
-#   1) Router reserves required_exposure per parent
-#   2) BankState accumulates per-engine reservations
-#   3) Betfair floor computes true_market_exposure per market
-#   4) Over-reserve = reserved - true_floor
-#   5) Refund distributed proportionally to engines that funded that market
-#
-# INVARIANTS:
-# - No global scaling
-# - No cross-market mixing
-# - Never refund more than engine_used
-# - _OPEN_EXPOSURE always matches sum(_ENGINE_USED)
-# - Idempotent
+# INVARIANT:
+# - Router reserves pessimistically
+# - Floor uses Betfair CURRENT surface only
+# - Refund = reserved - true_floor
 # ======================================================================================================
 
 def _reconcile_market_exposure_live():
 
     global _OPEN_EXPOSURE
 
-    rows = _compute_market_over_reserve_today()
-    if not rows:
+    # --------------------------------------------------
+    # 1️⃣ Authoritative Betfair floor
+    # --------------------------------------------------
+    floor_rows = _compute_market_floor_from_betfair_surface()
+    if not floor_rows:
         return []
+
+    # --------------------------------------------------
+    # 2️⃣ Compute reserved per market from runtime state
+    # --------------------------------------------------
+    from engines.config_paths import open_auto_db
+
+    con = open_auto_db(rw=False)
+    con.row_factory = None
+    cur = con.cursor()
+
+    reserved_rows = cur.execute("""
+        SELECT
+            marketId,
+            SUM(required_exposure)
+        FROM orders
+        WHERE role='PARENT'
+          AND entry_status='MATCHED'
+          AND COALESCE(exposure_released,0)=0
+          AND date(opened_at)=date('now','utc')
+        GROUP BY marketId
+    """).fetchall()
+
+    con.close()
+
+    reserved_by_market = {
+        mid: float(total or 0.0)
+        for mid, total in reserved_rows
+    }
+
+    floor_by_market = {
+        r["marketId"]: float(r["true_market_exposure"])
+        for r in floor_rows
+    }
 
     total_refund = 0.0
 
     with _LOCK:
 
-        for r in rows:
+        for mid, reserved in reserved_by_market.items():
 
-            engine = r["engine"]
-            refund = float(r.get("engine_should_be_returned") or 0.0)
+            true_floor = floor_by_market.get(mid, 0.0)
 
-            if refund <= 0.0:
+            if reserved <= true_floor:
                 continue
 
-            used = _ENGINE_USED.get(engine, 0.0)
+            over = reserved - true_floor
 
-            # Safety clamp — never refund more than used
-            refund = min(refund, used)
+            # --------------------------------------------------
+            # Proportional engine refund per market
+            # --------------------------------------------------
+            engine_rows = cur = None
 
-            if refund <= 0.0:
+            from engines.config_paths import open_auto_db
+            con2 = open_auto_db(rw=False)
+            con2.row_factory = None
+
+            engine_rows = con2.execute("""
+                SELECT engine, SUM(required_exposure)
+                FROM orders
+                WHERE role='PARENT'
+                  AND entry_status='MATCHED'
+                  AND marketId=?
+                  AND date(opened_at)=date('now','utc')
+                GROUP BY engine
+            """, (mid,)).fetchall()
+
+            con2.close()
+
+            total_market_reserved = sum(e[1] for e in engine_rows)
+
+            if total_market_reserved <= 0:
                 continue
 
-            _ENGINE_USED[engine] = _clamp(used - refund)
-            total_refund += refund
+            for engine, eng_reserved in engine_rows:
 
-        # Adjust global open exposure once
-        if total_refund > 0.0:
+                pct = eng_reserved / total_market_reserved
+                refund = over * pct
+
+                used = _ENGINE_USED.get(engine, 0.0)
+                refund = min(refund, used)
+
+                if refund <= 0:
+                    continue
+
+                _ENGINE_USED[engine] = _clamp(used - refund)
+                total_refund += refund
+
+        if total_refund > 0:
             _OPEN_EXPOSURE = _clamp(_OPEN_EXPOSURE - total_refund)
 
-    return rows
-
+    return floor_rows
 
 # -------------------------------------------------------------------
 # OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
