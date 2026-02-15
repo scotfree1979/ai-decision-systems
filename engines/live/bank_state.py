@@ -225,15 +225,18 @@ def _compute_market_floor_from_betfair_surface():
 
     rows = cur.execute("""
         SELECT
-            marketId,
-            selectionId,
-            side,
-            matched_size,
-            avg_price
-        FROM betfair_execution_surface
-        WHERE source='CURRENT'
-
+            s.marketId,
+            s.selectionId,
+            s.side,
+            s.matched_size,
+            s.avg_price
+        FROM betfair_execution_surface s
+        JOIN bets b
+          ON b.marketId = s.marketId
+        WHERE s.source='CURRENT'
+          AND date(b.marketStartTime)=date('now','utc')
     """).fetchall()
+
 
 # === PATCH END ==============================================================
 

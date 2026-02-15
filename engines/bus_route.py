@@ -303,8 +303,98 @@ class BusRouteSnapshot:
 
     def build_route(self):
         self.route_id += 1
-        raw_pairs = list(get_root_ctx_runner_pairs())
-        ordered = _order_runner_pool_by_market_time(raw_pairs)
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), replace raw_pairs construction
+# 📆 PATCHED: 2026-04-XX — Deterministic 5-Market Sliding Window (bets DB authority)
+#
+# PURPOSE:
+# - Remove scope-driven window shrinkage
+# - Use bets.marketStartTime as single source of truth
+# - Maintain exactly 5 concurrent markets (unless fewer remain)
+# - Slide window only when now > off + grace
+#
+# INVARIANTS:
+# - Window size = 5
+# - Markets removed only after off + grace
+# - No dependency on scope time filters
+# - CTX + PX behaviour unchanged
+# ======================================================================================================
+
+        from engines.config_paths import connect_db
+        from datetime import datetime, timezone, timedelta
+        import sqlite3
+
+        WINDOW_SIZE = 5
+        GRACE_MINUTES = 5
+
+        now = datetime.now(timezone.utc)
+
+        # --------------------------------------------------
+        # 1️⃣ Load all today's markets ordered by off time
+        # --------------------------------------------------
+        con = connect_db(ro=True)
+        con.row_factory = sqlite3.Row
+
+        try:
+            rows = con.execute("""
+                SELECT
+                    marketId,
+                    marketStartTime
+                FROM bets
+                WHERE date(marketStartTime)=date('now','utc')
+                ORDER BY datetime(marketStartTime) ASC
+            """).fetchall()
+        finally:
+            con.close()
+
+        # --------------------------------------------------
+        # 2️⃣ Remove markets strictly past off + grace
+        # --------------------------------------------------
+        active_markets = []
+
+        for r in rows:
+            mid = str(r["marketId"])
+            off_raw = r["marketStartTime"]
+
+            if not off_raw:
+                continue
+
+            try:
+                off_dt = datetime.fromisoformat(
+                    off_raw.replace("Z", "+00:00")
+                )
+            except Exception:
+                continue
+
+            if now <= off_dt + timedelta(minutes=GRACE_MINUTES):
+                active_markets.append(mid)
+
+        # --------------------------------------------------
+        # 3️⃣ Take first N markets only (sliding window)
+        # --------------------------------------------------
+        window_mids = active_markets[:WINDOW_SIZE]
+
+        # --------------------------------------------------
+        # 4️⃣ Build runner identity surface from window
+        # --------------------------------------------------
+        raw_pairs = []
+
+        for mid in window_mids:
+            st = get_market_state(mid) or {}
+            runners = st.get("runners") or {}
+
+            for sid in runners.keys():
+                raw_pairs.append((mid, str(sid)))
+
+        # Safety fallback (never empty if markets exist)
+        if not raw_pairs:
+            raw_pairs = list(get_root_ctx_runner_pairs())
+
+# ======================================================================================================
+# END PATCH
+# ======================================================================================================
+
         anchor_mid = _get_current_anchor_market()
         ordered = _rotate_from_market(ordered, anchor_mid)
 
@@ -729,7 +819,7 @@ class BusRouteSnapshot:
         # --------------------------------------------------
         eligible = []
 
-        for mid, sid in self.runner_pool:
+        for (mid, sid) in self.ctx_map.keys():
             ctx = self.ctx_map.get((str(mid), str(sid)))
             if not ctx:
                 continue
