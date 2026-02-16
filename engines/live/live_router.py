@@ -666,6 +666,59 @@ def _safe_bucket_items(d):
         )
     )
 
+def _child_promotion_allowed(child_id: int) -> bool:
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+        row = _q_retry(cur, """
+            SELECT hedge_of
+              FROM orders
+             WHERE id=?
+               AND role='CHILD'
+             LIMIT 1
+        """, (child_id,)).fetchone()
+
+        if not row:
+            return False
+
+        parent_id = int(row["hedge_of"])
+
+        # Is there an ACTIVE sibling child?
+        active = _q_retry(cur, """
+            SELECT 1
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_status IN ('PLACED','PLACING')
+             LIMIT 1
+        """, (parent_id,)).fetchone()
+
+        if active:
+            return False
+
+        # Is there a sibling that has matched but not yet processed?
+        matched = _q_retry(cur, """
+            SELECT entry_bet_id
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+               AND entry_status='PLACED'
+               AND entry_bet_id IS NOT NULL
+             LIMIT 1
+        """, (parent_id,)).fetchone()
+
+        if matched:
+            if get_bet_status(str(matched["entry_bet_id"])) == "EXECUTION_COMPLETE":
+                return True
+            return False
+
+        return True
+
+    finally:
+        con.close()
 
 # ======================================================================
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB
@@ -1038,7 +1091,12 @@ def _router_child_worker_loop():
                 # --------------------------------------------------
                 # Execute placement
                 # --------------------------------------------------
+                if not _child_promotion_allowed(child_id):
+                    _ROUTER_CHILD_QUEUE.task_done()
+                    continue
+
                 placed = _attempt_place_child_with_retry(int(child_id))
+
 
                 if not placed:
                     _ROUTER_CHILD_QUEUE.task_done()
@@ -2101,6 +2159,13 @@ def _sync_child_matches(limit: int = 100) -> int:
 
             # Release exposure
             _release_parent_exposure_db(parent_id)
+
+            from engines.math.dynamic_stake_v7 import advance_progressive_stage
+
+            advance_progressive_stage(
+                marketId=parent.marketId,
+                selectionId=parent.selectionId
+            )
 
             fixed += 1
 

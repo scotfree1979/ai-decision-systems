@@ -322,15 +322,44 @@ def evaluate_progressive_lock(
     state["locked_amount"] = target_amount
     state["stage_index"] += 1
 
+    # --------------------------------------------------
+    # Resolve parent context (DB-first, authoritative)
+    # --------------------------------------------------
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    prow = _q_retry(con, """
+        SELECT customerOrderRef, side, entry_stake
+          FROM orders
+         WHERE role='PARENT'
+           AND marketId=?
+           AND selectionId=?
+           AND entry_status='MATCHED'
+         LIMIT 1
+    """, (market_id, selection_id)).fetchone()
+    con.close()
+
+    if not prow:
+        return None
+
+    parent_cor = str(prow["customerOrderRef"])
+    parent_side = (prow["side"] or "").upper()
+    exit_side = "BACK" if parent_side == "LAY" else "LAY"
+
+    # current price must be injected by caller via context
+    current_px = float(runner_pnl and 0)  # placeholder safeguard
+
     return {
-        "enter": True,
         "engine": "OVERWATCHER",
         "role": "CHILD",
         "exit_kind": "PROGRESSIVE_LOCK",
+        "parent_cor": parent_cor,
         "marketId": market_id,
         "selectionId": selection_id,
-        "why": f"progressive_lock_stage_{state['stage_index']}",
+        "side": exit_side,
+        "px": current_px,
+        "size": float(prow["entry_stake"]),
     }
+
 
 # ======================================================================
 # STOPLOSS → BUS PLAN EMITTER (CANONICAL)

@@ -141,28 +141,16 @@ def _market_ready(st: dict) -> bool:
 
 def _apply_bus_stake_gate(*, engine: str, stake: float) -> float:
     """
-    FINAL stake authority.
+    BUS stake gate — neutralised.
 
-    This is the LAST mutation of plan["size"] before routing.
-    No odds logic. No phase logic. No scaling.
-
-    If this is wrong, BUS is wrong.
+    Dynamic stake module is now sole authority.
+    BUS enforces only non-zero invariant.
     """
 
     if stake is None or stake <= 0:
         raise RuntimeError("BUS invariant violated: stake <= 0")
 
-    min_stake = ENGINE_MIN[engine]
-    max_stake = ENGINE_MAX[engine]
-
-    if stake < min_stake:
-        return float(min_stake)
-
-    if stake > max_stake:
-        return float(max_stake)
-
     return float(stake)
-
 
 # ======================================================================================================
 # BUS DIAGNOSTICS SHIM — FINAL
@@ -1862,43 +1850,73 @@ class DecisionBus:
 # === PATCH END ==============================================================
 
         # --------------------------------------------------
-        # 🟥 LANE 5 — OVERWATCHER (PLAN EMITTER ONLY)
+        # 🟥 LANE 5 — OVERWATCHER (ROUTE-FED, PURE EVALUATOR)
         # --------------------------------------------------
         engine_report["OVERWATCHER"]["evaluated"] = True
 
         overwatcher = self.engines.get("OVERWATCHER")
 
         if overwatcher:
-            for (mid, sid), ctx in self._route_ctx_map.items():
 
-                ctx_l = dict(ctx)
-                _normalize_ctx_enums(ctx_l)
+            try:
+                for (mid, sid), ctx in self._route_ctx_map.items():
 
-                try:
-                    p = overwatcher.tick(ctx_l)
-
-                    if not p:
-                        _record_reason(engine_report, "OVERWATCHER", "no_plan")
+                    if not ctx:
                         continue
 
-                    if not p.get("enter"):
-                        _record_reason(
-                            engine_report,
-                            "OVERWATCHER",
-                            p.get("reason") or p.get("why") or "note",
-                        )
+                    current_px = ctx.get("px")
+                    anchor_px  = ctx.get("anchor_entry_odds")
+                    anchor_id  = ctx.get("anchor_parent_id")
+                    anchor_stk = ctx.get("anchor_entry_stake")
+
+                    # Must have live px and a matched parent anchor
+                    if current_px is None or not anchor_id or anchor_px is None:
                         continue
 
-                    plan = dict(p)
-                    plan["engine"] = "OVERWATCHER"
+                    # --------------------------------------------------
+                    # PURE STOPLOSS EVALUATION
+                    # --------------------------------------------------
+                    plan = overwatcher.maybe_emit_stoploss_plan(
+                        parent_row={
+                            "id": anchor_id,
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "side": ctx.get("side"),
+                            "entry_odds": anchor_px,
+                            "entry_stake": anchor_stk,
+                        },
+                        current_px=float(current_px),
+                    )
 
-                    plans.append(("OVERWATCHER", plan, ctx_l))
-                    engine_report["OVERWATCHER"]["fired"] += 1
-                    lane_counts[5] += 1
+                    if plan:
+                        plan["engine"] = "OVERWATCHER"
+                        plans.append(("OVERWATCHER", plan, ctx))
+                        engine_report["OVERWATCHER"]["fired"] += 1
+                        lane_counts[5] += 1
+                        continue
 
-                except Exception:
-                    _record_reason(engine_report, "OVERWATCHER", "tick_error")
+                    # --------------------------------------------------
+                    # PURE PROGRESSIVE LOCK EVALUATION
+                    # --------------------------------------------------
+                    runner_pnl = ctx.get("pnl_if_win")
+                    if runner_pnl is None:
+                        continue
 
+                    plan = overwatcher.evaluate_progressive_lock(
+                        market_id=mid,
+                        selection_id=sid,
+                        runner_pnl=float(runner_pnl),
+                    )
+
+                    if plan:
+                        plan["px"] = float(current_px)
+                        plan["engine"] = "OVERWATCHER"
+                        plans.append(("OVERWATCHER", plan, ctx))
+                        engine_report["OVERWATCHER"]["fired"] += 1
+                        lane_counts[5] += 1
+
+            except Exception:
+                _record_reason(engine_report, "OVERWATCHER", "tick_error")
 
         return plans, lane_counts
 

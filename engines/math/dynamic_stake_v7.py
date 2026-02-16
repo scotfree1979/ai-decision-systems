@@ -241,42 +241,77 @@ def get_form_adjustment(
 
 def compute_exploratory_dynamic_stake(*, ctx: dict, engine="MSC_EXPLORATORY") -> float:
     from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+    from tools.betfair_match_surface import get_direction_confidence
+    from engines.price_math import calculate_tick_distance as ladder_ticks_between
 
     lo = float(ENGINE_MIN[engine])
     hi = float(ENGINE_MAX[engine])
 
-    raw_conf = float(ctx.get("risk_confidence", 0.0))
+    anchor_px = ctx.get("anchor_entry_odds")
+    current_px = ctx.get("px")
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    band = ctx.get("band")
 
-    CONF_START = 50
-    CONF_FULL  = 100
-    STEP_COUNT = 5
-
-    # Flat until proof exists
-    if raw_conf < CONF_START:
+    if not anchor_px or not current_px:
         return round(lo, 2)
 
-    raw_conf = min(raw_conf, CONF_FULL)
+    # -----------------------------------------
+    # 1️⃣ Tick distance conviction
+    # -----------------------------------------
+    ticks = abs(ladder_ticks_between(anchor_px, current_px))
+    tick_score = min(ticks / 8.0, 1.0)  # exploratory reacts faster than risk
 
-    conf_range = CONF_FULL - CONF_START
-    conf_per_step = conf_range / STEP_COUNT
-    step = int((raw_conf - CONF_START) // conf_per_step) + 1
-    step = min(step, STEP_COUNT)
+    # -----------------------------------------
+    # 2️⃣ Direction confirmation
+    # -----------------------------------------
+    dir_conf = float(get_direction_confidence(mid, sid))
 
-    # Exploratory is capped at 60% of envelope
-    max_cap = lo + 0.6 * (hi - lo)
-    step_size = (max_cap - lo) / STEP_COUNT
+    # -----------------------------------------
+    # 3️⃣ Combined conviction
+    # -----------------------------------------
+    confidence = (0.7 * tick_score) + (0.3 * dir_conf)
+    confidence = max(0.0, min(confidence, 1.0))
 
-    stake = lo + step * step_size
+    # -----------------------------------------
+    # 4️⃣ Band compression
+    # -----------------------------------------
+    if band == "ACTIVE":
+        band_mult = 1.0
+    elif band == "PASSIVE":
+        band_mult = 0.7
+    elif band == "EXTENDED":
+        band_mult = 0.4
+    else:  # IGNORED or UNKNOWN
+        return round(lo, 2)
 
-    # FINAL FORM ADJUSTMENT
+    # -----------------------------------------
+    # 5️⃣ Exploratory cap (60% of envelope)
+    # -----------------------------------------
+    envelope = hi - lo
+    capped_hi = lo + 0.6 * envelope
+
+    # Apply band compression to capped envelope
+    band_hi = lo + band_mult * (capped_hi - lo)
+
+    # -----------------------------------------
+    # 6️⃣ Scale stake inside compressed cap
+    # -----------------------------------------
+    stake = lo + confidence * (band_hi - lo)
+
+    # -----------------------------------------
+    # 7️⃣ Form adjustment (light multiplier)
+    # -----------------------------------------
     try:
         stake *= get_form_adjustment(
-            marketId=ctx["marketId"],
-            selectionId=ctx["selectionId"],
+            marketId=mid,
+            selectionId=sid,
         )
     except Exception:
         pass
+
     return round(stake, 2)
+
 
 
 # ======================================================================
@@ -363,46 +398,59 @@ from engines.price_math import calculate_tick_distance as ladder_ticks_between
 
 def compute_risk_dynamic_stake(*, ctx: dict, engine="MSC_RISK") -> float:
     from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+    from tools.betfair_match_surface import get_direction_confidence
+    from engines.price_math import calculate_tick_distance as ladder_ticks_between
 
     lo = float(ENGINE_MIN[engine])
     hi = float(ENGINE_MAX[engine])
 
-    # Confidence from BUS (already execution-truthful)
-    raw_conf = float(ctx.get("risk_confidence", 0.0))
+    anchor_px = ctx.get("anchor_entry_odds")
+    current_px = ctx.get("px")
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    band = ctx.get("band")
 
-    # ---- ladder parameters ----
-    STEP_COUNT = 5
-    CONF_START = 50
-    CONF_FULL  = 100
-
-    # Base stake until confidence threshold
-    if raw_conf < CONF_START:
+    if not anchor_px or not current_px:
         return round(lo, 2)
 
-    # Clamp confidence
-    raw_conf = min(raw_conf, CONF_FULL)
+    # -----------------------------------------
+    # 1️⃣ Tick distance conviction
+    # -----------------------------------------
+    ticks = abs(ladder_ticks_between(anchor_px, current_px))
+    tick_score = min(ticks / 10.0, 1.0)
 
-    # Map confidence → step
-    conf_range = CONF_FULL - CONF_START          # 50
-    conf_per_step = conf_range / STEP_COUNT      # 10
+    # -----------------------------------------
+    # 2️⃣ Directional confirmation
+    # -----------------------------------------
+    dir_conf = float(get_direction_confidence(mid, sid))
 
-    step = int((raw_conf - CONF_START) // conf_per_step) + 1
-    step = min(step, STEP_COUNT)
+    # -----------------------------------------
+    # 3️⃣ Combined conviction (0 → 1)
+    # -----------------------------------------
+    confidence = (0.6 * tick_score) + (0.4 * dir_conf)
+    confidence = max(0.0, min(confidence, 1.0))
 
-    # Compute stake
-    step_size = (hi - lo) / STEP_COUNT
-    stake = lo + step * step_size
+    # -----------------------------------------
+    # 4️⃣ Band compression
+    # -----------------------------------------
+    if band == "ACTIVE":
+        band_mult = 1.0
+    elif band == "PASSIVE":
+        band_mult = 0.7
+    elif band == "EXTENDED":
+        band_mult = 0.4
+    else:  # IGNORED or UNKNOWN
+        return round(lo, 2)
 
-    # FINAL FORM ADJUSTMENT
-    try:
-        stake *= get_form_adjustment(
-            marketId=marketId,
-            selectionId=selectionId,
-        )
-    except Exception:
-        pass
+    band_hi = lo + band_mult * (hi - lo)
+
+    # -----------------------------------------
+    # 5️⃣ Linear scaling across compressed envelope
+    # -----------------------------------------
+    stake = lo + confidence * (band_hi - lo)
 
     return round(stake, 2)
+
 
 
 # ======================================================================================================
@@ -454,27 +502,26 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
     # 2️⃣ LEGACY — borrow confidence from RISK
     # --------------------------------------------------
     if eng == "LEGACY":
-        raw_conf = float(ctx.get("risk_confidence", 0.0))
 
-        CONF_START = 50
-        CONF_FULL  = 100
+        from tools.betfair_match_surface import get_direction_confidence
 
-        # No proof → minimum stake only
-        if raw_conf < CONF_START:
+        mid = ctx.get("marketId")
+        sid = ctx.get("selectionId")
+
+        if not mid or not sid:
             return round(min_stake, 2)
 
-        # Clamp confidence
-        raw_conf = min(raw_conf, CONF_FULL)
+        # 0.0 → 1.0 directional proof from matched hedge cycles
+        confidence = float(get_direction_confidence(mid, sid))
 
-        # Legacy is capped at 50% of its envelope
-        cap = min_stake + 0.5 * (max_stake - min_stake)
+        # Hard clamp
+        confidence = max(0.0, min(confidence, 1.0))
 
-        # Linear ramp between CONF_START → CONF_FULL
-        step = (raw_conf - CONF_START) / (CONF_FULL - CONF_START)
-        step = max(0.0, min(step, 1.0))
+        # Linear interpolation across full engine envelope
+        stake = min_stake + confidence * (max_stake - min_stake)
 
-        stake = min_stake + step * (cap - min_stake)
         return round(stake, 2)
+
 
     # --------------------------------------------------
     # 3️⃣ Default confidence score (dimensionless)
@@ -529,27 +576,43 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
 
 
 # === PATCH END ================================================================
+def advance_progressive_stage(*, marketId: str, selectionId: str):
+    key = (marketId, selectionId)
+
+    state = _PROGRESSIVE_STATE.get(key)
+    if not state:
+        return
+
+    state["stage"] += 1
+    state["locked_pct"] = min(state["locked_pct"], 1.0)
+
+def clear_progressive_if_no_parent(mid, sid):
+    if no matched parent:
+        _PROGRESSIVE_STATE.pop((mid, sid), None)
+
 # =====================================================================
 # OVERWATCHER — Progressive Lock Stake
 # =====================================================================
-
 _PROGRESSIVE_STATE = {}
 
 def compute_overwatch_dynamic_stake(ctx: dict) -> float:
     """
-    Progressive compression stake calculator.
+    Progressive compression stake calculator (band-aware).
 
-    - Uses existing matched child exposure
-    - Locks additional % each stage
-    - Ensures stake >= dynamic minimum
+    - Locks incremental profit %
+    - Uses green-up math
+    - Compression speed varies by band
+    - BUS enforces final min/max
     """
 
     mid = ctx.get("marketId")
     sid = ctx.get("selectionId")
     parent_stake = float(ctx.get("anchor_entry_stake") or 0.0)
+    anchor_odds  = float(ctx.get("anchor_entry_odds") or 0.0)
     px = float(ctx.get("px") or 0.0)
+    band = ctx.get("band")
 
-    if not parent_stake or px <= 0:
+    if not parent_stake or px <= 0 or anchor_odds <= 0:
         return 0.0
 
     key = (mid, sid)
@@ -562,7 +625,17 @@ def compute_overwatch_dynamic_stake(ctx: dict) -> float:
         }
     )
 
-    stages = [0.10, 0.25, 0.35, 0.45, 0.55, 0.60]
+    # --------------------------------------------------
+    # Band-aware compression ladders
+    # --------------------------------------------------
+    if band == "ACTIVE":
+        stages = [0.10, 0.25, 0.35, 0.45, 0.55, 0.60]
+    elif band == "PASSIVE":
+        stages = [0.08, 0.18, 0.28, 0.38, 0.48, 0.55]
+    elif band == "EXTENDED":
+        stages = [0.15, 0.30, 0.45, 0.55, 0.65, 0.70]
+    else:
+        return 0.0  # ignore IGNORED
 
     if state["stage"] >= len(stages):
         return 0.0
@@ -573,13 +646,15 @@ def compute_overwatch_dynamic_stake(ctx: dict) -> float:
     if delta_pct <= 0:
         return 0.0
 
-    # Green-up math reused
-    stake = (parent_stake * delta_pct * ctx.get("anchor_entry_odds")) / px
+    # --------------------------------------------------
+    # Canonical green-up math
+    # --------------------------------------------------
+    stake = (parent_stake * delta_pct * anchor_odds) / px
 
-    state["locked_pct"] = target_pct
-    state["stage"] += 1
+
 
     return round(max(stake, 0.0), 2)
+
 
 # ===============================================================
 # Dynamic Stake v7 — Unified sizing & greening
