@@ -331,8 +331,16 @@ class BusRouteSnapshot:
         now = datetime.now(timezone.utc)
 
         # --------------------------------------------------
-        # 1️⃣ Load all today's markets ordered by off time
+        # 1️⃣ Load DISTINCT today's markets ordered by off time
+        #    and filter by runner count >= 6
         # --------------------------------------------------
+
+        WINDOW_SIZE = 5
+        MIN_RUNNERS = 6
+        GRACE_MINUTES = 5
+
+        now = datetime.now(timezone.utc)
+
         con = connect_db(ro=True)
         con.row_factory = sqlite3.Row
 
@@ -340,17 +348,21 @@ class BusRouteSnapshot:
             rows = con.execute("""
                 SELECT
                     marketId,
-                    marketStartTime
+                    marketStartTime,
+                    COUNT(DISTINCT selectionId) AS runner_count
                 FROM bets
                 WHERE date(marketStartTime)=date('now','utc')
+                GROUP BY marketId, marketStartTime
+                HAVING runner_count >= ?
                 ORDER BY datetime(marketStartTime) ASC
-            """).fetchall()
+            """, (MIN_RUNNERS,)).fetchall()
         finally:
             con.close()
 
         # --------------------------------------------------
         # 2️⃣ Remove markets strictly past off + grace
         # --------------------------------------------------
+
         active_markets = []
 
         for r in rows:
@@ -371,28 +383,48 @@ class BusRouteSnapshot:
                 active_markets.append(mid)
 
         # --------------------------------------------------
-        # 3️⃣ Take first N markets only (sliding window)
+        # 3️⃣ Take first 5 eligible markets
         # --------------------------------------------------
+
         window_mids = active_markets[:WINDOW_SIZE]
 
+
         # --------------------------------------------------
-        # 4️⃣ Build runner identity surface from window
+        # 4️⃣ Build runner identity surface from bets DB
+        #    (Window-derived mids only — NOT scope)
         # --------------------------------------------------
+
         raw_pairs = []
 
-        for mid in window_mids:
-            st = get_market_state(mid) or {}
-            runners = st.get("runners") or {}
+        if window_mids:
 
-            for sid in runners.keys():
-                raw_pairs.append((mid, str(sid)))
+            con = connect_db(ro=True)
+            con.row_factory = sqlite3.Row
 
-        # Safety fallback (never empty if markets exist)
+            try:
+                rows = con.execute(f"""
+                    SELECT
+                        marketId,
+                        selectionId
+                    FROM bets
+                    WHERE marketId IN ({",".join(["?"]*len(window_mids))})
+                """, window_mids).fetchall()
+            finally:
+                con.close()
+
+            for r in rows:
+                if r["marketId"] and r["selectionId"]:
+                    raw_pairs.append(
+                        (str(r["marketId"]), str(r["selectionId"]))
+                    )
+
+        # Safety fallback — identity must never be empty
         if not raw_pairs:
             raw_pairs = list(get_root_ctx_runner_pairs())
 
-        # 🔑 RESTORE ORDERING STEP (MISSING)
+        # 🔑 Order by off time
         ordered = _order_runner_pool_by_market_time(raw_pairs)
+
 
 # ======================================================================================================
 # END PATCH
@@ -815,24 +847,25 @@ class BusRouteSnapshot:
     def partition_into_bus_stops(self):
 
         if not self.runner_pool:
+            self.bus_stops = {}
             return
 
         # --------------------------------------------------
-        # 🔒 Filter execution-eligible runners ONLY
+        # Execution surface = ACTIVE only
+        # Identity surface (runner_pool / ctx_map) remains full
         # --------------------------------------------------
+
         eligible = []
 
-        for (mid, sid) in self.ctx_map.keys():
-            ctx = self.ctx_map.get((str(mid), str(sid)))
-            if not ctx:
-                continue
+        for (mid, sid), ctx in self.ctx_map.items():
 
             band = ctx.get("band")
 
-            if band in ("ACTIVE", "PASSIVE", "EXTENDED"):
+            if band == "ACTIVE":
                 eligible.append((mid, sid))
 
         n = len(eligible)
+
         if n == 0:
             self.bus_stops = {}
             return

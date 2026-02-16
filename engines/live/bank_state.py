@@ -170,135 +170,129 @@ def rebuild_live_exposure_from_db():
             f"[BankState] exposure rebuilt | open={_OPEN_EXPOSURE:.2f}"
         )
 
-# ======================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: def _compute_market_over_reserve_today(
-# 🧩 ACTION: ADD NEW BETFAIR FLOOR FUNCTION (NON-DESTRUCTIVE)
-# 📆 PATCHED: 2026-04-XX — Betfair Execution Surface Floor
-#
-# PURPOSE:
-# - Replace SQL parent-based floor
-# - Use authoritative Betfair execution surface
-# - Only count source='CURRENT'
-# - Maintain exact BankState return contract
-# - No mutation
-# - No redistribution here
-# ======================================================================
-
 def _compute_market_floor_from_betfair_surface():
     """
-    Authoritative floor from Betfair execution surface.
+    Authoritative floor from Betfair CURRENT surface (Table 1).
 
-    Uses:
-        betfair_execution_surface
-    Filters:
-        source = 'CURRENT'
+    No DB surface.
+    No persistence.
+    Pure Betfair truth.
 
-    Returns same structure as _compute_market_over_reserve_today()
-    but only includes:
-        marketId
-        true_market_exposure
+    Returns:
+        [
+            {
+                "marketId": str,
+                "true_market_exposure": float
+            }
+        ]
     """
 
-    import sqlite3
-    from engines.config_paths import autoscalp_db
+    from engines.daily_config import get_app_key
+    from engines.live.live_router import _keys
+    import requests
+    import json
     from collections import defaultdict
 
-    con = sqlite3.connect(autoscalp_db())
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
+    app_key, token = _keys()
+    if not app_key or not token:
+        return []
 
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: inside _compute_market_floor_from_betfair_surface()
-# 🧩 ACTION: Add UTC date filter to execution surface
-# 📆 PATCHED: 2026-02-15 — Floor restricted to TODAY only
-#
-# PURPOSE:
-# - Prevent historical execution surface from inflating floor
-# - Floor must reflect TODAY only
-#
-# INVARIANT:
-# - source='CURRENT'
-# - date(last_seen) = date('now','utc')
-# ==============================================================================
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 
-    rows = cur.execute("""
-        SELECT
-            s.marketId,
-            s.selectionId,
-            s.side,
-            s.matched_size,
-            s.avg_price
-        FROM betfair_execution_surface s
-        JOIN bets b
-          ON b.marketId = s.marketId
-        WHERE s.source='CURRENT'
-          AND date(b.marketStartTime)=date('now','utc')
-    """).fetchall()
+    headers = {
+        "X-Application": app_key,
+        "X-Authentication": token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
+    payload = json.dumps([{
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listCurrentOrders",
+        "params": {},
+        "id": 1
+    }])
 
-# === PATCH END ==============================================================
+    try:
+        r = requests.post(url, headers=headers, data=payload, timeout=10)
+        r.raise_for_status()
+        current_orders = r.json()[0]["result"]["currentOrders"]
+    except Exception:
+        return []
 
-    con.close()
-
-    if not rows:
+    if not current_orders:
         return []
 
     # --------------------------------------------------
     # Build per-market runner set
     # --------------------------------------------------
     runners_by_market = defaultdict(set)
-    for r in rows:
-        runners_by_market[r["marketId"]].add(r["selectionId"])
+    orders_by_market = defaultdict(list)
 
-    # --------------------------------------------------
-    # Simulate worst-case per market
-    # --------------------------------------------------
-    market_pnl = defaultdict(lambda: defaultdict(float))
+    for o in current_orders:
 
-    for r in rows:
+        mid = str(o.get("marketId"))
+        sid = str(o.get("selectionId"))
+        side = (o.get("side") or "").upper()
+        matched = float(o.get("sizeMatched") or 0.0)
+        price = float((o.get("priceSize") or {}).get("price") or 0.0)
 
-        mid = r["marketId"]
-        sid = r["selectionId"]
-        side = (r["side"] or "").upper()
-        matched = float(r["matched_size"] or 0.0)
-        odds = float(r["avg_price"] or 0.0)
-
-        if matched <= 0 or odds <= 0:
+        if matched <= 0 or price <= 0:
             continue
 
-        for winner in runners_by_market[mid]:
+        runners_by_market[mid].add(sid)
 
-            if winner == sid:
-                if side == "LAY":
-                    pnl = -matched * (odds - 1)
-                else:
-                    pnl = matched * (odds - 1)
-            else:
-                if side == "LAY":
-                    pnl = matched
-                else:
-                    pnl = -matched
-
-            market_pnl[mid][winner] += pnl
+        orders_by_market[mid].append({
+            "selectionId": sid,
+            "side": side,
+            "matched": matched,
+            "price": price,
+        })
 
     results = []
 
-    for mid, outcomes in market_pnl.items():
+    # --------------------------------------------------
+    # Worst-case simulation per market
+    # --------------------------------------------------
+    for mid, orders in orders_by_market.items():
+
+        outcomes = defaultdict(float)
+
+        for winner in runners_by_market[mid]:
+
+            pnl = 0.0
+
+            for o in orders:
+                sid = o["selectionId"]
+                side = o["side"]
+                matched = o["matched"]
+                price = o["price"]
+
+                if winner == sid:
+                    if side == "LAY":
+                        pnl -= matched * (price - 1)
+                    else:  # BACK
+                        pnl += matched * (price - 1)
+                else:
+                    if side == "LAY":
+                        pnl += matched
+                    else:
+                        pnl -= matched
+
+            outcomes[winner] = pnl
 
         worst_loss = 0.0
-
         for pnl in outcomes.values():
             if pnl < worst_loss:
                 worst_loss = pnl
 
         results.append({
             "marketId": mid,
-            "true_market_exposure": -worst_loss
+            "true_market_exposure": round(-worst_loss, 2),
         })
 
     return results
+
 
 # ======================================================================
 # 📍 TARGET: engines/live/bank_state.py
