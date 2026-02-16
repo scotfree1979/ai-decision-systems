@@ -407,11 +407,50 @@ def refresh(mids: list[str], *, max_runners: int = 12) -> None:
         try: con.close()
         except Exception: pass
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py:ensure_for_markets
+# 🔎 SEARCH: def ensure_for_markets(
+# 📆 PATCHED: 2026-02-16 — Derive full-day universe from bets table
+# 🎯 PURPOSE:
+#   • MarketMonitor must refresh all live markets for today
+#   • Universe comes from bets table (not schedule, not scope)
+#   • Guarantees alignment with live trading universe
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def ensure_for_markets(mids: list[str], *, max_runners: int = 12) -> None:
-    """Refresh only if we have no state for these mids yet."""
-    miss = [m for m in mids if str(m) not in _STATE]
-    if miss:
-        refresh(miss, max_runners=max_runners)
+    """
+    Canonical behaviour:
+
+    MarketMonitor derives its universe from today's bets table,
+    not from caller-provided mids and not from markets_schedule.
+
+    This guarantees:
+        • Only live trading markets are refreshed
+        • All SIDs for those markets get band classification
+        • Scope cannot suppress classification
+    """
+
+    from engines.config_paths import open_bets_db
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    con = open_bets_db(rw=False)
+    try:
+        rows = con.execute("""
+            SELECT DISTINCT marketId
+            FROM bets
+            WHERE substr(marketStartTime,1,10) = ?
+        """, (today,)).fetchall()
+    finally:
+        con.close()
+
+    day_mids = [str(r[0]) for r in rows]
+
+    if day_mids:
+        refresh(day_mids, max_runners=max_runners)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# === PATCH END ==============================================================
+
 
 def get_market_state(mid: str) -> dict:
     return _STATE.get(str(mid), {})

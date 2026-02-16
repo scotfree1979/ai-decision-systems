@@ -2875,161 +2875,37 @@ def _list_current(app_key: str, token: str, bet_id: str) -> dict:
     )
 # === PATCH END ===
 
-def cancel_bet_canonical(*, bet_id: str) -> bool:
-    """
-    SINGLE SOURCE OF TRUTH for Betfair cancellations.
-
-    DB-FIRST. ROLE-AWARE. INVARIANT-LOCKED.
-
-    Returns True if cancel was executed.
-    Returns False if cancel was blocked.
-    """
-
-    if not bet_id:
-        return False
-
-    # --------------------------------------------------
-    # 1️⃣ Resolve order from DB (authoritative)
-    # --------------------------------------------------
-    try:
-        con = _orders_conn()
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-
-        row = _q_retry(cur, """
-            SELECT
-                id,
-                role,
-                hedge_of,
-                marketId,
-                customerOrderRef,
-                entry_status,
-                exit_status
-            FROM orders
-            WHERE entry_bet_id = ?
-            LIMIT 1
-        """, (str(bet_id),)).fetchone()
-
-        con.close()
-
-        if not row:
-            return False
-
-    except Exception:
-        return False
-
-    role        = (row["role"] or "").upper()
-    order_id    = int(row["id"])
-    market_id   = str(row["marketId"])
-    parent_cor  = str(row["customerOrderRef"])
-
-    # --------------------------------------------------
-    # 2️⃣ ROLE RULES
-    # --------------------------------------------------
-
-    # ── PARENT ─────────────────────────────────────────
-    if role == "PARENT":
-        # never cancel if already matched at Betfair
-        if not _guard_cancel_if_matched(
-            parent_cor=parent_cor,
-            bet_id=str(bet_id),
-        ):
-            return False
-
-        allowed = True
-
-    # ── CHILD ──────────────────────────────────────────
-    elif role == "CHILD":
-        allowed = False
-
-        # A) sibling child already matched?
-        if _child_cancellation_allowed(child_id=order_id):
-            allowed = True
-        else:
-            # B) market finished?
-            try:
-                bdb = connect_db(ro=True)
-                bdb.row_factory = sqlite3.Row
-                r = _q_retry(bdb, """
-                    SELECT
-                      CAST(
-                        (julianday('now','utc') - julianday(marketStartTime)) * 1440
-                        AS INTEGER
-                      ) AS mins_after
-                    FROM bets
-                    WHERE marketId=?
-                    LIMIT 1
-                """, (market_id,)).fetchone()
-                bdb.close()
-
-                if r and r["mins_after"] is not None:
-                    if int(r["mins_after"]) >= GRACE_MINUTES:
-                        allowed = True
-
-            except Exception:
-                pass
-
-        if not allowed:
-            _log_event(
-                "WARN",
-                "live_router",
-                f"[CANCEL BLOCKED] child bet_id={bet_id} market={market_id}"
-            )
-            return False
-
-    else:
-        return False
-
-    # --------------------------------------------------
-    # 3️⃣ Cancel at Betfair (best effort)
-    # --------------------------------------------------
-    try:
-        app_key, token = _keys()
-        _rpc(app_key, token, "cancelOrders", {"betIds": [str(bet_id)]})
-    except Exception:
-        pass
-
-    # --------------------------------------------------
-    # 4️⃣ Persist DB state (DB is lock)
-    # --------------------------------------------------
-    try:
 # === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: # 4️⃣ Persist DB state (DB is lock)
-# 🧩 ACTION: Scope cancellation strictly by bet_id
-# 📆 PATCHED: 2026-04-XX — Fix multi-parent child deletion bug
+# 📍 TARGET: engines/live/live_router.py:cancel_bet_canonical
+# 🔎 SEARCH: def cancel_bet_canonical(
+# 📆 PATCHED: 2026-02-16 — Disable router-driven cancellations (Betfair authoritative lifecycle)
+# 🎯 PURPOSE:
+#   • Router must NEVER cancel orders
+#   • Parents LAPSE naturally at off
+#   • Children PERSIST
+#   • Betfair match surface is sole authority
 # ============================================================================
 
-        con = _orders_conn()
-        cur = con.cursor()
+def cancel_bet_canonical(*, bet_id: str) -> bool:
+    """
+    CANCELLATION DISABLED.
 
-        _q_retry(cur, """
-            UPDATE orders
-               SET exit_status='CANCELLED',
-                   parent_closed=CASE WHEN role='PARENT' THEN 1 ELSE parent_closed END,
-                   exit_kind='BETFAIR_CANCEL',
-                   closed_at=COALESCE(closed_at, datetime('now','utc'))
-             WHERE entry_bet_id = ?
-        """, (str(bet_id),))
+    Router no longer performs any Betfair cancelOrders calls.
+    Order lifecycle is fully exchange-driven.
 
-        con.commit()
-        con.close()
+    Always returns False.
+    """
 
-        if role == "PARENT":
-            _release_parent_exposure_db(order_id)
+    _log_event(
+        "INFO",
+        "live_router",
+        f"[CANCEL SUPPRESSED] bet_id={bet_id}"
+    )
 
-        return True
+    return False
 
 # === PATCH END ==============================================================
 
-
-    except Exception as e:
-        _log_event(
-            "ERROR",
-            "live_router",
-            f"cancel_bet_canonical failed bet_id={bet_id}: {e}"
-        )
-        return False
 
 def _cancel(app_key: str, token: str, bet_id: str) -> None:
     cancel_bet_canonical(bet_id=str(bet_id))
@@ -6174,7 +6050,7 @@ def place_parent_and_hedge(
     on_parent_result=None,
     run_id: str | None = None,
     source: str = "A",
-    parent_persistence: str = "PERSIST",
+    parent_persistence: str = "LAPSE",
     child_persistence: str  = "PERSIST",
     max_inplay_seconds: int = 0,
     hedge_stake_override: float | None = None,

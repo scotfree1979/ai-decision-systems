@@ -388,6 +388,16 @@ class BusRouteSnapshot:
 
         window_mids = active_markets[:WINDOW_SIZE]
 
+        # --------------------------------------------------
+        # 🔄 Ensure MarketMonitor state for window markets
+        # --------------------------------------------------
+        try:
+            from engines.market_monitor import monitor
+            monitor.refresh(window_mids)
+        except Exception:
+            pass
+
+
 
         # --------------------------------------------------
         # 4️⃣ Build runner identity surface from bets DB
