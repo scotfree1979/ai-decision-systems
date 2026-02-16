@@ -586,9 +586,51 @@ def advance_progressive_stage(*, marketId: str, selectionId: str):
     state["stage"] += 1
     state["locked_pct"] = min(state["locked_pct"], 1.0)
 
-def clear_progressive_if_no_parent(mid, sid):
-    if no matched parent:
-        _PROGRESSIVE_STATE.pop((mid, sid), None)
+# ======================================================================
+# 📍 TARGET: engines/math/dynamic_stake_v7.py
+# 🔎 SEARCH: def clear_progressive_if_no_parent(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-02-16 — Fix progressive reset guard (DB-backed)
+#
+# PURPOSE:
+# - Clear progressive compression state when no MATCHED parent exists
+# - DB is authority
+# - Idempotent
+# ======================================================================
+
+def clear_progressive_if_no_parent(mid: str, sid: str) -> None:
+    """
+    Remove progressive compression state
+    if there is no MATCHED parent for this runner.
+    """
+
+    try:
+        from engines.config_paths import open_auto_db
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        row = con.execute("""
+            SELECT 1
+              FROM orders
+             WHERE role='PARENT'
+               AND marketId=?
+               AND selectionId=?
+               AND entry_status='MATCHED'
+               AND (exit_status IS NULL OR UPPER(exit_status) NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+             LIMIT 1
+        """, (str(mid), str(sid))).fetchone()
+
+        con.close()
+
+        if not row:
+            _PROGRESSIVE_STATE.pop((str(mid), str(sid)), None)
+
+    except Exception:
+        # Must never crash dynamic stake import
+        pass
+
 
 # =====================================================================
 # OVERWATCHER — Progressive Lock Stake
