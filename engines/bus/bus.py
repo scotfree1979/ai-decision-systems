@@ -2267,6 +2267,7 @@ class DecisionBus:
     # ======================================================================
 
     def _phase0_report_db_truth(self):
+        ordered = []  # 🔒 hard initialise immediately
         """
         Phase 0: DB-first live truth.
         Reports ALL markets with live parents, ordered by time-to-off.
@@ -2362,10 +2363,11 @@ class DecisionBus:
         # --------------------------------------------------
         ordered = []
 
-        ordered = sorted(
-            market_meta.items(),
-            key=lambda x: x[1]["secs"]
-        )
+        if market_meta:
+            ordered = sorted(
+                market_meta.items(),
+                key=lambda x: x[1]["secs"]
+            )
 
         print("\n================ BUS PHASE 0 — LIVE DB STATE =================")
         print(f"[{now.strftime('%H:%M:%S')} UTC] markets={len(ordered)}\n")
