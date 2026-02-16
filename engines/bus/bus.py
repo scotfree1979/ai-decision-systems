@@ -2267,13 +2267,13 @@ class DecisionBus:
     # ======================================================================
 
     def _phase0_report_db_truth(self):
-        ordered = []  # 🔒 hard initialise immediately
+
         """
         Phase 0: DB-first live truth.
         Reports ALL markets with live parents, ordered by time-to-off.
         No mutation. No engine logic.
         """
-
+        ordered = []  # 🔒 hard initialise immediately
         from engines.config_paths import connect_db, open_auto_db
         from datetime import datetime, timezone
         import sqlite3
