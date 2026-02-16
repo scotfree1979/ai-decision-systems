@@ -2360,6 +2360,8 @@ class DecisionBus:
         # --------------------------------------------------
         # 4️⃣ Order markets by time-to-off
         # --------------------------------------------------
+        ordered = []
+
         ordered = sorted(
             market_meta.items(),
             key=lambda x: x[1]["secs"]
