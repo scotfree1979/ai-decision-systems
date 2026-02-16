@@ -2361,7 +2361,7 @@ class DecisionBus:
         # --------------------------------------------------
         # 4️⃣ Order markets by time-to-off
         # --------------------------------------------------
-        ordered = []
+
 
         if market_meta:
             ordered = sorted(
