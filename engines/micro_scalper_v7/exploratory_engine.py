@@ -52,11 +52,10 @@ class ExploratoryEngine:
     def _score_runner(self, ctx: Dict[str, Any], msc: Dict[str, Any]) -> float:
         score = 0.0
 
-        trend = ctx.get("runner_trend") or {}
+        if msc.get("direction") in ("LAY->BACK", "BACK->LAY"):
+            score += 2.0
 
-        # Direction alignment with market truth
-        if trend.get("direction") == msc.get("direction"):
-            score += 3.0
+        trend = ctx.get("runner_trend") or {}
 
         # Tick movement magnitude
         score += min(5.0, float(trend.get("ticks_moved", 0.0)))
@@ -221,6 +220,11 @@ class ExploratoryEngine:
         try:
             from .direction_engine import compute_msc_decision
             msc = compute_msc_decision(ctx)
+
+            if not msc or msc.get("direction") is None:
+                return None
+
+
 
             ctx_snapshot = dict(ctx)
             ctx_snapshot["msc_direction"] = msc["direction"]

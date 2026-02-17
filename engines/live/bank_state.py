@@ -1023,75 +1023,18 @@ def on_parent_matched(*, engine: str, side: str,
 # PATCH 1️⃣ — on_parent_closed
 # -------------------------------------------------------------------
 def on_parent_closed(*, engine: str, parent_id: int) -> None:
-    global _OPEN_EXPOSURE
-
-    try:
-        from engines.config_paths import open_auto_db
-        con = open_auto_db(rw=False)
-        row = con.execute(
-            "SELECT required_exposure FROM orders WHERE id=?",
-            (int(parent_id),)
-        ).fetchone()
-        con.close()
-    except Exception:
-        return
-
-    if not row:
-        return
-
-    amount = _clamp(row[0])
-
-    with _LOCK:
-        used = _ENGINE_USED.get(engine, 0.0)
-        if used <= 0.0:
-            return
-
-        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - amount)
-        _ENGINE_USED[engine] = max(0.0, used - amount)
+    # Exposure is governed by Betfair floor reconciliation only.
+    # Do not mutate _OPEN_EXPOSURE here.
+    return
 
 # -------------------------------------------------------------------
 # PATCH 2️⃣ — on_child_matched
 # -------------------------------------------------------------------
 def on_child_matched(*, parent_id: int, **_ignored) -> None:
-    """
-    Child matched → release exposure from its parent.
+    # Exposure is governed by Betfair floor reconciliation only.
+    # Do not mutate _OPEN_EXPOSURE here.
+    return
 
-    parent_id here is ACTUALLY the CHILD id.
-    We must resolve hedge_of → parent.
-    """
-    global _OPEN_EXPOSURE
-
-    try:
-        from engines.config_paths import open_auto_db
-        con = open_auto_db(rw=False)
-        row = con.execute(
-            """
-            SELECT
-                p.engine,
-                p.required_exposure
-            FROM orders c
-            JOIN orders p ON p.id = c.hedge_of
-            WHERE c.id = ?
-            """,
-            (int(parent_id),)
-        ).fetchone()
-        con.close()
-    except Exception:
-        return
-
-    if not row:
-        return
-
-    engine, required = row
-    amount = _clamp(required)
-
-    with _LOCK:
-        used = _ENGINE_USED.get(engine, 0.0)
-        if used <= 0.0:
-            return
-
-        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - amount)
-        _ENGINE_USED[engine] = max(0.0, used - amount)
 
 
 
@@ -1099,32 +1042,9 @@ def on_child_matched(*, parent_id: int, **_ignored) -> None:
 # PATCH 3️⃣ — release_parent (router housekeeping)
 # -------------------------------------------------------------------
 def release_parent(parent_id: int) -> None:
-    global _OPEN_EXPOSURE
-
-    try:
-        from engines.config_paths import open_auto_db
-        con = open_auto_db(rw=False)
-        row = con.execute(
-            "SELECT engine, required_exposure FROM orders WHERE id=?",
-            (int(parent_id),)
-        ).fetchone()
-        con.close()
-    except Exception:
-        return
-
-    if not row:
-        return
-
-    engine, required = row
-    amount = _clamp(required)
-
-    with _LOCK:
-        used = _ENGINE_USED.get(engine, 0.0)
-        if used <= 0.0:
-            return
-
-        _OPEN_EXPOSURE = max(0.0, _OPEN_EXPOSURE - amount)
-        _ENGINE_USED[engine] = max(0.0, used - amount)
+    # Exposure is governed by Betfair floor reconciliation only.
+    # Do not mutate _OPEN_EXPOSURE here.
+    return
 
 
 def reconcile_realized_pnl_from_orders() -> None:

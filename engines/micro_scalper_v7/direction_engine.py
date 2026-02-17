@@ -21,76 +21,6 @@ Produces:
 
 from typing import Dict, Any
 import math
-# Market reality (direction)
-from tools.betfair_runner_trend_surface import get_runner_trend
-
-# Execution reality (confidence)
-from tools.betfair_match_surface import get_direction_confidence
-
-# ─────────────────────────────────────────────────────────────
-# BETFAIR DIRECTION AND CONFIDENCE HELPERS
-# ─────────────────────────────────────────────────────────────
-
-
-def resolve_direction(ctx: Dict[str, Any], fallback: str) -> str:
-    """
-    Final direction authority.
-
-    Priority:
-      1) Betfair Runner Trend Surface
-      2) MSC feature belief (fallback only)
-    """
-
-    mid = ctx.get("marketId")
-    sid = ctx.get("selectionId")
-
-    if not mid or not sid:
-        return fallback
-
-    trend = get_runner_trend(mid, sid)
-
-    trend_dir  = trend["direction"]
-    trend_conf = float(trend.get("confidence", 0.0))
-
-    # If market has meaningfully moved, trust it
-    if trend_conf >= 0.15:
-        return trend_dir
-
-    return fallback
-
-def resolve_mode(
-    *,
-    base_mode: str,
-    win_prob: float,
-    ctx: Dict[str, Any],
-) -> str:
-    """
-    Mode governor.
-
-    Match surface does NOT change direction.
-    It changes how confident we act (mode).
-    """
-
-    mid = ctx.get("marketId")
-    sid = ctx.get("selectionId")
-
-    if not mid or not sid:
-        return base_mode
-
-    conf = get_direction_confidence(mid, sid)
-    # Expected: 0.0 → 1.0 (based on matched fraction, volume, consistency)
-
-    # Strong confirmation → push aggressive
-    if conf >= 0.65:
-        return "AGGRESSIVE"
-
-    # Weak confirmation → pull conservative
-    if conf <= 0.25:
-        return "CONSERVATIVE"
-
-    # Otherwise keep MSC-derived mode
-    return base_mode
-
 
 # ─────────────────────────────────────────────────────────────
 # SAFE HELPERS
@@ -229,40 +159,281 @@ def compute_stop_ticks(mode: str, ctx: Dict[str, Any]) -> int:
     return max(1, int(base))
 
 # ─────────────────────────────────────────────────────────────
-# 6. MASTER ENTRY POINT (ALL IN ONE)
+# 6. TREND SIGNAL (STRUCTURAL)
+# ─────────────────────────────────────────────────────────────
+from tools.betfair_runner_trend_surface import get_runner_trend
+from tools.betfair_match_surface import get_direction_confidence
+from engines.market_monitor.monitor import get_market_state, get_crossover_signal
+from engines.price_math import walk_ticks
+
+
+def get_trend_signal(ctx: Dict[str, Any]) -> str | None:
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    if not mid or not sid:
+        return None
+
+    trend = get_runner_trend(mid, sid)
+    return trend.get("direction")
+
+
+# ─────────────────────────────────────────────────────────────
+# 7. CROSSOVER SIGNAL (HIGHEST AUTHORITY)
+# ─────────────────────────────────────────────────────────────
+def get_crossover_signal_direction(ctx: Dict[str, Any]) -> str | None:
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    if not mid or not sid:
+        return None
+
+    sig = get_crossover_signal(mid, sid)
+    if not sig.get("crossed_over_recent"):
+        return None
+
+    # Rank improvement = steam, rank drop = drift
+    delta = sig.get("rank_delta", 0)
+    if delta > 0:
+        return "BACK->LAY"
+    if delta < 0:
+        return "LAY->BACK"
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 8. BIAS SIGNAL
+# ─────────────────────────────────────────────────────────────
+def get_bias_signal(ctx: Dict[str, Any]) -> str | None:
+    bias = _f(ctx.get("bias_value"), 0.0)
+    if bias > 0.05:
+        return "BACK->LAY"
+    if bias < -0.05:
+        return "LAY->BACK"
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 9. FAVOURITE STRUCTURE SIGNAL
+# ─────────────────────────────────────────────────────────────
+def get_favourite_signal(ctx: Dict[str, Any]) -> str | None:
+    fav_rank = ctx.get("fav_rank")
+    trend_dir = get_trend_signal(ctx)
+
+    if fav_rank == 1 and trend_dir == "LAY->BACK":
+        return "LAY->BACK"
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 10. VOLATILITY SIGNAL
+# ─────────────────────────────────────────────────────────────
+def get_volatility_signal(ctx: Dict[str, Any]) -> str | None:
+    vol = _f(ctx.get("tick_volatility"), 0.0)
+    trend_dir = get_trend_signal(ctx)
+
+    if vol > 0.4:
+        return trend_dir
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 11. MATCH SURFACE CONFIRMATION
+# ─────────────────────────────────────────────────────────────
+def get_match_surface_signal(ctx: Dict[str, Any]) -> str | None:
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    if not mid or not sid:
+        return None
+
+    conf = get_direction_confidence(mid, sid)
+    if conf >= 0.6:
+        return get_trend_signal(ctx)
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 12. VOTE RESOLUTION
+# ─────────────────────────────────────────────────────────────
+def resolve_vote_direction(signals: list[str | None]) -> str | None:
+    votes = [s for s in signals if s is not None]
+    if not votes:
+        return None
+
+    drift_votes = votes.count("LAY->BACK")
+    steam_votes = votes.count("BACK->LAY")
+
+    if drift_votes > steam_votes:
+        return "LAY->BACK"
+    if steam_votes > drift_votes:
+        return "BACK->LAY"
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 13. BOUNDARY BUFFER (2 TICKS EACH SIDE)
+# ─────────────────────────────────────────────────────────────
+def apply_boundary_buffer(ctx: Dict[str, Any], direction: str | None) -> str | None:
+
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+    px  = ctx.get("px")
+
+    if not mid or not sid or px is None:
+        return direction
+
+    market_state = get_market_state(mid) or {}
+    runners = market_state.get("runners") or {}
+
+    ladder = sorted(
+        [(s, r.get("px")) for s, r in runners.items() if r.get("px") is not None],
+        key=lambda x: x[1]
+    )
+
+    index = None
+    for i, (runner_id, _) in enumerate(ladder):
+        if str(runner_id) == str(sid):
+            index = i
+            break
+
+    if index is None:
+        return direction
+
+    lower_px = ladder[index - 1][1] if index > 0 else None
+    upper_px = ladder[index + 1][1] if index < len(ladder) - 1 else None
+
+    if lower_px:
+        boundary_low = walk_ticks(lower_px, 2, direction="up")
+        if px <= boundary_low:
+            return None
+
+    if upper_px:
+        boundary_high = walk_ticks(upper_px, 2, direction="down")
+        if px >= boundary_high:
+            return None
+
+    return direction
+
+# ─────────────────────────────────────────────────────────────
+# 14. OPPORTUNITY SIGNAL (PERSISTENCE / REPEATABILITY)
+# ─────────────────────────────────────────────────────────────
+from engines.config_paths import auto_conn
+
+def get_opportunity_signal(ctx: Dict[str, Any]) -> str | None:
+    """
+    Uses indicators_opportunities table to detect
+    persistent directional pressure.
+    """
+
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+
+    if not mid or not sid:
+        return None
+
+    con = auto_conn(rw=False)
+    try:
+        row = con.execute("""
+            SELECT opportunities, taken
+            FROM indicators_opportunities
+            WHERE day = date('now','utc')
+              AND marketId = ?
+              AND selectionId = ?
+        """, (mid, sid)).fetchone()
+    finally:
+        con.close()
+
+    if not row:
+        return None
+
+    opps = _f(row[0])
+    taken = _f(row[1])
+
+    if opps == 0:
+        return None
+
+    persistence = taken / opps
+
+    # Persistent drift pressure
+    if persistence > 0.6:
+        return get_trend_signal(ctx)
+
+    return None
+
+# ─────────────────────────────────────────────────────────────
+# 15. MODE REFINEMENT (POST-DIRECTION STRUCTURAL CONFIRMATION)
+# ─────────────────────────────────────────────────────────────
+def refine_mode_with_structure(ctx: Dict[str, Any], direction: str | None, base_mode: str) -> str:
+    """
+    Adjusts aggressiveness based on structural alignment.
+    """
+
+    if direction is None:
+        return base_mode
+
+    trend = get_trend_signal(ctx)
+    match = get_match_surface_signal(ctx)
+    vol   = get_volatility_signal(ctx)
+
+    confirmations = 0
+
+    if trend == direction:
+        confirmations += 1
+    if match == direction:
+        confirmations += 1
+    if vol == direction:
+        confirmations += 1
+
+    if confirmations >= 2:
+        return "AGGRESSIVE"
+
+    if confirmations == 0:
+        return "CONSERVATIVE"
+
+    return base_mode
+
+# ─────────────────────────────────────────────────────────────
+# 16. MASTER ENTRY POINT (FULL AUTHORITY)
 # ─────────────────────────────────────────────────────────────
 def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Returns:
-        {
-            "win_prob": float,
-            "direction": "LAY->BACK" | "BACK->LAY",
-            "mode": "AGGRESSIVE" | "MODERATE" | "CONSERVATIVE",
-            "entry_ticks": int,
-            "stop_ticks": int
-        }
-    """
+
+    # Layer 1 — Original MSC
     win_prob = compute_win_probability(ctx)
-
-    # 1️⃣ MSC belief
-    belief_direction = compute_direction(win_prob, ctx)
-
-    # 2️⃣ Market reality overrides belief
-    direction = resolve_direction(ctx, belief_direction)
-
-    # 3️⃣ MSC base mode
+    base_direction = compute_direction(win_prob, ctx)
     base_mode = compute_mode(win_prob, ctx)
 
-    # 4️⃣ Match surface governs confidence → mode
-    mode = resolve_mode(
-        base_mode=base_mode,
-        win_prob=win_prob,
-        ctx=ctx,
-    )
+    # Layer 2 — Structural Signals
+    crossover = get_crossover_signal_direction(ctx)
+    trend     = get_trend_signal(ctx)
+    bias      = get_bias_signal(ctx)
+    fav       = get_favourite_signal(ctx)
+    vol       = get_volatility_signal(ctx)
+    match     = get_match_surface_signal(ctx)
+    opp       = get_opportunity_signal(ctx)
+
+    if crossover:
+        direction = crossover
+    else:
+        direction = resolve_vote_direction([
+            trend,
+            bias,
+            fav,
+            vol,
+            match,
+            opp,
+            base_direction,
+        ])
+
+    direction = apply_boundary_buffer(ctx, direction)
+
+    # Mode refinement
+    mode = refine_mode_with_structure(ctx, direction, base_mode)
 
     entry_ticks = compute_entry_ticks(mode)
     stop_ticks  = compute_stop_ticks(mode, ctx)
-
 
     return {
         "win_prob": win_prob,
@@ -271,3 +442,4 @@ def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
         "entry_ticks": entry_ticks,
         "stop_ticks": stop_ticks,
     }
+
