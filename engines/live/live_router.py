@@ -60,7 +60,7 @@ child_id = None
 # - Can tune later
 # ======================================================================================================
 
-PROGRESSIVE_LOCK_FACTOR = 0.20  # 20% of full hedge
+PROGRESSIVE_LOCK_FACTOR = 1.00  # 20% of full hedge
 
 
 _ROUTER_STATUS = {

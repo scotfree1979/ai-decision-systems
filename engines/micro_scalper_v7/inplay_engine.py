@@ -109,18 +109,23 @@ class InPlayEngine:
         key = (mid, sid)
 
         # --------------------------------------------------
-        # Race start detection (volatility-based)
+        # Race status detection (Betfair authoritative)
         # --------------------------------------------------
 
-        prev_px = self.last_px.get(key)
-        self.last_px[key] = px
+        from engines.flags.betfair_flag_surface import get_race_status_cached
 
-        if prev_px is not None:
-            if abs(px - prev_px) >= self.VOLATILITY_TICKS_TRIGGER:
-                self.market_inplay.setdefault(mid, time.time())
+        race_status = get_race_status_cached(mid)
 
-        # If market not yet in-play, only arm — never trigger
-        in_play = mid in self.market_inplay
+        # Hard stop: finished market
+        if race_status == "FINISHED":
+            return self._no_signal("race_finished")
+
+        # Arm only after OFF
+        in_play = (race_status == "OFF")
+
+        if not in_play:
+            return self._no_signal("waiting_for_off_flag")
+
 
         # --------------------------------------------------
         # Market-truth trend (authoritative)
