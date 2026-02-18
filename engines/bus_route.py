@@ -1062,41 +1062,16 @@ def get_root_ctx_runner_pairs():
 
 def get_risk_cycle_exclusions():
     """
-    Return LEGACY parent IDs whose MSC_RISK shadow cycle
-    is currently blocked (risk parent exists but child not matched).
+    NO-OP — Risk exclusions disabled.
 
-    Scope:
-      • One exclusion per LEGACY parent
-      • Runner-level sharing is forbidden
+    Rationale:
+    RiskEngine now governs cycle behaviour per anchor_parent_id.
+    Child unmatched state must NOT suppress new cycles.
+
+    Returns empty set to preserve interface without filtering.
     """
+    return set()
 
-    from engines.config_paths import auto_conn
-    import sqlite3
-
-    con = auto_conn(rw=False)
-    con.row_factory = sqlite3.Row
-
-    try:
-        rows = con.execute(
-            """
-            SELECT DISTINCT
-                p.id AS legacy_parent_id
-            FROM orders r
-            JOIN orders p
-              ON p.id = r.hedge_of
-            LEFT JOIN orders c
-              ON c.hedge_of = r.id
-             AND c.role = 'CHILD'
-            WHERE r.engine = 'MSC_RISK'
-              AND r.role = 'PARENT'
-              AND UPPER(r.entry_status) IN ('PLACED','MATCHED')
-              AND (c.id IS NULL OR UPPER(c.entry_status) <> 'MATCHED')
-            """
-        ).fetchall()
-    finally:
-        con.close()
-
-    return {int(r["legacy_parent_id"]) for r in rows}
 
 
 # ======================================================================================================
