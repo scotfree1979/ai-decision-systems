@@ -311,101 +311,110 @@ def get_moved_signals() -> list[tuple[str, str, float]]:
 
 
 
-def refresh(mids: list[str], *, max_runners: int = 12) -> None:
-    """Refresh market snapshots from odds_current; cheap and safe to call every tick."""
-    if not mids:
-        return
-    con = _adb(); con.row_factory = sqlite3.Row
+def refresh(mids: list[str] | None = None, *, max_runners: int = 50) -> None:
+    """
+    FULL-DAY authoritative monitor.
+
+    • Universe derived from bets table (today only)
+    • Exchange best price is single px authority
+    • No scope dependency
+    • No inbound fallback
+    • No odds_current dependency
+    """
+
+    from engines.config_paths import open_bets_db
+    from engines.bus_route import get_runner_odds_map
+    from datetime import datetime, timezone
+    import os
+
+    session_token = (
+        os.getenv("SESSION_TOKEN")
+        or os.getenv("BETFAIR_SESSION_TOKEN")
+    )
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # --------------------------------------------------
+    # 1️⃣ Get all (mid, sid) for today
+    # --------------------------------------------------
+    con = open_bets_db(rw=False)
     try:
-        now = time.time()
-        for mid in mids:
-            # latest ltp per sid
-            rows = con.execute("""
-                SELECT oc.selectionId AS sid, oc.ltp AS px, oc.updated_ts AS ts
-                FROM odds_current oc
-                WHERE oc.marketId = ?
-                  AND oc.updated_ts = (
-                      SELECT MAX(updated_ts) FROM odds_current
-                      WHERE marketId = oc.marketId AND selectionId = oc.selectionId
-                  )
-                LIMIT ?
-            """, (str(mid), int(max_runners))).fetchall() or []
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/market_monitor/monitor.py
-# 🔎 ANCHOR: fallback to inbound_oc_cache latest snapshot
-# 🎯 PURPOSE: REMOVE synthetic price fallback that forces runners ACTIVE
-# 📆 PATCHED: 2025-12-18
-# ===========================================================================
-
-            if not rows:
-                # fallback to inbound_oc_cache latest snapshot if any
-                rows = con.execute("""
-                    SELECT selectionId AS sid,
-                           COALESCE(oc1, anchor_odd) AS px,
-                           COALESCE(last_sync_ts, '') AS ts
-                    FROM inbound_oc_cache
-                    WHERE marketId = ?
-                    ORDER BY datetime(COALESCE(last_sync_ts,'')) DESC
-                    LIMIT ?
-                """, (str(mid), int(max_runners))).fetchall() or []
-
-                # ❌ REMOVED:
-                # Any synthetic / hard-coded px fallback (e.g. px = 5.0)
-                # Rationale:
-                # - If px is missing or extreme, runner must be IGNORED
-                # - Forcing px ACTIVE corrupts scope + execution integrity
-
-# === PATCH END ==============================================================
-
-
-
-            runners: Dict[str, dict] = {}
-            fav_sid, fav_px = None, None
-            for r in rows:
-                sid = str(r["sid"])
-                try:
-                    px = float(r["px"]) if r["px"] is not None else None
-                except Exception:
-                    px = None
-                prev = _STATE.get(mid, {}).get("runners", {}).get(sid, {}).get("px")
-                if prev and px:
-                    _record_move(mid, sid, prev, px)
-
-                band = _classify_price(px)
-                # 📍 TARGET: engines/market_monitor/monitor.py
-# 🔎 SEARCH: runners[sid] = {"px": px, "band": band, "is_fav": False}
-# 📆 PATCHED: 2025-10-12T09:45Z — persist ltp + fix fav assignment
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                runners[sid] = {
-                    "px": px,
-                    "ltp": px,                     # ✅ ensure visible in external state
-                    "band": band,
-                    "is_fav": False,
-                }
-                # assign temporary px for fav check
-                if px is not None and (fav_px is None or px < fav_px):
-                    fav_px, fav_sid = px, sid
-
-            # ✅ after loop: mark favourite properly
-            if fav_sid and fav_sid in runners:
-                runners[fav_sid]["is_fav"] = True
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-            _STATE[str(mid)] = {
-                "updated_ts": now,
-                "fav_sid": fav_sid,
-                "runners": runners,
-            }
-            _update_rank_state(str(mid), runners)
-
-            # NEW: update per-runner state *after* favourite is known
-            for sid_key, info in runners.items():
-                update_runner_state(str(mid), str(sid_key), info.get("band","UNKNOWN"), info.get("px"), bool(info.get("is_fav")))
+        rows = con.execute("""
+            SELECT DISTINCT marketId, selectionId
+            FROM bets
+            WHERE substr(marketStartTime,1,10) = ?
+        """, (today,)).fetchall()
     finally:
-        try: con.close()
-        except Exception: pass
+        con.close()
+
+    if not rows:
+        return
+
+    pairs = [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
+
+    # --------------------------------------------------
+    # 2️⃣ Fetch exchange px for all runners
+    # --------------------------------------------------
+    odds_map = get_runner_odds_map(pairs, session_token=session_token)
+
+    now = time.time()
+
+    # --------------------------------------------------
+    # 3️⃣ Build state per market
+    # --------------------------------------------------
+    markets: Dict[str, dict] = {}
+
+    for mid, sid in pairs:
+        odds = odds_map.get((mid, sid))
+        px = float(odds["px"]) if odds and odds.get("px") is not None else None
+
+        band = _classify_price(px)
+
+        m = markets.setdefault(mid, {
+            "updated_ts": now,
+            "runners": {},
+            "fav_sid": None,
+        })
+
+        m["runners"][sid] = {
+            "px": px,
+            "ltp": px,
+            "band": band,
+            "is_fav": False,
+        }
+
+    # --------------------------------------------------
+    # 4️⃣ Assign favourite per market
+    # --------------------------------------------------
+    for mid, data in markets.items():
+        fav_sid = None
+        fav_px = None
+
+        for sid, info in data["runners"].items():
+            px = info["px"]
+            if px is not None and (fav_px is None or px < fav_px):
+                fav_px = px
+                fav_sid = sid
+
+        if fav_sid:
+            data["fav_sid"] = fav_sid
+            data["runners"][fav_sid]["is_fav"] = True
+
+    # --------------------------------------------------
+    # 5️⃣ Commit to _STATE
+    # --------------------------------------------------
+    for mid, data in markets.items():
+        _STATE[mid] = data
+        _update_rank_state(mid, data["runners"])
+
+        for sid, info in data["runners"].items():
+            update_runner_state(
+                mid,
+                sid,
+                info.get("band", "UNKNOWN"),
+                info.get("px"),
+                bool(info.get("is_fav")),
+            )
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/market_monitor/monitor.py:ensure_for_markets

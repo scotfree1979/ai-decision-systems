@@ -393,7 +393,7 @@ class BusRouteSnapshot:
         # --------------------------------------------------
         try:
             from engines.market_monitor import monitor
-            monitor.refresh(window_mids)
+            monitor.refresh()
         except Exception:
             pass
 
@@ -860,36 +860,25 @@ class BusRouteSnapshot:
             self.bus_stops = {}
             return
 
-        # --------------------------------------------------
-        # Execution surface = ACTIVE only
-        # Identity surface (runner_pool / ctx_map) remains full
-        # --------------------------------------------------
-
-        eligible = []
-
-        for (mid, sid), ctx in self.ctx_map.items():
-
-            band = ctx.get("band")
-
-            if band == "ACTIVE":
-                eligible.append((mid, sid))
+        # ACTIVE-only execution surface
+        eligible = [
+            (mid, sid)
+            for (mid, sid), ctx in self.ctx_map.items()
+            if ctx.get("band") == "ACTIVE"
+        ]
 
         n = len(eligible)
 
+        self.bus_stops = {}
+
         if n == 0:
-            self.bus_stops = {}
+            # No active runners → no scheduling
             return
 
-        base = n // TICKS_PER_CYCLE
-        remainder = n % TICKS_PER_CYCLE
-
-        self.bus_stops = {}
-        idx = 0
-
         for tick in range(1, TICKS_PER_CYCLE + 1):
-            size = base + (1 if tick <= remainder else 0)
-            self.bus_stops[tick] = eligible[idx:idx + size]
-            idx += size
+            # Cycle through eligible list
+            idx = (tick - 1) % n
+            self.bus_stops[tick] = [eligible[idx]]
 
     # === PATCH END ==============================================================
 
