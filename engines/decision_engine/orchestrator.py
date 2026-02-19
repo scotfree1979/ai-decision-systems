@@ -3614,8 +3614,8 @@ def start_live_loop(*args, **kwargs):
         print(f"[blueprints] warn: {e}")
 
     try:
-        from engines.live.settlements import start_settlement_loop
-        start_settlement_loop(period_s=300)
+        from engines.live.settlements import start_all_settlement_services
+        start_all_settlement_services()
     except Exception as e:
         print(f"[settlements] warn: {e}")
 

@@ -3782,6 +3782,26 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                 f"[INVARIANT BREACH] parent MATCHED but child not constructed ref={cor}"
             )
 
+        # 🔑 TEMPORAL GUARANTEE: immediately enqueue child for placement
+        if child_id:
+            try:
+
+                enqueue_router_child(
+                    {
+                        "child_id": int(child_id),
+                        "parent_cor": str(cor),
+                        "side": hedge_side,
+                        "px": hedge_odds,
+                        "size": hedge_stake,
+                    },
+                    {}
+                )
+            except Exception as e:
+                _log_event(
+                    "ERROR",
+                    "live_router",
+                    f"enqueue child failed (non-fatal) ref={cor}: {e}"
+                )
 
 
 

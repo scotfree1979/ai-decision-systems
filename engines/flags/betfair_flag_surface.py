@@ -184,20 +184,36 @@ def get_race_status_cached(market_id: str) -> str | None:
 
     now = time.time()
 
-    # Refresh every 10 seconds
     if now - _LAST_FETCH > 10:
         try:
             app_key = get_app_key()
             token = resolve_token()
 
-            markets = load_today_markets()
+            # Use Betting API instead of Scores API
+            res = rpc(
+                BETTING_RPC,
+                app_key,
+                token,
+                "SportsAPING/v1.0/listMarketBook",
+                {
+                    "marketIds": [market_id],
+                    "priceProjection": {
+                        "priceData": ["EX_BEST_OFFERS"]
+                    }
+                }
+            )
 
-            for mid in markets:
-                event_id = get_event_id(app_key, token, mid)
-                if not event_id:
-                    continue
-                status = get_race_status(app_key, token, event_id)
-                _FLAG_CACHE[mid] = status
+            if res:
+                mb = res[0]
+                status = mb.get("status")
+                is_inplay = mb.get("isInplay", False)
+
+                if status == "CLOSED":
+                    _FLAG_CACHE[market_id] = "CLOSED"
+                elif is_inplay:
+                    _FLAG_CACHE[market_id] = "INPLAY"
+                else:
+                    _FLAG_CACHE[market_id] = "PRE"
 
             _LAST_FETCH = now
 
@@ -205,6 +221,7 @@ def get_race_status_cached(market_id: str) -> str | None:
             pass
 
     return _FLAG_CACHE.get(market_id)
+
 
 
 

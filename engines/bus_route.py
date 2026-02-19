@@ -360,7 +360,7 @@ class BusRouteSnapshot:
             con.close()
 
         # --------------------------------------------------
-        # 2️⃣ Remove markets strictly past off + grace
+        # 2️⃣ Determine sliding window (NEXT 5 from now)
         # --------------------------------------------------
 
         active_markets = []
@@ -379,8 +379,12 @@ class BusRouteSnapshot:
             except Exception:
                 continue
 
-            if now <= off_dt + timedelta(minutes=GRACE_MINUTES):
+            # Only keep future markets
+            if off_dt >= now:
                 active_markets.append(mid)
+
+        # Take NEXT FIVE
+        window_mids = active_markets[:WINDOW_SIZE]
 
         # --------------------------------------------------
         # 3️⃣ Take first 5 eligible markets
@@ -872,13 +876,25 @@ class BusRouteSnapshot:
         self.bus_stops = {}
 
         if n == 0:
-            # No active runners → no scheduling
             return
 
+        # --------------------------------------------------
+        # Even distribution across 10 bus stops
+        # --------------------------------------------------
+
+        per_stop = max(1, (n + TICKS_PER_CYCLE - 1) // TICKS_PER_CYCLE)
+
         for tick in range(1, TICKS_PER_CYCLE + 1):
-            # Cycle through eligible list
-            idx = (tick - 1) % n
-            self.bus_stops[tick] = [eligible[idx]]
+
+            runners = []
+
+            for i in range(per_stop):
+                idx = ((tick - 1) * per_stop + i) % n
+                runners.append(eligible[idx])
+
+            self.bus_stops[tick] = runners
+
+
 
     # === PATCH END ==============================================================
 
