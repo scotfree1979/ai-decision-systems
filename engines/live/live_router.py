@@ -3567,7 +3567,7 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 1) -> 
         # --------------------------------------------------
         app_key, token = _keys()
 
-        bet_id, _ = _place(
+        bet_id, detail = _place(
             app_key,
             token,
             str(row["marketId"]),
@@ -3580,19 +3580,38 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 1) -> 
         )
 
         # --------------------------------------------------
-        # 4️⃣ Stamp result
+        # 4️⃣ Stamp result (EXECUTION-CORRECT)
         # --------------------------------------------------
-        if bet_id:
+
+        if detail.get("status") == "SUCCESS":
+
+            # Case A — persistent order created
+            if bet_id:
+                _q_retry(cur, """
+                    UPDATE orders
+                       SET entry_status='PLACED',
+                           entry_bet_id=?
+                     WHERE id=?
+                """, (str(bet_id), int(child_id)))
+                con.commit()
+                return True
+
+            # Case B — matched instantly (no live order)
             _q_retry(cur, """
                 UPDATE orders
-                   SET entry_status='PLACED',
-                       entry_bet_id=?
+                   SET entry_status='MATCHED',
+                       exit_status='MATCHED',
+                       closed_at=datetime('now','utc')
                  WHERE id=?
-            """, (str(bet_id), int(child_id)))
+            """, (int(child_id),))
             con.commit()
+
             return True
 
-        # Betfair failure → mark FAILED
+
+        # --------------------------------------------------
+        # Betfair explicit failure
+        # --------------------------------------------------
         _q_retry(cur, """
             UPDATE orders
                SET entry_status='FAILED'
@@ -3601,13 +3620,6 @@ def _attempt_place_child_with_retry(child_id: int, *, max_attempts: int = 1) -> 
         con.commit()
         return False
 
-    except Exception as e:
-        _log_event(
-            "ERROR",
-            "live_router",
-            f"child placement failed id={child_id}: {e}"
-        )
-        return False
 
     finally:
         try:
