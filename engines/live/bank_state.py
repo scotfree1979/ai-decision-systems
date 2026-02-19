@@ -449,17 +449,32 @@ def _reconcile_market_exposure_live():
     con.row_factory = None
     cur = con.cursor()
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: reserved_rows = cur.execute("""
+# 🧩 ACTION: REPLACE — use bank_ledger as authoritative reservation surface
+# 📆 PATCHED: 2026-02-19 — Floor reconciliation now ledger-driven
+#
+# WHY:
+# - orders.required_exposure is router pessimism
+# - bank_ledger.reserved_amount is true live reservation surface
+# - Floor must reconcile against ledger only
+#
+# INVARIANT:
+#   Σ ledger.reserved_amount == Σ _ENGINE_USED == _OPEN_EXPOSURE
+# ======================================================================================================
+
     reserved_rows = cur.execute("""
         SELECT
-            marketId,
-            SUM(required_exposure)
-        FROM orders
-        WHERE role='PARENT'
-          AND entry_status='MATCHED'
-          AND COALESCE(exposure_released,0)=0
-          AND date(opened_at)=date('now','utc')
-        GROUP BY marketId
+            o.marketId,
+            SUM(l.reserved_amount)
+        FROM bank_ledger l
+        JOIN orders o ON o.id = l.parent_id
+        WHERE l.active = 1
+          AND date(o.opened_at)=date('now','utc')
+        GROUP BY o.marketId
     """).fetchall()
+
 
     con.close()
 
@@ -495,15 +510,32 @@ def _reconcile_market_exposure_live():
             con2 = open_auto_db(rw=False)
             con2.row_factory = None
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: engine_rows = con2.execute("""
+# 🧩 ACTION: REPLACE — per-engine allocation from ledger, not orders
+# 📆 PATCHED: 2026-02-19 — Engine refund proportional to ledger reservation
+#
+# WHY:
+# - orders.required_exposure no longer authoritative
+# - ledger holds current reserved_amount after partial refunds
+#
+# INVARIANT:
+#   Refund proportion = engine_reserved / total_market_reserved
+# ======================================================================================================
+
             engine_rows = con2.execute("""
-                SELECT engine, SUM(required_exposure)
-                FROM orders
-                WHERE role='PARENT'
-                  AND entry_status='MATCHED'
-                  AND marketId=?
-                  AND date(opened_at)=date('now','utc')
-                GROUP BY engine
+                SELECT
+                    l.engine,
+                    SUM(l.reserved_amount)
+                FROM bank_ledger l
+                JOIN orders o ON o.id = l.parent_id
+                WHERE l.active = 1
+                  AND o.marketId = ?
+                  AND date(o.opened_at)=date('now','utc')
+                GROUP BY l.engine
             """, (mid,)).fetchall()
+
 
             con2.close()
 
