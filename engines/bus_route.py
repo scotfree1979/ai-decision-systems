@@ -1648,7 +1648,7 @@ def get_legacy_parent_odds_snapshot(session_token=None):
                 p.entry_stake AS entry_stake
             FROM orders p
             WHERE p.role = 'PARENT'
-              AND p.engine = 'LEGACY'
+              AND p.engine IN ('LEGACY','MSC_EXPLORATORY')
               AND p.entry_status = 'MATCHED'
               AND date(p.opened_at) = date('now','utc')
             ORDER BY p.opened_at ASC
@@ -2184,7 +2184,7 @@ if __name__ == "__main__":
                 p.entry_odds
             FROM orders p
             WHERE p.role = 'PARENT'
-              AND p.engine = 'LEGACY'
+              AND p.engine IN ('LEGACY','MSC_EXPLORATORY')
               AND p.entry_status = 'MATCHED'
               AND date(p.opened_at) = date('now','utc')
             ORDER BY p.opened_at ASC
