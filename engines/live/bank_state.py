@@ -113,25 +113,13 @@ def _restore_risk_bank_from_market_exposure():
         f"→ risk_bank={risk_bank:.2f}"
     )
 
-
-# ======================================================================
+# === PATCH START ============================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🧩 ADD: exposure rehydration on restart
-# 📆 PATCHED: 2026-04-12 — restart-safe exposure rebuild
-# ======================================================================
+# 🔎 REPLACE: rebuild_live_exposure_from_db
+# 📆 PATCHED: 2026-04-19 — rebuild from persistent ledger
+# ============================================================================
 
 def rebuild_live_exposure_from_db():
-    """
-    Reconstruct engine exposure + open exposure from DB.
-
-    MUST be called at startup AFTER init_from_budget_allocations().
-
-    Rules:
-    - Only MATCHED parents
-    - Only exposure_released = 0
-    - Use required_exposure (authoritative)
-    - Do NOT mutate pots
-    """
 
     global _ENGINE_USED, _OPEN_EXPOSURE
 
@@ -142,33 +130,27 @@ def rebuild_live_exposure_from_db():
     cur = con.cursor()
 
     rows = cur.execute("""
-        SELECT engine,
-               SUM(required_exposure)
-        FROM orders
-        WHERE role='PARENT'
-          AND entry_status='MATCHED'
-          AND COALESCE(exposure_released,0)=0
-          AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
-          AND date(opened_at)=date('now','utc')
-        GROUP BY engine
+        SELECT engine, SUM(reserved_amount)
+          FROM bank_ledger
+         WHERE active = 1
+         GROUP BY engine
     """).fetchall()
 
     con.close()
 
     with _LOCK:
-        # reset runtime exposure only
         _ENGINE_USED = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
         _OPEN_EXPOSURE = 0.0
 
         for engine, total in rows:
             amount = _clamp(total or 0.0)
-
             _ENGINE_USED[engine] = amount
             _OPEN_EXPOSURE += amount
 
-        print(
-            f"[BankState] exposure rebuilt | open={_OPEN_EXPOSURE:.2f}"
-        )
+        print(f"[BankState] exposure rebuilt (ledger) | open={_OPEN_EXPOSURE:.2f}")
+
+# === PATCH END ==============================================================
+
 
 def _compute_market_floor_from_betfair_surface():
     """
@@ -542,6 +524,37 @@ def _reconcile_market_exposure_live():
                     continue
 
                 _ENGINE_USED[engine] = _clamp(used - refund)
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: inside refund loop
+# 📆 PATCHED: 2026-04-19 — ledger refund adjustment
+# ============================================================================
+
+                # Adjust ledger proportionally
+                try:
+                    from engines.config_paths import open_auto_db
+                    con3 = open_auto_db(rw=True)
+                    cur3 = con3.cursor()
+
+                    cur3.execute("""
+                        UPDATE bank_ledger
+                           SET reserved_amount = reserved_amount - ?,
+                               updated_at = datetime('now','utc')
+                         WHERE engine = ?
+                           AND active = 1
+                    """, (
+                        float(refund),
+                        engine
+                    ))
+
+                    con3.commit()
+                    con3.close()
+
+                except Exception:
+                    pass
+
+# === PATCH END ==============================================================
+
                 total_refund += refund
 
         if total_refund > 0:
@@ -954,6 +967,39 @@ def on_parent_placed(
             f"amount={amount:.2f} "
             f"open={_OPEN_EXPOSURE:.2f}"
         )
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: inside on_parent_placed (after _ENGINE_USED update)
+# 📆 PATCHED: 2026-04-19 — persistent ledger reservation
+# ============================================================================
+
+        # --------------------------------------------------
+        # Persist reservation in ledger
+        # --------------------------------------------------
+        try:
+            from engines.config_paths import open_auto_db
+            con2 = open_auto_db(rw=True)
+            cur2 = con2.cursor()
+
+            cur2.execute("""
+                INSERT OR REPLACE INTO bank_ledger
+                (parent_id, engine, reserved_amount, active, updated_at)
+                VALUES (?, ?, ?, 1, datetime('now','utc'))
+            """, (
+                int(parent_id),
+                engine,
+                float(amount),
+            ))
+
+            con2.commit()
+            con2.close()
+
+        except Exception:
+            pass
+
+# === PATCH END ==============================================================
+
 
     # --------------------------------------------------
     # 2️⃣ AUTHORITATIVE MARKET RECONCILIATION
