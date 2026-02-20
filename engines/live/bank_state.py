@@ -143,7 +143,7 @@ def rebuild_live_exposure_from_db():
         _OPEN_EXPOSURE = 0.0
 
         for engine, total in rows:
-            amount = _clamp(total or 0.0)
+            amount = _clamp(max(0.0, total or 0.0))
             _ENGINE_USED[engine] = amount
             _OPEN_EXPOSURE += amount
 
@@ -436,9 +436,33 @@ def _reconcile_market_exposure_live():
     # --------------------------------------------------
     # 1️⃣ Authoritative Betfair floor
     # --------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: if not floor_rows:
+# 🧩 ACTION: REMOVE early return on empty Betfair surface
+# 📆 PATCHED: 2026-02-19 — Fix exposure not collapsing after markets finish
+#
+# WHY:
+# - floor_rows empty means true_floor = 0
+# - Previously returned early and skipped refund logic
+# - Caused exposure to remain inflated (e.g. 599.80)
+#
+# NEW BEHAVIOUR:
+# - Empty floor_rows ⇒ treat as floor_by_market = {}
+# - Refund entire reserved surface
+# ======================================================================================================
+
     floor_rows = _compute_market_floor_from_betfair_surface()
-    if not floor_rows:
-        return []
+
+    # DO NOT early-return here.
+    # Empty floor_rows means floor = 0.
+    # Allow refund logic to process.
+
+    floor_by_market = {
+        r["marketId"]: float(r["true_market_exposure"])
+        for r in floor_rows
+    }
+
 
     # --------------------------------------------------
     # 2️⃣ Compute reserved per market from runtime state
@@ -556,21 +580,27 @@ def _reconcile_market_exposure_live():
                     continue
 
                 _ENGINE_USED[engine] = _clamp(used - refund)
-# === PATCH START ============================================================
+# ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: inside refund loop
-# 📆 PATCHED: 2026-04-19 — ledger refund adjustment
-# ============================================================================
+# 🔎 SEARCH: UPDATE bank_ledger
+# 📆 PATCHED: 2026-02-19 — Clamp ledger to prevent negative reserves
+#
+# PURPOSE:
+# - Prevent ledger from going negative
+# - Ledger must mirror live reserved surface only
+# - Ledger is memory, not authority
+# ======================================================================================================
 
-                # Adjust ledger proportionally
                 try:
                     from engines.config_paths import open_auto_db
                     con3 = open_auto_db(rw=True)
                     cur3 = con3.cursor()
 
+                    # Clamp at zero
                     cur3.execute("""
                         UPDATE bank_ledger
-                           SET reserved_amount = reserved_amount - ?,
+                           SET reserved_amount =
+                               MAX(0, reserved_amount - ?),
                                updated_at = datetime('now','utc')
                          WHERE engine = ?
                            AND active = 1
@@ -585,12 +615,47 @@ def _reconcile_market_exposure_live():
                 except Exception:
                     pass
 
-# === PATCH END ==============================================================
 
                 total_refund += refund
 
         if total_refund > 0:
             _OPEN_EXPOSURE = _clamp(_OPEN_EXPOSURE - total_refund)
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: end of _reconcile_market_exposure_live()
+# 📆 PATCHED: 2026-02-19 — Force ledger to mirror in-memory reserved surface
+#
+# PURPOSE:
+# - Ledger must reflect _ENGINE_USED exactly
+# - Ledger never computes exposure
+# - Ledger only stores state for restart recovery
+# ======================================================================================================
+
+        try:
+            from engines.config_paths import open_auto_db
+            con4 = open_auto_db(rw=True)
+            cur4 = con4.cursor()
+
+            # Reset ledger to match live engine used
+            for engine, used in _ENGINE_USED.items():
+                cur4.execute("""
+                    UPDATE bank_ledger
+                       SET reserved_amount = ?,
+                           updated_at = datetime('now','utc')
+                     WHERE engine = ?
+                       AND active = 1
+                """, (
+                    float(used),
+                    engine
+                ))
+
+            con4.commit()
+            con4.close()
+
+        except Exception:
+            pass
+
 
     return floor_rows
 
