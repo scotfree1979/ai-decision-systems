@@ -308,6 +308,22 @@ def get_v7_inplay_snapshot(market_id: str):
     con.row_factory = sqlite3.Row
 
     try:
+# ======================================================================================================
+# 📍 TARGET: engines/api_tools.py
+# 🔎 SEARCH: def get_v7_inplay_snapshot
+# 🧩 ACTION: REPLACE SQL — derive mto_minutes from bets.marketStartTime
+# 📆 PATCHED: 2026-02-XX — Fix MSC_INPLAY timing source (DB-authoritative)
+#
+# PURPOSE:
+# - Remove dependency on v_mastery_intel_v7.mto_minutes
+# - Use bets.marketStartTime as authoritative time source
+# - Ensure InPlay fires reliably post-off
+#
+# INVARIANT:
+# - Timing comes from bets DB only
+# - Intelligence remains optional
+# ======================================================================================================
+
         rows = con.execute("""
             SELECT
                 oc.marketId,
@@ -323,7 +339,10 @@ def get_v7_inplay_snapshot(market_id: str):
                 mi.drift_pct                           AS drift_pct,
                 mi.actual_drift_pct                    AS actual_drift_pct,
                 mi.reversal_flag                       AS reversal_flag,
-                mi.mto_minutes                         AS mto_minutes,
+
+                -- === AUTHORITATIVE TIME SOURCE ===
+                (julianday(b.marketStartTime) - julianday('now','utc')) * 1440.0
+                                                        AS mto_minutes,
 
                 -- === IN-PLAY POSITION ===
                 pos.pos_inplay                         AS pos_inplay,
@@ -331,6 +350,9 @@ def get_v7_inplay_snapshot(market_id: str):
                 pos.drift_ratio                        AS drift_ratio
 
             FROM inbound_oc_cache oc
+
+            JOIN bets b
+              ON b.marketId = oc.marketId
 
             LEFT JOIN v_mastery_intel_v7 mi
                    ON mi.marketId = oc.marketId
@@ -345,6 +367,7 @@ def get_v7_inplay_snapshot(market_id: str):
 
             ORDER BY odds ASC
         """, (str(market_id),)).fetchall()
+
 
     finally:
         con.close()
