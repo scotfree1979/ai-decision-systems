@@ -179,16 +179,39 @@ class InPlayEngine:
                 plans.extend(self._emit_back_ladder(ctx, to_price))
                 self.triggered[key] = True
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: return {
+# 🛠 ACTION: Replace batch return with BUS-native flat emission
+# 📆 PATCHED: 2026-02-20 — Fix Phase 3 break (remove nested plans contract)
+#
+# PURPOSE:
+# - BUS expects flat plan objects
+# - Nested "plans" payload caused missing direction/side error
+# - Restore compatibility with existing routing system
+#
+# INVARIANT:
+# - One plan returned per tick
+# - No nested batch payload
+# ==============================================================================
+
         if not plans:
             return self._no_signal("armed_not_triggered")
+
+        # Emit first valid ladder level per tick (BUS-native contract)
+        first = plans[0]
 
         return {
             "enter": True,
             "engine": "MSC_INPLAY",
-            "batch": True,
-            "plans": plans,
-            "why": "inplay_batch_trigger",
+            "role": first["role"],
+            "direction": first["direction"],
+            "px": first["px"],
+            "target_ticks": first["target_ticks"],
+            "why": first["why"],
         }
+
+# === PATCH END ==============================================================
 
     # ----------------------------
     # Ladder emitters (BATCH)
