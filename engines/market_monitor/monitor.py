@@ -34,7 +34,8 @@ _STATE.setdefault("fav_changed_ts", 0.0)
 _STATE.setdefault("rank_prev", {})         # {mid: [sid1, sid2, ...]}
 _STATE.setdefault("rank_now", {})          # {mid: [sid1, sid2, ...]}
 _STATE.setdefault("crossovers", {})        # {mid: {sid: {...}}}
-
+_STATE.setdefault("initial_px", {})
+_STATE.setdefault("last_px", {})
 
 
 try:
