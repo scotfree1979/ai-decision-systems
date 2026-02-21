@@ -64,7 +64,11 @@ def _structural_cycle():
     from engines.market_monitor.monitor import _STATE
 
     for mid, state in _STATE.items():
-        runners = state.get("runners", {})
+
+        if not isinstance(state, dict):
+            continue
+
+        runners = state.get("runners") or {}
 
         # compute rank ordering
         sorted_runners = sorted(

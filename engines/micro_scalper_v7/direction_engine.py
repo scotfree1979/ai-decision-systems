@@ -23,6 +23,23 @@ from typing import Dict, Any
 import math
 
 # ─────────────────────────────────────────────────────────────
+# STRUCTURAL TREND MEMORY (GLOBAL)
+# ─────────────────────────────────────────────────────────────
+
+_STRUCT_STATE = {}
+
+def _get_struct_state(mid: str, sid: str):
+    key = (str(mid), str(sid))
+    return _STRUCT_STATE.setdefault(key, {
+        "axis_side": None,          # ABOVE / BELOW
+        "axis_crosses": 0,
+        "dominant_axis": None,
+        "band": None,
+        "net_ticks": 0.0,
+        "dominant_ticks": None,
+    })
+
+# ─────────────────────────────────────────────────────────────
 # SAFE HELPERS
 # ─────────────────────────────────────────────────────────────
 def _f(x, d=0.0):
@@ -400,12 +417,13 @@ def refine_mode_with_structure(ctx: Dict[str, Any], direction: str | None, base_
 # ─────────────────────────────────────────────────────────────
 def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
-    # Layer 1 — Original MSC
+    mid = ctx.get("marketId")
+    sid = ctx.get("selectionId")
+
     win_prob = compute_win_probability(ctx)
-    base_direction = compute_direction(win_prob, ctx)
     base_mode = compute_mode(win_prob, ctx)
 
-    # Layer 2 — Structural Signals
+    # Structural signals
     crossover = get_crossover_signal_direction(ctx)
     trend     = get_trend_signal(ctx)
     bias      = get_bias_signal(ctx)
@@ -414,33 +432,79 @@ def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
     match     = get_match_surface_signal(ctx)
     opp       = get_opportunity_signal(ctx)
 
-    # --------------------------------------------------
-    # STRUCTURAL AUTHORITY LAYER (ANCHOR FIRST)
-    # --------------------------------------------------
-
     anchor_px  = _f(ctx.get("anchor_odd"))
     current_px = _f(ctx.get("px"))
+    band       = ctx.get("band")
+
+    state = _get_struct_state(mid, sid)
 
     direction = None
 
-    # 1️⃣ Crossover overrides everything
+    # ==================================================
+    # 1️⃣ RANK CROSSOVER (ABSOLUTE AUTHORITY)
+    # ==================================================
     if crossover:
         direction = crossover
+        state["dominant_axis"] = "ABOVE" if direction == "LAY->BACK" else "BELOW"
+        state["axis_crosses"] = 0
 
     else:
 
-        # 2️⃣ Anchor displacement backbone
+        # ==================================================
+        # 2️⃣ AXIS STRUCTURE (ANCHOR CROSS LOGIC)
+        # ==================================================
         if anchor_px > 0 and current_px > 0:
 
-            delta = (current_px - anchor_px) / anchor_px
+            delta = current_px - anchor_px
+            axis_side = "ABOVE" if delta > 0 else "BELOW"
 
-            if delta > 0.02:
-                direction = "LAY->BACK"
-            elif delta < -0.02:
-                direction = "BACK->LAY"
+            if state["axis_side"] is None:
+                state["axis_side"] = axis_side
 
-        # 3️⃣ Structural vote fallback
-        if not direction:
+            elif state["axis_side"] != axis_side:
+                state["axis_crosses"] += 1
+                state["axis_side"] = axis_side
+
+                # Harden after second cross
+                if state["axis_crosses"] >= 2:
+                    state["dominant_axis"] = axis_side
+
+            # Track net displacement in ticks
+            tick_delta = (current_px - anchor_px) / max(anchor_px, 0.0001)
+            state["net_ticks"] = tick_delta
+
+            if abs(tick_delta) > 0.02:
+                state["dominant_ticks"] = "ABOVE" if tick_delta > 0 else "BELOW"
+
+        # ==================================================
+        # 3️⃣ BAND CROSS HARDENER
+        # ==================================================
+        prev_band = state.get("band")
+
+        if prev_band and band and prev_band != band:
+            # Any band transition confirms trend direction
+            if state["axis_side"]:
+                state["dominant_axis"] = state["axis_side"]
+                state["axis_crosses"] = 0
+
+        state["band"] = band
+
+        # ==================================================
+        # 4️⃣ DETERMINE DOMINANT TREND
+        # ==================================================
+        dom = None
+
+        # Band break stronger than axis
+        if state["dominant_axis"]:
+            dom = state["dominant_axis"]
+
+        elif state["dominant_ticks"]:
+            dom = state["dominant_ticks"]
+
+        # ==================================================
+        # 5️⃣ FALLBACK STRUCTURAL VOTE (NO BASE_DIRECTION)
+        # ==================================================
+        if not dom:
             structural_vote = resolve_vote_direction([
                 trend,
                 bias,
@@ -449,9 +513,29 @@ def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
                 match,
                 opp,
             ])
-            direction = structural_vote or base_direction
+
+            if structural_vote == "LAY->BACK":
+                dom = "ABOVE"
+            elif structural_vote == "BACK->LAY":
+                dom = "BELOW"
+
+        # ==================================================
+        # 6️⃣ FINAL DIRECTION
+        # ==================================================
+        if dom == "ABOVE":
+            direction = "LAY->BACK"
+        elif dom == "BELOW":
+            direction = "BACK->LAY"
+        else:
+            direction = None
 
     direction = apply_boundary_buffer(ctx, direction)
+
+    # ==================================================
+    # TREND GATE — DO NOT FIRE UNTIL TREND EXISTS
+    # ==================================================
+    if not state.get("dominant_axis") and not state.get("dominant_ticks"):
+        direction = None
 
     mode = refine_mode_with_structure(ctx, direction, base_mode)
 
