@@ -8,7 +8,7 @@ DEFAULT_BANDS = {
     "ACTIVE_MIN": 1.50,
     "ACTIVE_MAX": 9.00,      # ACTIVE:   <= 9
     "PASSIVE_MAX": 12.00,    # PASSIVE:  9–12
-    "EXTENDED_MAX": 15.00,   # EXTENDED: 12–15
+    "EXTENDED_MAX": 20.00,   # EXTENDED: 12–20
 }
 
 
@@ -105,7 +105,15 @@ def update_runner_state(mid: str, sid: str, band: str, px: float | None, is_fav:
             pass
 # === PATCH END ===
 
+    # store initial price once
+    init_map = _STATE["initial_px"].setdefault(mid, {})
+    if sid not in init_map and px is not None:
+        init_map[sid] = float(px)
 
+    # store last price
+    if px is not None:
+        _STATE["last_px"].setdefault(mid, {})[sid] = float(px)
+  
     # favourite change
     prev_fav = _STATE.get("fav_sid")
     if is_fav and prev_fav != sid:

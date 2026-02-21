@@ -989,17 +989,23 @@ def _router_enforce_status_authority():
     # ALWAYS compute live state first
     live, inv = _collect_router_live_state()
 
-    # Snapshot router status (for spam suppression only)
+    # ==================================================
+    # REPORTING — AUTHORITY + LIVE STATE (FIXED)
+    # ==================================================
+
     global _ROUTER_STATUS_LAST
+
     status_snapshot = tuple(
         _ROUTER_STATUS[k] for k in sorted(_ROUTER_STATUS.keys())
     )
 
+    # 1️⃣ Authority report — only when changed
     if status_snapshot != _ROUTER_STATUS_LAST:
         _print_router_report(_ROUTER_STATUS)
-        _print_router_live_state(live, inv)
-
         _ROUTER_STATUS_LAST = status_snapshot
+
+    # 2️⃣ Live state report — ALWAYS print
+    _print_router_live_state(live, inv)
 
     # Snapshot live DB state separately
     global _ROUTER_LIVE_LAST

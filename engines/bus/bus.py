@@ -3329,36 +3329,37 @@ class DecisionBus:
                         f"conf={ctx.get('risk_confidence')} "
                         f"raw={raw_stake:.2f}"
                     )
-
-
-
-# ======================================================================================================
+# === PATCH START ==============================================================
 # 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: # --------------------------------------------------
-# 🔎 SEARCH: # HARD VALIDATION
-# 🧩 ACTION: INSERT (pre–_apply_bus_stake_gate)
-# 📆 PATCHED: 2026-01-23 — High-odds stake dampening
+# 🔎 SEARCH: # HIGH-ODDS STAKE DAMPENING (BUS AUTHORITY)
+# 🛠 ACTION: Restrict dampening to non-MSC_INPLAY engines
+# 📆 PATCHED: 2026-04-21 — Exclude MSC_INPLAY from half-stake guard
 #
-# RATIONALE:
-# - Large losses originated from high-odds executions
-# - Odds > 8 exhibit nonlinear downside risk
-# - Dampening belongs in BUS (final sizing authority)
+# PURPOSE:
+# - Preserve high-odds dampening globally
+# - Allow MSC_INPLAY full ladder exposure
 #
 # INVARIANT:
-# - Applies to ALL engines uniformly
-# - Executes AFTER raw stake computation
-# - Executes BEFORE final BUS stake gate
-# ======================================================================================================
+# - MSC_INPLAY never halved
+# - All other engines still halved above px>8
+# ==============================================================================
 
                 # --------------------------------------------------
                 # 🎚️ HIGH-ODDS STAKE DAMPENING (BUS AUTHORITY)
                 # --------------------------------------------------
-                if px > 8.0:
+                if engine != "MSC_INPLAY" and px > 8.0:
                     raw_stake = float(raw_stake) * 0.5
                     plan["_bus_note"] = "high_odds_half_stake"
                     _record_reason(engine_report, engine, "high_odds_half_stake")
 
+                # === PATCH END ==============================================================
 
+                # --------------------------------------------
+                # ENGINE FLOOR ENFORCEMENT (FINAL RAW STAKE)
+                # --------------------------------------------
+                engine_min = ENGINE_MIN.get(engine)
+                if engine_min is not None:
+                    raw_stake = max(float(raw_stake), float(engine_min))
 
                 # ==================================================
                 # 🔒 FINAL BUS STAKE GATE (ABSOLUTE AUTHORITY)

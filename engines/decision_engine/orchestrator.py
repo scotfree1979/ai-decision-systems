@@ -3711,8 +3711,13 @@ def start_live_loop(*args, **kwargs):
     start_context_observer()
 
     # --------------------------------------------------------------
-    # 6E.1) START FEEDBACK ASSIMILATOR (RIVER → POLICY)
+    # 6E.1) START STRUCTURAL DIRECTION LOOP
     # --------------------------------------------------------------
+
+    from engines.micro_scalper_v7.structural_direction_loop import start_structural_direction_loop
+
+    start_structural_direction_loop(interval_s=5)
+
 
     # --------------------------------------------------------------
     # 6E.2) START FEEDBACK ASSIMILATOR (RIVER)
@@ -3724,9 +3729,12 @@ def start_live_loop(*args, **kwargs):
         print(f"[ASSIMILATOR][WARN] failed to start: {e}")
 
     # --------------------------------------------------------------
-    # 6F) START CHILD PROCESS
+    # 6F) START INPLAY MONITORING
     # --------------------------------------------------------------
- 
+    from engines.inplay.inplay_flag_helper import start_inplay_authority_report_loop
+
+    start_inplay_authority_report_loop()
+
 
     # --------------------------------------------------------------
     # 6G) LIVE ROUTER BUDGET ALLOCATIONS

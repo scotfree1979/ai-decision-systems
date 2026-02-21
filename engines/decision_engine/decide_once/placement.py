@@ -259,7 +259,7 @@ def placement_affordable(plan, ctx):
     engine = plan["engine"]
     required = compute_required_exposure(plan)
 
-    ok = bank_state.can_place(engine, required)
+    ok = bank_state.can_place(engine, plan)
     return ok, required
 
 

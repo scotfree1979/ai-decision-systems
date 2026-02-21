@@ -414,22 +414,45 @@ def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
     match     = get_match_surface_signal(ctx)
     opp       = get_opportunity_signal(ctx)
 
+    # --------------------------------------------------
+    # STRUCTURAL AUTHORITY LAYER (ANCHOR FIRST)
+    # --------------------------------------------------
+
+    anchor_px  = _f(ctx.get("anchor_odd"))
+    current_px = _f(ctx.get("px"))
+
+    direction = None
+
+    # 1️⃣ Crossover overrides everything
     if crossover:
         direction = crossover
+
     else:
-        direction = resolve_vote_direction([
-            trend,
-            bias,
-            fav,
-            vol,
-            match,
-            opp,
-            base_direction,
-        ])
+
+        # 2️⃣ Anchor displacement backbone
+        if anchor_px > 0 and current_px > 0:
+
+            delta = (current_px - anchor_px) / anchor_px
+
+            if delta > 0.02:
+                direction = "LAY->BACK"
+            elif delta < -0.02:
+                direction = "BACK->LAY"
+
+        # 3️⃣ Structural vote fallback
+        if not direction:
+            structural_vote = resolve_vote_direction([
+                trend,
+                bias,
+                fav,
+                vol,
+                match,
+                opp,
+            ])
+            direction = structural_vote or base_direction
 
     direction = apply_boundary_buffer(ctx, direction)
 
-    # Mode refinement
     mode = refine_mode_with_structure(ctx, direction, base_mode)
 
     entry_ticks = compute_entry_ticks(mode)

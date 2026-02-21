@@ -7,7 +7,7 @@
 
 from typing import Dict, Any, List, Optional
 import time
-
+from datetime import datetime, timezone
 from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 from engines.mastery.event_sink import emit
 
@@ -108,23 +108,126 @@ class InPlayEngine:
 
         key = (mid, sid)
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: race_status = get_race_status_cached(mid)
+# 🛠 ACTION: REPLACE OFF FLAG WITH AUTHORITY LAYER
+# 📆 PATCHED: 2026-02-20 — Wire V7 Authority Layer Into InPlay
+#
+# PURPOSE:
+# - Replace Betfair OFF flag dependency
+# - Use inplay_flag_helper authoritative logic
+# - Primitive fallback already inside helper
+#
+# INVARIANT:
+# - If V7 data present → authoritative fires
+# - If V7 data missing → primitive fires
+# - InPlay must now fire
+# ==============================================================================
+
         # --------------------------------------------------
-        # Race status detection (Betfair authoritative)
+        # Authoritative InPlay Detection (V7 + Primitive)
         # --------------------------------------------------
 
-        from engines.flags.betfair_flag_surface import get_race_status_cached
+        from engines.inplay.inplay_flag_helper import build_race_intelligence
+        from engines.config_paths import open_bets_db
+        import sqlite3
 
-        race_status = get_race_status_cached(mid)
+        # fetch marketStartTime
+        market_start_ts = None
+        try:
+            con = open_bets_db(rw=False)
+            row = con.execute("""
+                SELECT marketStartTime
+                FROM bets
+                WHERE marketId = ?
+                LIMIT 1
+            """, (mid,)).fetchone()
+            con.close()
 
-        # Hard stop: finished market
-        if race_status == "FINISHED":
-            return self._no_signal("race_finished")
+            if row and row[0]:
+                market_start_ts = datetime.fromisoformat(
+                    row[0].replace("Z","")
+                ).replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
 
-        # Arm only after OFF
-        in_play = (race_status == "OFF")
+        if not market_start_ts:
+            return self._no_signal("no_market_start_time")
+
+        # build price map for this market only
+        runner_prices = {}
+        try:
+            from tools.betfair_runner_trend_surface import _TREND_CACHE
+            for (m, s), v in list(_TREND_CACHE.items()):
+                if str(m) == mid:
+                    runner_prices[str(s)] = v.get("px")
+        except Exception:
+            return self._no_signal("no_trend_surface")
+
+        if not runner_prices:
+            return self._no_signal("no_runner_prices")
+
+        intel = build_race_intelligence(
+            mid,
+            market_start_ts,
+            runner_prices
+        )
+
+        in_play = intel["market"]["is_inplay"]
 
         if not in_play:
-            return self._no_signal("waiting_for_off_flag")
+            return self._no_signal("waiting_for_authority_flag")
+
+# === PATCH END ==============================================================
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: trend = get_runner_trend(mid, sid)
+# 🛠 ACTION: Insert authority influence layer
+# 📆 PATCHED: 2026-02-20 — Authority-Based Decision Influence
+#
+# PURPOSE:
+# - Use helper collapse intelligence to influence decisions
+# - Primitive logic becomes fallback
+# - V7 overlay controls selection priority
+#
+# INVARIANT:
+# - If V7 available → only top collapse candidate allowed
+# - If no V7 → primitive continues unchanged
+# ==============================================================================
+
+        # --------------------------------------------------
+        # Authority Influence Layer
+        # --------------------------------------------------
+
+        authoritative_runners = intel.get("runners", [])
+        authority_available = any(
+            r.get("role") is not None or
+            r.get("drift_speed") is not None or
+            r.get("structure_signals")
+            for r in authoritative_runners
+        )
+
+        if authority_available:
+
+            top = authoritative_runners[0]
+
+            # Only allow top collapse candidate to trade
+            if str(top.get("selectionId")) != sid:
+                return self._no_signal("not_top_collapse_candidate")
+
+            # Require minimum collapse strength
+            if top.get("collapse_score", 0) < 1.5:
+                return self._no_signal("collapse_score_too_low")
+
+            # Avoid trading strong leaders unless collapse extreme
+            role = top.get("role")
+            if role == "LEADING" and top.get("collapse_score", 0) < 2.5:
+                return self._no_signal("leader_not_collapsing")
+
+# === PATCH END ============================================================== 
+
 
 
         # --------------------------------------------------
@@ -166,6 +269,57 @@ class InPlayEngine:
             return self._no_signal("already_triggered")
 
         plans: List[Dict[str, Any]] = []
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 INSERT BEFORE: # ---- LAY ladder trigger ----
+# 📆 PATCHED: 2026-02-20 — Secondary Harvest Boundary (15–20 zone)
+#
+# PURPOSE:
+# - Harvest money from clearly losing runners
+# - Flat lay £10
+# - Mutually exclusive with primary ladder
+# - One-shot per runner
+# ==============================================================================
+
+        HARVEST_MIN = 15.0
+        HARVEST_MAX = 20.0
+        HARVEST_STAKE = 10.0
+
+        # Secondary harvest condition
+        if (
+            HARVEST_MIN <= px <= HARVEST_MAX
+            and not self.triggered.get(key)
+            and not getattr(self, "harvested", {}).get(key)
+        ):
+
+            # Avoid harvesting leaders
+            role = None
+            if authority_available:
+                role = top.get("role")
+
+            if role not in ("LEADING", "PROMINENT"):
+
+                # Mark as harvested
+                if not hasattr(self, "harvested"):
+                    self.harvested = {}
+
+                self.harvested[key] = True
+                self.triggered[key] = True  # prevent primary ladder later
+
+                return {
+                    "enter": True,
+                    "engine": "MSC_INPLAY",
+                    "role": "PARENT",
+                    "direction": "LAY->BACK",
+                    "px": px,
+                    "stake": HARVEST_STAKE,
+                    "target_ticks": 100,  # deeper scalp
+                    "why": "inplay_secondary_harvest",
+                }
+
+# === PATCH END ==============================================================
+
 
         # ---- LAY ladder trigger ----
         if self.armed_lay.get(key):
