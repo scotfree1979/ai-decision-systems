@@ -1098,6 +1098,17 @@ class DecisionBus:
         for ctx in self._route_ctx_map.values():
             _normalize_ctx_enums(ctx)
   
+        from engines.micro_scalper_v7.direction_engine import compute_msc_decision
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+            try:
+                dec = compute_msc_decision(ctx)
+                if isinstance(dec, dict):
+                    d = dec.get("direction")
+                    ctx["direction"] = d
+                    ctx["msc_direction"] = d
+            except Exception:
+                pass
         # === PATCH END ==============================================================
 
 
@@ -2100,6 +2111,35 @@ class DecisionBus:
         ctx["anchor_entry_stake"] = None
         ctx["anchor_engine"] = None
 
+        # --------------------------------------------------
+        # 🔑 ANCHOR ODD (STRUCTURAL AXIS) — BUS AUTHORITY
+        # --------------------------------------------------
+        try:
+            from engines.config_paths import open_bets_db
+
+            con_b = open_bets_db(rw=False)
+            row_b = con_b.execute(
+                """
+                SELECT anchor_odd
+                FROM bets
+                WHERE marketId = ?
+                  AND selectionId = ?
+                LIMIT 1
+                """,
+                (str(mid), str(sid)),
+            ).fetchone()
+
+            if row_b and row_b[0] is not None:
+                ctx["anchor_odd"] = float(row_b[0])
+            else:
+                ctx["anchor_odd"] = None
+
+        finally:
+            try:
+                con_b.close()
+            except Exception:
+                pass
+
         for o in ctx["orders_by_runner"]:
             if (
                 o.get("role") == "PARENT"
@@ -3068,20 +3108,10 @@ class DecisionBus:
                 # --------------------------------------------------
                 # Direction check (execution truth)
                 # --------------------------------------------------
-                dec = None
-                try:
-                    dec = compute_msc_decision(ctx)
-                    ctx["msc_decision"] = dec
-                except Exception:
-                    dec = None
 
-                exec_dir = dec.get("direction") if isinstance(dec, dict) else None
-                plan_dir = plan.get("direction")
-
-                # Inject direction if missing
-                if not plan_dir and exec_dir:
+                exec_dir = ctx.get("direction")
+                if not plan.get("direction") and exec_dir:
                     plan["direction"] = exec_dir
-                    plan_dir = exec_dir
 
                 # --------------------------------------------------
                 # REQUIRED EXPOSURE (AUTHORITATIVE — BUS OWNED)

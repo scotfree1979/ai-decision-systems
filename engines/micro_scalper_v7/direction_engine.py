@@ -532,10 +532,13 @@ def compute_msc_decision(ctx: Dict[str, Any]) -> Dict[str, Any]:
     direction = apply_boundary_buffer(ctx, direction)
 
     # ==================================================
-    # TREND GATE — DO NOT FIRE UNTIL TREND EXISTS
+    # BASELINE ANCHOR TREND (ALWAYS EXISTS IF ANCHOR VALID)
     # ==================================================
-    if not state.get("dominant_axis") and not state.get("dominant_ticks"):
-        direction = None
+    if not direction and anchor_px > 0 and current_px > 0:
+        if current_px > anchor_px:
+            direction = "LAY->BACK"
+        elif current_px < anchor_px:
+            direction = "BACK->LAY"
 
     mode = refine_mode_with_structure(ctx, direction, base_mode)
 
