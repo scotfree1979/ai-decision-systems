@@ -290,6 +290,8 @@ def _compute_market_floor_from_betfair_surface():
             if pnl < worst_loss:
                 worst_loss = pnl
 
+
+
         # --------------------------------------------------
         # 2️⃣ Scenario: NONE of traded runners win
         # --------------------------------------------------
@@ -310,9 +312,50 @@ def _compute_market_floor_from_betfair_surface():
         if pnl_none < worst_loss:
             worst_loss = pnl_none
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: inside _compute_market_floor_from_betfair_surface(), after matched worst_loss computed
+# 🧩 ACTION: ADD unmatched exposure bucket
+# 📆 PATCHED: 2026-02-22 — Include unmatched liability in exposure calculation
+#
+# PURPOSE:
+# - Betfair reserves unmatched orders immediately
+# - Floor must include unmatched liability
+#
+# INVARIANT:
+# exposure = matched_floor + unmatched_liability
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # 3️⃣ UNMATCHED LIABILITY BUCKET
+        # --------------------------------------------------
+        unmatched_liability = 0.0
+
+        for o in current_orders:
+            if str(o.get("marketId")) != mid:
+                continue
+
+            total_size = float((o.get("priceSize") or {}).get("size") or 0.0)
+            matched    = float(o.get("sizeMatched") or 0.0)
+            price      = float((o.get("priceSize") or {}).get("price") or 0.0)
+            side       = (o.get("side") or "").upper()
+
+            remaining = total_size - matched
+
+            if remaining <= 0 or price <= 0:
+                continue
+
+            if side == "LAY":
+                unmatched_liability += remaining * (price - 1)
+            else:  # BACK
+                unmatched_liability += remaining
+
+        # Add unmatched bucket to matched floor
+        true_exposure = round((-worst_loss) + unmatched_liability, 2)
+
         results.append({
             "marketId": mid,
-            "true_market_exposure": round(-worst_loss, 2),
+            "true_market_exposure": true_exposure,
         })
 
     return results
