@@ -335,20 +335,15 @@ def _compute_market_floor_from_betfair_surface():
             if str(o.get("marketId")) != mid:
                 continue
 
-            total_size = float((o.get("priceSize") or {}).get("size") or 0.0)
-            matched    = float(o.get("sizeMatched") or 0.0)
-            price      = float((o.get("priceSize") or {}).get("price") or 0.0)
-            side       = (o.get("side") or "").upper()
+            remaining = float(o.get("sizeRemaining") or 0.0)
+            price     = float((o.get("priceSize") or {}).get("price") or 0.0)
+            side      = (o.get("side") or "").upper()
 
-            remaining = total_size - matched
-
-            if remaining <= 0 or price <= 0:
-                continue
-
-            if side == "LAY":
-                unmatched_liability += remaining * (price - 1)
-            else:  # BACK
-                unmatched_liability += remaining
+            if remaining > 0 and price > 0:
+                if side == "LAY":
+                    unmatched_liability += remaining * (price - 1)
+                else:
+                    unmatched_liability += remaining
 
         # Add unmatched bucket to matched floor
         true_exposure = round((-worst_loss) + unmatched_liability, 2)
