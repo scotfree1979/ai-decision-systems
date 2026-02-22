@@ -1496,12 +1496,10 @@ def can_place(engine: str, plan: dict) -> bool:
         return True
 
     # 4️⃣ Engine allocation check
-    with _LOCK:
-        engine_pot  = float(_ENGINE_POTS.get(engine, 0.0))
-        engine_used = float(_ENGINE_USED.get(engine, 0.0))
+    available = get_engine_available(engine)
 
-        if engine_used + delta_floor > engine_pot:
-            return False
+    if delta_floor > available:
+        return False
 
     return True
 
