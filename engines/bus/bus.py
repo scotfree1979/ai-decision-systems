@@ -1145,6 +1145,27 @@ class DecisionBus:
                 f"ctx_with_px={ctx_with_px}"
             )
 
+        # --------------------------------------------------
+        # 🧠 CTX STRUCTURAL DIAGNOSTIC (V7)
+        # --------------------------------------------------
+        total = len(self._route_ctx_map)
+        ready = 0
+
+        for ctx in self._route_ctx_map.values():
+            if (
+                ctx.get("px") is not None and
+                ctx.get("band") is not None and
+                ctx.get("direction") is not None and
+                ctx.get("anchor_odd") is not None
+            ):
+                ready += 1
+
+        print(
+            f"[BUS][CTX][V7] "
+            f"runners={total} "
+            f"structural_ready={ready} "
+            f"structural_missing={total - ready}"
+        )
 
         # --------------------------------------------------
         # 🟦 LANE 1 — LEGACY (BUS STOP ONLY)
@@ -2812,6 +2833,29 @@ class DecisionBus:
 
         self._ctx_refresh_times.append(dt)
 
+        # --------------------------------------------------
+        # 🔑 ANCHOR INJECTION (BUS AUTHORITY)
+        # --------------------------------------------------
+        from engines.config_paths import open_bets_db
+
+        con = open_bets_db(rw=False)
+        try:
+            for (mid, sid), ctx in self._route_ctx_map.items():
+                row = con.execute(
+                    """
+                    SELECT anchor_odd
+                    FROM bets
+                    WHERE marketId = ?
+                      AND selectionId = ?
+                    LIMIT 1
+                    """,
+                    (str(mid), str(sid)),
+                ).fetchone()
+
+                ctx["anchor_odd"] = float(row[0]) if row and row[0] is not None else None
+        finally:
+            con.close()
+
         print(
             f"[BUS][CTX_REFRESH] "
             f"tick={self.tick_id} "
@@ -3412,6 +3456,9 @@ class DecisionBus:
                 # Annotate only, router decides.
 
                 # Direction drift annotation (diagnostic only)
+                plan_dir = plan.get("direction")
+                exec_dir = ctx.get("direction")
+
                 if plan_dir and exec_dir and plan_dir != exec_dir:
                     plan["_bus_note"] = "direction_changed"
                     _record_reason(engine_report, plan["engine"], "direction_changed")
