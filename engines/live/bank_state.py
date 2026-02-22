@@ -57,6 +57,77 @@ def init_bank_state():
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: below _compute_market_floor_from_betfair_surface()
+# 🧩 ACTION: ADD unmatched working capital surface (engine-split)
+# 📆 PATCHED: 2026-04-XX — Separate unmatched from floor
+#
+# PURPOSE:
+# - Compute unmatched liability per engine
+# - Does NOT affect floor
+# - Pure Betfair execution surface
+# - Read-only
+# ======================================================================================================
+
+def _compute_engine_unmatched_working_capital():
+
+    from engines.live.live_router import _keys
+    import requests, json
+    from collections import defaultdict
+
+    app_key, token = _keys()
+    if not app_key or not token:
+        return {}
+
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+
+    headers = {
+        "X-Application": app_key,
+        "X-Authentication": token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = json.dumps([{
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listCurrentOrders",
+        "params": {},
+        "id": 1
+    }])
+
+    try:
+        r = requests.post(url, headers=headers, data=payload, timeout=10)
+        r.raise_for_status()
+        current_orders = r.json()[0]["result"]["currentOrders"]
+    except Exception:
+        return {}
+
+    unmatched_by_engine = defaultdict(float)
+
+    for o in current_orders:
+
+        remaining = float(o.get("sizeRemaining") or 0.0)
+        if remaining <= 0:
+            continue
+
+        side  = (o.get("side") or "").upper()
+        price = float((o.get("priceSize") or {}).get("price") or 0.0)
+
+        engine = o.get("customerStrategyRef") or o.get("customerOrderRef")
+        if not engine:
+            continue
+
+        # liability model
+        if side == "LAY":
+            liability = remaining * (price - 1)
+        else:
+            liability = remaining
+
+        unmatched_by_engine[str(engine)] += liability
+
+    return dict(unmatched_by_engine)
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
 # 🔎 ANCHOR: end of file
 # 🧩 ACTION: ADD OBSERVABILITY REPORT LOOP (READ-ONLY)
 # 📆 PATCHED: 2026-01-11 — BankState minute telemetry (pots / used / available)
@@ -346,13 +417,31 @@ def _compute_market_floor_from_betfair_surface():
                     unmatched_liability += remaining
 
         # Add unmatched bucket to matched floor
-        true_exposure = round((-worst_loss) + unmatched_liability, 2)
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: # 3️⃣ UNMATCHED LIABILITY BUCKET
+# 🛠 ACTION: REMOVE unmatched from floor (floor = matched worst-case only)
+# 📆 PATCHED: 2026-04-XX — Floor now PURE matched exposure (unmatched separated)
+#
+# PURPOSE:
+# - Unmatched working capital now handled separately
+# - Floor must represent ONLY matched worst-case exposure
+# - Prevent double-counting in engine used
+#
+# NEW INVARIANT:
+#   floor = matched worst-case only
+#   unmatched = working capital only
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # FINAL FLOOR (MATCHED ONLY)
+        # --------------------------------------------------
+        true_exposure = round((-worst_loss), 2)
 
         results.append({
             "marketId": mid,
             "true_market_exposure": true_exposure,
         })
-
     return results
 
 
@@ -895,6 +984,20 @@ def _bankstate_report_loop(interval_s: int = 60):
 
                 print("===========================================")
 
+            # --------------------------------------------------
+            # REPORT 4 - WORKING CAPITAL REPORT (UNMATCHED ONLY)
+            # --------------------------------------------------
+
+            unmatched_map = _compute_engine_unmatched_working_capital()
+
+            print("\n=== ENGINE WORKING CAPITAL (UNMATCHED) ===")
+
+            for engine in sorted(_ENGINE_POTS.keys()):
+                wc = unmatched_map.get(engine, 0.0)
+                print(f"{engine:<20} working_capital={wc:.2f}")
+
+            print("==========================================")
+
 
         except Exception as e:
             print(f"[BankState][REPORT][WARN] {e}")
@@ -1142,6 +1245,9 @@ def get_engine_available(engine: str) -> float:
     with _LOCK:
         pot  = _ENGINE_POTS.get(engine, 0.0)
         used = _ENGINE_USED.get(engine, 0.0)
+        # subtract unmatched working capital
+        unmatched_map = _compute_engine_unmatched_working_capital()
+        used += unmatched_map.get(engine, 0.0)
         return _clamp(pot - used)
 
 

@@ -380,7 +380,7 @@ class BusRouteSnapshot:
                 continue
 
             # Only keep future markets
-            if off_dt >= now:
+            if off_dt >= now - timedelta(minutes=GRACE_MINUTES):
                 active_markets.append(mid)
 
         # Take NEXT FIVE
