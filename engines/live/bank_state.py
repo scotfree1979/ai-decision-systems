@@ -231,16 +231,42 @@ def _compute_market_floor_from_betfair_surface():
             "price": price,
         })
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: # --------------------------------------------------
+# 🧩 ACTION: REPLACE worst-case simulation logic
+# 📆 PATCHED: 2026-02-22 — Add NONE-of-traded bucket to floor calculation
+#
+# PURPOSE:
+# - Include scenario where NONE of our traded runners win
+# - Floor = worst P&L across:
+#       • each traded runner winning
+#       • none of traded runners winning
+#
+# ARCHITECTURE:
+# - We only model traded runners (system abstraction)
+# - We do NOT enumerate full exchange field
+# - NONE bucket captures all non-traded winners
+#
+# INVARIANT:
+# - Floor = max loss across simulated scenarios
+# ======================================================================================================
+
     results = []
 
     # --------------------------------------------------
-    # Worst-case simulation per market
+    # Worst-case simulation per market (CORRECTED)
     # --------------------------------------------------
     for mid, orders in orders_by_market.items():
 
-        outcomes = defaultdict(float)
+        traded_runners = set(o["selectionId"] for o in orders)
 
-        for winner in runners_by_market[mid]:
+        worst_loss = 0.0
+
+        # --------------------------------------------------
+        # 1️⃣ Scenario: each traded runner wins
+        # --------------------------------------------------
+        for winner in traded_runners:
 
             pnl = 0.0
 
@@ -261,12 +287,28 @@ def _compute_market_floor_from_betfair_surface():
                     else:
                         pnl -= matched
 
-            outcomes[winner] = pnl
-
-        worst_loss = 0.0
-        for pnl in outcomes.values():
             if pnl < worst_loss:
                 worst_loss = pnl
+
+        # --------------------------------------------------
+        # 2️⃣ Scenario: NONE of traded runners win
+        # --------------------------------------------------
+        pnl_none = 0.0
+
+        for o in orders:
+            side = o["side"]
+            matched = o["matched"]
+
+            # If none of traded runners win:
+            # - All BACK bets lose stake
+            # - All LAY bets win stake
+            if side == "LAY":
+                pnl_none += matched
+            else:  # BACK
+                pnl_none -= matched
+
+        if pnl_none < worst_loss:
+            worst_loss = pnl_none
 
         results.append({
             "marketId": mid,
@@ -519,6 +561,67 @@ def _reconcile_market_exposure_live():
         for mid, reserved in reserved_by_market.items():
 
             true_floor = floor_by_market.get(mid, 0.0)
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: inside _reconcile_market_exposure_live() after true_floor calculation
+# 🧩 ACTION: ADD floor-underflow correction (reserved < floor)
+# 📆 PATCHED: 2026-02-22 — Enforce floor as absolute exposure truth
+#
+# PURPOSE:
+# - If reserved < true_floor, exposure must increase to match floor
+# - Floor is authoritative
+# - Prevent drift when router under-reserves
+#
+# INVARIANT:
+#   _OPEN_EXPOSURE == Σ true_floor
+#   Σ _ENGINE_USED == _OPEN_EXPOSURE
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # 🟥 FLOOR UNDER-RESERVE CORRECTION
+            # --------------------------------------------------
+            if reserved < true_floor:
+
+                shortfall = true_floor - reserved
+
+                # distribute shortfall proportionally to engines already in market
+                engine_rows = con2 = None
+
+                from engines.config_paths import open_auto_db
+                con2 = open_auto_db(rw=False)
+                con2.row_factory = None
+
+                engine_rows = con2.execute("""
+                    SELECT
+                        l.engine,
+                        SUM(l.reserved_amount)
+                    FROM bank_ledger l
+                    JOIN orders o ON o.id = l.parent_id
+                    WHERE l.active = 1
+                      AND o.marketId = ?
+                      AND date(o.opened_at)=date('now','utc')
+                    GROUP BY l.engine
+                """, (mid,)).fetchall()
+
+                con2.close()
+
+                total_market_reserved = sum(e[1] for e in engine_rows) or 1.0
+
+                for engine, eng_reserved in engine_rows:
+
+                    pct = eng_reserved / total_market_reserved
+                    add_amount = shortfall * pct
+
+                    _ENGINE_USED[engine] = _clamp(
+                        _ENGINE_USED.get(engine, 0.0) + add_amount
+                    )
+
+                _OPEN_EXPOSURE = _clamp(
+                    _OPEN_EXPOSURE + shortfall
+                )
+
+                continue
 
             if reserved <= true_floor:
                 continue
