@@ -6308,15 +6308,31 @@ def place_parent_and_hedge(
             (required_exposure, parent_id)
         )
 
-    # --------------------------------------------------
-    # ROUTER GATE — ASK BankState FIRST (NO MUTATION)
-    # --------------------------------------------------
-    if not bank_state.can_place(engine, required_exposure):
-        _orders_update_parent_failed(
-            parent_ref,
-            "INSUFFICIENT_EXPOSURE_ROUTER"
-        )
-        return None, parent_ref
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: ROUTER GATE — ASK BankState FIRST
+# 📆 PATCHED: 2026-04-21 — Floor-delta gate (plan-based)
+#
+# PURPOSE:
+# - Replace required_exposure gate with floor-delta simulation gate
+# - Pass full plan into BankState
+# ======================================================================================================
+
+        gate_plan = {
+            "marketId": market_id,
+            "selectionId": selection_id,
+            "side": side,
+            "px": entry_odds,
+            "size": stake,
+            "engine": engine,
+        }
+
+        if not bank_state.can_place(engine, gate_plan):
+            _orders_update_parent_failed(
+                parent_ref,
+                "INSUFFICIENT_FLOOR_DELTA"
+            )
+            return None, parent_ref
 
     # 3) place parent -----------------------------------------------------------
     # --------------------------------------------------

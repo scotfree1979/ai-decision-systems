@@ -1109,54 +1109,128 @@ def on_parent_placed(
             f"open={_OPEN_EXPOSURE:.2f}"
         )
 
-
-# === PATCH START ============================================================
+# ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: def can_place(
-# 🛠 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-04-21 — Floor-based placement gate (engine allocation aware)
+# 🔎 SEARCH: def _simulate_floor_with_new_bet(
+# 📆 PATCHED: 2026-04-21 — True runner-level floor simulation (authoritative)
 #
 # PURPOSE:
-# - Replace ledger-based gating with floor-delta gating
-# - Compare incremental floor increase against engine pot allocation
-# - Allow floor-reducing trades automatically
-#
-# INVARIANT:
-# - Floor is authoritative (Betfair surface)
-# - Engine pots already represent % allocation of total risk bank
-# - Ledger no longer drives placement permission
-# ============================================================================
+# - Inject hypothetical matched order into Betfair CURRENT surface
+# - Recompute full worst-case market loss
+# - Exact same logic as floor computation
+# ======================================================================================================
 
-def can_place(engine: str, plan: dict) -> bool:
+def _simulate_floor_with_new_bet(mid: str, plan: dict) -> float:
     """
-    Floor-based placement permission.
+    Compute true projected worst-case exposure for a market
+    if this bet were already matched.
+    """
 
-    Logic:
-    1️⃣ Compute current true floor for the market
-    2️⃣ Simulate new worst-case if this plan were added
-    3️⃣ Compute delta_floor
-    4️⃣ Allow if:
-         - delta_floor <= 0 (reduces or neutral)
-         - OR engine_used + delta_floor <= engine_pot
-    """
+    from engines.live.live_router import _keys
+    import requests, json
+    from collections import defaultdict
+
+    app_key, token = _keys()
+
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    headers = {
+        "X-Application": app_key,
+        "X-Authentication": token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = json.dumps([{
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listCurrentOrders",
+        "params": {},
+        "id": 1
+    }])
 
     try:
-        from engines.live.bank_state import _compute_market_floor_from_betfair_surface
+        r = requests.post(url, headers=headers, data=payload, timeout=10)
+        r.raise_for_status()
+        current_orders = r.json()[0]["result"]["currentOrders"]
     except Exception:
-        return True  # fail-open (never block system)
+        return 0.0
+
+    # --------------------------------------------------
+    # Build matched order surface
+    # --------------------------------------------------
+    orders = []
+
+    for o in current_orders:
+        if str(o.get("marketId")) != mid:
+            continue
+
+        matched = float(o.get("sizeMatched") or 0.0)
+        price = float((o.get("priceSize") or {}).get("price") or 0.0)
+        side = (o.get("side") or "").upper()
+        sid = str(o.get("selectionId"))
+
+        if matched > 0 and price > 0:
+            orders.append({
+                "selectionId": sid,
+                "side": side,
+                "matched": matched,
+                "price": price,
+            })
+
+    # --------------------------------------------------
+    # Inject hypothetical new matched order
+    # --------------------------------------------------
+    orders.append({
+        "selectionId": str(plan["selectionId"]),
+        "side": str(plan["side"]).upper(),
+        "matched": float(plan["size"]),
+        "price": float(plan["px"]),
+    })
+
+    # --------------------------------------------------
+    # Enumerate all runners
+    # --------------------------------------------------
+    runners = set(o["selectionId"] for o in orders)
+
+    worst_loss = 0.0
+
+    for winner in runners:
+        pnl = 0.0
+
+        for o in orders:
+            sid = o["selectionId"]
+            side = o["side"]
+            matched = o["matched"]
+            price = o["price"]
+
+            if winner == sid:
+                if side == "LAY":
+                    pnl -= matched * (price - 1)
+                else:
+                    pnl += matched * (price - 1)
+            else:
+                if side == "LAY":
+                    pnl += matched
+                else:
+                    pnl -= matched
+
+        if pnl < worst_loss:
+            worst_loss = pnl
+
+    return round(-worst_loss, 2)
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: def can_place(
+# 📆 PATCHED: 2026-04-21 — Floor-delta placement gate (engine allocation aware)
+# ======================================================================================================
+
+def can_place(engine: str, plan: dict) -> bool:
 
     mid = str(plan.get("marketId"))
-    sid = str(plan.get("selectionId"))
-    side = str(plan.get("side") or "").upper()
-    px   = float(plan.get("px") or 0.0)
-    stake = float(plan.get("size") or 0.0)
-
-    if not mid or not sid or px <= 0 or stake <= 0:
+    if not mid:
         return False
 
-    # --------------------------------------------------
-    # 1️⃣ Current floor (Betfair surface)
-    # --------------------------------------------------
+    # 1️⃣ Current floor
     floor_rows = _compute_market_floor_from_betfair_surface()
     floor_by_market = {
         r["marketId"]: float(r["true_market_exposure"])
@@ -1165,45 +1239,24 @@ def can_place(engine: str, plan: dict) -> bool:
 
     current_floor = floor_by_market.get(mid, 0.0)
 
-    # --------------------------------------------------
-    # 2️⃣ Simulate incremental worst-case impact
-    # --------------------------------------------------
-    # Conservative approximation:
-    # - LAY increases worst-case by liability
-    # - BACK increases worst-case by stake
-    #
-    # (Exact simulation unnecessary — floor reconciliation
-    #  will correct immediately after placement.)
+    # 2️⃣ Projected floor
+    projected_floor = _simulate_floor_with_new_bet(mid, plan)
 
-    if side == "LAY":
-        incremental = stake * (px - 1.0)
-    else:  # BACK
-        incremental = stake
+    delta_floor = projected_floor - current_floor
 
-    new_floor = current_floor + incremental
-
-    delta_floor = new_floor - current_floor
-
-    # --------------------------------------------------
-    # 3️⃣ If trade reduces floor → always allow
-    # --------------------------------------------------
+    # 3️⃣ Floor reduction → always allow
     if delta_floor <= 0:
         return True
 
-    # --------------------------------------------------
     # 4️⃣ Engine allocation check
-    # --------------------------------------------------
     with _LOCK:
         engine_pot  = float(_ENGINE_POTS.get(engine, 0.0))
         engine_used = float(_ENGINE_USED.get(engine, 0.0))
 
-        # Only compare incremental change
         if engine_used + delta_floor > engine_pot:
             return False
 
     return True
-
-# === PATCH END ==============================================================
 
 # -------------------------------------------------------------------
 # EVENT API (CALLED BY ROUTER / SETTLEMENTS)
