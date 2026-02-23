@@ -15,6 +15,28 @@ except Exception:
 _ENGINE_POTS: Dict[str, float] = {}
 _ENGINE_AVAILABLE: Dict[str, float] = {}
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ACTION: LOCK ledger schema (mirror only)
+# ======================================================================================================
+
+def _ensure_bank_ledger_schema():
+    from engines.config_paths import open_auto_db
+    con = open_auto_db(rw=True)
+    cur = con.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bank_ledger(
+            day TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            engine_used REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY(day, engine)
+        )
+    """)
+
+    con.commit()
+    con.close()
+
 # -------------------------------------------------------------------
 # COMPATIBILITY SHIMS (required by BUS / reports)
 # -------------------------------------------------------------------
@@ -595,308 +617,103 @@ def _compute_market_over_reserve_today():
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
 # 🔎 SEARCH: def _reconcile_market_exposure_live():
-# 🛠 ACTION: Replace reconciliation source with Betfair floor
-# 📆 PATCHED: 2026-02-15 — Floor now execution-surface authoritative
+# 🧩 ACTION: FULL REBUILD — ENGINE_USED = floor + unmatched (no mutation drift)
+# 📆 PATCHED: 2026-04-FIX
 #
-# PURPOSE:
-# - Stop using SQL parent model for floor
-# - Use betfair_execution_surface as sole floor authority
-# - Refund based on true market exposure
-#
-# INVARIANT:
-# - Router reserves pessimistically
-# - Floor uses Betfair CURRENT surface only
-# - Refund = reserved - true_floor
+# LOCKED INVARIANT:
+#   ENGINE_USED = ENGINE_FLOOR_SHARE + ENGINE_UNMATCHED
+#   _OPEN_EXPOSURE = sum(ENGINE_USED)
+#   bank_ledger mirrors ENGINE_USED only
 # ======================================================================================================
 
 def _reconcile_market_exposure_live():
 
-    global _OPEN_EXPOSURE
+    global _ENGINE_USED, _OPEN_EXPOSURE
 
-    # --------------------------------------------------
-    # 1️⃣ Authoritative Betfair floor
-    # --------------------------------------------------
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: if not floor_rows:
-# 🧩 ACTION: REMOVE early return on empty Betfair surface
-# 📆 PATCHED: 2026-02-19 — Fix exposure not collapsing after markets finish
-#
-# WHY:
-# - floor_rows empty means true_floor = 0
-# - Previously returned early and skipped refund logic
-# - Caused exposure to remain inflated (e.g. 599.80)
-#
-# NEW BEHAVIOUR:
-# - Empty floor_rows ⇒ treat as floor_by_market = {}
-# - Refund entire reserved surface
-# ======================================================================================================
-
+    # 1️⃣ Get authoritative floor (matched only)
     floor_rows = _compute_market_floor_from_betfair_surface()
-
-    # DO NOT early-return here.
-    # Empty floor_rows means floor = 0.
-    # Allow refund logic to process.
 
     floor_by_market = {
         r["marketId"]: float(r["true_market_exposure"])
         for r in floor_rows
     }
 
-
-    # --------------------------------------------------
-    # 2️⃣ Compute reserved per market from runtime state
-    # --------------------------------------------------
+    # 2️⃣ Build per-engine floor share using required_exposure weights
     from engines.config_paths import open_auto_db
-
     con = open_auto_db(rw=False)
     con.row_factory = None
     cur = con.cursor()
 
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: reserved_rows = cur.execute("""
-# 🧩 ACTION: REPLACE — use bank_ledger as authoritative reservation surface
-# 📆 PATCHED: 2026-02-19 — Floor reconciliation now ledger-driven
-#
-# WHY:
-# - orders.required_exposure is router pessimism
-# - bank_ledger.reserved_amount is true live reservation surface
-# - Floor must reconcile against ledger only
-#
-# INVARIANT:
-#   Σ ledger.reserved_amount == Σ _ENGINE_USED == _OPEN_EXPOSURE
-# ======================================================================================================
-
-    reserved_rows = cur.execute("""
+    rows = cur.execute("""
         SELECT
             o.marketId,
-            SUM(l.reserved_amount)
-        FROM bank_ledger l
-        JOIN orders o ON o.id = l.parent_id
-        WHERE l.active = 1
+            o.engine,
+            SUM(o.required_exposure)
+        FROM orders o
+        WHERE o.role='PARENT'
+          AND o.entry_status='MATCHED'
           AND date(o.opened_at)=date('now','utc')
-        GROUP BY o.marketId
+        GROUP BY o.marketId, o.engine
     """).fetchall()
-
 
     con.close()
 
-    reserved_by_market = {
-        mid: float(total or 0.0)
-        for mid, total in reserved_rows
-    }
+    # floor allocation accumulator
+    engine_floor = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
 
-    floor_by_market = {
-        r["marketId"]: float(r["true_market_exposure"])
-        for r in floor_rows
-    }
+    # group by market
+    from collections import defaultdict
+    market_engine_reserved = defaultdict(list)
 
-    total_refund = 0.0
+    for mid, engine, reserved in rows:
+        market_engine_reserved[mid].append((engine, float(reserved or 0.0)))
 
+    for mid, engine_rows in market_engine_reserved.items():
+
+        true_floor = floor_by_market.get(mid, 0.0)
+
+        total_reserved = sum(r[1] for r in engine_rows) or 1.0
+
+        for engine, reserved in engine_rows:
+            pct = reserved / total_reserved
+            engine_floor[engine] += true_floor * pct
+
+    # 3️⃣ Compute unmatched (working capital)
+    unmatched_map = _compute_engine_unmatched_working_capital()
+
+    # 4️⃣ Rebuild ENGINE_USED fresh (NO DRIFT)
     with _LOCK:
 
-        for mid, reserved in reserved_by_market.items():
+        for engine in _ENGINE_POTS.keys():
+            floor_part = engine_floor.get(engine, 0.0)
+            unmatched_part = unmatched_map.get(engine, 0.0)
 
-            true_floor = floor_by_market.get(mid, 0.0)
+            _ENGINE_USED[engine] = _clamp(floor_part + unmatched_part)
 
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: inside _reconcile_market_exposure_live() after true_floor calculation
-# 🧩 ACTION: ADD floor-underflow correction (reserved < floor)
-# 📆 PATCHED: 2026-02-22 — Enforce floor as absolute exposure truth
-#
-# PURPOSE:
-# - If reserved < true_floor, exposure must increase to match floor
-# - Floor is authoritative
-# - Prevent drift when router under-reserves
-#
-# INVARIANT:
-#   _OPEN_EXPOSURE == Σ true_floor
-#   Σ _ENGINE_USED == _OPEN_EXPOSURE
-# ======================================================================================================
+        _OPEN_EXPOSURE = _clamp(sum(_ENGINE_USED.values()))
 
-            # --------------------------------------------------
-            # 🟥 FLOOR UNDER-RESERVE CORRECTION
-            # --------------------------------------------------
-            if reserved < true_floor:
-
-                shortfall = true_floor - reserved
-
-                # distribute shortfall proportionally to engines already in market
-                engine_rows = con2 = None
-
-                from engines.config_paths import open_auto_db
-                con2 = open_auto_db(rw=False)
-                con2.row_factory = None
-
-                engine_rows = con2.execute("""
-                    SELECT
-                        l.engine,
-                        SUM(l.reserved_amount)
-                    FROM bank_ledger l
-                    JOIN orders o ON o.id = l.parent_id
-                    WHERE l.active = 1
-                      AND o.marketId = ?
-                      AND date(o.opened_at)=date('now','utc')
-                    GROUP BY l.engine
-                """, (mid,)).fetchall()
-
-                con2.close()
-
-                total_market_reserved = sum(e[1] for e in engine_rows) or 1.0
-
-                for engine, eng_reserved in engine_rows:
-
-                    pct = eng_reserved / total_market_reserved
-                    add_amount = shortfall * pct
-
-                    _ENGINE_USED[engine] = _clamp(
-                        _ENGINE_USED.get(engine, 0.0) + add_amount
-                    )
-
-                _OPEN_EXPOSURE = _clamp(
-                    _OPEN_EXPOSURE + shortfall
-                )
-
-                continue
-
-            if reserved <= true_floor:
-                continue
-
-            over = reserved - true_floor
-
-            # --------------------------------------------------
-            # Proportional engine refund per market
-            # --------------------------------------------------
-            engine_rows = cur = None
-
-            from engines.config_paths import open_auto_db
-            con2 = open_auto_db(rw=False)
-            con2.row_factory = None
-
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: engine_rows = con2.execute("""
-# 🧩 ACTION: REPLACE — per-engine allocation from ledger, not orders
-# 📆 PATCHED: 2026-02-19 — Engine refund proportional to ledger reservation
-#
-# WHY:
-# - orders.required_exposure no longer authoritative
-# - ledger holds current reserved_amount after partial refunds
-#
-# INVARIANT:
-#   Refund proportion = engine_reserved / total_market_reserved
-# ======================================================================================================
-
-            engine_rows = con2.execute("""
-                SELECT
-                    l.engine,
-                    SUM(l.reserved_amount)
-                FROM bank_ledger l
-                JOIN orders o ON o.id = l.parent_id
-                WHERE l.active = 1
-                  AND o.marketId = ?
-                  AND date(o.opened_at)=date('now','utc')
-                GROUP BY l.engine
-            """, (mid,)).fetchall()
-
-
-            con2.close()
-
-            total_market_reserved = sum(e[1] for e in engine_rows)
-
-            if total_market_reserved <= 0:
-                continue
-
-            for engine, eng_reserved in engine_rows:
-
-                pct = eng_reserved / total_market_reserved
-                refund = over * pct
-
-                used = _ENGINE_USED.get(engine, 0.0)
-                refund = min(refund, used)
-
-                if refund <= 0:
-                    continue
-
-                _ENGINE_USED[engine] = _clamp(used - refund)
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: UPDATE bank_ledger
-# 📆 PATCHED: 2026-02-19 — Clamp ledger to prevent negative reserves
-#
-# PURPOSE:
-# - Prevent ledger from going negative
-# - Ledger must mirror live reserved surface only
-# - Ledger is memory, not authority
-# ======================================================================================================
-
-                try:
-                    from engines.config_paths import open_auto_db
-                    con3 = open_auto_db(rw=True)
-                    cur3 = con3.cursor()
-
-                    # Clamp at zero
-                    cur3.execute("""
-                        UPDATE bank_ledger
-                           SET reserved_amount =
-                               MAX(0, reserved_amount - ?),
-                               updated_at = datetime('now','utc')
-                         WHERE engine = ?
-                           AND active = 1
-                    """, (
-                        float(refund),
-                        engine
-                    ))
-
-                    con3.commit()
-                    con3.close()
-
-                except Exception:
-                    pass
-
-
-                total_refund += refund
-
-        if total_refund > 0:
-            _OPEN_EXPOSURE = _clamp(_OPEN_EXPOSURE - total_refund)
-
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: end of _reconcile_market_exposure_live()
-# 📆 PATCHED: 2026-02-19 — Force ledger to mirror in-memory reserved surface
-#
-# PURPOSE:
-# - Ledger must reflect _ENGINE_USED exactly
-# - Ledger never computes exposure
-# - Ledger only stores state for restart recovery
-# ======================================================================================================
-
+        # 5️⃣ Mirror ledger (pure mirror, no arithmetic)
         try:
             from engines.config_paths import open_auto_db
-            con4 = open_auto_db(rw=True)
-            cur4 = con4.cursor()
+            con2 = open_auto_db(rw=True)
+            cur2 = con2.cursor()
 
-            # Reset ledger to match live engine used
+            today = _utc_day()
+
+            # wipe today's rows
+            cur2.execute("DELETE FROM bank_ledger WHERE day=?", (today,))
+
             for engine, used in _ENGINE_USED.items():
-                cur4.execute("""
-                    UPDATE bank_ledger
-                       SET reserved_amount = ?,
-                           updated_at = datetime('now','utc')
-                     WHERE engine = ?
-                       AND active = 1
-                """, (
-                    float(used),
-                    engine
-                ))
+                cur2.execute("""
+                    INSERT INTO bank_ledger(day, engine, engine_used)
+                    VALUES (?, ?, ?)
+                """, (today, engine, float(used)))
 
-            con4.commit()
-            con4.close()
+            con2.commit()
+            con2.close()
 
         except Exception:
             pass
-
 
     return floor_rows
 
@@ -1245,20 +1062,9 @@ def get_engine_pot(engine: str) -> float:
 
 
 def get_engine_available(engine: str) -> float:
-    """
-    Available capital for this engine RIGHT NOW.
-
-    Canonical rule:
-      available = pot − used
-
-    No scope, no divisor, no concurrency heuristics.
-    """
     with _LOCK:
-        pot  = _ENGINE_POTS.get(engine, 0.0)
+        pot = _ENGINE_POTS.get(engine, 0.0)
         used = _ENGINE_USED.get(engine, 0.0)
-        # subtract unmatched working capital
-        unmatched_map = _compute_engine_unmatched_working_capital()
-        used += unmatched_map.get(engine, 0.0)
         return _clamp(pot - used)
 
 
@@ -1286,87 +1092,40 @@ def on_parent_placed(
     **_ignored,
 ) -> None:
     """
-    Reserve FULL lifecycle exposure at placement time.
-    Then reconcile market over-reserve authoritatively.
+    Parent placed event.
+
+    IMPORTANT:
+    - Do NOT mutate ENGINE_USED here.
+    - Do NOT reserve required_exposure.
+    - Unmatched liability is derived from orders table.
+    - Floor share is derived from Betfair surface.
+    - ENGINE_USED is rebuilt inside reconciliation.
+
+    This function only triggers reconciliation.
     """
 
-    global _OPEN_EXPOSURE
-
     try:
+        # Just verify the parent exists (sanity guard)
         from engines.config_paths import open_auto_db
         con = open_auto_db(rw=False)
         row = con.execute(
-            "SELECT required_exposure FROM orders WHERE id=?",
+            "SELECT id FROM orders WHERE id=?",
             (int(parent_id),)
         ).fetchone()
         con.close()
+
+        if not row:
+            return
+
     except Exception:
         return
 
-    if not row or row[0] is None:
-        raise RuntimeError(
-            f"[BankState] invariant violation: required_exposure missing for parent_id={parent_id}"
-        )
+    # 🔒 No exposure mutation here.
+    # 🔒 No ledger write here.
+    # 🔒 No required_exposure reservation.
 
-    amount = _clamp(row[0])
-
-    # --------------------------------------------------
-    # 1️⃣ RAW RESERVATION (router pessimism preserved)
-    # --------------------------------------------------
-    with _LOCK:
-        _OPEN_EXPOSURE += amount
-        _ENGINE_USED[engine] = _ENGINE_USED.get(engine, 0.0) + amount
-
-        print(
-            f"[BankState] +RESERVE engine={engine} "
-            f"amount={amount:.2f} "
-            f"open={_OPEN_EXPOSURE:.2f}"
-        )
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: inside on_parent_placed (after _ENGINE_USED update)
-# 📆 PATCHED: 2026-04-19 — persistent ledger reservation
-# ============================================================================
-
-        # --------------------------------------------------
-        # Persist reservation in ledger
-        # --------------------------------------------------
-        try:
-            from engines.config_paths import open_auto_db
-            con2 = open_auto_db(rw=True)
-            cur2 = con2.cursor()
-
-            cur2.execute("""
-                INSERT OR REPLACE INTO bank_ledger
-                (parent_id, engine, reserved_amount, active, updated_at)
-                VALUES (?, ?, ?, 1, datetime('now','utc'))
-            """, (
-                int(parent_id),
-                engine,
-                float(amount),
-            ))
-
-            con2.commit()
-            con2.close()
-
-        except Exception:
-            pass
-
-# === PATCH END ==============================================================
-
-
-    # --------------------------------------------------
-    # 2️⃣ AUTHORITATIVE MARKET RECONCILIATION
-    # --------------------------------------------------
-    refunds = _reconcile_market_exposure_live()
-
-    if refunds:
-        print(
-            f"[BankState] reconciliation applied | "
-            f"open={_OPEN_EXPOSURE:.2f}"
-        )
-
+    # 1️⃣ Rebuild exposure deterministically
+    _reconcile_market_exposure_live()
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
 # 🔎 SEARCH: def _simulate_floor_with_new_bet(
