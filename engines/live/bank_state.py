@@ -46,7 +46,30 @@ def init_bank_state():
     BudgetManager is the source of truth.
     BankState initialises itself from persisted budget_allocations.
     """
+
     try:
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/bank_state.py:init_bank_state
+# 🔎 ANCHOR: start of function
+# 🛠 ACTION: purge old-day ledger rows
+# 📆 PATCHED: 2026-02-23
+# ==============================================================================
+
+        from engines.config_paths import open_auto_db
+        today = _utc_day()
+
+        con = open_auto_db(rw=True)
+        cur = con.cursor()
+
+        cur.execute("""
+            DELETE FROM bank_ledger
+            WHERE day != ?
+        """, (today,))
+
+        con.commit()
+        con.close()
+
+# === PATCH END ==============================================================
         init_from_budget_allocations()
         rebuild_live_exposure_from_db()   # ← ADD THIS
         _restore_risk_bank_from_market_exposure()
@@ -163,28 +186,37 @@ def _restore_risk_bank_from_market_exposure():
         f"→ risk_bank={risk_bank:.2f}"
     )
 
-# === PATCH START ============================================================
+# === PATCH START ==============================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 REPLACE: rebuild_live_exposure_from_db
-# 📆 PATCHED: 2026-04-19 — rebuild from persistent ledger
-# ============================================================================
+# 🔎 SEARCH: def rebuild_live_exposure_from_db(
+# 🛠 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-02-23 — Day-scoped ledger mirror
+#
+# PURPOSE:
+# - Load only TODAY exposure
+# - Ledger mirrors _ENGINE_USED
+# - No cross-day contamination
+#
+# INVARIANT:
+#   ledger.day == today
+#   _OPEN_EXPOSURE == sum(engine_used for today)
+# ==============================================================================
 
 def rebuild_live_exposure_from_db():
 
     global _ENGINE_USED, _OPEN_EXPOSURE
 
     from engines.config_paths import open_auto_db
+    today = _utc_day()
 
     con = open_auto_db(rw=False)
-    con.row_factory = None
     cur = con.cursor()
 
     rows = cur.execute("""
-        SELECT engine, SUM(reserved_amount)
-          FROM bank_ledger
-         WHERE active = 1
-         GROUP BY engine
-    """).fetchall()
+        SELECT engine, engine_used
+        FROM bank_ledger
+        WHERE day = ?
+    """, (today,)).fetchall()
 
     con.close()
 
@@ -192,12 +224,12 @@ def rebuild_live_exposure_from_db():
         _ENGINE_USED = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
         _OPEN_EXPOSURE = 0.0
 
-        for engine, total in rows:
-            amount = _clamp(max(0.0, total or 0.0))
-            _ENGINE_USED[engine] = amount
-            _OPEN_EXPOSURE += amount
+        for engine, used in rows:
+            used = _clamp(used or 0.0)
+            _ENGINE_USED[engine] = used
+            _OPEN_EXPOSURE += used
 
-        print(f"[BankState] exposure rebuilt (ledger) | open={_OPEN_EXPOSURE:.2f}")
+        print(f"[BankState] exposure rebuilt (ledger mirror) | open={_OPEN_EXPOSURE:.2f}")
 
 # === PATCH END ==============================================================
 

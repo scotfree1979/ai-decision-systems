@@ -155,13 +155,30 @@ class InPlayEngine:
         if not market_start_ts:
             return self._no_signal("no_market_start_time")
 
-        # build price map for this market only
+
+        # build price map for this market only (SAFE)
         runner_prices = {}
         try:
             from tools.betfair_runner_trend_surface import _TREND_CACHE
+
             for (m, s), v in list(_TREND_CACHE.items()):
-                if str(m) == mid:
-                    runner_prices[str(s)] = v.get("px")
+                if str(m) != mid:
+                    continue
+
+                # prefer micro_to_price (current)
+                px_val = (
+                    v.get("micro_to_price")
+                    or v.get("struct_to_price")
+                )
+
+                if px_val is None:
+                    continue
+
+                try:
+                    runner_prices[str(s)] = float(px_val)
+                except Exception:
+                    continue
+
         except Exception:
             return self._no_signal("no_trend_surface")
 

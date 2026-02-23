@@ -84,85 +84,136 @@ def fetch_market_book(app_key: str, token: str, market_id: str) -> dict:
 # --------------------------------------------------
 # Public API: get runner trend
 # --------------------------------------------------
+# === PATCH START ==============================================================
+# 📍 TARGET: tools/betfair_runner_trend_surface.py
+# 🔎 SEARCH: def get_runner_trend(
+# 🛠 ACTION: REPLACE FUNCTION BODY — Cache is Authority
+# 📆 PATCHED: 2026-02-23 — Unify trend surface authority (cache-backed)
+#
+# PURPOSE:
+# - get_runner_trend() must return from _TREND_CACHE
+# - Prevent duplicate RPC calls
+# - Prevent None propagation
+# - Preserve standalone behaviour when cache empty
+#
+# INVARIANT:
+# - Never returns None
+# - Always returns deterministic dict
+# - All engines continue calling get_runner_trend unchanged
+# ==============================================================================
+
 def get_runner_trend(market_id: str, selection_id: str) -> Dict[str, Any]:
     """
-    Return market-truth trend for ONE runner.
+    Unified authoritative trend getter.
 
-    Output:
-        {
-          direction: "BACK->LAY" | "LAY->BACK" | "FLAT",
-          ticks_moved: int,
-          from_price: float,
-          to_price: float,
-          confidence: float
-        }
+    LIVE MODE:
+        Returns cached trend from _TREND_CACHE.
+    STANDALONE MODE:
+        Falls back to direct RPC if cache empty.
     """
 
-    app_key = get_app_key()
-    if not app_key:
-        raise RuntimeError("APP_KEY missing from daily_config")
+    key = (str(market_id), str(selection_id))
 
-    token = resolve_session_token()
-    if not token:
+    # --------------------------------------------------
+    # 1️⃣ Primary: Cache authority
+    # --------------------------------------------------
+    cached = _TREND_CACHE.get(key)
+
+    if cached:
         return {
-            "direction": "FLAT",
-            "ticks_moved": 0,
-            "confidence": 0.0,
+            "direction": cached.get("struct_direction")
+                          or cached.get("micro_direction")
+                          or "FLAT",
+
+            "ticks_moved": float(
+                cached.get("micro_ticks")
+                or 0.0
+            ),
+
+            "from_price": cached.get("struct_from_price")
+                          or cached.get("micro_from_price"),
+
+            "to_price": cached.get("struct_to_price")
+                        or cached.get("micro_to_price"),
+
+            "confidence": float(
+                cached.get("micro_confidence")
+                or 0.0
+            ),
         }
 
-
-    book = fetch_market_book(app_key, token, market_id)
-
-    for r in book.get("runners") or []:
-        if str(r.get("selectionId")) != str(selection_id):
-            continue
-
-        ltp = r.get("lastPriceTraded")
-        traded = r.get("ex", {}).get("tradedVolume") or []
-
-        if not ltp or not traded:
+    # --------------------------------------------------
+    # 2️⃣ Fallback: Standalone RPC mode
+    # --------------------------------------------------
+    try:
+        app_key = get_app_key()
+        if not app_key:
             return {
                 "direction": "FLAT",
-                "ticks_moved": 0,
+                "ticks_moved": 0.0,
                 "from_price": None,
                 "to_price": None,
                 "confidence": 0.0,
             }
 
-        # First traded price = reference
-        from_price = float(traded[0]["price"])
-        to_price   = float(ltp)
+        token = resolve_session_token()
+        if not token:
+            return {
+                "direction": "FLAT",
+                "ticks_moved": 0.0,
+                "from_price": None,
+                "to_price": None,
+                "confidence": 0.0,
+            }
 
-        # Direction semantics (EXACTLY what you described)
-        if to_price < from_price:
-            direction = "BACK->LAY"   # price came in
-        elif to_price > from_price:
-            direction = "LAY->BACK"   # price drifted
-        else:
-            direction = "FLAT"
+        book = fetch_market_book(app_key, token, market_id)
 
-        # Tick distance (coarse for now; ladder-accurate later)
-        ticks_moved = abs(to_price - from_price)
+        for r in book.get("runners") or []:
+            if str(r.get("selectionId")) != str(selection_id):
+                continue
 
-        # Confidence heuristic (can evolve)
-        confidence = min(1.0, ticks_moved / max(from_price, 1.0))
+            ltp = r.get("lastPriceTraded")
+            traded = r.get("ex", {}).get("tradedVolume") or []
 
-        return {
-            "direction": direction,
-            "ticks_moved": ticks_moved,
-            "from_price": from_price,
-            "to_price": to_price,
-            "confidence": round(confidence, 3),
-        }
+            if not ltp or not traded:
+                break
 
-    # Runner not found
+            from_price = float(traded[0]["price"])
+            to_price   = float(ltp)
+
+            if to_price < from_price:
+                direction = "BACK->LAY"
+            elif to_price > from_price:
+                direction = "LAY->BACK"
+            else:
+                direction = "FLAT"
+
+            ticks_moved = abs(to_price - from_price)
+            confidence = min(1.0, ticks_moved / max(from_price, 1.0))
+
+            return {
+                "direction": direction,
+                "ticks_moved": float(ticks_moved),
+                "from_price": from_price,
+                "to_price": to_price,
+                "confidence": float(round(confidence, 3)),
+            }
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------
+    # 3️⃣ Absolute safety fallback
+    # --------------------------------------------------
     return {
         "direction": "FLAT",
-        "ticks_moved": 0,
+        "ticks_moved": 0.0,
         "from_price": None,
         "to_price": None,
         "confidence": 0.0,
     }
+
+# === PATCH END ==============================================================
 
 # ============================================================
 # RUNNER TREND SURFACE LOOP (AUTHORITATIVE)
@@ -262,16 +313,63 @@ def _trend_loop(refresh_s: int = 5):
                     micro_ticks = abs(struct_to - prev_micro_to)
                     micro_conf  = min(1.0, micro_ticks / max(prev_micro_to, 1.0))
 
-                    _TREND_CACHE[(mid, sid)] = {
-                        # Structural narrative
-                        "struct_direction": struct_direction,
-                        "struct_from_price": struct_from,
-                        "struct_to_price": struct_to,
+# =============================================================================
+# 📍 TARGET: tools/betfair_runner_trend_surface.py
+# 🔎 SEARCH: _TREND_CACHE[(mid, sid)] =
+# 🛠 ACTION: Restore full backward-compatible surface contract
+# 📆 PATCHED: 2026-02-23 — Contract Restoration (no consumer breakage)
+#
+# PURPOSE:
+# - Reinstate ALL original surface keys
+# - Keep struct/micro enhancements
+# - Prevent None comparisons
+# - Preserve legacy consumers
+#
+# INVARIANT:
+# - Every key that existed before still exists
+# - New keys are additive only
+# =============================================================================
 
-                        # Micro momentum
+# =============================================================================
+# 📍 TARGET: tools/betfair_runner_trend_surface.py
+# 🔎 SEARCH: _TREND_CACHE[(mid, sid)] =
+# 📆 PATCHED: 2026-02-23 — Fix broken cache variable mismatch
+# =============================================================================
+
+                    # ---- canonical values (must exist before cache write) ----
+                    from_price = struct_from
+                    to_price   = struct_to
+
+                    if to_price < from_price:
+                        direction = "BACK->LAY"
+                    elif to_price > from_price:
+                        direction = "LAY->BACK"
+                    else:
+                        direction = "FLAT"
+
+                    ticks_moved = abs(to_price - from_price)
+                    confidence  = min(1.0, ticks_moved / max(from_price, 1.0))
+
+                    # ---- cache write (full backward-compatible contract) ----
+                    _TREND_CACHE[(mid, sid)] = {
+
+                        # Canonical contract (DO NOT CHANGE)
+                        "px": to_price,
+                        "direction": direction,
+                        "from_price": from_price,
+                        "to_price": to_price,
+                        "ticks_moved": ticks_moved,
+                        "confidence": round(confidence, 3),
+
+                        # Structural layer
+                        "struct_direction": direction,
+                        "struct_from_price": from_price,
+                        "struct_to_price": to_price,
+
+                        # Micro layer
                         "micro_direction": micro_direction,
                         "micro_from_price": prev_micro_to,
-                        "micro_to_price": struct_to,
+                        "micro_to_price": to_price,
                         "micro_ticks": micro_ticks,
                         "micro_confidence": round(micro_conf, 3),
 

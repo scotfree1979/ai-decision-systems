@@ -4252,15 +4252,25 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
         except Exception:
             pass
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: def _ensure_child_queued_for_matched_parent(parent_cor: str)
+# 🧩 ACTION: Enforce enqueue invariant on child creation
+# 📆 PATCHED: 2026-04-23 — Centralise child enqueue authority
+#
+# PURPOSE:
+# - Guarantee: CHILD row creation ⇒ enqueue_router_child()
+# - Eliminate QUEUED-without-execution race
+# - Make this function lifecycle-complete
+#
+# INVARIANT:
+# - If child already exists → return existing id (NO enqueue)
+# - If child is newly created → enqueue immediately
+# - Idempotent
+# ======================================================================================================
+
 def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
-    """
-    Standalone invariant enforcer.
 
-    If a PARENT is MATCHED and no CHILD exists,
-    insert exactly one CHILD row with entry_status='QUEUED'.
-
-    Idempotent.
-    """
     con = _orders_conn()
     con.row_factory = sqlite3.Row
     cur = con.cursor()
@@ -4283,7 +4293,6 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
               AND role='PARENT'
               AND entry_status='MATCHED'
               AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
-    
             LIMIT 1
         """, (str(parent_cor),)).fetchone()
 
@@ -4292,27 +4301,30 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
 
         parent_id = int(parent["id"])
 
-        # Child already exists?
+        # --------------------------------------------------
+        # 1️⃣ Child already exists?
+        # --------------------------------------------------
         row = _q_retry(cur, """
             SELECT id
-            FROM orders
-            WHERE role='CHILD'
-              AND hedge_of=?
-            LIMIT 1
+              FROM orders
+             WHERE role='CHILD'
+               AND hedge_of=?
+             LIMIT 1
         """, (parent_id,)).fetchone()
 
         if row:
             return int(row["id"])
 
-        # --- Hedge derivation (authoritative) ---
+        # --------------------------------------------------
+        # 2️⃣ Derive hedge deterministically
+        # --------------------------------------------------
         parent_side = parent["side"].upper()
-        child_side = "BACK" if parent_side == "LAY" else "LAY"
-        ticks = int(parent["target_ticks"] or 1)
+        child_side  = "BACK" if parent_side == "LAY" else "LAY"
+        ticks       = int(parent["target_ticks"] or 1)
 
         from engines.price_math import walk_ticks
         from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
-        # ✅ CORRECT ladder direction
         tick_dir = ticks if parent_side == "LAY" else -ticks
 
         hedge_odds = walk_ticks(float(parent["entry_odds"]), tick_dir)
@@ -4325,14 +4337,14 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
             hedge_odds
         )
 
-        # FIRST hedge only = progressive factor
         hedge_stake = round(float(full_hedge_stake) * PROGRESSIVE_LOCK_FACTOR, 2)
 
-        # Safety: never below £1 minimum
         if hedge_stake < 1.0:
             hedge_stake = 1.0
 
-        # Insert CHILD (DB-first, QUEUED)
+        # --------------------------------------------------
+        # 3️⃣ Insert CHILD (QUEUED)
+        # --------------------------------------------------
         _q_retry(cur, """
             INSERT INTO orders (
                 customerOrderRef,
@@ -4365,12 +4377,12 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
             float(hedge_odds),
             float(hedge_stake),
             parent_id,
-            parent["source"],   # ← inherited (correct)
+            parent["source"],
             parent["engine"],
         ))
 
+        child_id = int(cur.lastrowid)
         con.commit()
-        return int(cur.lastrowid)
 
     except Exception as e:
         _log_event(
@@ -4385,6 +4397,26 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
             con.close()
         except Exception:
             pass
+
+    # --------------------------------------------------
+    # 4️⃣ ENQUEUE IMMEDIATELY (LIFECYCLE GUARANTEE)
+    # --------------------------------------------------
+    try:
+        enqueue_router_child(
+            {
+                "child_id": child_id,
+                "parent_cor": str(parent_cor),
+            },
+            {}
+        )
+    except Exception as e:
+        _log_event(
+            "ERROR",
+            "live_router",
+            f"child enqueue failed parent_ref={parent_cor}: {e}"
+        )
+
+    return child_id
 
 # === PATCH START: Playbooks Writer (LIVE profit pattern logger) ===
 # 📍 TARGET: engines/live/live_router.py

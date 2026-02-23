@@ -379,7 +379,68 @@ def persist_surface(surface_rows):
     con.commit()
     con.close()
 
+# ============================================================
+# LIABILITY SURFACE LOOP (LIVE MODE)
+# ============================================================
 
+import threading
+import time
+
+_LIABILITY_THREAD = None
+_LIABILITY_STOP = None
+
+
+def _liability_surface_loop(period_s: float = 5.0):
+    """
+    Continuous Betfair liability refresh loop.
+
+    - Pull parents from DB
+    - Fetch CURRENT + CLEARED
+    - Persist execution surface
+    - Never prints unless debugging
+    - Fail-open
+    """
+    global _LIABILITY_STOP
+
+    app_key = get_app_key()
+    token = resolve_token()
+
+    while not _LIABILITY_STOP.is_set():
+        try:
+            parents = load_today_parent_betids()
+
+            if parents:
+                surface_raw = build_betfair_surface(parents, app_key, token)
+                if surface_raw:
+                    surface = enrich_surface_with_db(surface_raw)
+                    if surface:
+                        persist_surface(surface)
+
+        except Exception:
+            pass
+
+        time.sleep(period_s)
+
+
+def start_liability_surface_loop(period_s: float = 5.0):
+    global _LIABILITY_THREAD, _LIABILITY_STOP
+
+    if _LIABILITY_THREAD and _LIABILITY_THREAD.is_alive():
+        return
+
+    _LIABILITY_STOP = threading.Event()
+
+    t = threading.Thread(
+        target=_liability_surface_loop,
+        args=(period_s,),
+        name="LiabilitySurfaceLoop",
+        daemon=True,
+    )
+
+    t.start()
+    _LIABILITY_THREAD = t
+
+    print(f"[LIABILITY SURFACE] started (period={period_s}s)")
 
 # --------------------------------------------------
 # MAIN

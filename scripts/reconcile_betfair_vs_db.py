@@ -587,6 +587,143 @@ def main():
 
     print("\n===============================================================")
 
+    # ===============================================================
+    # 🔍 SR1 EXTENDED DIAGNOSTICS BLOCK (READ-ONLY)
+    # ===============================================================
+
+    print("\n================ EXTENDED SR1 DIAGNOSTICS =================\n")
+
+    # ---------------------------------------------------------------
+    # 1️⃣ PARENTS BY ENGINE / STATUS
+    # ---------------------------------------------------------------
+    print("\n=== TODAY PARENTS BY ENGINE / ENTRY+EXIT STATUS ===")
+
+    q1 = """
+    SELECT engine, entry_status, exit_status, COUNT(*)
+    FROM orders
+    WHERE role='PARENT'
+      AND date(opened_at)=date('now','utc')
+    GROUP BY engine, entry_status, exit_status
+    ORDER BY engine;
+    """
+    for r in sqlite3.connect(DB_PATH).execute(q1):
+        print(r)
+
+
+    # ---------------------------------------------------------------
+    # 2️⃣ PARENT ↔ CHILD EXISTENCE RATE
+    # ---------------------------------------------------------------
+    print("\n=== PARENTS vs CHILD EXISTENCE (ENGINE LEVEL) ===")
+
+    q2 = """
+    SELECT
+        p.engine,
+        COUNT(*) AS parents,
+        SUM(CASE WHEN c.id IS NULL THEN 1 ELSE 0 END) AS no_child
+    FROM orders p
+    LEFT JOIN orders c
+        ON c.hedge_of = p.id
+    WHERE p.role='PARENT'
+      AND date(p.opened_at)=date('now','utc')
+    GROUP BY p.engine;
+    """
+    for r in sqlite3.connect(DB_PATH).execute(q2):
+        print(r)
+
+
+    # ---------------------------------------------------------------
+    # 3️⃣ MATCHED REQUIRED_EXPOSURE BY ENGINE
+    # ---------------------------------------------------------------
+    print("\n=== MATCHED REQUIRED_EXPOSURE BY ENGINE ===")
+
+    q3 = """
+    SELECT
+        engine,
+        SUM(required_exposure),
+        COUNT(*)
+    FROM orders
+    WHERE role='PARENT'
+      AND entry_status='MATCHED'
+      AND date(opened_at)=date('now','utc')
+    GROUP BY engine;
+    """
+    for r in sqlite3.connect(DB_PATH).execute(q3):
+        print(r)
+
+
+    # ---------------------------------------------------------------
+    # 4️⃣ FAILED PARENTS STILL HOLDING EXPOSURE
+    # ---------------------------------------------------------------
+    print("\n=== FAILED PARENTS EXPOSURE (SHOULD BE ZERO) ===")
+
+    q4 = """
+    SELECT
+        engine,
+        SUM(required_exposure),
+        COUNT(*)
+    FROM orders
+    WHERE role='PARENT'
+      AND exit_status='FAILED'
+      AND date(opened_at)=date('now','utc')
+    GROUP BY engine;
+    """
+    for r in sqlite3.connect(DB_PATH).execute(q4):
+        print(r)
+
+
+    # ---------------------------------------------------------------
+    # 5️⃣ MATCHED SIDE DISTRIBUTION (STEAM vs DRIFT)
+    # ---------------------------------------------------------------
+    print("\n=== MATCHED PARENTS SIDE DISTRIBUTION ===")
+
+    q5 = """
+    SELECT
+        side,
+        COUNT(*)
+    FROM orders
+    WHERE role='PARENT'
+      AND entry_status='MATCHED'
+      AND date(opened_at)=date('now','utc')
+    GROUP BY side;
+    """
+    for r in sqlite3.connect(DB_PATH).execute(q5):
+        print(r)
+
+
+    # ---------------------------------------------------------------
+    # 6️⃣ SCHEMA CHECK – v7_oc_drift_unfolded
+    # ---------------------------------------------------------------
+    print("\n=== v7_oc_drift_unfolded SCHEMA ===")
+
+    q6 = "PRAGMA table_info(v7_oc_drift_unfolded)"
+    for r in sqlite3.connect(DB_PATH).execute(q6):
+        print(r)
+
+
+    # ---------------------------------------------------------------
+    # 7️⃣ NEXT QUALIFYING MARKETS (>=7 RUNNERS)
+    # ---------------------------------------------------------------
+    print("\n=== NEXT 10 QUALIFYING MARKETS (>=7 RUNNERS) ===")
+
+    try:
+        con_bets = sqlite3.connect("data/bets.db")
+        q7 = """
+        SELECT marketId, marketStartTime, COUNT(*)
+        FROM bets
+        WHERE date(marketStartTime)=date('now','utc')
+        GROUP BY marketId
+        HAVING COUNT(*) >= 7
+        ORDER BY marketStartTime
+        LIMIT 10;
+        """
+        for r in con_bets.execute(q7):
+            print(r)
+        con_bets.close()
+    except Exception as e:
+        print("bets.db check failed:", e)
+
+    print("\n===============================================================")
+
 
 if __name__ == "__main__":
     main()

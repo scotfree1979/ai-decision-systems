@@ -3771,6 +3771,16 @@ def start_live_loop(*args, **kwargs):
     start_runner_trend_surface(refresh_s=5)
 
     # ------------------------------------------------------------------
+    # 6H.3) START LIABILITY SURFACE LOOP
+    # ------------------------------------------------------------------
+
+    try:
+        from tools.betfair_liability_surface import start_liability_surface_loop
+        start_liability_surface_loop(period_s=5)
+    except Exception as e:
+        print(f"[LIABILITY SURFACE][WARN] failed to start: {e}")
+
+    # ------------------------------------------------------------------
     # 6I) START BUS ROUTE LOOP
     # ------------------------------------------------------------------
 
