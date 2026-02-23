@@ -655,11 +655,11 @@ class DecisionBus:
         # IGNORED = 0
 
         if engine in ("LEGACY", "MSC_EXPLORATORY"):
-            return band >= 3   # ACTIVE only
+            return band >= 2   # ACTIVE + PASSIVE
 
         
         if engine == "MSC_INPLAY":
-            return band >= 2   # ACTIVE + PASSIVE
+            return band >= 1   # ACTIVE + PASSIVE + EXTENDED
 
         if engine == "MSC_RISK":
             return band >= 1  # ACTIVE + PASSIVE + EXTENDED

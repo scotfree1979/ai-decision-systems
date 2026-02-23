@@ -52,23 +52,11 @@ def bf_rpc(app_key: str, token: str, method: str, params: dict) -> dict:
 # --------------------------------------------------
 # Resolve SESSION TOKEN (identical pattern)
 # --------------------------------------------------
-def resolve_session_token():
-    """
-    LIVE-SAFE token resolver.
-    NEVER blocks. NEVER prompts.
-    """
-    import os
-
-    tok = (
-        os.getenv("SESSION_TOKEN")
-        or os.getenv("BETFAIR_SESSION_TOKEN")
-    )
-
-    if not tok:
-        # Fail-open: no token → trend unavailable
-        return None
-
-    return tok.strip()
+def resolve_session_token() -> str:
+    tok = os.getenv("SESSION_TOKEN") or os.getenv("BETFAIR_SESSION_TOKEN")
+    if tok:
+        return tok.strip()
+    return getpass.getpass("Enter Betfair SESSION TOKEN: ").strip()
 
 
 # --------------------------------------------------
@@ -176,22 +164,167 @@ def get_runner_trend(market_id: str, selection_id: str) -> Dict[str, Any]:
         "confidence": 0.0,
     }
 
+# ============================================================
+# RUNNER TREND SURFACE LOOP (AUTHORITATIVE)
+# ============================================================
+
+import threading
+import time
+
+_TREND_CACHE = {}          # (marketId, selectionId) -> trend dict
+_TREND_RUNNING = False
+
+def _trend_loop(refresh_s: int = 5):
+    global _TREND_RUNNING
+
+    from engines.config_paths import connect_db
+    import sqlite3
+
+    _TREND_RUNNING = True
+
+    while _TREND_RUNNING:
+        try:
+            # ---------------------------------------------
+            # 1️⃣ Get today's markets (DB authority)
+            # ---------------------------------------------
+            con = connect_db(ro=True)
+            con.row_factory = sqlite3.Row
+
+            rows = con.execute("""
+                SELECT DISTINCT marketId
+                FROM bets
+                WHERE date(marketStartTime)=date('now','utc')
+            """).fetchall()
+
+            con.close()
+
+            if not rows:
+                time.sleep(refresh_s)
+                continue
+
+            app_key = get_app_key()
+            token = resolve_session_token()
+
+            if not token:
+                time.sleep(refresh_s)
+                continue
+
+            # ---------------------------------------------
+            # 2️⃣ Fetch EX_TRADED per market
+            # ---------------------------------------------
+            for r in rows:
+                mid = str(r["marketId"])
+                try:
+                    book = fetch_market_book(app_key, token, mid)
+                except Exception:
+                    continue
+
+                for runner in book.get("runners") or []:
+                    sid = str(runner.get("selectionId"))
+
+                    ltp = runner.get("lastPriceTraded")
+                    traded = runner.get("ex", {}).get("tradedVolume") or []
+
+                    if not ltp or not traded:
+                        continue
+
+                    struct_from = float(traded[0]["price"])
+                    struct_to   = float(ltp)
+
+                    # ----------------------------
+                    # STRUCTURAL (lifecycle)
+                    # ----------------------------
+                    if struct_to < struct_from:
+                        struct_direction = "BACK->LAY"
+                    elif struct_to > struct_from:
+                        struct_direction = "LAY->BACK"
+                    else:
+                        struct_direction = "FLAT"
+
+                    # ----------------------------
+                    # MICRO (short horizon)
+                    # ----------------------------
+                    prev = _TREND_CACHE.get((mid, sid), {})
+                    prev_micro_to = prev.get("micro_to_price", struct_to)
+
+                    if struct_to < prev_micro_to:
+                        micro_direction = "BACK->LAY"
+                    elif struct_to > prev_micro_to:
+                        micro_direction = "LAY->BACK"
+                    else:
+                        micro_direction = "FLAT"
+
+                    micro_ticks = abs(struct_to - prev_micro_to)
+                    micro_conf  = min(1.0, micro_ticks / max(prev_micro_to, 1.0))
+
+                    _TREND_CACHE[(mid, sid)] = {
+                        # Structural narrative
+                        "struct_direction": struct_direction,
+                        "struct_from_price": struct_from,
+                        "struct_to_price": struct_to,
+
+                        # Micro momentum
+                        "micro_direction": micro_direction,
+                        "micro_from_price": prev_micro_to,
+                        "micro_to_price": struct_to,
+                        "micro_ticks": micro_ticks,
+                        "micro_confidence": round(micro_conf, 3),
+
+                        "ts": time.time(),
+                    }
+
+        except Exception:
+            pass
+
+        time.sleep(refresh_s)
+
+
+def start_runner_trend_surface(refresh_s: int = 5):
+    global _TREND_RUNNING
+    if _TREND_RUNNING:
+        return
+
+    t = threading.Thread(
+        target=_trend_loop,
+        args=(refresh_s,),
+        daemon=True
+    )
+    t.start()
+
 # --------------------------------------------------
 # Standalone test entrypoint
 # --------------------------------------------------
 def main():
     print("\n=== Betfair Runner Trend Surface ===\n")
 
+    app_key = get_app_key()
+    if not app_key:
+        raise RuntimeError("APP_KEY missing from daily_config")
+
+    token = resolve_session_token()
+    if not token:
+        raise RuntimeError("SESSION_TOKEN not available")
+
     market_id = input("MarketId: ").strip()
     selection_id = input("SelectionId: ").strip()
 
-    out = get_runner_trend(market_id, selection_id)
+    print("\nQuerying Betfair…\n")
 
-    print("\n--- Runner Trend ---")
-    for k, v in out.items():
-        print(f"{k}: {v}")
+    try:
+        out = get_runner_trend(market_id, selection_id)
 
-    print("\n=== End Runner Trend ===\n")
+        print("---- Runner Trend ----")
+        print(f"direction    : {out.get('direction')}")
+        print(f"from_price   : {out.get('from_price')}")
+        print(f"to_price     : {out.get('to_price')}")
+        print(f"ticks_moved  : {out.get('ticks_moved')}")
+        print(f"confidence   : {out.get('confidence')}")
+        print("-----------------------\n")
+
+    except Exception as e:
+        print(f"Trend surface error: {e}")
+
+    print("=== End Runner Trend ===\n")
 
 if __name__ == "__main__":
     main()

@@ -3762,8 +3762,13 @@ def start_live_loop(*args, **kwargs):
 
     start_execution_surface_loop(period_s=2.0)
 
+    # ------------------------------------------------------------------
+    # 6H.2) START RUNNER SURFACE LOOP
+    # ------------------------------------------------------------------
 
+    from tools.betfair_runner_trend_surface import start_runner_trend_surface
 
+    start_runner_trend_surface(refresh_s=5)
 
     # ------------------------------------------------------------------
     # 6I) START BUS ROUTE LOOP
