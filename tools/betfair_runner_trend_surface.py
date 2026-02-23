@@ -203,7 +203,12 @@ def _trend_loop(refresh_s: int = 5):
                 continue
 
             app_key = get_app_key()
-            token = resolve_session_token()
+
+            # Resolve once per loop start
+            if "_LOOP_TOKEN" not in globals():
+                globals()["_LOOP_TOKEN"] = resolve_session_token()
+
+            token = globals()["_LOOP_TOKEN"]
 
             if not token:
                 time.sleep(refresh_s)
@@ -295,36 +300,30 @@ def start_runner_trend_surface(refresh_s: int = 5):
 # Standalone test entrypoint
 # --------------------------------------------------
 def main():
-    print("\n=== Betfair Runner Trend Surface ===\n")
+    print("\n=== Betfair Runner Trend Surface LOOP TEST ===\n")
 
     app_key = get_app_key()
     if not app_key:
         raise RuntimeError("APP_KEY missing from daily_config")
 
+    # resolve once
     token = resolve_session_token()
-    if not token:
-        raise RuntimeError("SESSION_TOKEN not available")
+    globals()["_LOOP_TOKEN"] = token
 
-    market_id = input("MarketId: ").strip()
-    selection_id = input("SelectionId: ").strip()
+    print("Starting live trend loop...\n")
 
-    print("\nQuerying Betfair…\n")
+    start_runner_trend_surface(refresh_s=2)
 
     try:
-        out = get_runner_trend(market_id, selection_id)
+        while True:
+            time.sleep(5)
+            print(f"\nCACHE SIZE: {len(_TREND_CACHE)}")
 
-        print("---- Runner Trend ----")
-        print(f"direction    : {out.get('direction')}")
-        print(f"from_price   : {out.get('from_price')}")
-        print(f"to_price     : {out.get('to_price')}")
-        print(f"ticks_moved  : {out.get('ticks_moved')}")
-        print(f"confidence   : {out.get('confidence')}")
-        print("-----------------------\n")
+            for k, v in list(_TREND_CACHE.items())[:5]:
+                print(k, v)
 
-    except Exception as e:
-        print(f"Trend surface error: {e}")
-
-    print("=== End Runner Trend ===\n")
+    except KeyboardInterrupt:
+        print("\nStopped.\n")
 
 if __name__ == "__main__":
     main()
