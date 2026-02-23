@@ -70,61 +70,40 @@ def init_bank_state():
 
 def _compute_engine_unmatched_working_capital():
 
-    from engines.live.live_router import _keys
-    import requests, json
-    from collections import defaultdict
+    from engines.config_paths import open_auto_db
 
-    app_key, token = _keys()
-    if not app_key or not token:
-        return {}
+    con = open_auto_db(rw=False)
+    con.row_factory = None
+    cur = con.cursor()
 
-    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+    rows = cur.execute("""
+        SELECT
+            o.engine,
+            SUM(
+                CASE
+                    WHEN o.side = 'LAY'
+                        THEN o.entry_stake * (o.entry_odds - 1)
+                    ELSE
+                        o.entry_stake
+                END
+            ) AS working_capital
+        FROM orders o
+        JOIN bets b ON b.marketId = o.marketId
+        WHERE o.role = 'PARENT'
+          AND o.entry_status IN ('PLACED')
+          AND (o.exit_status IS NULL OR o.exit_status NOT IN ('CANCELLED','VOID','SETTLED','MATCHED','EXPIRED'))
+          AND date(o.opened_at) = date('now','utc')
+          AND (julianday(b.marketStartTime) - julianday('now','utc')) > 0
+        GROUP BY o.engine
+        ORDER BY o.engine;
+    """).fetchall()
 
-    headers = {
-        "X-Application": app_key,
-        "X-Authentication": token,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+    con.close()
+
+    return {
+        engine: float(amount or 0.0)
+        for engine, amount in rows
     }
-
-    payload = json.dumps([{
-        "jsonrpc": "2.0",
-        "method": "SportsAPING/v1.0/listCurrentOrders",
-        "params": {},
-        "id": 1
-    }])
-
-    try:
-        r = requests.post(url, headers=headers, data=payload, timeout=10)
-        r.raise_for_status()
-        current_orders = r.json()[0]["result"]["currentOrders"]
-    except Exception:
-        return {}
-
-    unmatched_by_engine = defaultdict(float)
-
-    for o in current_orders:
-
-        remaining = float(o.get("sizeRemaining") or 0.0)
-        if remaining <= 0:
-            continue
-
-        side  = (o.get("side") or "").upper()
-        price = float((o.get("priceSize") or {}).get("price") or 0.0)
-
-        engine = o.get("customerStrategyRef") or o.get("customerOrderRef")
-        if not engine:
-            continue
-
-        # liability model
-        if side == "LAY":
-            liability = remaining * (price - 1)
-        else:
-            liability = remaining
-
-        unmatched_by_engine[str(engine)] += liability
-
-    return dict(unmatched_by_engine)
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
