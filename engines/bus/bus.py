@@ -3075,6 +3075,76 @@ class DecisionBus:
 
         print("────────────────────────────────────────────────────────\n")
 
+        # ==================================================
+        # 🟢 BOOKMAKER ADMISSION CONTROLLER (BAC v1)
+        # ==================================================
+
+        from collections import defaultdict
+
+        # --------------------------------------------------
+        # 1️⃣ Build per-market exposure snapshot (LIVE parents only)
+        # --------------------------------------------------
+        market_book = defaultdict(lambda: {"BACK": 0.0, "LAY": 0.0})
+
+        for (mid, sid), ctx_live in self._route_ctx_map.items():
+            for o in ctx_live.get("orders_by_runner", []):
+                if (
+                    o.get("role") == "PARENT"
+                    and str(o.get("entry_status")).upper() == "MATCHED"
+                ):
+                    side = str(o.get("side")).upper()
+                    stake = float(o.get("entry_stake") or 0.0)
+                    odds  = float(o.get("entry_odds") or 0.0)
+
+                    if side == "BACK":
+                        market_book[mid]["BACK"] += stake
+                    elif side == "LAY":
+                        market_book[mid]["LAY"] += stake * (odds - 1.0)
+
+        # --------------------------------------------------
+        # 2️⃣ Score generated plans by convexity improvement
+        # --------------------------------------------------
+        scored_plans = []
+
+        for eng, plan, ctx in plans:
+
+            mid = plan.get("marketId")
+            side = str(plan.get("side") or "").upper()
+
+            score = 0
+
+            # Structural crossover priority
+            why = str(plan.get("why") or "")
+            if "crossover" in why.lower():
+                score += 100
+
+            # Convexity balancing
+            if mid in market_book:
+
+                back_exp = market_book[mid]["BACK"]
+                lay_exp  = market_book[mid]["LAY"]
+
+                if back_exp > lay_exp and side == "LAY":
+                    score += 20
+                elif lay_exp > back_exp and side == "BACK":
+                    score += 20
+                else:
+                    score += 5
+            else:
+                score += 5
+
+            # Slight global LAY bias
+            if side == "LAY":
+                score += 3
+
+            scored_plans.append((score, eng, plan, ctx))
+
+        # --------------------------------------------------
+        # 3️⃣ Reorder plans by score (high first)
+        # --------------------------------------------------
+        scored_plans.sort(key=lambda x: x[0], reverse=True)
+
+        plans = [(eng, plan, ctx) for (_s, eng, plan, ctx) in scored_plans]
         try:
             # ==================================================
             # PHASE 2 — ENRICHMENT (BEGINS)
@@ -3576,12 +3646,55 @@ class DecisionBus:
                     print(f"  {reason:<22} : {count}")
             print("────────────────────────────────────────────────────────\n")
 
-            # --------------------------------------------------
-            # Diagnostic only (no execution impact)
-            # --------------------------------------------------
-            print("\nCONFIDENCE")
-            if risk_confidence:
-                print(f"[BUS][RISK][CONF] {len(risk_confidence)} runners")
+            # ==================================================
+            # 📊 V7 BOOKMAKER SURFACE
+            # ==================================================
+
+            from collections import defaultdict
+
+            market_book = defaultdict(lambda: {"BACK": 0.0, "LAY": 0.0})
+
+            for (mid, sid), ctx_live in self._route_ctx_map.items():
+                for o in ctx_live.get("orders_by_runner", []):
+                    if (
+                        o.get("role") == "PARENT"
+                        and str(o.get("entry_status")).upper() == "MATCHED"
+                    ):
+                        side = str(o.get("side")).upper()
+                        stake = float(o.get("entry_stake") or 0.0)
+                        odds  = float(o.get("entry_odds") or 0.0)
+
+                        if side == "BACK":
+                            market_book[mid]["BACK"] += stake
+                        elif side == "LAY":
+                            market_book[mid]["LAY"] += stake * (odds - 1.0)
+
+            if market_book:
+                print("\n══════════════════════════════════════════════════════")
+                print("V7 BOOKMAKER SURFACE")
+                print("══════════════════════════════════════════════════════")
+
+                for mid, data in market_book.items():
+                    back_exp = round(data["BACK"], 2)
+                    lay_exp  = round(data["LAY"], 2)
+                    imbalance = round(back_exp - lay_exp, 2)
+
+                    if imbalance > 0:
+                        state = "BACK_HEAVY"
+                    elif imbalance < 0:
+                        state = "LAY_HEAVY"
+                    else:
+                        state = "BALANCED"
+
+                    print(
+                        f"{mid}  "
+                        f"BACK_EXP={back_exp:<8} "
+                        f"LAY_EXP={lay_exp:<8} "
+                        f"IMB={imbalance:<8} "
+                        f"{state}"
+                    )
+
+                print("══════════════════════════════════════════════════════\n")
 
             print("────────────────────────────────────────────────────────\n")
 
