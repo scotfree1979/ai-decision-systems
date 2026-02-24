@@ -1050,16 +1050,19 @@ def _router_child_worker_loop():
         # ==================================================
         _router_enforce_status_authority()
 
-
         try:
-            # ==================================================
-            # PHASE 1 — EXECUTE ONE CHILD FROM QUEUE (IF ANY)
-            # ==================================================
-            try:
-                plan, ctx = _ROUTER_CHILD_QUEUE.get_nowait()
-            except queue.Empty:
-                plan = None
-                ctx = None
+            # --------------------------------------------------
+            # DRAIN QUEUE — process ALL children immediately
+            # --------------------------------------------------
+
+            plan = None
+            ctx = None
+
+            while True:
+                try:
+                    plan, ctx = _ROUTER_CHILD_QUEUE.get_nowait()
+                except queue.Empty:
+                    break
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -1183,7 +1186,8 @@ def _router_child_worker_loop():
             print("[ROUTER][CHILD][ERR]")
             traceback.print_exc()
 
-        time.sleep(1.0)
+        # Micro sleep to prevent CPU spin
+        time.sleep(0.05)
 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
