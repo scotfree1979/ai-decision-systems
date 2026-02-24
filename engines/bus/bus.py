@@ -2776,37 +2776,24 @@ class DecisionBus:
         # ======================================================================================================
 
         # --------------------------------------------------
-        # PRE-BUILD NEXT ROUTE (NON-BLOCKING)
+        # PRE-BUILD NEXT ROUTE (DELEGATED TO SNAPSHOT)
         # --------------------------------------------------
         if self._bus_stop == 7:
-
             try:
-                from engines.bus_route import BusRouteSnapshot
-
-                next_snapshot = BusRouteSnapshot()
-                next_snapshot.build_route()
-                next_snapshot.partition_into_bus_stops()
-   
-                # 🔑 CRITICAL — hydrate PX BEFORE swap
-                next_snapshot.refresh_ctx_dynamic_fields()
-
-                self._next_route_snapshot = next_snapshot
-
-                print(f"[BUS][ROUTE] prebuilt next route at bus_stop=7 (px hydrated)")
-
+                self._route_snapshot.prepare_next_route()
+                print("[BUS][ROUTE] prebuild delegated to snapshot")
             except Exception:
                 pass
 
         # --------------------------------------------------
-        # ROUTE SWITCH (FAST POINTER SWAP)
+        # ROUTE SWITCH (DELEGATED TO SNAPSHOT)
         # --------------------------------------------------
         if self._bus_stop == 1:
-
-            if hasattr(self, "_next_route_snapshot"):
-                self._route_snapshot = self._next_route_snapshot
-                del self._next_route_snapshot
-
-                print(f"[BUS][ROUTE] switched to prebuilt route")
+            try:
+                self._route_snapshot.activate_next_route()
+                print("[BUS][ROUTE] activated prebuilt route")
+            except Exception:
+                pass
 
 
         # --------------------------------------------------

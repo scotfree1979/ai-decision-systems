@@ -750,6 +750,52 @@ class BusRouteSnapshot:
 
     # === PATCH END ==============================================================
 
+    # ======================================================================
+    # ROUTE LIFECYCLE — INTERNAL SNAPSHOT CONTROL
+    # ======================================================================
+
+    def prepare_next_route(self):
+        """
+        Prebuild the next route snapshot.
+
+        BUS decides WHEN this runs (e.g. bus_stop == 7).
+        Snapshot decides HOW route is built.
+
+        This method does NOT mutate current route.
+        """
+
+        next_snapshot = BusRouteSnapshot()
+        next_snapshot.build_route()
+        next_snapshot.partition_into_bus_stops()
+        next_snapshot.refresh_ctx_dynamic_fields()
+
+        # Store internally (do not expose to BUS)
+        self._next_snapshot = next_snapshot
+
+
+    def activate_next_route(self):
+        """
+        Activate the prebuilt snapshot.
+
+        BUS calls this at bus_stop == 1.
+
+        No new route building happens here.
+        Just a clean swap of internal state.
+        """
+
+        if not hasattr(self, "_next_snapshot"):
+            return
+
+        next_snapshot = self._next_snapshot
+
+        # Swap identity surfaces
+        self.runner_pool = next_snapshot.runner_pool
+        self.ctx_map = next_snapshot.ctx_map
+        self.bus_stops = next_snapshot.bus_stops
+
+        # Cleanup
+        del self._next_snapshot
+
 
     def get_ctx_for_market(self, market_id: str):
         """
