@@ -108,34 +108,19 @@ class InPlayEngine:
 
         key = (mid, sid)
 
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
-# 🔎 SEARCH: race_status = get_race_status_cached(mid)
-# 🛠 ACTION: REPLACE OFF FLAG WITH AUTHORITY LAYER
-# 📆 PATCHED: 2026-02-20 — Wire V7 Authority Layer Into InPlay
-#
-# PURPOSE:
-# - Replace Betfair OFF flag dependency
-# - Use inplay_flag_helper authoritative logic
-# - Primitive fallback already inside helper
-#
-# INVARIANT:
-# - If V7 data present → authoritative fires
-# - If V7 data missing → primitive fires
-# - InPlay must now fire
-# ==============================================================================
-
         # --------------------------------------------------
-        # Authoritative InPlay Detection (V7 + Primitive)
+        # Race Start Authority (Non-Blocking)
         # --------------------------------------------------
 
-        from engines.inplay.inplay_flag_helper import build_race_intelligence
-        from engines.config_paths import open_bets_db
-        import sqlite3
+        race_started = False
+        race_quartile = None
+        race_confidence = 0.0
 
-        # fetch marketStartTime
-        market_start_ts = None
         try:
+            from engines.inplay.inplay_flag_helper import build_race_intelligence
+            from engines.config_paths import open_bets_db
+            import sqlite3
+
             con = open_bets_db(rw=False)
             row = con.execute("""
                 SELECT marketStartTime
@@ -149,54 +134,31 @@ class InPlayEngine:
                 market_start_ts = datetime.fromisoformat(
                     row[0].replace("Z","")
                 ).replace(tzinfo=timezone.utc).timestamp()
-        except Exception:
-            pass
 
-        if not market_start_ts:
-            return self._no_signal("no_market_start_time")
+                from tools.betfair_runner_trend_surface import _TREND_CACHE
 
+                runner_prices = {}
+                for (m, s), v in list(_TREND_CACHE.items()):
+                    if str(m) != mid:
+                        continue
+                    px_val = v.get("micro_to_price") or v.get("struct_to_price")
+                    if px_val:
+                        runner_prices[str(s)] = float(px_val)
 
-        # build price map for this market only (SAFE)
-        runner_prices = {}
-        try:
-            from tools.betfair_runner_trend_surface import _TREND_CACHE
+                if runner_prices:
+                    intel = build_race_intelligence(
+                        mid,
+                        market_start_ts,
+                        runner_prices
+                    )
 
-            for (m, s), v in list(_TREND_CACHE.items()):
-                if str(m) != mid:
-                    continue
-
-                # prefer micro_to_price (current)
-                px_val = (
-                    v.get("micro_to_price")
-                    or v.get("struct_to_price")
-                )
-
-                if px_val is None:
-                    continue
-
-                try:
-                    runner_prices[str(s)] = float(px_val)
-                except Exception:
-                    continue
+                    race_started = intel["market"]["is_inplay"]
+                    race_quartile = intel["market"]["race_quartile"]
+                    race_confidence = intel["market"]["confidence"]
 
         except Exception:
-            return self._no_signal("no_trend_surface")
-
-        if not runner_prices:
-            return self._no_signal("no_runner_prices")
-
-        intel = build_race_intelligence(
-            mid,
-            market_start_ts,
-            runner_prices
-        )
-
-        in_play = intel["market"]["is_inplay"]
-
-        if not in_play:
-            return self._no_signal("waiting_for_authority_flag")
-
-# === PATCH END ==============================================================
+            # Helper failure must NEVER block InPlay
+            race_started = False
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
@@ -276,10 +238,25 @@ class InPlayEngine:
                 self.armed_back[key] = True
 
         # --------------------------------------------------
+        # Atomic V7 Report
+        # --------------------------------------------------
+
+        self._print_v7_inplay_report(
+            market_id=mid,
+            sid=sid,
+            px=px,
+            direction=direction,
+            ticks_moved=ticks_moved,
+            race_started=race_started,
+            race_quartile=race_quartile,
+            race_confidence=race_confidence,
+        )
+
+        # --------------------------------------------------
         # Triggering (in-play only, one-shot)
         # --------------------------------------------------
 
-        if not in_play:
+        if not race_started:
             return self._no_signal("armed_pre_inplay")
 
         if self.triggered.get(key):
@@ -417,6 +394,49 @@ class InPlayEngine:
             for lvl in self.BACK_LADDER
             if lvl <= px
         ]
+
+    # --------------------------------------------------
+    # V7 Atomic Report
+    # --------------------------------------------------
+
+    def _print_v7_inplay_report(
+        self,
+        market_id: str,
+        sid: str,
+        px: float,
+        direction: str,
+        ticks_moved: float,
+        race_started: bool,
+        race_quartile: Optional[str],
+        race_confidence: float,
+    ):
+
+        now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+
+        print("\n══════════════════════════════════════════════════════")
+        print("V7 MSC_INPLAY REPORT")
+        print(f"t={now_str}   mode=LIVE")
+        print("══════════════════════════════════════════════════════")
+
+        print("\nMARKET")
+        print("------------------------------------------------------")
+        print(f"marketId                : {market_id}")
+        print(f"race_started            : {'YES' if race_started else 'NO'}")
+        print(f"race_quartile           : {race_quartile}")
+        print(f"race_confidence         : {round(race_confidence,2)}")
+        print("------------------------------------------------------")
+
+        print("\nRUNNER")
+        print("------------------------------------------------------")
+        print(f"selectionId             : {sid}")
+        print(f"price                   : {px}")
+        print(f"direction               : {direction}")
+        print(f"ticks_moved             : {ticks_moved}")
+        print(f"armed_lay               : {self.armed_lay.get((market_id, sid), False)}")
+        print(f"armed_back              : {self.armed_back.get((market_id, sid), False)}")
+        print(f"triggered               : {self.triggered.get((market_id, sid), False)}")
+        print("------------------------------------------------------")
+        print("══════════════════════════════════════════════════════")
 
     # ----------------------------
     # No-signal helper

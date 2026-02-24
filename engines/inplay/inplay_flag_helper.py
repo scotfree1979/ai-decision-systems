@@ -223,17 +223,25 @@ def build_race_intelligence(
         for r in rows:
             v7_positions[str(r["selectionId"])] = r["pos_inplay"]
 
-        # --- Drift Unfolded ---
+        # --- Drift Unfolded (Schema-Correct) ---
         rows = con.execute("""
-            SELECT selectionId, drift_speed, drift_acceleration
+            SELECT selectionId, drift_ratio
             FROM v7_oc_drift_unfolded
             WHERE marketId = ?
         """, (str(market_id),)).fetchall()
 
         for r in rows:
-            v7_drift[str(r["selectionId"])] = {
-                "drift_speed": r["drift_speed"],
-                "drift_acceleration": r["drift_acceleration"],
+            sid = str(r["selectionId"])
+            drift_ratio = float(r["drift_ratio"] or 0.0)
+
+            # Convert ratio into directional drift proxy
+            # drift_ratio > 1 = drift
+            # drift_ratio < 1 = steam
+            drift_speed = drift_ratio - 1.0
+
+            v7_drift[sid] = {
+                "drift_speed": drift_speed,
+                "drift_acceleration": 0.0  # not available in this view
             }
 
         con.close()
