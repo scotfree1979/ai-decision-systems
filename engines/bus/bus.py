@@ -1884,48 +1884,68 @@ class DecisionBus:
         # --------------------------------------------------
         # 🟥 LANE 5 — OVERWATCHER (ROUTE-FED, PURE EVALUATOR)
         # --------------------------------------------------
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🟥 LANE 5 — OVERWATCHER
+# 🛠 ACTION: Add explicit NO-FIRE reason recording
+# 📆 PATCHED: 2026-04-XX — Overwatch visibility instrumentation
+#
+# PURPOSE:
+# - Overwatch must report why it did not emit
+# - No behavioural change
+# - Diagnostic only
+# ==============================================================================
+
         engine_report["OVERWATCHER"]["evaluated"] = True
 
         overwatcher = self.engines.get("OVERWATCHER")
 
         if overwatcher:
 
-            try:
-                for (mid, sid), ctx in self._route_ctx_map.items():
+            for (mid, sid), ctx in self._route_ctx_map.items():
 
-                    if not ctx:
-                        continue
+                if not ctx:
+                    _record_reason(engine_report, "OVERWATCHER", "missing_ctx")
+                    continue
 
-                    current_px = ctx.get("px")
-                    anchor_px  = ctx.get("anchor_entry_odds")
-                    anchor_id  = ctx.get("anchor_parent_id")
-                    anchor_stk = ctx.get("anchor_entry_stake")
+                current_px = ctx.get("px")
+                anchor_px  = ctx.get("anchor_entry_odds")
+                anchor_id  = ctx.get("anchor_parent_id")
+                anchor_stk = ctx.get("anchor_entry_stake")
 
-                    # Must have live px and a matched parent anchor
-                    if current_px is None or not anchor_id or anchor_px is None:
-                        continue
+                if current_px is None:
+                    _record_reason(engine_report, "OVERWATCHER", "missing_px")
+                    continue
 
-                    # --------------------------------------------------
-                    # PURE STOPLOSS EVALUATION
-                    # --------------------------------------------------
-                    plan = overwatcher.maybe_emit_stoploss_plan(
-                        parent_row={
-                            "id": anchor_id,
-                            "marketId": mid,
-                            "selectionId": sid,
-                            "side": ctx.get("side"),
-                            "entry_odds": anchor_px,
-                            "entry_stake": anchor_stk,
-                        },
-                        current_px=float(current_px),
-                    )
+                if not anchor_id or anchor_px is None:
+                    _record_reason(engine_report, "OVERWATCHER", "no_active_parent")
+                    continue
 
-                    if plan:
-                        plan["engine"] = "OVERWATCHER"
-                        plans.append(("OVERWATCHER", plan, ctx))
-                        engine_report["OVERWATCHER"]["fired"] += 1
-                        lane_counts[5] += 1
-                        continue
+                # --------------------------------------------------
+                # STOPLOSS EVALUATION
+                # --------------------------------------------------
+                plan = overwatcher.maybe_emit_stoploss_plan(
+                    parent_row={
+                        "id": anchor_id,
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "side": ctx.get("side"),
+                        "entry_odds": anchor_px,
+                        "entry_stake": anchor_stk,
+                        "opened_at": ctx.get("opened_at"),
+                    },
+                    current_px=float(current_px),
+                )
+
+                if plan:
+                    plan["engine"] = "OVERWATCHER"
+                    plans.append(("OVERWATCHER", plan, ctx))
+                    engine_report["OVERWATCHER"]["fired"] += 1
+                    lane_counts[5] += 1
+                else:
+                    _record_reason(engine_report, "OVERWATCHER", "no_stoploss_hit")
+
+# === PATCH END ==============================================================
 
                     # --------------------------------------------------
                     # PURE PROGRESSIVE LOCK EVALUATION

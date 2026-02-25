@@ -330,16 +330,28 @@ class BusRouteSnapshot:
 
         now = datetime.now(timezone.utc)
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — market window selection block
+# 🛠 ACTION: REPLACE window construction logic with qualifying accumulator scan
+# 📆 PATCHED: 2026-04-25 — Deterministic 5 qualifying market accumulator
+#
+# PURPOSE:
+# - Always select NEXT 5 QUALIFYING markets
+# - Skip markets with runner_count < MIN_RUNNERS
+# - Continue scanning schedule until 5 found
+# - Only shrink when fewer than 5 qualifying markets remain (true end-of-day)
+#
+# INVARIANT:
+# - Window = 5 markets whenever possible
+# - No premature slice
+# - No temporary 3/4 window when more qualify later
+# ======================================================================================================
+
         # --------------------------------------------------
         # 1️⃣ Load DISTINCT today's markets ordered by off time
-        #    and filter by runner count >= 6
+        #     (NO HAVING filter — qualification handled below)
         # --------------------------------------------------
-
-        WINDOW_SIZE = 5
-        MIN_RUNNERS = 6
-        GRACE_MINUTES = 5
-
-        now = datetime.now(timezone.utc)
 
         con = connect_db(ro=True)
         con.row_factory = sqlite3.Row
@@ -353,20 +365,21 @@ class BusRouteSnapshot:
                 FROM bets
                 WHERE date(marketStartTime)=date('now','utc')
                 GROUP BY marketId, marketStartTime
-                HAVING runner_count >= ?
                 ORDER BY datetime(marketStartTime) ASC
-            """, (MIN_RUNNERS,)).fetchall()
+            """).fetchall()
         finally:
             con.close()
 
         # --------------------------------------------------
-        # 2️⃣ Determine sliding window (NEXT 5 from now)
+        # 2️⃣ Accumulate NEXT 5 QUALIFYING markets
         # --------------------------------------------------
 
-        active_markets = []
+        window_mids = []
 
         for r in rows:
+
             mid = str(r["marketId"])
+            runner_count = int(r["runner_count"] or 0)
             off_raw = r["marketStartTime"]
 
             if not off_raw:
@@ -379,33 +392,21 @@ class BusRouteSnapshot:
             except Exception:
                 continue
 
-            # Only keep future markets
-            if off_dt >= now - timedelta(minutes=GRACE_MINUTES):
-                active_markets.append(mid)
+            # Skip markets fully expired (beyond grace)
+            if off_dt < now - timedelta(minutes=GRACE_MINUTES):
+                continue
 
-        # Take NEXT FIVE
-        window_mids = active_markets[:WINDOW_SIZE]
+            # Qualification rule
+            if runner_count < MIN_RUNNERS:
+                continue
 
-        # --------------------------------------------------
-        # 3️⃣ Take first 5 eligible markets
-        # --------------------------------------------------
+            window_mids.append(mid)
 
-        window_mids = active_markets[:WINDOW_SIZE]
-
-        # --------------------------------------------------
-        # 🔄 Ensure MarketMonitor state for window markets
-        # --------------------------------------------------
-        try:
-            from engines.market_monitor import monitor
-            monitor.refresh()
-        except Exception:
-            pass
-
-
+            if len(window_mids) == WINDOW_SIZE:
+                break
 
         # --------------------------------------------------
-        # 4️⃣ Build runner identity surface from bets DB
-        #    (Window-derived mids only — NOT scope)
+        # 3️⃣ Build runner identity surface from window mids
         # --------------------------------------------------
 
         raw_pairs = []
@@ -436,14 +437,12 @@ class BusRouteSnapshot:
         if not raw_pairs:
             raw_pairs = list(get_root_ctx_runner_pairs())
 
-        # 🔑 Order by off time
+        # Order by off time
         ordered = _order_runner_pool_by_market_time(raw_pairs)
-
 
 # ======================================================================================================
 # END PATCH
 # ======================================================================================================
-
         anchor_mid = _get_current_anchor_market()
         ordered = _rotate_from_market(ordered, anchor_mid)
 
@@ -498,8 +497,27 @@ class BusRouteSnapshot:
                 minutes_post_off = (now - off).total_seconds() / 60.0
 
                 # Mark for prune if older than 120 minutes post-off
-                if minutes_post_off > 120:
-                    market_times[mid] = True
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), prune markets block
+# 🛠 ACTION: REPLACE ENTIRE PRUNE BLOCK WITH NO-OP
+# 📆 PATCHED: 2026-04-25 — Prune disabled (window now deterministic & non-cumulative)
+#
+# PURPOSE:
+# - Route window is rebuilt deterministically from NOW
+# - No cumulative growth across day
+# - No stale markets can exist
+# - Pruning no longer required
+#
+# INVARIANT:
+# - This block intentionally does NOTHING
+# - runner_pool untouched
+# - ctx_map untouched
+# - Route identity remains deterministic
+# ======================================================================================================
+
+                # PRUNE DISABLED — deterministic 5-market window rebuild
+                pass
 
             con.close()
 
