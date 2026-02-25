@@ -102,52 +102,113 @@ def init_bank_state():
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: below _compute_market_floor_from_betfair_surface()
-# 🧩 ACTION: ADD unmatched working capital surface (engine-split)
-# 📆 PATCHED: 2026-04-XX — Separate unmatched from floor
+# 🔎 SEARCH: def _compute_engine_unmatched_working_capital():
+# 🛠 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-25 — Working capital from Betfair CURRENT surface (parents + children)
 #
 # PURPOSE:
-# - Compute unmatched liability per engine
-# - Does NOT affect floor
-# - Pure Betfair execution surface
-# - Read-only
+# - Compute unmatched liability from Betfair listCurrentOrders
+# - Include BOTH parents and children
+# - Use sizeRemaining (authoritative)
+# - Group by engine via orders table mapping
+#
+# INVARIANT:
+#   Working capital = TRUE unmatched exposure currently reserved at Betfair
+#   No DB guessing
+#   No role filtering
 # ======================================================================================================
 
 def _compute_engine_unmatched_working_capital():
 
+    from engines.live.live_router import _keys
     from engines.config_paths import open_auto_db
+    import requests
+    import json
+    from collections import defaultdict
 
+    app_key, token = _keys()
+    if not app_key or not token:
+        return {}
+
+    url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+
+    headers = {
+        "X-Application": app_key,
+        "X-Authentication": token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = json.dumps([{
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listCurrentOrders",
+        "params": {},
+        "id": 1
+    }])
+
+    try:
+        r = requests.post(url, headers=headers, data=payload, timeout=10)
+        r.raise_for_status()
+        current_orders = r.json()[0]["result"]["currentOrders"]
+    except Exception:
+        return {}
+
+    if not current_orders:
+        return {}
+
+    # --------------------------------------------------
+    # Map betId → engine (DB truth)
+    # --------------------------------------------------
     con = open_auto_db(rw=False)
     con.row_factory = None
     cur = con.cursor()
 
+    betid_to_engine = {}
+
     rows = cur.execute("""
-        SELECT
-            o.engine,
-            SUM(
-                CASE
-                    WHEN o.side = 'LAY'
-                        THEN o.entry_stake * (o.entry_odds - 1)
-                    ELSE
-                        o.entry_stake
-                END
-            ) AS working_capital
-        FROM orders o
-        JOIN bets b ON b.marketId = o.marketId
-        WHERE o.role = 'PARENT'
-          AND o.entry_status IN ('PLACED')
-          AND (o.exit_status IS NULL OR o.exit_status NOT IN ('CANCELLED','VOID','SETTLED','MATCHED','EXPIRED'))
-          AND date(o.opened_at) = date('now','utc')
-          AND (julianday(b.marketStartTime) - julianday('now','utc')) > 0
-        GROUP BY o.engine
-        ORDER BY o.engine;
+        SELECT betId, engine
+        FROM orders
+        WHERE betId IS NOT NULL
+          AND date(opened_at) = date('now','utc')
     """).fetchall()
 
     con.close()
 
+    for betId, engine in rows:
+        betid_to_engine[str(betId)] = engine
+
+    # --------------------------------------------------
+    # Compute unmatched working capital per engine
+    # --------------------------------------------------
+    engine_wc = defaultdict(float)
+
+    for o in current_orders:
+
+        remaining = float(o.get("sizeRemaining") or 0.0)
+        if remaining <= 0:
+            continue
+
+        price = float((o.get("priceSize") or {}).get("price") or 0.0)
+        if price <= 0:
+            continue
+
+        side = (o.get("side") or "").upper()
+        betId = str(o.get("betId") or "")
+
+        engine = betid_to_engine.get(betId)
+        if not engine:
+            continue  # ignore unknown orders
+
+        if side == "LAY":
+            liability = remaining * (price - 1)
+        else:  # BACK
+            liability = remaining
+
+        engine_wc[engine] += float(liability)
+
     return {
-        engine: float(amount or 0.0)
-        for engine, amount in rows
+        engine: round(amount, 2)
+        for engine, amount in engine_wc.items()
     }
 
 # ======================================================================================================
