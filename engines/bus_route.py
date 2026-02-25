@@ -327,6 +327,7 @@ class BusRouteSnapshot:
 
         WINDOW_SIZE = 5
         GRACE_MINUTES = 5
+        MIN_RUNNERS = 6
 
         now = datetime.now(timezone.utc)
 
