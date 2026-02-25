@@ -343,7 +343,7 @@ class BusRouteSnapshot:
 # ======================================================================================================
 
         WINDOW_SIZE = 5
-        ENTRY_HOURS = 3
+
         MIN_RUNNERS = 6
         POST_OFF_MINUTES = 120  # safety guard only
 
@@ -360,6 +360,7 @@ class BusRouteSnapshot:
                     COUNT(DISTINCT selectionId) AS runner_count
                 FROM bets
                 WHERE date(marketStartTime)=date('now','utc')
+                  AND datetime(marketStartTime) >= datetime('now','utc','-5 minutes')
                 GROUP BY marketId, marketStartTime
                 ORDER BY datetime(marketStartTime) ASC
             """).fetchall()
@@ -386,8 +387,25 @@ class BusRouteSnapshot:
 
             minutes_to_off = (off_dt - now).total_seconds() / 60.0
 
-            # Admission rule (T <= 3h)
-            if minutes_to_off > ENTRY_HOURS * 60:
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: # Admission rule (T <= 3h)
+# 🛠 ACTION: Replace admission logic to FUTURE-ONLY window
+# 📆 PATCHED: 2026-04-XX — Strict forward-only 5-market window
+#
+# PURPOSE:
+# - Include ONLY markets with marketStartTime >= now
+# - Select NEXT 5 qualifying markets
+# - No backward inclusion
+# - Deterministic ordering
+#
+# INVARIANT:
+# - First market in runner_pool must be next future race
+# - No past races in window
+# ======================================================================================================
+
+            # STRICT FUTURE-ONLY ADMISSION
+            if off_dt < now:
                 continue
 
             # Safety: remove markets > 120 minutes post-off
@@ -432,8 +450,7 @@ class BusRouteSnapshot:
 # ======================================================================================================
 # END PATCH
 # ======================================================================================================
-        anchor_mid = _get_current_anchor_market()
-        ordered = _rotate_from_market(ordered, anchor_mid)
+
 
 
         # --------------------------------------------------
@@ -797,22 +814,21 @@ class BusRouteSnapshot:
         """
         return self.bus_stops.get(tick, [])
 
-    # === PATCH START ==============================================================
-    # 📍 TARGET: engines/bus_route.py
-    # 🔎 SEARCH: def partition_into_bus_stops(self):
-    # 🛠 ACTION: Replace entire function
-    # 📆 PATCHED: 2026-04-XX — Exclude IGNORED from bus stop scheduling only
-    #
-    # PURPOSE:
-    # - runner_pool remains full identity surface
-    # - IGNORED runners excluded from execution rotation
-    # - ctx_map untouched
-    # - lifecycle injections still possible
-    #
-    # INVARIANT:
-    # - runner_pool contains ALL runners
-    # - bus_stops contain ACTIVE + PASSIVE only
-    # ==============================================================================
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def partition_into_bus_stops(self):
+# 🛠 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-25 — Restore identity-based route rotation (band-agnostic)
+#
+# PURPOSE:
+# - Route scheduling must NOT depend on band
+# - Route = identity surface only
+# - Band gating belongs inside BUS lanes
+#
+# INVARIANT:
+# - All runners in runner_pool are scheduled
+# - bus_stops never empty if runner_pool non-empty
+# ======================================================================================================
 
     def partition_into_bus_stops(self):
 
@@ -820,24 +836,10 @@ class BusRouteSnapshot:
             self.bus_stops = {}
             return
 
-        # ACTIVE-only execution surface
-        eligible = [
-            (mid, sid)
-            for (mid, sid), ctx in self.ctx_map.items()
-            if ctx.get("band") == "ACTIVE"
-        ]
-
-        n = len(eligible)
-
+        n = len(self.runner_pool)
         self.bus_stops = {}
 
-        if n == 0:
-            return
-
-        # --------------------------------------------------
-        # Even distribution across 10 bus stops
-        # --------------------------------------------------
-
+        # Even distribution across TICKS_PER_CYCLE
         per_stop = max(1, (n + TICKS_PER_CYCLE - 1) // TICKS_PER_CYCLE)
 
         for tick in range(1, TICKS_PER_CYCLE + 1):
@@ -846,12 +848,9 @@ class BusRouteSnapshot:
 
             for i in range(per_stop):
                 idx = ((tick - 1) * per_stop + i) % n
-                runners.append(eligible[idx])
+                runners.append(self.runner_pool[idx])
 
             self.bus_stops[tick] = runners
-
-
-
     # === PATCH END ==============================================================
 
 
