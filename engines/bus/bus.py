@@ -1967,9 +1967,6 @@ class DecisionBus:
                         engine_report["OVERWATCHER"]["fired"] += 1
                         lane_counts[5] += 1
 
-            except Exception:
-                _record_reason(engine_report, "OVERWATCHER", "tick_error")
-
         return plans, lane_counts
 
     def _ensure_route_buffer(self):
