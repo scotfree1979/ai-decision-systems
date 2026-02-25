@@ -343,7 +343,7 @@ class BusRouteSnapshot:
 # ======================================================================================================
 
         WINDOW_SIZE = 5
-
+        ENTRY_HOURS = 12
         MIN_RUNNERS = 6
         POST_OFF_MINUTES = 120  # safety guard only
 
@@ -367,7 +367,30 @@ class BusRouteSnapshot:
         finally:
             con.close()
 
-        window_mids = []
+        # ==============================================================================
+        # 📍 TARGET: engines/bus_route.py
+        # 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — window selection logic
+        # 🛠 ACTION: REPLACE ENTIRE WINDOW CONSTRUCTION BLOCK
+        # 📆 PATCHED: 2026-04-25 — 5+1 Floating Preferred Window Model
+        #
+        # PURPOSE:
+        # - Outer horizon: 12 hours
+        # - Preferred execution zone: 4.5 hours
+        # - Base window = 5 markets
+        # - Floating slot (+1) when new preferred entrant appears
+        #
+        # INVARIANTS:
+        # - Deterministic rebuild every call
+        # - No cumulative state
+        # - First 5 always earliest future markets
+        # - Sixth slot = newest preferred entrant (if exists)
+        # ==============================================================================
+
+        WINDOW_SIZE = 5
+        OUTER_HOURS = 12
+        PREFERRED_HOURS = 4.5
+
+        future_markets = []
 
         for r in rows:
 
@@ -385,40 +408,49 @@ class BusRouteSnapshot:
             except Exception:
                 continue
 
-            minutes_to_off = (off_dt - now).total_seconds() / 60.0
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus_route.py
-# 🔎 SEARCH: # Admission rule (T <= 3h)
-# 🛠 ACTION: Replace admission logic to FUTURE-ONLY window
-# 📆 PATCHED: 2026-04-XX — Strict forward-only 5-market window
-#
-# PURPOSE:
-# - Include ONLY markets with marketStartTime >= now
-# - Select NEXT 5 qualifying markets
-# - No backward inclusion
-# - Deterministic ordering
-#
-# INVARIANT:
-# - First market in runner_pool must be next future race
-# - No past races in window
-# ======================================================================================================
-
-            # STRICT FUTURE-ONLY ADMISSION
+            # FUTURE ONLY
             if off_dt < now:
                 continue
 
-            # Safety: remove markets > 120 minutes post-off
-            if minutes_to_off < -POST_OFF_MINUTES:
+            # OUTER HORIZON (12h)
+            if off_dt > now + timedelta(hours=OUTER_HOURS):
                 continue
 
             if runner_count < MIN_RUNNERS:
                 continue
 
-            window_mids.append(mid)
+            future_markets.append((mid, off_dt))
 
-            if len(window_mids) == WINDOW_SIZE:
-                break
+        # Ensure deterministic order
+        future_markets = sorted(future_markets, key=lambda x: x[1])
+
+        # --------------------------------------------------
+        # BASE WINDOW (first 5 future markets)
+        # --------------------------------------------------
+        base_window = [mid for mid, _ in future_markets[:WINDOW_SIZE]]
+
+        # --------------------------------------------------
+        # PREFERRED ZONE (<= 4.5h to off)
+        # --------------------------------------------------
+        preferred_markets = [
+            mid for mid, off_dt in future_markets
+            if off_dt <= now + timedelta(hours=PREFERRED_HOURS)
+        ]
+
+        window_mids = list(base_window)
+
+        # --------------------------------------------------
+        # FLOATING SLOT LOGIC (+1)
+        # --------------------------------------------------
+        if len(preferred_markets) > WINDOW_SIZE:
+            newest_preferred = preferred_markets[-1]
+
+            if newest_preferred not in window_mids:
+                window_mids.append(newest_preferred)
+
+        # --------------------------------------------------
+        # BUILD RUNNER PAIRS FROM WINDOW
+        # --------------------------------------------------
 
         raw_pairs = []
 
