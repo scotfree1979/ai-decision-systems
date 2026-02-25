@@ -82,7 +82,7 @@ class InPlayEngine:
 # ============================================================================
 
         from engines.bus_route import DAY_RUNNER_SURFACE
-
+        intel = {}
         mid = str(ctx.get("marketId"))
         sid = str(ctx.get("selectionId"))
 
@@ -160,55 +160,56 @@ class InPlayEngine:
             # Helper failure must NEVER block InPlay
             race_started = False
 
+        # --------------------------------------------------
+        # Authority Influence Layer (Ranking, not veto)
+        # --------------------------------------------------
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
-# 🔎 SEARCH: trend = get_runner_trend(mid, sid)
-# 🛠 ACTION: Insert authority influence layer
-# 📆 PATCHED: 2026-02-20 — Authority-Based Decision Influence
+# 🔎 SEARCH: # Authority Influence Layer (Ranking, not veto)
+# 🛠 ACTION: Refine authority gating (LEADING + PROMINENT protection)
+# 📆 PATCHED: 2026-02-24 — Balanced authority layer
 #
 # PURPOSE:
-# - Use helper collapse intelligence to influence decisions
-# - Primitive logic becomes fallback
-# - V7 overlay controls selection priority
-#
-# INVARIANT:
-# - If V7 available → only top collapse candidate allowed
-# - If no V7 → primitive continues unchanged
+# - Authority ranks, not vetoes
+# - Protect LEADING strongly
+# - Protect PROMINENT unless collapse strong
+# - Allow multiple runners per market
 # ==============================================================================
 
-        # --------------------------------------------------
-        # Authority Influence Layer
-        # --------------------------------------------------
-
         authoritative_runners = intel.get("runners", [])
-        authority_available = any(
-            r.get("role") is not None or
-            r.get("drift_speed") is not None or
-            r.get("structure_signals")
-            for r in authoritative_runners
-        )
+        authority_available = bool(authoritative_runners)
+
+        collapse_score = 0.0
+        role = None
 
         if authority_available:
 
-            top = authoritative_runners[0]
+            collapse_map = {
+                str(r.get("selectionId")): r.get("collapse_score", 0)
+                for r in authoritative_runners
+            }
 
-            # Only allow top collapse candidate to trade
-            if str(top.get("selectionId")) != sid:
-                return self._no_signal("not_top_collapse_candidate")
+            role_map = {
+                str(r.get("selectionId")): r.get("role")
+                for r in authoritative_runners
+            }
 
-            # Require minimum collapse strength
-            if top.get("collapse_score", 0) < 1.5:
+            collapse_score = collapse_map.get(sid, 0.0)
+            role = role_map.get(sid)
+
+            # Block very weak collapse entirely
+            if collapse_score < 1.0:
                 return self._no_signal("collapse_score_too_low")
 
-            # Avoid trading strong leaders unless collapse extreme
-            role = top.get("role")
-            if role == "LEADING" and top.get("collapse_score", 0) < 2.5:
-                return self._no_signal("leader_not_collapsing")
+            # Protect LEADING unless extreme collapse
+            if role == "LEADING" and collapse_score < 2.5:
+                return self._no_signal("leader_protected")
 
-# === PATCH END ============================================================== 
+            # Protect PROMINENT unless solid collapse
+            if role == "PROMINENT" and collapse_score < 2.0:
+                return self._no_signal("prominent_protected")
 
-
-
+# === PATCH END ==============================================================
         # --------------------------------------------------
         # Market-truth trend (authoritative)
         # --------------------------------------------------
@@ -288,10 +289,7 @@ class InPlayEngine:
         ):
 
             # Avoid harvesting leaders
-            role = None
-            if authority_available:
-                role = top.get("role")
-
+  
             if role not in ("LEADING", "PROMINENT"):
 
                 # Mark as harvested
@@ -315,11 +313,30 @@ class InPlayEngine:
 # === PATCH END ==============================================================
 
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: # ---- LAY ladder trigger ----
+# 🛠 ACTION: Add authority ranking bias
+# 📆 PATCHED: 2026-02-24 — Allow multiple runners but prioritise higher collapse
+#
+# PURPOSE:
+# - Permit several runners per market
+# - Prefer higher collapse_score
+# - Maintain sweetspot discipline
+# ==============================================================================
+
         # ---- LAY ladder trigger ----
         if self.armed_lay.get(key):
+
+            # If authority available, prefer higher collapse runners
+            if authority_available and collapse_score < 1.0:
+                return self._no_signal("collapse_below_trade_threshold")
+
             if to_price >= self.SWEETSPOT:
                 plans.extend(self._emit_lay_ladder(ctx, to_price))
-                self.triggered[key] = True
+                self.triggered[key] = True            
+
+# === PATCH END ==============================================================
 
         # ---- BACK ladder trigger ----
         elif self.armed_back.get(key):
