@@ -325,34 +325,29 @@ class BusRouteSnapshot:
         from datetime import datetime, timezone, timedelta
         import sqlite3
 
-        WINDOW_SIZE = 5
-        GRACE_MINUTES = 5
-        MIN_RUNNERS = 6
-
-        now = datetime.now(timezone.utc)
-
 # ======================================================================================================
 # 📍 TARGET: engines/bus_route.py
-# 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — market window selection block
-# 🛠 ACTION: REPLACE window construction logic with qualifying accumulator scan
-# 📆 PATCHED: 2026-04-25 — Deterministic 5 qualifying market accumulator
+# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), replace window construction block
+# 📆 PATCHED: 2026-04-25 — 3-Hour Pre-Off Admission Model (Deterministic, Clean)
 #
 # PURPOSE:
-# - Always select NEXT 5 QUALIFYING markets
-# - Skip markets with runner_count < MIN_RUNNERS
-# - Continue scanning schedule until 5 found
-# - Only shrink when fewer than 5 qualifying markets remain (true end-of-day)
+# - Market enters route when <= 3 hours to off
+# - Window holds up to 5 qualifying markets
+# - No finish-triggered sliding
+# - Deterministic rebuild every call
 #
 # INVARIANT:
-# - Window = 5 markets whenever possible
-# - No premature slice
-# - No temporary 3/4 window when more qualify later
+# - No dependency on scope
+# - No cumulative state
+# - Self-contained logic
 # ======================================================================================================
 
-        # --------------------------------------------------
-        # 1️⃣ Load DISTINCT today's markets ordered by off time
-        #     (NO HAVING filter — qualification handled below)
-        # --------------------------------------------------
+        WINDOW_SIZE = 5
+        ENTRY_HOURS = 3
+        MIN_RUNNERS = 6
+        POST_OFF_MINUTES = 120  # safety guard only
+
+        now = datetime.now(timezone.utc)
 
         con = connect_db(ro=True)
         con.row_factory = sqlite3.Row
@@ -371,17 +366,13 @@ class BusRouteSnapshot:
         finally:
             con.close()
 
-        # --------------------------------------------------
-        # 2️⃣ Accumulate NEXT 5 QUALIFYING markets
-        # --------------------------------------------------
-
         window_mids = []
 
         for r in rows:
 
             mid = str(r["marketId"])
-            runner_count = int(r["runner_count"] or 0)
             off_raw = r["marketStartTime"]
+            runner_count = int(r["runner_count"] or 0)
 
             if not off_raw:
                 continue
@@ -393,11 +384,16 @@ class BusRouteSnapshot:
             except Exception:
                 continue
 
-            # Skip markets fully expired (beyond grace)
-            if off_dt < now - timedelta(minutes=GRACE_MINUTES):
+            minutes_to_off = (off_dt - now).total_seconds() / 60.0
+
+            # Admission rule (T <= 3h)
+            if minutes_to_off > ENTRY_HOURS * 60:
                 continue
 
-            # Qualification rule
+            # Safety: remove markets > 120 minutes post-off
+            if minutes_to_off < -POST_OFF_MINUTES:
+                continue
+
             if runner_count < MIN_RUNNERS:
                 continue
 
@@ -405,10 +401,6 @@ class BusRouteSnapshot:
 
             if len(window_mids) == WINDOW_SIZE:
                 break
-
-        # --------------------------------------------------
-        # 3️⃣ Build runner identity surface from window mids
-        # --------------------------------------------------
 
         raw_pairs = []
 
@@ -419,9 +411,7 @@ class BusRouteSnapshot:
 
             try:
                 rows = con.execute(f"""
-                    SELECT
-                        marketId,
-                        selectionId
+                    SELECT marketId, selectionId
                     FROM bets
                     WHERE marketId IN ({",".join(["?"]*len(window_mids))})
                 """, window_mids).fetchall()
@@ -434,11 +424,9 @@ class BusRouteSnapshot:
                         (str(r["marketId"]), str(r["selectionId"]))
                     )
 
-        # Safety fallback — identity must never be empty
         if not raw_pairs:
             raw_pairs = list(get_root_ctx_runner_pairs())
 
-        # Order by off time
         ordered = _order_runner_pool_by_market_time(raw_pairs)
 
 # ======================================================================================================
@@ -447,103 +435,6 @@ class BusRouteSnapshot:
         anchor_mid = _get_current_anchor_market()
         ordered = _rotate_from_market(ordered, anchor_mid)
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus_route.py
-# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), after ordered = ...
-# 📆 PATCHED: 2026-04-02 — Prune markets older than -120 minutes
-#
-# PURPOSE:
-# - Prevent route growth across full trading day
-# - Remove stale markets >120 minutes post-off
-# - Preserve active lifecycle runners
-#
-# INVARIANTS:
-# - Only prunes markets strictly older than -120 minutes
-# - Never prunes markets with matched parents today
-# - Fail-open (never crash route build)
-# ======================================================================================================
-
-        try:
-            from engines.config_paths import connect_db
-            from datetime import datetime, timezone
-            import sqlite3
-
-            now = datetime.now(timezone.utc)
-
-            con = connect_db(ro=True)
-            con.row_factory = sqlite3.Row
-
-            # Load all market start times for current runner_pool
-            mids = {mid for (mid, _sid) in self.runner_pool}
-
-            market_times = {}
-            for mid in mids:
-                row = con.execute(
-                    """
-                    SELECT marketStartTime
-                    FROM bets
-                    WHERE marketId = ?
-                    LIMIT 1
-                    """,
-                    (mid,),
-                ).fetchone()
-
-                if not row or not row["marketStartTime"]:
-                    continue
-
-                off = datetime.fromisoformat(
-                    row["marketStartTime"].replace("Z", "+00:00")
-                )
-
-                minutes_post_off = (now - off).total_seconds() / 60.0
-
-                # Mark for prune if older than 120 minutes post-off
-# ======================================================================================================
-# 📍 TARGET: engines/bus_route.py
-# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), prune markets block
-# 🛠 ACTION: REPLACE ENTIRE PRUNE BLOCK WITH NO-OP
-# 📆 PATCHED: 2026-04-25 — Prune disabled (window now deterministic & non-cumulative)
-#
-# PURPOSE:
-# - Route window is rebuilt deterministically from NOW
-# - No cumulative growth across day
-# - No stale markets can exist
-# - Pruning no longer required
-#
-# INVARIANT:
-# - This block intentionally does NOTHING
-# - runner_pool untouched
-# - ctx_map untouched
-# - Route identity remains deterministic
-# ======================================================================================================
-
-                # PRUNE DISABLED — deterministic 5-market window rebuild
-                pass
-
-            con.close()
-
-            if market_times:
-                # Remove stale runners from runner_pool
-                self.runner_pool = [
-                    (mid, sid)
-                    for (mid, sid) in self.runner_pool
-                    if mid not in market_times
-                ]
-
-                # Remove stale CTX entries
-                for key in list(self.ctx_map.keys()):
-                    mid, _sid = key
-                    if mid in market_times:
-                        self.ctx_map.pop(key, None)
-
-                print(
-                    f"[BUS][PRUNE] removed_markets={len(market_times)} "
-                    f"remaining_runners={len(self.runner_pool)}"
-                )
-
-        except Exception:
-            # Fail-open: pruning must never break route build
-            pass
 
         # --------------------------------------------------
         # 🔁 TIME-RELATIVE ROUTE MEMBERSHIP (AUTHORITATIVE)
