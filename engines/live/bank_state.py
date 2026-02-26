@@ -166,16 +166,20 @@ def _compute_engine_unmatched_working_capital():
     betid_to_engine = {}
 
     rows = cur.execute("""
-        SELECT betId, engine
+        SELECT entry_bet_id, engine
         FROM orders
-        WHERE betId IS NOT NULL
+        WHERE entry_bet_id IS NOT NULL
           AND date(opened_at) = date('now','utc')
     """).fetchall()
 
     con.close()
 
-    for betId, engine in rows:
-        betid_to_engine[str(betId)] = engine
+    # --------------------------------------------------
+    # Build entry_bet_id → engine map
+    # --------------------------------------------------
+    for entry_bet_id, engine in rows:
+        if entry_bet_id:
+            betid_to_engine[str(entry_bet_id)] = engine
 
     # --------------------------------------------------
     # Compute unmatched working capital per engine
@@ -193,14 +197,14 @@ def _compute_engine_unmatched_working_capital():
             continue
 
         side = (o.get("side") or "").upper()
-        betId = str(o.get("betId") or "")
+        bet_id = str(o.get("betId") or "")
 
-        engine = betid_to_engine.get(betId)
+        engine = betid_to_engine.get(bet_id)
         if not engine:
             continue  # ignore unknown orders
 
         if side == "LAY":
-            liability = remaining * (price - 1)
+            liability = remaining * (price - 1.0)
         else:  # BACK
             liability = remaining
 
