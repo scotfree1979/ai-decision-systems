@@ -408,8 +408,20 @@ class BusRouteSnapshot:
             except Exception:
                 continue
 
-            # FUTURE ONLY
-            if off_dt < now:
+            # --------------------------------------------------
+            # ACTIVE WINDOW (restart-safe)
+            # --------------------------------------------------
+
+            # Market is valid if:
+            #   • Not past grace
+            #   • And within outer horizon
+
+            # Drop if past grace
+            if off_dt + timedelta(minutes=POST_OFF_MINUTES) < now:
+                continue
+
+            # Drop if too far in future
+            if off_dt > now + timedelta(hours=OUTER_HOURS):
                 continue
 
             # OUTER HORIZON (12h)
@@ -440,15 +452,28 @@ class BusRouteSnapshot:
         window_mids = list(base_window)
 
         # --------------------------------------------------
-        # 2️⃣ Floating slot (next chronological + 4.5h threshold)
+        # 2️⃣ Floating slot (4.5h sliding window, max 5)
         # --------------------------------------------------
-        if len(future_markets) > WINDOW_SIZE:
 
-            next_mid, next_off = future_markets[WINDOW_SIZE]
+        floating_mids = []
 
-            # Only admit if within preferred window (4.5h)
-            if next_off <= now + timedelta(hours=PREFERRED_HOURS):
-                window_mids.append(next_mid)
+        for mid, off_dt in future_markets[WINDOW_SIZE:]:
+
+            # Only consider markets inside 4.5h window
+            if off_dt <= now + timedelta(hours=PREFERRED_HOURS):
+
+                # Exclude markets already past grace
+                if off_dt + timedelta(minutes=POST_OFF_MINUTES) >= now:
+                    floating_mids.append(mid)
+
+            else:
+                # Because list is sorted, we can stop scanning
+                break
+
+        # Cap floating window at 5
+        floating_mids = floating_mids[:5]
+
+        window_mids = base_window + floating_mids
 
         # --------------------------------------------------
         # BUILD RUNNER PAIRS FROM WINDOW
