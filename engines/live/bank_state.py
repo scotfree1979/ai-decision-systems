@@ -699,46 +699,69 @@ def _reconcile_market_exposure_live():
         for r in floor_rows
     }
 
-    # 2️⃣ Build per-engine floor share using required_exposure weights
+    # 2️⃣ Allocate floor by WORST-RUNNER EXPOSURE (correct model)
+
     from engines.config_paths import open_auto_db
     con = open_auto_db(rw=False)
     con.row_factory = None
     cur = con.cursor()
 
-    rows = cur.execute("""
-        SELECT
-            o.marketId,
-            o.engine,
-            SUM(o.required_exposure)
-        FROM orders o
-        WHERE o.role='PARENT'
-          AND o.entry_status='MATCHED'
-          AND date(o.opened_at)=date('now','utc')
-        GROUP BY o.marketId, o.engine
-    """).fetchall()
+    engine_floor = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
+
+    # For each market
+    for mid, true_floor in floor_by_market.items():
+
+        # Pull matched exposure per engine PER RUNNER
+        rows = cur.execute("""
+            SELECT
+                o.selectionId,
+                o.engine,
+                SUM(
+                    CASE
+                        WHEN o.side='LAY'
+                            THEN o.entry_stake * (o.entry_odds - 1)
+                        ELSE
+                            -o.entry_stake
+                    END
+                ) AS net_exposure
+            FROM orders o
+            WHERE o.role='PARENT'
+              AND o.entry_status='MATCHED'
+              AND date(o.opened_at)=date('now','utc')
+              AND o.marketId=?
+            GROUP BY o.selectionId, o.engine
+        """, (mid,)).fetchall()
+
+        # Build runner exposure map
+        runner_engine_exposure = {}
+        runner_totals = {}
+
+        for selectionId, engine, net in rows:
+            net = float(net or 0.0)
+
+            runner_engine_exposure.setdefault(selectionId, {})
+            runner_engine_exposure[selectionId][engine] = net
+
+            runner_totals[selectionId] = (
+                runner_totals.get(selectionId, 0.0) + net
+            )
+
+        if not runner_totals:
+            continue
+
+        # Identify worst-case runner
+        worst_runner = max(
+            runner_totals.items(),
+            key=lambda x: x[1]
+        )[0]
+
+        # Allocate floor share = engine exposure on worst runner
+        for engine, net in runner_engine_exposure.get(worst_runner, {}).items():
+            engine_floor[engine] += max(0.0, float(net))
 
     con.close()
 
-    # floor allocation accumulator
-    engine_floor = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
-
-    # group by market
-    from collections import defaultdict
-    market_engine_reserved = defaultdict(list)
-
-    for mid, engine, reserved in rows:
-        market_engine_reserved[mid].append((engine, float(reserved or 0.0)))
-
-    for mid, engine_rows in market_engine_reserved.items():
-
-        true_floor = floor_by_market.get(mid, 0.0)
-
-        total_reserved = sum(r[1] for r in engine_rows) or 1.0
-
-        for engine, reserved in engine_rows:
-            pct = reserved / total_reserved
-            engine_floor[engine] += true_floor * pct
-
+    
     # 3️⃣ Compute unmatched (working capital)
     unmatched_map = _compute_engine_unmatched_working_capital()
 
@@ -791,6 +814,7 @@ def _bankstate_report_loop(interval_s: int = 60):
     """
     while True:
         try:
+            _reconcile_market_exposure_live()
             with _LOCK:
                 now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
                 open_exp = _clamp(_OPEN_EXPOSURE)
@@ -1345,15 +1369,14 @@ def can_place(engine: str, plan: dict) -> bool:
 # 📆 PATCHED: 2025-12-21 — parent match no longer affects exposure
 # ======================================================================================================
 
-def on_parent_matched(*, engine: str, side: str,
-                      entry_odds: float, entry_stake: float) -> None:
+def on_parent_matched(*_, **__):
     """
     Parent MATCHED event.
 
-    FIX:
-    - Exposure is already reserved at PLACED
-    - DO NOT mutate exposure here
+    Exposure does NOT mutate here.
+    We simply rebuild floor + unmatched from exchange truth.
     """
+    _reconcile_market_exposure_live()
     if _is_simulation():
         print(
             f"[BankState] parent matched (no exposure change) "
@@ -1385,18 +1408,30 @@ def on_parent_matched(*, engine: str, side: str,
 # -------------------------------------------------------------------
 # PATCH 1️⃣ — on_parent_closed
 # -------------------------------------------------------------------
-def on_parent_closed(*, engine: str, parent_id: int) -> None:
-    # Exposure is governed by Betfair floor reconciliation only.
-    # Do not mutate _OPEN_EXPOSURE here.
-    return
+def on_parent_closed(*_, **__):
+    """
+    Parent terminal event (CANCELLED / EXPIRED / SETTLED).
+
+    Unmatched may drop.
+    Floor may drop.
+
+    Rebuild deterministically.
+    """
+    _reconcile_market_exposure_live()
 
 # -------------------------------------------------------------------
 # PATCH 2️⃣ — on_child_matched
 # -------------------------------------------------------------------
-def on_child_matched(*, parent_id: int, **_ignored) -> None:
-    # Exposure is governed by Betfair floor reconciliation only.
-    # Do not mutate _OPEN_EXPOSURE here.
-    return
+def on_child_matched(*_, **__):
+    """
+    Child MATCHED event.
+
+    Child moving from unmatched → matched
+    changes both working capital and floor.
+
+    Rebuild from authoritative surface.
+    """
+    _reconcile_market_exposure_live()
 
 
 
@@ -1404,10 +1439,14 @@ def on_child_matched(*, parent_id: int, **_ignored) -> None:
 # -------------------------------------------------------------------
 # PATCH 3️⃣ — release_parent (router housekeeping)
 # -------------------------------------------------------------------
-def release_parent(parent_id: int) -> None:
-    # Exposure is governed by Betfair floor reconciliation only.
-    # Do not mutate _OPEN_EXPOSURE here.
-    return
+def release_parent(*_, **__):
+    """
+    Legacy compatibility hook.
+
+    Exposure is no longer manually released.
+    We rebuild instead.
+    """
+    _reconcile_market_exposure_live()
 
 
 def reconcile_realized_pnl_from_orders() -> None:
