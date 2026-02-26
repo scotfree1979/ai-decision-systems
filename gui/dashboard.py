@@ -187,10 +187,8 @@ class DashboardView(ttk.Frame):
                                 bg="#d9d9d9", fg="black")
         mastery_btn.pack(side="right", padx=5)
 # === PATCH END ===
-
-
-
-
+        kpi_frame.pack(fill="x", padx=8, pady=(0, 6))
+        self._build_execution_intelligence(root)
 
         # Scrollable container
         canvas = tk.Canvas(root, highlightthickness=0)
@@ -609,6 +607,210 @@ class DashboardView(ttk.Frame):
         self.kpi_vars["mleft"].set(str(int(d.get("markets_left",0))))
         self.kpi_vars["livepnl"].set(_m(d.get("live_pnl_unsettled",0)))
         self.after(5000, self._refresh_kpis)
+
+    # ===============================================================
+    # EXECUTION INTELLIGENCE BLOCK
+    # ===============================================================
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: def _build_execution_intelligence
+# 🧩 REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-26 — Wireframe-aligned Execution Intelligence layout
+# PURPOSE:
+# - Match locked wireframe exactly
+# - No hardcoded numbers
+# - No phantom data sources
+# - BankState wired to real engine pots
+# ==============================================================================
+
+    def _build_execution_intelligence(self, parent):
+
+        container = ttk.LabelFrame(parent, text="Execution Intelligence")
+        container.pack(fill="x", padx=8, pady=(0, 8))
+
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=1)
+
+        # ─────────────────────────────────────────────
+        # LEFT — BUS / ROUTE CONTROL
+        # ─────────────────────────────────────────────
+        left = ttk.LabelFrame(container, text="Bus / Route Control")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        self.bus_status_dot = tk.Label(left, text="●", fg="green")
+        self.bus_status_dot.grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(6, 0))
+
+        self.bus_status_text = ttk.Label(left, text="LIVE",
+                                         font=("TkDefaultFont", 10, "bold"))
+        self.bus_status_text.grid(row=0, column=1, sticky="w", pady=(6, 0))
+
+        self.bus_route_var  = tk.StringVar(value="Route ID: 0")
+        self.bus_stop_var   = tk.StringVar(value="Bus Stop: 0 / 10")
+        self.bus_tick_var   = tk.StringVar(value="Tick ID: 0")
+        self.bus_phase_var  = tk.StringVar(value="Phase: IDLE")
+
+        ttk.Label(left, textvariable=self.bus_route_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Label(left, textvariable=self.bus_stop_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Label(left, textvariable=self.bus_tick_var).grid(row=3, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Label(left, textvariable=self.bus_phase_var).grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0,6))
+
+        # ─────────────────────────────────────────────
+        # RIGHT — ROUTER STATE
+        # ─────────────────────────────────────────────
+        right = ttk.LabelFrame(container, text="Router State")
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        self.router_status_dot = tk.Label(right, text="●", fg="green")
+        self.router_status_dot.grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(6, 0))
+
+        self.router_status_text = ttk.Label(right, text="ACTIVE",
+                                            font=("TkDefaultFont", 10, "bold"))
+        self.router_status_text.grid(row=0, column=1, sticky="w", pady=(6, 0))
+
+        self.router_parent_var = tk.StringVar(value="Parents Today: 0")
+        self.router_child_var  = tk.StringVar(value="Children Today: 0")
+        self.router_match_var  = tk.StringVar(value="Children Matched: 0")
+
+        ttk.Label(right, textvariable=self.router_parent_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Label(right, textvariable=self.router_child_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Label(right, textvariable=self.router_match_var).grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(0,6))
+
+        # ─────────────────────────────────────────────
+        # BANKSTATE / EXPOSURE (FULL WIDTH)
+        # ─────────────────────────────────────────────
+        bank = ttk.LabelFrame(container, text="BankState / Exposure")
+        bank.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+
+        self.bank_exposure_var = tk.StringVar(value="Total Exposure: £0.00")
+        self.bank_realised_var = tk.StringVar(value="Realised Today: £0.00")
+
+        ttk.Label(bank, textvariable=self.bank_exposure_var,
+                  font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w", padx=6, pady=(6,0))
+        ttk.Label(bank, textvariable=self.bank_realised_var).grid(row=1, column=0, sticky="w", padx=6, pady=(0,6))
+
+        self.bank_engine_vars = {}
+
+        engines = ["LEGACY", "MSC_RISK", "MSC_EXPLORATORY", "MSC_INPLAY"]
+
+        header = ttk.Frame(bank)
+        header.grid(row=2, column=0, sticky="w", padx=6)
+
+        ttk.Label(header, text="ENGINE", width=18).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="POT", width=10).grid(row=0, column=1, sticky="w")
+        ttk.Label(header, text="USED", width=10).grid(row=0, column=2, sticky="w")
+        ttk.Label(header, text="AVAILABLE", width=12).grid(row=0, column=3, sticky="w")
+
+        for i, eng in enumerate(engines, start=3):
+            rowf = ttk.Frame(bank)
+            rowf.grid(row=i, column=0, sticky="w", padx=6)
+
+            ttk.Label(rowf, text=eng, width=18).grid(row=0, column=0, sticky="w")
+
+            pot  = tk.StringVar(value="0")
+            used = tk.StringVar(value="0")
+            avail = tk.StringVar(value="0")
+
+            ttk.Label(rowf, textvariable=pot, width=10).grid(row=0, column=1, sticky="w")
+            ttk.Label(rowf, textvariable=used, width=10).grid(row=0, column=2, sticky="w")
+            ttk.Label(rowf, textvariable=avail, width=12).grid(row=0, column=3, sticky="w")
+
+            self.bank_engine_vars[eng] = (pot, used, avail)
+
+        self._refresh_execution_intelligence()
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: def _refresh_execution_intelligence
+# 🧩 REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-26 — Wire real reports into dashboard (today-scoped)
+# PURPOSE:
+# - No phantom data
+# - Scope everything to TODAY
+# - Lift existing reports into UI
+# ==============================================================================
+
+    def _refresh_execution_intelligence(self):
+
+        try:
+            from engines.bus.bus import BUS, bus_snapshot
+            from engines.live.live_router import fetch_router_stats
+            from engines.live.bank_state import get_engine_pots
+        except Exception:
+            self.after(5000, self._refresh_execution_intelligence)
+            return
+
+        # ─────────────────────────────────────────────
+        # BUS TELEMETRY (AUTHORITATIVE)
+        # ─────────────────────────────────────────────
+        bus_data = BUS.dashboard_snapshot()
+        snap = bus_snapshot() or {}
+        router = fetch_router_stats() or {}
+        pots = get_engine_pots() or {}
+
+        # ───────── BUS / ROUTE CONTROL ─────────
+
+        route_id = bus_data.get("route_id", 0)
+        bus_stop = bus_data.get("bus_stop", 0)
+        tick_id  = bus_data.get("tick_id", 0)
+        hz       = bus_data.get("hz", 0.0)
+        window   = bus_data.get("window_size", 0)
+        avg_ctx  = bus_data.get("avg_ctx_refresh", 0.0)
+        fill     = bus_data.get("fill_rate", 0.0)
+
+        exposure = float(snap.get("exposure", 0.0))
+
+        phase = "RUNNING" if tick_id > 0 else "IDLE"
+
+        if exposure < 0:
+            dot = "red"
+            status_text = "ERROR"
+        else:
+            dot = "green"
+            status_text = "LIVE"
+
+        self.bus_status_dot.config(fg=dot)
+        self.bus_status_text.config(text=status_text)
+
+        self.bus_route_var.set(f"Route ID: {route_id}")
+        self.bus_stop_var.set(f"Bus Stop: {bus_stop} / 10")
+        self.bus_tick_var.set(f"Tick ID: {tick_id}")
+        self.bus_phase_var.set(f"Phase: {phase}")
+
+        # ───────── ROUTER STATE (DB TRUTH) ─────────
+
+        parents = int(router.get("parents_matched", 0))
+        children = int(router.get("children_open", 0))
+        matched = int(router.get("children_matched", 0))
+
+        self.router_parent_var.set(f"Parents Today: {parents}")
+        self.router_child_var.set(f"Children Today: {children}")
+        self.router_match_var.set(f"Children Matched: {matched}")
+
+        self.router_status_dot.config(fg="green")
+        self.router_status_text.config(text="ACTIVE")
+
+        # ───────── BANKSTATE / EXPOSURE ─────────
+
+        total_exposure = float(snap.get("exposure", 0.0))
+        realised_today = float(snap.get("realised", 0.0))
+
+        self.bank_exposure_var.set(f"Total Exposure: £{total_exposure:,.2f}")
+        self.bank_realised_var.set(f"Realised Today: £{realised_today:,.2f}")
+
+        for eng, values in pots.items():
+            if eng in self.bank_engine_vars:
+                pot_var, used_var, avail_var = self.bank_engine_vars[eng]
+
+                pot = float(values.get("pot", 0))
+                used = float(values.get("used", 0))
+                avail = float(values.get("available", 0))
+
+                pot_var.set(f"{pot:,.0f}")
+                used_var.set(f"{used:,.0f}")
+                avail_var.set(f"{avail:,.0f}")
+
+        self.after(5000, self._refresh_execution_intelligence)
+# === PATCH END ==============================================================
 
     def _on_source_change(self,_=None):
         try:

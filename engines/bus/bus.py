@@ -1989,6 +1989,20 @@ class DecisionBus:
 
     def run_live(self, hz: float = 1.0):
         interval = max(0.05, 1.0 / max(0.1, hz))
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def run_live(self, hz: float = 1.0):
+# 🧩 ACTION: ADD — persist hz for dashboard
+# 📆 PATCHED: 2026-04-26 — expose hz to dashboard
+#
+# PURPOSE:
+# - Wireframe shows Hz
+# - BUS already receives hz
+# - Persist for snapshot read
+# ======================================================================================================
+
+        # Persist hz for dashboard visibility
+        self._hz = float(hz)
         print(f"[BUS] live loop started (hz={hz})")
 
         while True:
@@ -2303,6 +2317,56 @@ class DecisionBus:
             _record("OVERWATCHER", False, False, str(e))
 
         return plans
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside class DecisionBus (near analytics_report)
+# 🧩 ACTION: ADD — dashboard snapshot (read-only)
+# 📆 PATCHED: 2026-04-26 — expose BUS telemetry to dashboard
+#
+# PURPOSE:
+# - Dashboard requires structured state
+# - Pure read-only method
+# - No mutation
+# - No execution side effects
+# ======================================================================================================
+
+    def dashboard_snapshot(self) -> dict:
+        """
+        Read-only snapshot for LIVE dashboard.
+        No mutation. No routing. No DB writes.
+        """
+
+        try:
+            avg_ctx = (
+                sum(self._ctx_refresh_times[-10:])
+                / min(len(self._ctx_refresh_times), 10)
+                if self._ctx_refresh_times else 0.0
+            )
+        except Exception:
+            avg_ctx = 0.0
+
+        return {
+            # Identity
+            "route_id": self._route_id,
+            "bus_stop": self._bus_stop,
+            "tick_id": self.tick_id,
+            "hz": getattr(self, "_hz", 0.0),
+
+            # Cadence
+            "window_size": getattr(self._cadence, "window_seconds", 0),
+
+            # Context
+            "avg_ctx_refresh": avg_ctx,
+            "bus_stop_runners":
+                self._route_snapshot.get_bus_stop(self._bus_stop)
+                if self._route_snapshot else [],
+
+            # Fill telemetry
+            "fill_rate": getattr(self, "_last_fill_rate", 0.0),
+            "attempted": getattr(self, "_last_attempted", 0),
+            "delegated": getattr(self, "_last_delegated", 0),
+        }
 
     # ======================================================================
     # analytics_report() — unchanged
@@ -3900,12 +3964,32 @@ class DecisionBus:
 
             fill_rate = (delegated / attempted) if attempted > 0 else 0.0
 
+
             fill_pct = fill_rate * 100.0
 
             if fill_pct >= 50.0:
                 fill_colour = "🟢"
             else:
                 fill_colour = "🔴"
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: fill_rate = (delegated / attempted) if attempted > 0 else 0.0
+# 🧩 ACTION: ADD — persist fill telemetry for dashboard (read-only)
+# 📆 PATCHED: 2026-04-26 — expose BUS fill metrics to dashboard
+#
+# PURPOSE:
+# - Dashboard needs fill rate, attempted, delegated
+# - No behavioural impact
+# - Pure state capture
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # 📊 Persist fill telemetry (dashboard read-only)
+            # --------------------------------------------------
+            self._last_fill_rate = fill_pct
+            self._last_attempted = attempted
+            self._last_delegated = delegated
 
             print(
                 f"[BUS][FILL] attempted={attempted} "

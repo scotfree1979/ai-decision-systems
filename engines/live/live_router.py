@@ -2448,31 +2448,42 @@ def fetch_router_stats() -> dict:
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: SELECT
+# 📆 PATCHED: 2026-04-26 — router stats restricted to TODAY (UTC)
+#
+# PURPOSE:
+# - Dashboard “Today” must be date-scoped
+# - Prevent cumulative LIVE totals
+# - Align with BUS snapshot semantics
+# ======================================================================================================
+
         row = _q_retry(cur, """
             SELECT
               SUM(CASE WHEN role='PARENT'
                         AND entry_status='MATCHED'
-                        AND (exit_status IS NULL OR exit_status<>'MATCHED')
-                       THEN 1 ELSE 0 END) AS parents_open,
-
-              SUM(CASE WHEN role='PARENT'
-                        AND entry_status='MATCHED'
+                        AND date(opened_at)=date('now','utc')
                        THEN 1 ELSE 0 END) AS parents_matched,
 
               SUM(CASE WHEN role='CHILD'
                         AND entry_status IN ('LIVE','PLACED','MATCHED')
-                        AND (exit_status IS NULL OR exit_status<>'MATCHED')
+                        AND date(opened_at)=date('now','utc')
                        THEN 1 ELSE 0 END) AS children_open,
 
               SUM(CASE WHEN role='CHILD'
                         AND entry_status='MATCHED'
+                        AND date(opened_at)=date('now','utc')
                        THEN 1 ELSE 0 END) AS children_matched
             FROM orders
             WHERE mode='LIVE'
         """).fetchone()
 
         if row:
-            stats = {k: int(row[k] or 0) for k in stats}
+            stats["parents_open"]      = int(row[0] or 0)
+            stats["parents_matched"]   = int(row[1] or 0)
+            stats["children_open"]     = int(row[2] or 0)
+            stats["children_matched"]  = int(row[3] or 0)
 
         con.close()
     except Exception:
