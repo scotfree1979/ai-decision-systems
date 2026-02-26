@@ -325,8 +325,14 @@ def close_settled_markets() -> int:
 
 
     with connect_db(set_db) as s:
-        o = _auto_conn(rw=True)
-        o.row_factory = sqlite3.Row
+        from engines.config_paths import auto_conn
+
+        # read connection
+        r = auto_conn(rw=False)
+
+        # write connection
+        w = auto_conn(rw=True)
+      
 
         mids = [r["marketId"] for r in s.execute(
             "SELECT marketId FROM bf_market_book WHERE UPPER(status)='CLOSED'"
@@ -338,7 +344,7 @@ def close_settled_markets() -> int:
         for mid in mids:
 
             # 🔑 STEP 1: fetch open parents BEFORE expiring them
-            parents = o.execute("""
+            parents = r.execute("""
                 SELECT id, engine, entry_odds, entry_stake
                   FROM orders
                  WHERE marketId=?
@@ -353,7 +359,7 @@ def close_settled_markets() -> int:
 
 
             # 🔑 STEP 3: mark orders terminal
-            o.execute("""
+            w.execute("""
               UPDATE orders
                  SET exit_status = 'EXPIRED',
                      closed_at   = COALESCE(closed_at, datetime('now','utc'))
@@ -361,9 +367,9 @@ def close_settled_markets() -> int:
                  AND UPPER(exit_status) NOT IN ('SETTLED','CANCELLED');
             """, (mid,))
 
-            closed += int(o.total_changes or 0)
+            closed = len(mids)
 
-        o.commit()
+        w.commit()
 
     print(f"[settlements] expired all orders in {len(mids)} closed markets → {closed} rows updated")
 
