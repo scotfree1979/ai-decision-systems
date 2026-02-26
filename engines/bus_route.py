@@ -440,13 +440,15 @@ class BusRouteSnapshot:
         window_mids = list(base_window)
 
         # --------------------------------------------------
-        # FLOATING SLOT LOGIC (+1)
+        # 2️⃣ Floating slot (next chronological + 4.5h threshold)
         # --------------------------------------------------
-        if len(preferred_markets) > WINDOW_SIZE:
-            newest_preferred = preferred_markets[-1]
+        if len(future_markets) > WINDOW_SIZE:
 
-            if newest_preferred not in window_mids:
-                window_mids.append(newest_preferred)
+            next_mid, next_off = future_markets[WINDOW_SIZE]
+
+            # Only admit if within preferred window (4.5h)
+            if next_off <= now + timedelta(hours=PREFERRED_HOURS):
+                window_mids.append(next_mid)
 
         # --------------------------------------------------
         # BUILD RUNNER PAIRS FROM WINDOW

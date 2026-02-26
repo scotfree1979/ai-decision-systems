@@ -424,8 +424,19 @@ def bus_snapshot():
         for eng, n in rows:
             snap["engines"][eng] = int(n)
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def bus_snapshot():
+# 📆 PATCHED: 2026-02-26 — Scope BUS snapshot to UTC trading day
+#
+# PURPOSE:
+# - Dashboard + recycling must be day-scoped
+# - Prevent historical exposure from blocking capital
+# - Align BUS with SR4 reports (UTC scoped)
+# ==============================================================================
+
         # --------------------------------------------------
-        # Parent / child lifecycle counts (LIVE, open only)
+        # Parent / child lifecycle counts (LIVE, TODAY ONLY)
         # --------------------------------------------------
         snap["parents_opened"] = con.execute("""
             SELECT COUNT(*)
@@ -434,6 +445,7 @@ def bus_snapshot():
               AND UPPER(COALESCE(mode,''))='LIVE'
               AND UPPER(entry_status)='MATCHED'
               AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
+              AND date(opened_at)=date('now','utc')
         """).fetchone()[0]
 
         snap["children_opened"] = con.execute("""
@@ -443,11 +455,9 @@ def bus_snapshot():
               AND UPPER(COALESCE(mode,''))='LIVE'
               AND UPPER(entry_status)='MATCHED'
               AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
+              AND date(opened_at)=date('now','utc')
         """).fetchone()[0]
 
-        # --------------------------------------------------
-        # Children fully matched (completed lifecycle)
-        # --------------------------------------------------
         snap["children_matched"] = con.execute("""
             SELECT COUNT(*)
             FROM orders
@@ -455,10 +465,11 @@ def bus_snapshot():
               AND UPPER(COALESCE(mode,''))='LIVE'
               AND UPPER(entry_status)='MATCHED'
               AND UPPER(exit_status)='MATCHED'
+              AND date(opened_at)=date('now','utc')
         """).fetchone()[0]
 
         # --------------------------------------------------
-        # Exposure (LIVE open parent liability)
+        # Exposure (LIVE open parent liability — TODAY ONLY)
         # --------------------------------------------------
         row = con.execute("""
             SELECT COALESCE(SUM(
@@ -475,9 +486,11 @@ def bus_snapshot():
               AND UPPER(COALESCE(mode,''))='LIVE'
               AND UPPER(entry_status)='MATCHED'
               AND (exit_status IS NULL OR UPPER(exit_status)!='MATCHED')
+              AND date(opened_at)=date('now','utc')
         """).fetchone()
 
         snap["exposure"] = float(row[0] or 0.0)
+# === PATCH END ==============================================================
 
         # --------------------------------------------------
         # Realised PnL (LIVE, today)
