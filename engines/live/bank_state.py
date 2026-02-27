@@ -809,112 +809,227 @@ def _reconcile_market_exposure_live():
 # OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
 # -------------------------------------------------------------------
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: def _bankstate_report_loop(
+# 🛠 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-04-27 — Unified Atomic BankState Snapshot
+#
+# PURPOSE:
+# - Remove scattered print sections
+# - Produce one atomic block
+# - Eliminate interleaving noise
+# - Make exposure math unequivocal
+# - No logic changes
+# ======================================================================================================
+
 def _bankstate_report_loop(interval_s: int = 60):
-    """
-    Unified BankState reporting loop.
-    - No behaviour changes
-    - No extra noise
-    - Integrates market reconciliation cleanly
-    """
+
     while True:
         try:
             _reconcile_market_exposure_live()
+
             with _LOCK:
-                now = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+                total_pot = sum(_ENGINE_POTS.values())
+                total_used = sum(_ENGINE_USED.values())
+                total_avail = total_pot - total_used
                 open_exp = _clamp(_OPEN_EXPOSURE)
 
-                # ==================================================
-                # REPORT 1 — BANK STATE SUMMARY
-                # ==================================================
-                print("\n============ V7 BANK STATE ============")
-                print(
-                    f"t={now}   "
-                    f"open_exposure={open_exp:.2f}   "
-                    f"markets={_effective_market_count()}"
-                )
-                print("\nENGINE            POT      USED     AVAIL")
-                print("------------------------------------------")
+                # --------------------------------------------------
+                # Compute per-engine floor + unmatched
+                # --------------------------------------------------
 
-                tot_pot = tot_used = tot_avail = 0.0
+                floor_rows = _compute_market_floor_from_betfair_surface()
+                floor_by_market = {
+                    r["marketId"]: float(r["true_market_exposure"])
+                    for r in floor_rows
+                }
+
+                unmatched_map = _compute_engine_unmatched_working_capital()
+
+                # Engine floor share rebuild (same logic as reconcile)
+                engine_floor = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
+
+                from engines.config_paths import open_auto_db
+                con = open_auto_db(rw=False)
+                cur = con.cursor()
+
+                for mid in floor_by_market.keys():
+
+                    rows = cur.execute("""
+                        SELECT
+                            o.selectionId,
+                            o.engine,
+                            SUM(
+                                CASE
+                                    WHEN o.side='LAY'
+                                        THEN o.entry_stake * (o.entry_odds - 1)
+                                    ELSE
+                                        -o.entry_stake
+                                END
+                            ) AS net_exposure
+                        FROM orders o
+                        WHERE o.role='PARENT'
+                          AND o.entry_status='MATCHED'
+                          AND date(o.opened_at)=date('now','utc')
+                          AND o.marketId=?
+                        GROUP BY o.selectionId, o.engine
+                    """, (mid,)).fetchall()
+
+                    runner_engine = {}
+                    runner_totals = {}
+
+                    for selectionId, engine, net in rows:
+                        net = float(net or 0.0)
+                        runner_engine.setdefault(selectionId, {})
+                        runner_engine[selectionId][engine] = net
+                        runner_totals[selectionId] = runner_totals.get(selectionId, 0.0) + net
+
+                    if runner_totals:
+                        worst_runner = max(runner_totals.items(), key=lambda x: x[1])[0]
+                        for engine, net in runner_engine.get(worst_runner, {}).items():
+                            engine_floor[engine] += max(0.0, float(net))
+
+                con.close()
+
+                # --------------------------------------------------
+                # Build atomic report block
+                # --------------------------------------------------
+
+                lines = []
+                lines.append("\n======================================================================")
+                lines.append(f"🏦  V7 BANKSTATE SNAPSHOT — {now}")
+                lines.append("======================================================================")
+                lines.append("")
+                lines.append("GLOBAL SUMMARY")
+                lines.append("----------------------------------------------------------------------")
+                lines.append(f"Open Exposure        : {open_exp:8.2f}")
+                lines.append(f"Total Pot            : {total_pot:8.2f}")
+                lines.append(f"Total Used           : {total_used:8.2f}")
+                lines.append(f"Total Available      : {total_avail:8.2f}")
+                lines.append(f"Active Markets       : {_effective_market_count():8d}")
+                lines.append("----------------------------------------------------------------------")
+                lines.append("")
+                lines.append("ENGINE BREAKDOWN")
+                lines.append("----------------------------------------------------------------------")
+                lines.append("ENGINE             POT      FLOOR    UNMATCHED    USED     AVAIL")
+                lines.append("----------------------------------------------------------------------")
 
                 for engine in sorted(_ENGINE_POTS.keys()):
                     pot = _ENGINE_POTS.get(engine, 0.0)
+                    floor_part = engine_floor.get(engine, 0.0)
+                    unmatched_part = unmatched_map.get(engine, 0.0)
                     used = _ENGINE_USED.get(engine, 0.0)
                     avail = pot - used
 
-                    tot_pot += pot
-                    tot_used += used
-                    tot_avail += avail
-
-                    print(
+                    lines.append(
                         f"{engine:<16} "
-                        f"{pot:>7.2f}  "
-                        f"{used:>7.2f}  "
-                        f"{_clamp(avail):>7.2f}"
+                        f"{pot:8.2f}  "
+                        f"{floor_part:8.2f}  "
+                        f"{unmatched_part:10.2f}  "
+                        f"{used:8.2f}  "
+                        f"{avail:8.2f}"
                     )
 
-                print("------------------------------------------")
-                print(
-                    f"{'TOTAL':<16} "
-                    f"{tot_pot:>7.2f}  "
-                    f"{tot_used:>7.2f}  "
-                    f"{_clamp(tot_avail):>7.2f}"
-                )
-                print("==========================================")
+                lines.append("----------------------------------------------------------------------")
+                lines.append(f"{'TOTAL':<16} {total_pot:8.2f}  "
+                             f"{sum(engine_floor.values()):8.2f}  "
+                             f"{sum(unmatched_map.values()):10.2f}  "
+                             f"{total_used:8.2f}  "
+                             f"{total_avail:8.2f}")
+                lines.append("----------------------------------------------------------------------")
+                lines.append("")
+                lines.append("BETFAIR FLOOR (MATCHED WORST-CASE PER MARKET)")
+                lines.append("----------------------------------------------------------------------")
 
-                # ==================================================
-                # REPORT 2 — ENGINE BUDGET SNAPSHOT (EXISTING)
-                # ==================================================
-                print("\n============ V7 ENGINE BUDGET ============")
-                print(f"day={_utc_day()}\n")
-                print("ENGINE            ALLOC%    PNL       EXPOSURE")
-                print("----------------------------------------------")
+                if floor_rows:
+                    for r in floor_rows[:5]:
+                        lines.append(
+                            f"market={r['marketId']}   "
+                            f"floor={float(r['true_market_exposure']):.2f}"
+                        )
+                else:
+                    lines.append("No matched exposure detected.")
 
-                for engine, pot in _ENGINE_POTS.items():
-                    used = _ENGINE_USED.get(engine, 0.0)
-                    pct = (pot / tot_pot * 100.0) if tot_pot else 0.0
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: inside unified report block before INVARIANT CHECKS
+# 🛠 ACTION: ADD DELTA GATE PREVIEW SECTION
+# 📆 PATCHED: 2026-04-27 — Placement gate visibility
+#
+# PURPOSE:
+# - Show whether BankState would block a small incremental bet
+# - Expose phantom "pot full" situations
+# - No state mutation
+# - Pure simulation
+# ======================================================================================================
 
-                    # pnl already reconciled elsewhere
-                    pnl = 0.0
+                lines.append("")
+                lines.append("PLACEMENT GATE PREVIEW (Δ FLOOR TEST)")
+                lines.append("----------------------------------------------------------------------")
+                lines.append("ENGINE             DELTA_NEXT    AVAILABLE    CAN_PLACE")
+                lines.append("----------------------------------------------------------------------")
 
-                    print(
+                for engine in sorted(_ENGINE_POTS.keys()):
+
+                    available = get_engine_available(engine)
+
+                    # Skip if no markets
+                    if not floor_by_market:
+                        lines.append(
+                            f"{engine:<16} "
+                            f"{0.00:10.2f}  "
+                            f"{available:10.2f}  "
+                            f"{'N/A':>10}"
+                        )
+                        continue
+
+                    # Pick first market as probe
+                    probe_mid = list(floor_by_market.keys())[0]
+
+                    # Minimal synthetic probe plan (£1 BACK)
+                    probe_plan = {
+                        "marketId": probe_mid,
+                        "selectionId": "0",
+                        "side": "BACK",
+                        "size": 1.0,
+                        "px": 2.0,
+                    }
+
+                    current_floor = floor_by_market.get(probe_mid, 0.0)
+                    projected_floor = _simulate_floor_with_new_bet(probe_mid, probe_plan)
+
+                    delta_floor = projected_floor - current_floor
+
+                    if delta_floor <= 0:
+                        can_place_flag = "YES"
+                    else:
+                        can_place_flag = "YES" if delta_floor <= available else "NO"
+
+                    lines.append(
                         f"{engine:<16} "
-                        f"{pct:>6.1f}%   "
-                        f"{pnl:>+7.2f}   "
-                        f"{used:>7.2f}"
+                        f"{delta_floor:10.2f}  "
+                        f"{available:10.2f}  "
+                        f"{can_place_flag:>10}"
                     )
 
-                print("==============================================")
+                lines.append("----------------------------------------------------------------------")
 
-            # ======================================================
-            # REPORT 3 — BETFAIR FLOOR (AUTHORITATIVE)
-            # ======================================================
-            rec = _compute_market_floor_from_betfair_surface()
-            if rec:
-                print("\n====== BETFAIR FLOOR (EXECUTION SURFACE) ======\n")
+                lines.append("----------------------------------------------------------------------")
+                lines.append("")
+                lines.append("INVARIANT CHECKS")
+                lines.append("----------------------------------------------------------------------")
 
-                for r in rec[:5]:
-                    print(
-                        f"market={r['marketId']} "
-                        f"floor={float(r['true_market_exposure']):.2f}"
-                    )
+                if abs(total_used - open_exp) < 0.01:
+                    lines.append("✔ TOTAL_USED == OPEN_EXPOSURE")
+                else:
+                    lines.append("❌ TOTAL_USED != OPEN_EXPOSURE")
 
-                print("===========================================")
-
-            # --------------------------------------------------
-            # REPORT 4 - WORKING CAPITAL REPORT (UNMATCHED ONLY)
-            # --------------------------------------------------
-
-            unmatched_map = _compute_engine_unmatched_working_capital()
-
-            print("\n=== ENGINE WORKING CAPITAL (UNMATCHED) ===")
-
-            for engine in sorted(_ENGINE_POTS.keys()):
-                wc = unmatched_map.get(engine, 0.0)
-                print(f"{engine:<20} working_capital={wc:.2f}")
-
-            print("==========================================")
-
+                lines.append("----------------------------------------------------------------------")
+                lines.append("======================================================================")
+                print("\n".join(lines))
 
         except Exception as e:
             print(f"[BankState][REPORT][WARN] {e}")
