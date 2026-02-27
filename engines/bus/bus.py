@@ -680,6 +680,66 @@ class DecisionBus:
         # OVERWATCHER and others
         return True
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside class DecisionBus (helper section)
+# 🛠 ACTION: ADD window snapshot reporter
+# 📆 PATCHED: 2026-04-27 — Unified Window Snapshot
+#
+# PURPOSE:
+# - Surface route window composition
+# - Validate 5+floating logic
+# - Print only at route build points
+# - No behavioural mutation
+# ======================================================================================================
+
+    def _print_window_snapshot(self, label: str):
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+
+        snapshot = self._route_snapshot
+
+        runner_pool = snapshot.get_all_runners() or []
+        mids = sorted({mid for (mid, _sid) in runner_pool})
+
+        bus_stops = snapshot.bus_stops or {}
+        stop_sizes = [len(v) for v in bus_stops.values()] if bus_stops else []
+
+        lines = []
+        lines.append("\n======================================================================")
+        lines.append(f"🚌  V7 WINDOW SNAPSHOT ({label}) — {now.strftime('%Y-%m-%d %H:%M:%SZ')}")
+        lines.append("======================================================================")
+        lines.append(f"Route ID                 : {self._route_id}")
+        lines.append(f"Runner Pool Size         : {len(runner_pool)}")
+        lines.append(f"Unique Markets In Route  : {len(mids)}")
+        lines.append(f"Bus Stops                : {len(bus_stops)}")
+
+        if stop_sizes:
+            lines.append(f"Runners Per Stop         : {stop_sizes[0]}")
+            if len(set(stop_sizes)) > 1:
+                lines.append("⚠ Uneven stop distribution detected")
+        else:
+            lines.append("⚠ No bus stops detected")
+
+        lines.append("")
+        lines.append("Markets In Route (Ordered):")
+
+        for mid in mids:
+            lines.append(f"  - {mid}")
+
+        # Duplication detection
+        if runner_pool and len(runner_pool) < 10:
+            lines.append("")
+            lines.append("Duplication Mode         : ACTIVE (runner count < 10)")
+        else:
+            lines.append("")
+            lines.append("Duplication Mode         : NORMAL")
+
+        lines.append("======================================================================")
+
+        print("\n".join(lines))
 
     def _ensure_px_from_route(self, ctx: dict) -> bool:
         """
@@ -2840,6 +2900,7 @@ class DecisionBus:
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
             self._route_snapshot.refresh_ctx_dynamic_fields()
+            self._print_window_snapshot("INITIAL BUILD")
 
             self._route_initialised = True
             print("[BUS][ROUTE] initial route built")
@@ -2875,6 +2936,7 @@ class DecisionBus:
         if self._bus_stop == 7:
             try:
                 self._route_snapshot.prepare_next_route()
+                self._print_window_snapshot("PREBUILD @ STOP 7")
                 print("[BUS][ROUTE] prebuild delegated to snapshot")
             except Exception:
                 pass
