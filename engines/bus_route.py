@@ -490,7 +490,8 @@ class BusRouteSnapshot:
         if not raw_pairs:
             raw_pairs = list(get_root_ctx_runner_pairs())
 
-        ordered = _order_runner_pool_by_market_time(raw_pairs) ======================================================================================================
+        ordered = _order_runner_pool_by_market_time(raw_pairs) 
+# ======================================================================================================
 # END PATCH
 # ======================================================================================================
 
