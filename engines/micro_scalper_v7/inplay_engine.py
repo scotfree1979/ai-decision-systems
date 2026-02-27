@@ -365,7 +365,7 @@ class InPlayEngine:
 
         # Emit first valid ladder level per tick (BUS-native contract)
         first = plans[0]
-
+        _write_inplay_runtime_snapshot(ctx, self)
         return {
             "enter": True,
             "engine": "MSC_INPLAY",
@@ -472,4 +472,58 @@ class InPlayEngine:
             pass
         return payload
 
+# === PATCH END ==============================================================
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py (append at end)
+# 📆 PATCHED: 2026-02-27 — Structured runtime snapshot (INPLAY)
+# ==============================================================================
+
+def _ensure_inplay_runtime_schema():
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS inplay_runtime_snapshot(
+            ts TEXT,
+            marketId TEXT,
+            selectionId TEXT,
+            px REAL,
+            direction TEXT,
+            armed_lay INTEGER,
+            armed_back INTEGER,
+            triggered INTEGER
+        )
+    """)
+    con.close()
+
+
+def _write_inplay_runtime_snapshot(ctx, self):
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+        from engines.config_paths import autoscalp_db
+
+        _ensure_inplay_runtime_schema()
+
+        mid = str(ctx.get("marketId"))
+        sid = str(ctx.get("selectionId"))
+
+        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+        con.execute("""
+            INSERT INTO inplay_runtime_snapshot
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            mid,
+            sid,
+            ctx.get("px"),
+            ctx.get("direction"),
+            int(self.armed_lay.get((mid, sid), False)),
+            int(self.armed_back.get((mid, sid), False)),
+            int(self.triggered.get((mid, sid), False)),
+        ))
+        con.close()
+    except Exception:
+        pass
 # === PATCH END ==============================================================

@@ -1006,6 +1006,7 @@ def _router_enforce_status_authority():
 
     # 2️⃣ Live state report — ALWAYS print
     _print_router_live_state(live, inv)
+    _write_router_runtime_snapshot(fetch_router_stats())
 
     # Snapshot live DB state separately
     global _ROUTER_LIVE_LAST
@@ -7220,3 +7221,52 @@ def start_router_child_worker():
 
 
     print("[ROUTER] child execution worker started")
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/live_router.py (append at end)
+# 📆 PATCHED: 2026-02-27 — Structured runtime snapshot (ROUTER)
+# ==============================================================================
+
+def _ensure_router_runtime_schema():
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS router_runtime_snapshot(
+            ts TEXT,
+            parents_open INTEGER,
+            parents_matched INTEGER,
+            parents_closed INTEGER,
+            children_open INTEGER,
+            children_matched INTEGER,
+            children_closed INTEGER
+        )
+    """)
+    con.close()
+
+
+def _write_router_runtime_snapshot(stats: dict):
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+        from engines.config_paths import autoscalp_db
+
+        _ensure_router_runtime_schema()
+
+        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+        con.execute("""
+            INSERT INTO router_runtime_snapshot
+            VALUES (?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            stats.get("parents_open"),
+            stats.get("parents_matched"),
+            stats.get("parents_closed"),
+            stats.get("children_open"),
+            stats.get("children_matched"),
+            stats.get("children_closed"),
+        ))
+        con.close()
+    except Exception:
+        pass
+# === PATCH END ==============================================================

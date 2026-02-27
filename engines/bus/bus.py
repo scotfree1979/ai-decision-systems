@@ -2439,8 +2439,10 @@ class DecisionBus:
             "fill_rate": getattr(self, "_last_fill_rate", 0.0),
             "attempted": getattr(self, "_last_attempted", 0),
             "delegated": getattr(self, "_last_delegated", 0),
-        }
 
+            
+        }
+        _write_bus_runtime_snapshot(self.dashboard_snapshot())
     # ======================================================================
     # analytics_report() — unchanged
     # ======================================================================
@@ -4222,6 +4224,62 @@ class DecisionBus:
 # ======================================================================
 # END OF def tick(self)
 # ======================================================================
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus/bus.py (append at end of file)
+# 📆 PATCHED: 2026-02-27 — Structured runtime snapshot (BUS)
+#
+# PURPOSE:
+# - Persist authoritative BUS telemetry
+# - No logic mutation
+# - Pure observability
+# ==============================================================================
+
+def _ensure_bus_runtime_schema():
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bus_runtime_snapshot(
+            ts TEXT,
+            route_id INTEGER,
+            bus_stop INTEGER,
+            tick_id INTEGER,
+            hz REAL,
+            window_size INTEGER,
+            avg_ctx_refresh REAL,
+            fill_rate REAL
+        )
+    """)
+    con.close()
+
+
+def _write_bus_runtime_snapshot(data: dict):
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+        from engines.config_paths import autoscalp_db
+
+        _ensure_bus_runtime_schema()
+
+        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+        con.execute("""
+            INSERT INTO bus_runtime_snapshot
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            data.get("route_id"),
+            data.get("bus_stop"),
+            data.get("tick_id"),
+            data.get("hz"),
+            data.get("window_size"),
+            data.get("avg_ctx_refresh"),
+            data.get("fill_rate"),
+        ))
+        con.close()
+    except Exception:
+        pass
+# === PATCH END ==============================================================
 
 
 # Global BUS instance

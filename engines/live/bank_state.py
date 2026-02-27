@@ -802,7 +802,7 @@ def _reconcile_market_exposure_live():
 
         except Exception:
             pass
-
+    _write_bank_runtime_snapshot()
     return floor_rows
 
 # -------------------------------------------------------------------
@@ -1629,5 +1629,73 @@ def reconcile_realized_pnl_from_orders() -> None:
 
         con.commit()
         con.close()
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/bank_state.py (append at end)
+# 📆 PATCHED: 2026-02-27 — Structured runtime snapshot (BANKSTATE)
+# ==============================================================================
+
+def _ensure_bank_runtime_schema():
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bankstate_runtime_snapshot(
+            ts TEXT,
+            total_pot REAL,
+            total_used REAL,
+            total_available REAL,
+            total_exposure REAL
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bankstate_engine_snapshot(
+            ts TEXT,
+            engine TEXT,
+            pot REAL,
+            used REAL,
+            available REAL
+        )
+    """)
+    con.close()
+
+
+def _write_bank_runtime_snapshot():
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+        from engines.config_paths import autoscalp_db
+
+        _ensure_bank_runtime_schema()
+
+        ts = datetime.now(timezone.utc).isoformat()
+
+        total_pot = sum(_ENGINE_POTS.values())
+        total_used = sum(_ENGINE_USED.values())
+        total_available = total_pot - total_used
+
+        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+
+        con.execute("""
+            INSERT INTO bankstate_runtime_snapshot
+            VALUES (?,?,?,?,?)
+        """, (ts, total_pot, total_used, total_available, _OPEN_EXPOSURE))
+
+        for engine in _ENGINE_POTS:
+            con.execute("""
+                INSERT INTO bankstate_engine_snapshot
+                VALUES (?,?,?,?,?)
+            """, (
+                ts,
+                engine,
+                _ENGINE_POTS.get(engine, 0.0),
+                _ENGINE_USED.get(engine, 0.0),
+                _ENGINE_POTS.get(engine, 0.0) - _ENGINE_USED.get(engine, 0.0),
+            ))
+
+        con.close()
+    except Exception:
+        pass
+# === PATCH END ==============================================================
 
 
