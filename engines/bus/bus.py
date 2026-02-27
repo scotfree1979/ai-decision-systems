@@ -2442,7 +2442,7 @@ class DecisionBus:
 
             
         }
-        _write_bus_runtime_snapshot(self.dashboard_snapshot())
+    
     # ======================================================================
     # analytics_report() — unchanged
     # ======================================================================
@@ -4067,6 +4067,8 @@ class DecisionBus:
             self._last_fill_rate = fill_pct
             self._last_attempted = attempted
             self._last_delegated = delegated
+
+            _write_bus_runtime_snapshot(self.dashboard_snapshot())
 
             print(
                 f"[BUS][FILL] attempted={attempted} "

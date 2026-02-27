@@ -284,6 +284,7 @@ class BusRouteSnapshot:
         self.runner_pool = []
         self.bus_stops = {}
         self.ctx_map = {}  # (marketId, selectionId) -> ctx
+        self.active_slots = set()
 
     # ======================================================================================================
     # 📍 TARGET: engines/bus_route.py
@@ -360,7 +361,7 @@ class BusRouteSnapshot:
                     COUNT(DISTINCT selectionId) AS runner_count
                 FROM bets
                 WHERE date(marketStartTime)=date('now','utc')
-                  AND datetime(marketStartTime) >= datetime('now','utc','-5 minutes')
+                  AND datetime(marketStartTime) >= datetime('now','utc','-120 minutes')
                 GROUP BY marketId, marketStartTime
                 ORDER BY datetime(marketStartTime) ASC
             """).fetchall()
@@ -369,116 +370,101 @@ class BusRouteSnapshot:
 
         # ==============================================================================
         # 📍 TARGET: engines/bus_route.py
-        # 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — window selection logic
+        # 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — slot logic
         # 🛠 ACTION: REPLACE ENTIRE WINDOW CONSTRUCTION BLOCK
-        # 📆 PATCHED: 2026-04-25 — 5+1 Floating Preferred Window Model
+        # 📆 PATCHED: 2026-04-27 — Stateful 2.5h Admission + Grace Exit Model
         #
         # PURPOSE:
-        # - Outer horizon: 12 hours
-        # - Preferred execution zone: 4.5 hours
-        # - Base window = 5 markets
-        # - Floating slot (+1) when new preferred entrant appears
-        #
-        # INVARIANTS:
-        # - Deterministic rebuild every call
-        # - No cumulative state
-        # - First 5 always earliest future markets
-        # - Sixth slot = newest preferred entrant (if exists)
+        # - Market enters only if > 2.5h remaining
+        # - Market exits only after off + grace
+        # - Maximum 5 concurrent markets
+        # - Deterministic ordering (earliest first)
+        # - Preserve ordered runner distribution behaviour
         # ==============================================================================
 
+        MIN_TRADING_HOURS = 2.5  # 🔧 TOGGLE HERE
+        MIN_TRADING_MINUTES = MIN_TRADING_HOURS * 60
         WINDOW_SIZE = 5
-        OUTER_HOURS = 12
-        PREFERRED_HOURS = 4.5
 
-        future_markets = []
+        # ------------------------------------------------------------------
+        # Ensure state container exists (persistent across rebuilds)
+        # ------------------------------------------------------------------
+        if not hasattr(self, "active_slots"):
+            self.active_slots = set()
 
-        for r in rows:
+        # ------------------------------------------------------------------
+        # 1️⃣ REMOVE — only after off + grace
+        # ------------------------------------------------------------------
+        for mid in list(self.active_slots):
 
-            mid = str(r["marketId"])
-            off_raw = r["marketStartTime"]
-            runner_count = int(r["runner_count"] or 0)
-
-            if not off_raw:
+            r = next((x for x in rows if str(x["marketId"]) == mid), None)
+            if not r:
+                self.active_slots.discard(mid)
                 continue
 
             try:
                 off_dt = datetime.fromisoformat(
-                    off_raw.replace("Z", "+00:00")
+                    r["marketStartTime"].replace("Z", "+00:00")
                 )
             except Exception:
+                self.active_slots.discard(mid)
                 continue
 
-            # --------------------------------------------------
-            # ACTIVE WINDOW (restart-safe)
-            # --------------------------------------------------
-
-            # Market is valid if:
-            #   • Not past grace
-            #   • And within outer horizon
-
-            # Drop if past grace
             if off_dt + timedelta(minutes=POST_OFF_MINUTES) < now:
-                continue
+                self.active_slots.discard(mid)
 
-            # Drop if too far in future
-            if off_dt > now + timedelta(hours=OUTER_HOURS):
-                continue
+        # ------------------------------------------------------------------
+        # 2️⃣ ADMIT — only if > 2.5h remaining
+        # ------------------------------------------------------------------
+        if len(self.active_slots) < WINDOW_SIZE:
 
-            # OUTER HORIZON (12h)
-            if off_dt > now + timedelta(hours=OUTER_HOURS):
-                continue
+            # Sort rows by earliest off first (deterministic admission order)
+            sorted_rows = sorted(
+                rows,
+                key=lambda r: datetime.fromisoformat(
+                    r["marketStartTime"].replace("Z", "+00:00")
+                )
+            )
 
-            if runner_count < MIN_RUNNERS:
-                continue
+            for r in sorted_rows:
 
-            future_markets.append((mid, off_dt))
+                if len(self.active_slots) >= WINDOW_SIZE:
+                    break
 
-        # Ensure deterministic order
-        future_markets = sorted(future_markets, key=lambda x: x[1])
+                mid = str(r["marketId"])
 
-        # --------------------------------------------------
-        # BASE WINDOW (first 5 future markets)
-        # --------------------------------------------------
-        base_window = [mid for mid, _ in future_markets[:WINDOW_SIZE]]
+                if mid in self.active_slots:
+                    continue
 
-        # --------------------------------------------------
-        # PREFERRED ZONE (<= 4.5h to off)
-        # --------------------------------------------------
-        preferred_markets = [
-            mid for mid, off_dt in future_markets
-            if off_dt <= now + timedelta(hours=PREFERRED_HOURS)
-        ]
+                try:
+                    off_dt = datetime.fromisoformat(
+                        r["marketStartTime"].replace("Z", "+00:00")
+                    )
+                except Exception:
+                    continue
 
-        window_mids = list(base_window)
+                minutes_to_off = (off_dt - now).total_seconds() / 60.0
 
-        # --------------------------------------------------
-        # 2️⃣ Floating slot (4.5h sliding window, max 5)
-        # --------------------------------------------------
+                if minutes_to_off > MIN_TRADING_MINUTES:
+                    if int(r["runner_count"] or 0) >= MIN_RUNNERS:
+                        self.active_slots.add(mid)
 
-        floating_mids = []
+        # ------------------------------------------------------------------
+        # 3️⃣ FINAL ORDERING (earliest first — critical for bus duplication)
+        # ------------------------------------------------------------------
+        window_mids = sorted(
+            list(self.active_slots),
+            key=lambda m: next(
+                datetime.fromisoformat(
+                    x["marketStartTime"].replace("Z", "+00:00")
+                )
+                for x in rows if str(x["marketId"]) == m
+            )
+        )
 
-        for mid, off_dt in future_markets[WINDOW_SIZE:]:
-
-            # Only consider markets inside 4.5h window
-            if off_dt <= now + timedelta(hours=PREFERRED_HOURS):
-
-                # Exclude markets already past grace
-                if off_dt + timedelta(minutes=POST_OFF_MINUTES) >= now:
-                    floating_mids.append(mid)
-
-            else:
-                # Because list is sorted, we can stop scanning
-                break
-
-        # Cap floating window at 5
-        floating_mids = floating_mids[:5]
-
-        window_mids = base_window + floating_mids
-
-        # --------------------------------------------------
-        # BUILD RUNNER PAIRS FROM WINDOW
-        # --------------------------------------------------
-
+        # ------------------------------------------------------------------
+        # BUILD RUNNER PAIRS FROM window_mids
+        # ------------------------------------------------------------------
         raw_pairs = []
 
         if window_mids:
@@ -487,7 +473,7 @@ class BusRouteSnapshot:
             con.row_factory = sqlite3.Row
 
             try:
-                rows = con.execute(f"""
+                rows2 = con.execute(f"""
                     SELECT marketId, selectionId
                     FROM bets
                     WHERE marketId IN ({",".join(["?"]*len(window_mids))})
@@ -495,7 +481,7 @@ class BusRouteSnapshot:
             finally:
                 con.close()
 
-            for r in rows:
+            for r in rows2:
                 if r["marketId"] and r["selectionId"]:
                     raw_pairs.append(
                         (str(r["marketId"]), str(r["selectionId"]))
@@ -504,9 +490,7 @@ class BusRouteSnapshot:
         if not raw_pairs:
             raw_pairs = list(get_root_ctx_runner_pairs())
 
-        ordered = _order_runner_pool_by_market_time(raw_pairs)
-
-# ======================================================================================================
+        ordered = _order_runner_pool_by_market_time(raw_pairs) ======================================================================================================
 # END PATCH
 # ======================================================================================================
 

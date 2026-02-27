@@ -720,6 +720,57 @@ def _child_promotion_allowed(child_id: int) -> bool:
     finally:
         con.close()
 
+def _write_router_runtime_snapshot_from_collect(live: dict):
+
+    from datetime import datetime, timezone
+    import sqlite3
+    from engines.config_paths import autoscalp_db
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    con = sqlite3.connect(autoscalp_db(), timeout=6)
+    cur = con.cursor()
+
+    # Clear previous snapshot (single-frame table)
+    cur.execute("DELETE FROM router_runtime_snapshot")
+
+    # ---------------- PARENTS ----------------
+    for engine, buckets in live["parents"].items():
+        cur.execute("""
+            INSERT INTO router_runtime_snapshot
+            (ts, engine, role, queued, placing, placed, matched, cancelled, closed)
+            VALUES (?, ?, 'PARENT', ?, ?, ?, ?, ?, ?)
+        """, (
+            ts,
+            engine,
+            buckets.get("QUEUED", 0),
+            buckets.get("PLACING", 0),
+            buckets.get("PLACED", 0),
+            buckets.get("MATCHED", 0),
+            buckets.get("CANCELLED", 0),
+            buckets.get("CLOSED", 0),
+        ))
+
+    # ---------------- CHILDREN ----------------
+    for engine, buckets in live["children"].items():
+        cur.execute("""
+            INSERT INTO router_runtime_snapshot
+            (ts, engine, role, queued, placing, placed, matched, cancelled, closed)
+            VALUES (?, ?, 'CHILD', ?, ?, ?, ?, ?, ?)
+        """, (
+            ts,
+            engine,
+            buckets.get("QUEUED", 0),
+            buckets.get("PLACING", 0),
+            buckets.get("PLACED", 0),
+            buckets.get("MATCHED", 0),
+            buckets.get("CANCELLED", 0),
+            buckets.get("CLOSED", 0),
+        ))
+
+    con.commit()
+    con.close()
+
 # ======================================================================
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB
 # ======================================================================
@@ -1006,7 +1057,7 @@ def _router_enforce_status_authority():
 
     # 2️⃣ Live state report — ALWAYS print
     _print_router_live_state(live, inv)
-    _write_router_runtime_snapshot(fetch_router_stats())
+    _write_router_runtime_snapshot_from_collect(live)
 
     # Snapshot live DB state separately
     global _ROUTER_LIVE_LAST
@@ -7202,6 +7253,7 @@ def init_live_router():
     """
     Called by GUI or orchestrator after full system startup.
     """
+    _ensure_router_runtime_schema()
     _repair_orphan_run_ids_on_startup()
 
 _ROUTER_CHILD_THREAD = None
@@ -7234,39 +7286,84 @@ def _ensure_router_runtime_schema():
     con.execute("""
         CREATE TABLE IF NOT EXISTS router_runtime_snapshot(
             ts TEXT,
-            parents_open INTEGER,
-            parents_matched INTEGER,
-            parents_closed INTEGER,
-            children_open INTEGER,
-            children_matched INTEGER,
-            children_closed INTEGER
+            parents_json TEXT,
+            children_json TEXT,
+            open_trades INTEGER,
+            completed_trades INTEGER,
+            cancelled_trades INTEGER
         )
     """)
     con.close()
 
+def _render_router_report(self, con):
 
-def _write_router_runtime_snapshot(stats: dict):
-    try:
-        import sqlite3
-        from datetime import datetime, timezone
-        from engines.config_paths import autoscalp_db
+    row = con.execute("""
+        SELECT * FROM router_runtime_snapshot
+        ORDER BY ts DESC LIMIT 1
+    """).fetchone()
 
-        _ensure_router_runtime_schema()
+    if not row:
+        return
 
-        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
-        con.execute("""
-            INSERT INTO router_runtime_snapshot
-            VALUES (?,?,?,?,?,?,?)
-        """, (
-            datetime.now(timezone.utc).isoformat(),
-            stats.get("parents_open"),
-            stats.get("parents_matched"),
-            stats.get("parents_closed"),
-            stats.get("children_open"),
-            stats.get("children_matched"),
-            stats.get("children_closed"),
-        ))
-        con.close()
-    except Exception:
-        pass
-# === PATCH END ==============================================================
+    import json
+
+    parents = json.loads(row["parents_json"] or "{}")
+    children = json.loads(row["children_json"] or "{}")
+
+    open_trades = int(row["open_trades"] or 0)
+    completed_trades = int(row["completed_trades"] or 0)
+    cancelled_trades = int(row["cancelled_trades"] or 0)
+
+    text = []
+
+    text.append("================= V7 ROUTER LIVE STATE =================")
+    text.append(f"t={row['ts'][-9:]}   mode=LIVE   stage=POST-RECONCILE")
+    text.append("=======================================================")
+    text.append("")
+
+    # ---------------- PARENTS ----------------
+    text.append("PARENTS — ENTRY / EXIT STATUS (BY ENGINE)")
+    text.append("---------------------------------------------------------------")
+    text.append("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
+    text.append("---------------------------------------------------------------")
+
+    for engine in sorted(parents.keys()):
+        p = parents[engine]
+        text.append(
+            f"{engine:<16} "
+            f"{p.get('QUEUED',0):>6} "
+            f"{p.get('PLACING',0):>8} "
+            f"{p.get('PLACED',0):>8} "
+            f"{p.get('MATCHED',0):>8} "
+            f"{p.get('CANCELLED',0):>10} "
+            f"{p.get('CLOSED',0):>8}"
+        )
+
+    text.append("")
+    text.append("CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)")
+    text.append("---------------------------------------------------------------")
+    text.append("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
+    text.append("---------------------------------------------------------------")
+
+    for engine in sorted(children.keys()):
+        c = children[engine]
+        text.append(
+            f"{engine:<16} "
+            f"{c.get('QUEUED',0):>6} "
+            f"{c.get('PLACING',0):>8} "
+            f"{c.get('PLACED',0):>8} "
+            f"{c.get('MATCHED',0):>8} "
+            f"{c.get('CANCELLED',0):>10} "
+            f"{c.get('CLOSED',0):>8}"
+        )
+
+    text.append("")
+    text.append("TRADE SUMMARY")
+    text.append("-------------------------------------------------------")
+    text.append(f"open_trades        : {open_trades}")
+    text.append(f"completed_trades   : {completed_trades}")
+    text.append(f"cancelled_trades   : {cancelled_trades}")
+    text.append("-------------------------------------------------------")
+
+    self.router_text.delete("1.0", tk.END)
+    self.router_text.insert("1.0", "\n".join(text))

@@ -115,8 +115,6 @@ def _dashboard_con() -> sqlite3.Connection:
             time.sleep(0.05)
     return con
 
-
-
 def _live_conn_safe() -> sqlite3.Connection:
     return _dashboard_con()
 
@@ -151,6 +149,14 @@ class DashboardView(ttk.Frame):
         self.source_var = tk.StringVar(value=(source or "LIVE").upper())
         self.kpi_vars = {}
         self._build_ui()
+        # --- Heartbeat state ---
+        self._heartbeat_started = False
+        self._heartbeat_state = 0
+        self._pulse_on = False
+        self._pulse_speed = 1200
+        self._last_snapshot_ts = None
+
+        self._init_heartbeat_styles()
         self._start_loops()
 
     # ── UI layout ─────────────────────────────────────────────────────
@@ -586,6 +592,82 @@ class DashboardView(ttk.Frame):
             box.grid(row=0,column=i,padx=10,pady=4,sticky="w")
             frame.grid_columnconfigure(i,weight=1)
 
+    def _init_heartbeat_styles(self):
+        style = ttk.Style()
+
+        # Soft white base
+        style.configure("Bank.Rest.TLabelframe", background="#f8fbff")
+        style.configure("Bank.Build.TLabelframe", background="#fff7e6")
+        style.configure("Bank.Race.TLabelframe", background="#ffeaea")
+        style.configure("Bank.Crit.TLabelframe", background="#ffd6d6")
+
+        style.configure("Router.Rest.TLabelframe", background="#f8fbff")
+        style.configure("Router.Build.TLabelframe", background="#fff7e6")
+        style.configure("Router.Race.TLabelframe", background="#ffeaea")
+        style.configure("Router.Crit.TLabelframe", background="#ffd6d6")
+
+    def _compute_heartbeat_state(self, bank_row, row):
+
+        if not bank_row:
+            return 0
+
+        total_pot = float(bank_row["total_pot"] or 0)
+        total_used = float(bank_row["total_used"] or 0)
+        available = float(bank_row["total_available"] or 0)
+
+        exposure_ratio = (total_used / total_pot) if total_pot else 0
+
+        if exposure_ratio > 0.9:
+            return 2  # force racing mode
+
+        # 💀 CRITICAL
+        if available < 0:
+            return 3
+
+        # 🔴 RACING — any open lifecycle activity?
+        if row:
+            open_activity = (
+                int(row["queued"] or 0)
+                + int(row["placing"] or 0)
+                + int(row["placed"] or 0)
+            )
+            if open_activity > 0:
+                return 2
+
+        # 🟡 BUILDING
+        if exposure_ratio > 0.7:
+            return 1
+
+        # 🟢 REST
+        return 0
+
+    def _heartbeat_loop(self):
+
+        if not self._heartbeat_started:
+            return
+
+        # Pulse effect
+        if self._pulse_on:
+            self.bank_frame.configure(style="")
+            self.router_frame.configure(style="")
+        else:
+            if self._heartbeat_state == 0:
+                style = "Bank.Rest.TLabelframe"
+            elif self._heartbeat_state == 1:
+                style = "Bank.Build.TLabelframe"
+            elif self._heartbeat_state == 2:
+                style = "Bank.Race.TLabelframe"
+            else:
+                style = "Bank.Crit.TLabelframe"
+
+            self.bank_frame.configure(style=style)
+            self.router_frame.configure(style=style.replace("Bank", "Router"))
+
+        self._pulse_on = not self._pulse_on
+        self.after(self._pulse_speed, self._heartbeat_loop)
+
+
+
     def _refresh_kpis(self):
         try:
             d = kpi_tiles(source=self.source_var.get())
@@ -625,15 +707,20 @@ class DashboardView(ttk.Frame):
         container = ttk.LabelFrame(parent, text="Execution Intelligence")
         container.pack(fill="x", padx=8, pady=(0, 8))
 
-        # 4 panels in one row (wide layout)
-        for i in range(4):
-            container.columnconfigure(i, weight=1)
+        # 2 main columns
+        container.columnconfigure(0, weight=1, minsize=260)  # LEFT
+        container.columnconfigure(1, weight=1)  # RIGHT
 
-        # ---------------------------------------------------
-        # PANEL 1 — BUS
-        # ---------------------------------------------------
-        self.bus_frame = ttk.LabelFrame(container, text="BUS")
-        self.bus_frame.grid(row=0, column=0, sticky="nsew", padx=6)
+        # ============================================================
+        # LEFT COLUMN (BUS + INPLAY stacked)
+        # ============================================================
+        left = ttk.Frame(container)
+        left.grid(row=0, column=0, sticky="ns", padx=6)
+        left.columnconfigure(0, weight=1)
+
+        # BUS
+        self.bus_frame = ttk.LabelFrame(left, text="BUS")
+        self.bus_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
 
         self.bus_vars = {
             "route": tk.StringVar(value="Route ID: 0"),
@@ -644,70 +731,68 @@ class DashboardView(ttk.Frame):
         }
 
         for i, v in enumerate(self.bus_vars.values()):
-            ttk.Label(self.bus_frame, textvariable=v).grid(row=i, column=0, sticky="w", padx=6, pady=2)
+            ttk.Label(self.bus_frame, textvariable=v).grid(
+                row=i, column=0, sticky="w", padx=6, pady=2
+            )
 
-        # ---------------------------------------------------
-        # PANEL 2 — ROUTER
-        # ---------------------------------------------------
-        self.router_frame = ttk.LabelFrame(container, text="ROUTER")
-        self.router_frame.grid(row=0, column=1, sticky="nsew", padx=6)
-
-        self.router_vars = {
-            "parents_open":     tk.StringVar(value="Parents Open: 0"),
-            "parents_matched":  tk.StringVar(value="Parents Matched: 0"),
-            "parents_closed":   tk.StringVar(value="Parents Closed: 0"),
-            "children_open":    tk.StringVar(value="Children Open: 0"),
-            "children_matched": tk.StringVar(value="Children Matched: 0"),
-            "children_closed":  tk.StringVar(value="Children Closed: 0"),
-        }
-
-        for i, v in enumerate(self.router_vars.values()):
-            ttk.Label(self.router_frame, textvariable=v).grid(row=i, column=0, sticky="w", padx=6, pady=2)
-
-        # ---------------------------------------------------
-        # PANEL 3 — BANKSTATE
-        # ---------------------------------------------------
-        self.bank_frame = ttk.LabelFrame(container, text="BANKSTATE")
-        self.bank_frame.grid(row=0, column=2, sticky="nsew", padx=6)
-
-        self.bank_vars = {
-            "total_exposure": tk.StringVar(value="Exposure: £0"),
-            "total_used":     tk.StringVar(value="Used: £0"),
-            "total_available":tk.StringVar(value="Available: £0"),
-        }
-
-        for i, v in enumerate(self.bank_vars.values()):
-            ttk.Label(self.bank_frame, textvariable=v).grid(row=i, column=0, sticky="w", padx=6, pady=2)
-
-        self.bank_engine_rows = {}
-        row_base = 4
-
-        engines = ["LEGACY", "MSC_EXPLORATORY", "MSC_RISK", "MSC_INPLAY", "OVERWATCHER", "SAFETY_NET"]
-
-        for i, eng in enumerate(engines):
-            var = tk.StringVar(value=f"{eng}: 0 / 0")
-            ttk.Label(self.bank_frame, textvariable=var).grid(row=row_base+i, column=0, sticky="w", padx=6)
-            self.bank_engine_rows[eng] = var
-
-        # ---------------------------------------------------
-        # PANEL 4 — INPLAY
-        # ---------------------------------------------------
-        self.inplay_frame = ttk.LabelFrame(container, text="INPLAY")
-        self.inplay_frame.grid(row=0, column=3, sticky="nsew", padx=6)
+        # INPLAY
+        self.inplay_frame = ttk.LabelFrame(left, text="INPLAY")
+        self.inplay_frame.grid(row=1, column=0, sticky="nsew")
 
         self.inplay_vars = {
-            "market":   tk.StringVar(value="Market: -"),
-            "runner":   tk.StringVar(value="Runner: -"),
-            "price":    tk.StringVar(value="Price: -"),
-            "armed":    tk.StringVar(value="Armed: -"),
-            "triggered":tk.StringVar(value="Triggered: -"),
+            "market": tk.StringVar(value="Market: -"),
+            "runner": tk.StringVar(value="Runner: -"),
+            "price": tk.StringVar(value="Price: -"),
+            "armed": tk.StringVar(value="Armed: -"),
+            "triggered": tk.StringVar(value="Triggered: -"),
         }
 
         for i, v in enumerate(self.inplay_vars.values()):
-            ttk.Label(self.inplay_frame, textvariable=v).grid(row=i, column=0, sticky="w", padx=6, pady=2)
+            ttk.Label(self.inplay_frame, textvariable=v).grid(
+                row=i, column=0, sticky="w", padx=6, pady=2
+            )
+
+        # ============================================================
+        # RIGHT COLUMN (BANKSTATE + ROUTER side-by-side)
+        # ============================================================
+        right = ttk.Frame(container)
+        right.grid(row=0, column=1, sticky="nsew", padx=6)
+
+        # BANKSTATE and ROUTER side by side
+        right.columnconfigure(0, weight=1)
+        right.columnconfigure(1, weight=1)
+
+        # BANKSTATE (left half of right column)
+        self.bank_frame = ttk.LabelFrame(right, text="BANKSTATE")
+        self.bank_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        self.bank_text = tk.Text(
+            self.bank_frame,
+            height=28,
+            font=("Courier New", 11, "bold"),
+            wrap="none",
+            bg="#ffffff",
+            relief="flat",
+            borderwidth=0
+        )
+        self.bank_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # ROUTER (right half)
+        self.router_frame = ttk.LabelFrame(right, text="ROUTER")
+        self.router_frame.grid(row=0, column=1, sticky="nsew")
+
+        self.router_text = tk.Text(
+            self.router_frame,
+            height=28,
+            font=("Courier New", 11, "bold"),
+            wrap="none",
+            bg="#ffffff",
+            relief="flat",
+            borderwidth=0
+        )
+        self.router_text.pack(fill="both", expand=True, padx=8, pady=8)
 
         self._refresh_execution_intelligence()
-
 
     def _refresh_execution_intelligence(self):
 
@@ -715,12 +800,41 @@ class DashboardView(ttk.Frame):
         from engines.config_paths import autoscalp_db
 
         try:
-            con = sqlite3.connect(autoscalp_db(), timeout=6)
+            con = _dashboard_con()
             con.row_factory = sqlite3.Row
 
-            # ---------------------------------------------------
+            bank_row = con.execute("""
+                SELECT * FROM bankstate_runtime_snapshot
+                ORDER BY ts DESC LIMIT 1
+            """).fetchone()
+
+            row = con.execute("""
+                SELECT * FROM router_runtime_snapshot
+                ORDER BY ts DESC LIMIT 1
+            """).fetchone()
+
+            self._render_router_report(con)
+            self._render_bankstate_report(con)
+
+            # 🔥 HEARTBEAT CONTROL (single location only)
+            if bank_row and not self._heartbeat_started:
+                self._heartbeat_started = True
+                self._heartbeat_loop()
+
+            if bank_row:
+                self._heartbeat_state = self._compute_heartbeat_state(bank_row, row)
+
+            if self._heartbeat_state == 0:
+                self._pulse_speed = 1400
+            elif self._heartbeat_state == 1:
+                self._pulse_speed = 900
+            elif self._heartbeat_state == 2:
+                self._pulse_speed = 600
+            else:
+                self._pulse_speed = 350
+            # ─────────────────────────────────────────
             # BUS SNAPSHOT
-            # ---------------------------------------------------
+            # ─────────────────────────────────────────
             row = con.execute("""
                 SELECT * FROM bus_runtime_snapshot
                 ORDER BY ts DESC LIMIT 1
@@ -731,62 +845,22 @@ class DashboardView(ttk.Frame):
                 self.bus_vars["stop"].set(f"Bus Stop: {row['bus_stop']}")
                 self.bus_vars["tick"].set(f"Tick ID: {row['tick_id']}")
                 self.bus_vars["hz"].set(f"Hz: {row['hz']}")
-                self.bus_vars["fill"].set(f"Fill Rate: {round(row['fill_rate']*100,1)}%")
+                self.bus_vars["fill"].set(
+                    f"Fill Rate: {round((row['fill_rate'] or 0)*100,1)}%"
+                )
 
-            # ---------------------------------------------------
-            # ROUTER SNAPSHOT
-            # ---------------------------------------------------
-            row = con.execute("""
-                SELECT * FROM router_runtime_snapshot
-                ORDER BY ts DESC LIMIT 1
-            """).fetchone()
-
-            if row:
-                self.router_vars["parents_open"].set(f"Parents Open: {row['parents_open']}")
-                self.router_vars["parents_matched"].set(f"Parents Matched: {row['parents_matched']}")
-                self.router_vars["parents_closed"].set(f"Parents Closed: {row['parents_closed']}")
-                self.router_vars["children_open"].set(f"Children Open: {row['children_open']}")
-                self.router_vars["children_matched"].set(f"Children Matched: {row['children_matched']}")
-                self.router_vars["children_closed"].set(f"Children Closed: {row['children_closed']}")
-
-            # ---------------------------------------------------
-            # BANK SNAPSHOT
-            # ---------------------------------------------------
-            row = con.execute("""
-                SELECT * FROM bankstate_runtime_snapshot
-                ORDER BY ts DESC LIMIT 1
-            """).fetchone()
-
-            if row:
-                self.bank_vars["total_exposure"].set(f"Exposure: £{row['total_exposure']:.2f}")
-                self.bank_vars["total_used"].set(f"Used: £{row['total_used']:.2f}")
-                self.bank_vars["total_available"].set(f"Available: £{row['total_available']:.2f}")
-
-            rows = con.execute("""
-                SELECT * FROM bankstate_engine_snapshot
-                WHERE ts = (SELECT MAX(ts) FROM bankstate_engine_snapshot)
-            """).fetchall()
-
-            for r in rows:
-                eng = r["engine"]
-                if eng in self.bank_engine_rows:
-                    self.bank_engine_rows[eng].set(
-                        f"{eng}: £{r['used']:.0f} / £{r['pot']:.0f}"
-                    )
-
-            # ---------------------------------------------------
+            # ─────────────────────────────────────────
             # INPLAY SNAPSHOT
-            # ---------------------------------------------------
+            # ─────────────────────────────────────────
             row = con.execute("""
                 SELECT * FROM inplay_runtime_snapshot
                 ORDER BY ts DESC LIMIT 1
             """).fetchone()
 
             if row:
-                # resolve names from bets table
                 name_row = con.execute("""
                     SELECT horse_name, event_name
-                    FROM bets
+                    FROM betsdb.bets
                     WHERE marketId=? AND selectionId=?
                     LIMIT 1
                 """, (row["marketId"], row["selectionId"])).fetchone()
@@ -800,17 +874,229 @@ class DashboardView(ttk.Frame):
                 self.inplay_vars["armed"].set(
                     f"Armed: L={row['armed_lay']} B={row['armed_back']}"
                 )
-                self.inplay_vars["triggered"].set(f"Triggered: {row['triggered']}")
+                self.inplay_vars["triggered"].set(
+                    f"Triggered: {row['triggered']}"
+                )
 
             con.close()
 
-        except Exception:
-            pass
+        except Exception as e:
+            print("Execution Intelligence Error:", e)
 
         self.after(2000, self._refresh_execution_intelligence)
 
-# === PATCH END ==============================================================
+    def _render_router_report(self, con):
 
+        rows = con.execute("""
+            SELECT *
+            FROM router_runtime_snapshot
+            ORDER BY ts DESC
+        """).fetchall()
+
+        if not rows:
+            return
+
+        from collections import defaultdict
+
+        parents = defaultdict(lambda: defaultdict(int))
+        children = defaultdict(lambda: defaultdict(int))
+
+        for r in rows:
+            engine = r["engine"]
+            role = r["role"]
+
+            bucket_map = {
+                "QUEUED": r["queued"],
+                "PLACING": r["placing"],
+                "PLACED": r["placed"],
+                "MATCHED": r["matched"],
+                "CANCELLED": r["cancelled"],
+                "CLOSED": r["closed"],
+            }
+
+            if role == "PARENT":
+                parents[engine] = bucket_map
+            elif role == "CHILD":
+                children[engine] = bucket_map
+
+        # --------------------------------------------------
+        # Totals
+        # --------------------------------------------------
+
+        total_parents_open = sum(
+            p.get("QUEUED",0) + p.get("PLACING",0) + p.get("PLACED",0)
+            for p in parents.values()
+        )
+
+        total_children_open = sum(
+            c.get("QUEUED",0) + c.get("PLACING",0) + c.get("PLACED",0)
+            for c in children.values()
+        )
+
+        total_open = total_parents_open + total_children_open
+
+        total_matched = sum(
+            p.get("MATCHED",0) for p in parents.values()
+        ) + sum(
+            c.get("MATCHED",0) for c in children.values()
+        )
+
+        total_closed = sum(
+            p.get("CLOSED",0) for p in parents.values()
+        ) + sum(
+            c.get("CLOSED",0) for c in children.values()
+        )
+
+        # --------------------------------------------------
+        # Dynamic header 🔥⚡🟢
+        # --------------------------------------------------
+
+        if total_open > 200:
+            header = "🔥 V7 ROUTER LIVE STATE"
+        elif total_open > 100:
+            header = "⚡ V7 ROUTER LIVE STATE"
+        else:
+            header = "🟢 V7 ROUTER LIVE STATE"
+
+        text = []
+        text.append(header)
+        text.append("=" * 60)
+        text.append("")
+
+        # --------------------------------------------------
+        # 📦 PARENTS
+        # --------------------------------------------------
+
+        text.append("📦 PARENTS — ENTRY / EXIT STATUS (BY ENGINE)")
+        text.append("-" * 60)
+        text.append("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
+        text.append("-" * 60)
+
+        for engine in sorted(parents.keys()):
+            p = parents[engine]
+            text.append(
+                f"{engine:<16} "
+                f"{p.get('QUEUED',0):>6} "
+                f"{p.get('PLACING',0):>8} "
+                f"{p.get('PLACED',0):>8} "
+                f"{p.get('MATCHED',0):>8} "
+                f"{p.get('CANCELLED',0):>10} "
+                f"{p.get('CLOSED',0):>8}"
+            )
+
+        # --------------------------------------------------
+        # 👶 CHILDREN
+        # --------------------------------------------------
+
+        text.append("")
+        text.append("👶 CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)")
+        text.append("-" * 60)
+        text.append("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
+        text.append("-" * 60)
+
+        for engine in sorted(children.keys()):
+            c = children[engine]
+            text.append(
+                f"{engine:<16} "
+                f"{c.get('QUEUED',0):>6} "
+                f"{c.get('PLACING',0):>8} "
+                f"{c.get('PLACED',0):>8} "
+                f"{c.get('MATCHED',0):>8} "
+                f"{c.get('CANCELLED',0):>10} "
+                f"{c.get('CLOSED',0):>8}"
+            )
+
+        # --------------------------------------------------
+        # ⚡ TRADE SUMMARY
+        # --------------------------------------------------
+
+        text.append("")
+        text.append("⚡ TRADE SUMMARY")
+        text.append("-" * 40)
+
+        if total_open > 150:
+            open_display = f"🔥 {total_open}"
+        elif total_open > 75:
+            open_display = f"⚡ {total_open}"
+        else:
+            open_display = f"{total_open}"
+
+        text.append(f"Total Open      : {open_display}")
+        text.append(f"Total Matched   : ✅ {total_matched}")
+        text.append(f"Total Closed    : {total_closed}")
+
+        self.router_text.delete("1.0", tk.END)
+        self.router_text.insert("1.0", "\n".join(text))
+
+    def _render_bankstate_report(self, con):
+
+        row = con.execute("""
+            SELECT * FROM bankstate_runtime_snapshot
+            ORDER BY ts DESC LIMIT 1
+        """).fetchone()
+
+        if not row:
+            return
+
+        text = []
+        text.append("GLOBAL SUMMARY")
+        text.append("-" * 60)
+        text.append(f"Open Exposure        : {row['total_exposure']:.2f}")
+        text.append(f"Total Pot            : {row['total_pot']:.2f}")
+        text.append(f"Total Used           : {row['total_used']:.2f}")
+        available = float(row["total_available"] or 0)
+
+        if available < 0:
+            avail_display = f"🔴 {available:.2f}"
+        else:
+            avail_display = f"🟢 {available:.2f}"
+
+        text.append(f"Total Available      : {avail_display}")
+        text.append("-" * 60)
+        text.append("")
+
+        text.append("🏦 V7 BANKSTATE — LIVE CAPITAL ENGINE")
+        text.append("-" * 70)
+        text.append("{:<18}{:>10}{:>10}{:>10}{:>12}{:>12}".format(
+            "ENGINE","POT","USED","AVAIL","FLOOR","UNMATCHED"
+        ))
+        text.append("-" * 70)
+
+        rows = con.execute("""
+            SELECT * FROM bankstate_engine_snapshot
+            WHERE ts = (SELECT MAX(ts) FROM bankstate_engine_snapshot)
+        """).fetchall()
+
+        for r in rows:
+            used = float(r["used"] or 0)
+            pot = float(r["pot"] or 0)
+            avail = float(r["available"] or 0)
+
+            # 🔥 Over-extended engine
+            if avail < 0:
+                engine_name = f"🔥 {r['engine']}"
+            elif used > pot * 0.8:
+                engine_name = f"⚡ {r['engine']}"
+            else:
+                engine_name = f"{r['engine']}"
+
+            floor = float(r["floor"] or 0)
+            unmatched = float(r["unmatched"] or 0)
+
+            text.append("{:<18}{:>10.2f}{:>10.2f}{:>10.2f}{:>12.2f}{:>12.2f}".format(
+                engine_name,
+                pot,
+                used,
+                avail,
+                floor,
+    unmatched
+))
+        text.append("-" * 70)
+
+        self.bank_text.delete("1.0", tk.END)
+        self.bank_text.insert("1.0", "\n".join(text))
+
+      
     def _on_source_change(self,_=None):
         try:
             cp.set_db_paths(mode=self.source_var.get().lower(), quiet=True)
