@@ -365,6 +365,25 @@ def evaluate_progressive_lock(
 # STOPLOSS → BUS PLAN EMITTER (CANONICAL)
 # ======================================================================
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/overwatcher.py
+# 🔎 SEARCH: def maybe_emit_stoploss_plan(
+# 🛠 ACTION: Remove stop_ticks dependency + remove stake from emission
+# 📆 PATCHED: 2026-04-28 — Correct stoploss contract (BUS owns sizing)
+#
+# PURPOSE:
+# - Overwatch computes stop distance internally (SLEQ-based)
+# - BUS owns stake sizing
+# - stop_ticks NOT required
+# - CHILD plan must NOT contain size
+#
+# PRESERVED:
+# - 2-second open guard
+# - Duplicate STOPLOSS child guard
+# - Canonical adverse-direction logic
+# - BUS-native CHILD plan contract
+# ==============================================================================
+
 def maybe_emit_stoploss_plan(
     *,
     parent_row: dict,
@@ -373,7 +392,7 @@ def maybe_emit_stoploss_plan(
     """
     PURE stop-loss evaluator.
 
-    - NO DB writes
+    - NO DB writes (except duplicate guard read)
     - NO routing
     - NO execution
     - Returns a BUS-native CHILD plan or None
@@ -385,56 +404,70 @@ def maybe_emit_stoploss_plan(
         if (datetime.now(timezone.utc) - opened).total_seconds() < 2.0:
             return None
 
-
     # --- required inputs ---
     side        = (parent_row.get("side") or "").upper()
-    entry_odds = parent_row.get("entry_odds")
-    stop_ticks = parent_row.get("stop_ticks")
-    stake      = parent_row.get("entry_stake")
-    mid        = parent_row.get("marketId")
-    sid        = parent_row.get("selectionId")
+    entry_odds  = parent_row.get("entry_odds")
+    stake       = parent_row.get("entry_stake")
+    mid         = parent_row.get("marketId")
+    sid         = parent_row.get("selectionId")
+    parent_id   = parent_row.get("id")
 
     if (
         not side
         or entry_odds is None
-        or stop_ticks is None
         or stake is None
         or current_px is None
+        or parent_id is None
     ):
         return None
 
-    # --- canonical adverse-direction logic ---
-    # Lay first  → loss if odds STEAM DOWN
-    # Back first → loss if odds DRIFT UP
+    # --------------------------------------------------
+    # Compute dynamic stop using SLEQ (Overwatch-owned)
+    # --------------------------------------------------
+    parent_state = ParentState(
+        parent_id=int(parent_id),
+        entry_side=side,
+        entry_odds=float(entry_odds),
+        entry_stake=float(stake),
+    )
 
+    sleq = MSC_STOPLOSS.get_sleq(parent_state)
+
+    stop_px = _compute_msc_stop_px(
+        entry_odds=float(entry_odds),
+        side=side,
+        sleq=sleq
+    )
+
+    # --- canonical adverse-direction logic ---
     if side == "LAY":
-        stop_px   = walk_ticks(entry_odds, stop_ticks, direction="down")
-        hit       = current_px <= stop_px
+        hit = current_px <= stop_px
         exit_side = "BACK"
     else:  # BACK
-        stop_px   = walk_ticks(entry_odds, stop_ticks, direction="up")
-        hit       = current_px >= stop_px
+        hit = current_px >= stop_px
         exit_side = "LAY"
 
     if not hit:
         return None
 
+    # --------------------------------------------------
+    # Prevent duplicate STOPLOSS child
+    # --------------------------------------------------
     con = _orders_conn(); con.row_factory = sqlite3.Row
     row = _q_retry(con, """
         SELECT 1
           FROM orders
-          WHERE role='CHILD'
+         WHERE role='CHILD'
            AND hedge_of = ?
            AND UPPER(exit_kind) = 'STOPLOSS'
          LIMIT 1
-    """, (parent_row["id"],)).fetchone()
+    """, (int(parent_id),)).fetchone()
     con.close()
 
     if row:
         return None
 
-
-    # --- BUS-native CHILD plan ---
+    # --- BUS-native CHILD plan (NO SIZE HERE) ---
     return {
         "engine": "OVERWATCHER",
         "role": "CHILD",
@@ -443,8 +476,9 @@ def maybe_emit_stoploss_plan(
         "selectionId": sid,
         "side": exit_side,
         "px": current_px,
-        "size": float(stake),   # BUS will validate, not recompute
     }
+
+# === PATCH END ==============================================================
 
 
 def enforce_msc_exploratory_stoploss():
