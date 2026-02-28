@@ -6494,7 +6494,7 @@ def place_parent_and_hedge(
         )
 
         # 🔒 HARD BLOCK — not this parent's turn yet
-        if row not in allowed:
+        if parent_id not in {r["id"] for r in allowed}:
             _log_event(
                 "INFO",
                 "live_router",
