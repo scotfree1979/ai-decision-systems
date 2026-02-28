@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 from engines.mastery.event_sink import emit
 
-from tools.betfair_runner_trend_surface import get_runner_trend
+
 
 
 class InPlayEngine:
@@ -81,21 +81,31 @@ class InPlayEngine:
 # - No execution logic runs for ignored runners
 # ============================================================================
 
-        from engines.bus_route import DAY_RUNNER_SURFACE
+      
         intel = {}
         mid = str(ctx.get("marketId"))
         sid = str(ctx.get("selectionId"))
 
-        runner = DAY_RUNNER_SURFACE.get_runner(mid, sid)
+        # --- AUTHORITATIVE BAND + PX FROM MARKET MONITOR ---
+        from engines.market_monitor.monitor import classify
 
-        if runner:
-            if ctx.get("px") is None:
-                ctx["px"] = runner["px"]
-            ctx["band"] = runner["band"]
+        mm = classify(mid, sid)
 
-        px = float(ctx.get("px") or 0.0)
+        if mm:
+            # px fallback only if missing
+            if ctx.get("px") is None and mm.get("px") is not None:
+                ctx["px"] = mm.get("px")
+
+            # authoritative band
+            ctx["band"] = mm.get("band")
+
+        px_val = ctx.get("px")
+        if px_val is None:
+            return self._no_signal("missing_px")
+
+        px = float(px_val)
         if px <= 0:
-            return self._no_signal("ignored_band")
+            return self._no_signal("invalid_px")
 
 
         if ctx.get("band") == "IGNORED":
@@ -111,14 +121,30 @@ class InPlayEngine:
         # --------------------------------------------------
         # Race Start Authority (Non-Blocking)
         # --------------------------------------------------
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: # Race Start Authority (Non-Blocking)
+# 🛠 ACTION: Replace race start detection with scheduled+behaviour model
+# 📆 PATCHED: 2026-04-28 — Dual Authority Race Start Detection
+#
+# PURPOSE:
+# - Prevent pre-off false triggers
+# - Prevent delayed-race misclassification
+# - Remove reliance on trend cache timing
+# - Anchor volatility to scheduled off time
+#
+# INVARIANT:
+# - Race cannot start before scheduled off
+# - Race must exhibit volatility to be confirmed
+# ==============================================================================
 
         race_started = False
         race_quartile = None
         race_confidence = 0.0
 
         try:
-            from engines.inplay.inplay_flag_helper import build_race_intelligence
             from engines.config_paths import open_bets_db
+            from datetime import datetime, timezone
             import sqlite3
 
             con = open_bets_db(rw=False)
@@ -131,36 +157,39 @@ class InPlayEngine:
             con.close()
 
             if row and row[0]:
-                market_start_ts = datetime.fromisoformat(
+
+                scheduled_off = datetime.fromisoformat(
                     row[0].replace("Z","")
                 ).replace(tzinfo=timezone.utc).timestamp()
 
-                from tools.betfair_runner_trend_surface import _TREND_CACHE
+                now_ts = datetime.now(timezone.utc).timestamp()
 
-                runner_prices = {}
-                for (m, s), v in list(_TREND_CACHE.items()):
-                    if str(m) != mid:
-                        continue
-                    px_val = v.get("micro_to_price") or v.get("struct_to_price")
-                    if px_val:
-                        runner_prices[str(s)] = float(px_val)
+                scheduled_started = now_ts >= scheduled_off
 
-                if runner_prices:
-                    intel = build_race_intelligence(
-                        mid,
-                        market_start_ts,
-                        runner_prices
-                    )
+                # Behaviour confirmation
+                behaviour_started = abs(ticks_moved) >= self.VOLATILITY_TICKS_TRIGGER
 
-                    race_started = intel["market"]["is_inplay"]
-                    race_quartile = intel["market"]["race_quartile"]
-                    race_confidence = intel["market"]["confidence"]
+                race_started = scheduled_started and behaviour_started
+
+                # Narrative clock (separate from execution)
+                if scheduled_started:
+                    elapsed = now_ts - scheduled_off
+
+                    if elapsed <= 60:
+                        race_quartile = "Q1"
+                    elif elapsed <= 120:
+                        race_quartile = "Q2"
+                    elif elapsed <= 180:
+                        race_quartile = "Q3"
+                    else:
+                        race_quartile = "Q4"
+
+                    race_confidence = min(1.0, abs(ticks_moved) / 3.0)
 
         except Exception:
-            # Helper failure must NEVER block InPlay
             race_started = False
 
-        # --------------------------------------------------
+# === PATCH END ==============================================================        # --------------------------------------------------
         # Authority Influence Layer (Ranking, not veto)
         # --------------------------------------------------
 # === PATCH START ==============================================================
@@ -346,34 +375,31 @@ class InPlayEngine:
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
-# 🔎 SEARCH: return {
-# 🛠 ACTION: Replace batch return with BUS-native flat emission
-# 📆 PATCHED: 2026-02-20 — Fix Phase 3 break (remove nested plans contract)
+# 🔎 SEARCH: if not plans:
+# 🛠 ACTION: Restore batch emission contract for MSC_INPLAY
+# 📆 PATCHED: 2026-04-28 — Reinstate full ladder batch emission
 #
 # PURPOSE:
-# - BUS expects flat plan objects
-# - Nested "plans" payload caused missing direction/side error
-# - Restore compatibility with existing routing system
+# - Emit ALL ladder parents at trigger
+# - Align with BUS batch expansion logic
+# - Preserve 24-slot design (4 runners × 6 levels)
 #
 # INVARIANT:
-# - One plan returned per tick
-# - No nested batch payload
+# - Engine returns {"batch": True, "plans": [...]}
+# - BUS expands into individual parents
+# - Router promotes sequentially
 # ==============================================================================
 
         if not plans:
             return self._no_signal("armed_not_triggered")
 
-        # Emit first valid ladder level per tick (BUS-native contract)
-        first = plans[0]
         _write_inplay_runtime_snapshot(ctx, self)
+
         return {
             "enter": True,
             "engine": "MSC_INPLAY",
-            "role": first["role"],
-            "direction": first["direction"],
-            "px": first["px"],
-            "target_ticks": first["target_ticks"],
-            "why": first["why"],
+            "batch": True,
+            "plans": plans,
         }
 
 # === PATCH END ==============================================================
