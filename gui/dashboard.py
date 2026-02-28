@@ -148,14 +148,14 @@ class DashboardView(ttk.Frame):
         self.app = app
         self.source_var = tk.StringVar(value=(source or "LIVE").upper())
         self.kpi_vars = {}
-        self._build_ui()
+
         # --- Heartbeat state ---
         self._heartbeat_started = False
         self._heartbeat_state = 0
         self._pulse_on = False
         self._pulse_speed = 1200
         self._last_snapshot_ts = None
-
+        self._build_ui()
         self._init_heartbeat_styles()
         self._start_loops()
 
@@ -1032,11 +1032,14 @@ class DashboardView(ttk.Frame):
 
         row = con.execute("""
             SELECT * FROM bankstate_runtime_snapshot
-            ORDER BY ts DESC LIMIT 1
+            ORDER BY ts DESC
+            LIMIT 1
         """).fetchone()
 
         if not row:
             return
+
+        ts = row["ts"]
 
         text = []
         text.append("GLOBAL SUMMARY")
@@ -1063,8 +1066,12 @@ class DashboardView(ttk.Frame):
         text.append("-" * 70)
 
         rows = con.execute("""
-            SELECT * FROM bankstate_engine_snapshot
-            WHERE ts = (SELECT MAX(ts) FROM bankstate_engine_snapshot)
+            SELECT *
+            FROM bankstate_engine_snapshot
+            WHERE ts = (
+                SELECT MAX(ts)
+                FROM bankstate_engine_snapshot
+            ) 
         """).fetchall()
 
         for r in rows:
@@ -1089,9 +1096,9 @@ class DashboardView(ttk.Frame):
                 used,
                 avail,
                 floor,
-    unmatched
-))
-        text.append("-" * 70)
+                unmatched
+            ))
+            text.append("-" * 70)
 
         self.bank_text.delete("1.0", tk.END)
         self.bank_text.insert("1.0", "\n".join(text))

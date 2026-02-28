@@ -498,32 +498,36 @@ def _ensure_inplay_runtime_schema():
     con.close()
 
 
-def _write_inplay_runtime_snapshot(ctx, self):
+# ==================================================
+# 🟥 INPLAY RUNTIME SNAPSHOT (ENGINE-OWNED)
+# ==================================================
+def write_runtime_snapshot(self):
     try:
         import sqlite3
         from datetime import datetime, timezone
         from engines.config_paths import autoscalp_db
 
-        _ensure_inplay_runtime_schema()
-
-        mid = str(ctx.get("marketId"))
-        sid = str(ctx.get("selectionId"))
+        ts = datetime.now(timezone.utc).isoformat()
 
         con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
-        con.execute("""
-            INSERT INTO inplay_runtime_snapshot
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (
-            datetime.now(timezone.utc).isoformat(),
-            mid,
-            sid,
-            ctx.get("px"),
-            ctx.get("direction"),
-            int(self.armed_lay.get((mid, sid), False)),
-            int(self.armed_back.get((mid, sid), False)),
-            int(self.triggered.get((mid, sid), False)),
-        ))
+
+        for (mid, sid), _ in self.armed_lay.items():
+
+            con.execute("""
+                INSERT INTO inplay_runtime_snapshot
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (
+                ts,
+                str(mid),
+                str(sid),
+                None,  # px handled via ctx snapshot, not engine memory
+                None,
+                int(self.armed_lay.get((mid, sid), False)),
+                int(self.armed_back.get((mid, sid), False)),
+                int(self.triggered.get((mid, sid), False)),
+            ))
+
         con.close()
+
     except Exception:
         pass
-# === PATCH END ==============================================================

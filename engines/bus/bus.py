@@ -4070,6 +4070,39 @@ class DecisionBus:
 
             _write_bus_runtime_snapshot(self.dashboard_snapshot())
 
+            # ==================================================
+            # 🟦 BANKSTATE SNAPSHOT (TICK-DRIVEN)
+            # ==================================================
+            try:
+                from engines.live.bank_state import _write_bank_runtime_snapshot
+                _write_bank_runtime_snapshot()
+            except Exception:
+                pass
+
+            # ==================================================
+            # 🟥 INPLAY SNAPSHOT (TICK-DRIVEN)
+            # ==================================================
+            try:
+                inplay_engine = self.engines.get("MSC_INPLAY")
+                if inplay_engine:
+                    inplay_engine.write_runtime_snapshot()
+            except Exception:
+                pass
+
+            # ==================================================
+            # 🟩 ROUTER SNAPSHOT (TICK-DRIVEN)
+            # ==================================================
+
+            try:
+                from engines.live.live_router import collect_router_live_state
+                from engines.live.live_router import _write_router_runtime_snapshot_from_collect
+
+                live = collect_router_live_state()
+                _write_router_runtime_snapshot_from_collect(live)
+
+            except Exception:
+                pass
+
             print(
                 f"[BUS][FILL] attempted={attempted} "
                 f"delegated={delegated} "

@@ -343,7 +343,7 @@ class BusRouteSnapshot:
 # - Self-contained logic
 # ======================================================================================================
 
-        WINDOW_SIZE = 5
+        WINDOW_SIZE = 10
         ENTRY_HOURS = 12
         MIN_RUNNERS = 6
         POST_OFF_MINUTES = 120  # safety guard only
@@ -384,7 +384,7 @@ class BusRouteSnapshot:
 
         MIN_TRADING_HOURS = 2.5  # 🔧 TOGGLE HERE
         MIN_TRADING_MINUTES = MIN_TRADING_HOURS * 60
-        WINDOW_SIZE = 5
+
 
         # ------------------------------------------------------------------
         # Ensure state container exists (persistent across rebuilds)

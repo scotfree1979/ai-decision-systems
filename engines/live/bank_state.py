@@ -14,6 +14,15 @@ except Exception:
 # ---- Engine pots (persisted, BudgetManager-owned) ----------------
 _ENGINE_POTS: Dict[str, float] = {}
 _ENGINE_AVAILABLE: Dict[str, float] = {}
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ACTION: cache last computed floor/unmatched for snapshot mirror
+# ==============================================================================
+
+_ENGINE_FLOOR_CACHE: Dict[str, float] = {}
+_ENGINE_UNMATCHED_CACHE: Dict[str, float] = {}
+
+# === PATCH END ==============================================================
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
@@ -802,8 +811,8 @@ def _reconcile_market_exposure_live():
 
         except Exception:
             pass
-    _write_bank_runtime_snapshot()
-    return floor_rows
+      
+    return engine_floor, unmatched_map, floor_rows
 
 # -------------------------------------------------------------------
 # OBSERVABILITY REPORT LOOP (REFINED, LOW-NOISE)
@@ -827,7 +836,10 @@ def _bankstate_report_loop(interval_s: int = 60):
 
     while True:
         try:
-            _reconcile_market_exposure_live()
+            engine_floor, unmatched_map, floor_rows = _reconcile_market_exposure_live()
+
+            # 🔒 Snapshot write moved HERE so dashboard = print (atomic)
+            _write_bank_runtime_snapshot(engine_floor, unmatched_map)
 
             with _LOCK:
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
@@ -837,11 +849,21 @@ def _bankstate_report_loop(interval_s: int = 60):
                 total_avail = total_pot - total_used
                 open_exp = _clamp(_OPEN_EXPOSURE)
 
+# === PATCH START ==============================================================
+                # Cache split values for snapshot mirror
+                _ENGINE_FLOOR_CACHE.clear()
+                _ENGINE_UNMATCHED_CACHE.clear()
+
+                for engine in _ENGINE_POTS.keys():
+                    _ENGINE_FLOOR_CACHE[engine] = engine_floor.get(engine, 0.0)
+                    _ENGINE_UNMATCHED_CACHE[engine] = unmatched_map.get(engine, 0.0)
+# === PATCH END ==============================================================
+
                 # --------------------------------------------------
                 # Compute per-engine floor + unmatched
                 # --------------------------------------------------
 
-                floor_rows = _compute_market_floor_from_betfair_surface()
+ 
                 floor_by_market = {
                     r["marketId"]: float(r["true_market_exposure"])
                     for r in floor_rows
@@ -1037,7 +1059,7 @@ def _bankstate_report_loop(interval_s: int = 60):
         time.sleep(interval_s)
 
 
-def start_bankstate_reporter(interval_s: int = 60):
+def start_bankstate_reporter(interval_s: int = 2):
     """
     Start the BankState observability reporter.
     Safe to call multiple times (singleton).
@@ -1654,48 +1676,72 @@ def _ensure_bank_runtime_schema():
             engine TEXT,
             pot REAL,
             used REAL,
-            available REAL
+            available REAL,
+            floor REAL,
+            unmatched REAL
         )
     """)
     con.close()
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🧩 ACTION: snapshot is now pure memory mirror (NO recompute)
+# ==============================================================================
 
 def _write_bank_runtime_snapshot():
-    try:
-        import sqlite3
-        from datetime import datetime, timezone
-        from engines.config_paths import autoscalp_db
 
-        _ensure_bank_runtime_schema()
+    import sqlite3
+    from datetime import datetime, timezone
+    from engines.config_paths import autoscalp_db
 
-        ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(timezone.utc).isoformat()
 
+    with _LOCK:
         total_pot = sum(_ENGINE_POTS.values())
         total_used = sum(_ENGINE_USED.values())
         total_available = total_pot - total_used
 
-        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+        floor_cache = dict(_ENGINE_FLOOR_CACHE)
+        unmatched_cache = dict(_ENGINE_UNMATCHED_CACHE)
+
+        pots = dict(_ENGINE_POTS)
+        used_map = dict(_ENGINE_USED)
+        open_exp = _OPEN_EXPOSURE
+
+    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+
+    # GLOBAL
+    con.execute("""
+        INSERT INTO bankstate_runtime_snapshot
+        VALUES (?,?,?,?,?)
+    """, (ts, total_pot, total_used, total_available, open_exp))
+
+    # ENGINE SPLIT
+    for engine in pots:
+
+        pot = float(pots.get(engine, 0.0))
+        used = float(used_map.get(engine, 0.0))
+        available = pot - used
+
+        floor_part = float(floor_cache.get(engine, 0.0))
+        unmatched_part = float(unmatched_cache.get(engine, 0.0))
 
         con.execute("""
-            INSERT INTO bankstate_runtime_snapshot
-            VALUES (?,?,?,?,?)
-        """, (ts, total_pot, total_used, total_available, _OPEN_EXPOSURE))
+            INSERT INTO bankstate_engine_snapshot
+            (ts, engine, pot, used, available, floor, unmatched)
+            VALUES (?,?,?,?,?,?,?)
+        """, (
+            ts,
+            engine,
+            pot,
+            used,
+            available,
+            floor_part,
+            unmatched_part,
+        ))
 
-        for engine in _ENGINE_POTS:
-            con.execute("""
-                INSERT INTO bankstate_engine_snapshot
-                VALUES (?,?,?,?,?)
-            """, (
-                ts,
-                engine,
-                _ENGINE_POTS.get(engine, 0.0),
-                _ENGINE_USED.get(engine, 0.0),
-                _ENGINE_POTS.get(engine, 0.0) - _ENGINE_USED.get(engine, 0.0),
-            ))
+    con.close()
 
-        con.close()
-    except Exception:
-        pass
 # === PATCH END ==============================================================
 
 
