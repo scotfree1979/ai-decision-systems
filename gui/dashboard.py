@@ -804,13 +804,18 @@ class DashboardView(ttk.Frame):
             con.row_factory = sqlite3.Row
 
             bank_row = con.execute("""
-                SELECT * FROM bankstate_runtime_snapshot
-                ORDER BY ts DESC LIMIT 1
+                SELECT *
+                FROM bankstate_runtime_snapshot
+                WHERE date(ts) = date('now','utc')
+                ORDER BY ts DESC
+                LIMIT 1
             """).fetchone()
 
             row = con.execute("""
-                SELECT * FROM router_runtime_snapshot
-                ORDER BY ts DESC LIMIT 1
+                SELECT *
+                FROM router_runtime_snapshot
+                WHERE date(ts) = date('now','utc')
+                ORDER BY ts DESC
             """).fetchone()
 
             self._render_router_report(con)
@@ -890,10 +895,27 @@ class DashboardView(ttk.Frame):
         rows = con.execute("""
             SELECT *
             FROM router_runtime_snapshot
+            WHERE date(ts) = date('now','utc')
             ORDER BY ts DESC
         """).fetchall()
 
         if not rows:
+            self.router_text.delete("1.0", tk.END)
+            self.router_text.insert("1.0",
+                "🟢 V7 ROUTER LIVE STATE\n"
+                "============================================================\n\n"
+                "📦 PARENTS — ENTRY / EXIT STATUS (BY ENGINE)\n"
+                "------------------------------------------------------------\n"
+                "No trades yet today.\n\n"
+                "👶 CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)\n"
+                "------------------------------------------------------------\n"
+                "No trades yet today.\n\n"
+                "⚡ TRADE SUMMARY\n"
+                "------------------------------------------------------------\n"
+                "Total Open      : 0\n"
+                "Total Matched   : 0\n"
+                "Total Closed    : 0\n"
+            )
             return
 
         from collections import defaultdict
@@ -1031,12 +1053,23 @@ class DashboardView(ttk.Frame):
     def _render_bankstate_report(self, con):
 
         row = con.execute("""
-            SELECT * FROM bankstate_runtime_snapshot
+            SELECT *
+            FROM bankstate_runtime_snapshot
+            WHERE date(ts) = date('now','utc')
             ORDER BY ts DESC
             LIMIT 1
         """).fetchone()
 
         if not row:
+            self.bank_text.delete("1.0", tk.END)
+            self.bank_text.insert("1.0",
+                "GLOBAL SUMMARY\n"
+                "------------------------------------------------------------\n"
+                "Open Exposure        : 0.00\n"
+                "Total Pot            : 0.00\n"
+                "Total Used           : 0.00\n"
+                "Total Available      : 0.00\n"
+            )
             return
 
         ts = row["ts"]
@@ -1068,10 +1101,12 @@ class DashboardView(ttk.Frame):
         rows = con.execute("""
             SELECT *
             FROM bankstate_engine_snapshot
-            WHERE ts = (
-                SELECT MAX(ts)
-                FROM bankstate_engine_snapshot
-            ) 
+            WHERE date(ts) = date('now','utc')
+              AND ts = (
+                  SELECT MAX(ts)
+                  FROM bankstate_engine_snapshot
+                  WHERE date(ts) = date('now','utc')
+              ) 
         """).fetchall()
 
         for r in rows:

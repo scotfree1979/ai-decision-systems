@@ -839,7 +839,7 @@ def _bankstate_report_loop(interval_s: int = 60):
             engine_floor, unmatched_map, floor_rows = _reconcile_market_exposure_live()
 
             # 🔒 Snapshot write moved HERE so dashboard = print (atomic)
-            _write_bank_runtime_snapshot(engine_floor, unmatched_map)
+            _write_bank_runtime_snapshot()
 
             with _LOCK:
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
