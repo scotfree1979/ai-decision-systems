@@ -361,7 +361,6 @@ class BusRouteSnapshot:
                     COUNT(DISTINCT selectionId) AS runner_count
                 FROM bets
                 WHERE date(marketStartTime)=date('now','utc')
-                  AND datetime(marketStartTime) >= datetime('now','utc','-120 minutes')
                 GROUP BY marketId, marketStartTime
                 ORDER BY datetime(marketStartTime) ASC
             """).fetchall()
@@ -433,8 +432,11 @@ class BusRouteSnapshot:
                 self.active_slots.discard(mid)
 
         # ------------------------------------------------------------------
-        # 2️⃣ ADMIT
+        # 2️⃣ ADMIT (SEED + ONGOING ADMISSION — CLEAN SEPARATION)
         # ------------------------------------------------------------------
+
+        # Capture seed phase BEFORE modifying active_slots
+        seed_phase = (len(self.active_slots) == 0)
 
         sorted_rows = sorted(
             rows,
@@ -443,40 +445,63 @@ class BusRouteSnapshot:
             )
         )
 
-        for r in sorted_rows:
+        # ==============================================================
+        # 2A️⃣ SEED PHASE (RUN ONCE IF WINDOW EMPTY)
+        # ==============================================================
+        if seed_phase:
 
-            if len(self.active_slots) >= WINDOW_SIZE:
-                break
+            for r in sorted_rows:
 
-            mid = str(r["marketId"])
+                if len(self.active_slots) >= WINDOW_SIZE:
+                    break
 
-            if mid in self.active_slots:
-                continue
+                mid = str(r["marketId"])
 
-            try:
-                off_dt = datetime.fromisoformat(
-                    r["marketStartTime"].replace("Z", "+00:00")
-                )
-            except Exception:
-                continue
+                if mid in self.active_slots:
+                    continue
 
-            minutes_to_off = (off_dt - now).total_seconds() / 60.0
+                try:
+                    off_dt = datetime.fromisoformat(
+                        r["marketStartTime"].replace("Z", "+00:00")
+                    )
+                except Exception:
+                    continue
 
-            # --------------------------------------------------------------
-            # Startup Seeding Rule
-            # --------------------------------------------------------------
-            if not self.active_slots:
+                minutes_to_off = (off_dt - now).total_seconds() / 60.0
+
+                # 🔒 Seed rule: must be >= 60 mins away
                 if minutes_to_off >= STARTUP_MIN_TRADING_MINUTES:
                     if int(r["runner_count"] or 0) >= MIN_RUNNERS:
                         self.active_slots.add(mid)
-                continue
 
-            # --------------------------------------------------------------
-            # Ongoing Admission Rule (4.5h trading guarantee)
-            # --------------------------------------------------------------
-            if minutes_to_off <= ONGOING_ADMISSION_MINUTES:
-                if int(r["runner_count"] or 0) >= MIN_RUNNERS:
-                    self.active_slots.add(mid)
+        # ==============================================================
+        # 2B️⃣ ONGOING ADMISSION (WINDOW NOT EMPTY)
+        # ==============================================================
+        else:
+
+            for r in sorted_rows:
+
+                if len(self.active_slots) >= WINDOW_SIZE:
+                    break
+
+                mid = str(r["marketId"])
+
+                if mid in self.active_slots:
+                    continue
+
+                try:
+                    off_dt = datetime.fromisoformat(
+                        r["marketStartTime"].replace("Z", "+00:00")
+                    )
+                except Exception:
+                    continue
+
+                minutes_to_off = (off_dt - now).total_seconds() / 60.0
+
+                # 🔒 Admission rule: include when <= 4.5 hours
+                if minutes_to_off <= ONGOING_ADMISSION_MINUTES:
+                    if int(r["runner_count"] or 0) >= MIN_RUNNERS:
+                        self.active_slots.add(mid)
 
         # ------------------------------------------------------------------
         # FINAL ORDERING
@@ -490,7 +515,6 @@ class BusRouteSnapshot:
                 for x in rows if str(x["marketId"]) == m
             )
         )
-
 
         # --------------------------------------------------
         # 🔁 TIME-RELATIVE ROUTE MEMBERSHIP (AUTHORITATIVE)
