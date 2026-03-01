@@ -498,7 +498,20 @@ class BusRouteSnapshot:
         # Route must reflect CURRENT scope only.
         # No cumulative day-long accumulation.
 
-        self.runner_pool = ordered.copy()
+        # --------------------------------------------------
+        # BUILD ORDERED RUNNER POOL (EARLIEST → LATEST)
+        # --------------------------------------------------
+
+        ordered = []
+
+        for mid in window_mids:
+            st = get_market_state(mid) or {}
+            runners = st.get("runners") or {}
+            for sid in runners.keys():
+                ordered.append((str(mid), str(sid)))
+
+        # Final assignment
+        self.runner_pool = ordered
 
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
@@ -1385,6 +1398,11 @@ def build_bus_route_tick(rotation: RunnerRotation):
     Returns exactly 30 parent-plan *requests*.
     No CTX building. No execution.
     """
+    session_token = (
+        os.getenv("SESSION_TOKEN")
+        or os.getenv("BETFAIR_SESSION_TOKEN")
+    )
+
     pool = _build_runner_pool()
     if not pool:
         return []
