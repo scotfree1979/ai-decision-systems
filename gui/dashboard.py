@@ -888,6 +888,12 @@ class DashboardView(ttk.Frame):
         except Exception as e:
             print("Execution Intelligence Error:", e)
 
+        # --- FORCE GEOMETRY REFRESH (prevents resize requirement) ---
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
         self.after(2000, self._refresh_execution_intelligence)
 
     def _render_router_report(self, con):
@@ -1184,6 +1190,7 @@ def open_dashboard_window(master=None, *, source="LIVE", app=None):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if __name__ == "__main__":
     print("[dashboard] standalone launch (direct execution mode)")
+
     root = tk.Tk()
     root.title("AutoScalp — LIVE Dashboard")
     root.geometry("1280x800")
@@ -1191,25 +1198,9 @@ if __name__ == "__main__":
     view = DashboardView(root, source="LIVE")
     view.pack(fill="both", expand=True)
 
+    # Let Tk handle geometry naturally
+    root.after(50, root.update_idletasks)
+
     print("[dashboard] Tk mainloop starting …")
-    root.update_idletasks()
-    root.update()
-    root.after(100, lambda: root.event_generate("<Configure>"))
-    # --- Force initial render (fixes blank-on-launch issue) ---
-    def redraw(event=None):
-        """Force a one-time geometry recalculation so cards render immediately."""
-        try:
-            root.update_idletasks()
-            root.update()
-            # trigger layout for every Frame and Canvas child
-            for child in root.winfo_children():
-                child.event_generate("<Configure>")
-        except Exception as e:
-            print(f"[dashboard] redraw warn: {e}")
-
-    # trigger once, 200ms after the window is visible
-    root.after(200, redraw)
-
     root.mainloop()
-# === PATCH END ===
 
