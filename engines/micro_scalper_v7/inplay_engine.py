@@ -119,6 +119,37 @@ class InPlayEngine:
         key = (mid, sid)
 
         # --------------------------------------------------
+        # Market Monitor Volatility (Authoritative)
+        # --------------------------------------------------
+
+        from engines.market_monitor.monitor import _STATE
+        from engines.math.tick_utils import price_to_ticks  # if you already have it
+
+        last_map = _STATE.get("last_px", {}).get(mid, {})
+        prev_px  = last_map.get(sid)
+
+        ticks_moved = 0.0
+        direction = "FLAT"
+
+        if prev_px is not None and px is not None:
+
+            prev_ticks = price_to_ticks(float(prev_px))
+            now_ticks  = price_to_ticks(float(px))
+
+            ticks_moved = abs(now_ticks - prev_ticks)
+
+            if now_ticks > prev_ticks:
+                direction = "LAY->BACK"
+            elif now_ticks < prev_ticks:
+                direction = "BACK->LAY"
+
+        # 🔒 update memory AFTER calculation
+        _STATE.setdefault("last_px", {}).setdefault(mid, {})[sid] = px
+
+        confidence = min(1.0, ticks_moved / 3.0)
+        to_price = px
+
+        # --------------------------------------------------
         # Race Start Authority (Non-Blocking)
         # --------------------------------------------------
 # === PATCH START ==============================================================
@@ -239,19 +270,7 @@ class InPlayEngine:
                 return self._no_signal("prominent_protected")
 
 # === PATCH END ==============================================================
-        # --------------------------------------------------
-        # Market-truth trend (authoritative)
-        # --------------------------------------------------
 
-        trend = get_runner_trend(mid, sid)
-
-        direction    = trend.get("direction")
-        ticks_moved  = trend.get("ticks_moved", 0)
-        confidence   = trend.get("confidence", 0.0)
-        to_price     = trend.get("to_price") or px
-
-        if not direction or direction == "FLAT":
-            return self._no_signal("flat_trend")
 
         # --------------------------------------------------
         # Arming logic (always on)
@@ -275,6 +294,7 @@ class InPlayEngine:
             market_id=mid,
             sid=sid,
             px=px,
+            prev_px=prev_px,
             direction=direction,
             ticks_moved=ticks_moved,
             race_started=race_started,
@@ -452,6 +472,7 @@ class InPlayEngine:
         race_started: bool,
         race_quartile: Optional[str],
         race_confidence: float,
+        prev_px: Optional[float],
     ):
 
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
@@ -474,6 +495,8 @@ class InPlayEngine:
         print(f"selectionId             : {sid}")
         print(f"price                   : {px}")
         print(f"direction               : {direction}")
+        print(f"prev_price              : {prev_px}")
+        print(f"price_delta             : {None if prev_px is None else round(px - prev_px,4)}")
         print(f"ticks_moved             : {ticks_moved}")
         print(f"armed_lay               : {self.armed_lay.get((market_id, sid), False)}")
         print(f"armed_back              : {self.armed_back.get((market_id, sid), False)}")
@@ -527,7 +550,7 @@ def _ensure_inplay_runtime_schema():
 # ==================================================
 # 🟥 INPLAY RUNTIME SNAPSHOT (ENGINE-OWNED)
 # ==================================================
-def write_runtime_snapshot(self):
+def _write_inplay_runtime_snapshot(ctx, self):
     try:
         import sqlite3
         from datetime import datetime, timezone
