@@ -45,20 +45,20 @@ ENGINES = [
 
 # Baseline allocations (start-of-day percentages)
 BASELINE_PCT = {
-    "MSC_RISK":        0.28,  # £140  ← primary scalper
-    "LEGACY":          0.25,  # £120  ← anchors only
-    "MSC_EXPLORATORY": 0.12,  # £70
-    "MSC_INPLAY":      0.22,  # £50
-    "OVERWATCHER":     0.04,  # £60
-    "SAFETY_NET":      0.02,  # £60
+    "MSC_RISK":        0.40,  # Primary engine (dominant allocation)
+    "LEGACY":          0.15,  # Anchors only
+    "MSC_EXPLORATORY": 0.08,  # Reduced exploratory bleed
+    "MSC_INPLAY":      0.25,  # In-play ladder capital
+    "OVERWATCHER":     0.06,  # Protective hedge
+    "SAFETY_NET":      0.06,  # System safety buffer
 }
 
 
 # Hard floors (minimum operational runway)
 FLOOR_PCT = {
-    "MSC_RISK":        0.20,  # ≥ £100 at £500 bank
-    "LEGACY":          0.20,
-    "MSC_EXPLORATORY": 0.10,
+    "MSC_RISK":        0.25,
+    "LEGACY":          0.10,
+    "MSC_EXPLORATORY": 0.05,
     "MSC_INPLAY":      0.20,
     "OVERWATCHER":     0.05,
     "SAFETY_NET":      0.05,
