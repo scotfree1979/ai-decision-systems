@@ -372,25 +372,44 @@ class BusRouteSnapshot:
         # 📍 TARGET: engines/bus_route.py
         # 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — slot logic
         # 🛠 ACTION: REPLACE ENTIRE WINDOW CONSTRUCTION BLOCK
-        # 📆 PATCHED: 2026-04-27 — Stateful 2.5h Admission + Grace Exit Model
+        # 📆 PATCHED: 2026-04-28 — Dual Startup + Ongoing Admission Model
         #
         # PURPOSE:
-        # - Market enters only if > 2.5h remaining
-        # - Market exits only after off + grace
-        # - Maximum 5 concurrent markets
-        # - Deterministic ordering (earliest first)
-        # - Preserve ordered runner distribution behaviour
+        # - Startup rule protects midday restarts
+        # - Ongoing rule guarantees 4.5h trading per new market
+        # - Markets exit only after off + grace
+        # - Max WINDOW_SIZE maintained deterministically
         # ==============================================================================
 
-        MIN_TRADING_HOURS = 2.5  # 🔧 TOGGLE HERE
-        MIN_TRADING_MINUTES = MIN_TRADING_HOURS * 60
+        STARTUP_MIN_TRADING_MINUTES = 60        # 🔧 protects midday restart
+        ONGOING_ADMISSION_MINUTES   = 270       # 🔧 4.5 hours guarantee
+        POST_OFF_MINUTES            = 120       # unchanged grace
 
-
-        # ------------------------------------------------------------------
-        # Ensure state container exists (persistent across rebuilds)
-        # ------------------------------------------------------------------
         if not hasattr(self, "active_slots"):
             self.active_slots = set()
+
+        # ------------------------------------------------------------------
+        # 🔒 PARENT PINNING — invariant enforcement
+        # ------------------------------------------------------------------
+        from engines.config_paths import open_auto_db
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+        try:
+            parent_rows = con.execute("""
+                SELECT DISTINCT marketId
+                FROM orders
+                WHERE role='PARENT'
+                  AND engine IN ('LEGACY','MSC_EXPLORATORY')
+                  AND date(opened_at)=date('now','utc')
+            """).fetchall()
+        finally:
+            con.close()
+
+        pinned_markets = {str(r["marketId"]) for r in parent_rows}
+
+        # Ensure parent markets are always in active_slots
+        for mid in pinned_markets:
+            self.active_slots.add(mid)
 
         # ------------------------------------------------------------------
         # 1️⃣ REMOVE — only after off + grace
@@ -414,43 +433,53 @@ class BusRouteSnapshot:
                 self.active_slots.discard(mid)
 
         # ------------------------------------------------------------------
-        # 2️⃣ ADMIT — only if > 2.5h remaining
+        # 2️⃣ ADMIT
         # ------------------------------------------------------------------
-        if len(self.active_slots) < WINDOW_SIZE:
 
-            # Sort rows by earliest off first (deterministic admission order)
-            sorted_rows = sorted(
-                rows,
-                key=lambda r: datetime.fromisoformat(
+        sorted_rows = sorted(
+            rows,
+            key=lambda r: datetime.fromisoformat(
+                r["marketStartTime"].replace("Z", "+00:00")
+            )
+        )
+
+        for r in sorted_rows:
+
+            if len(self.active_slots) >= WINDOW_SIZE:
+                break
+
+            mid = str(r["marketId"])
+
+            if mid in self.active_slots:
+                continue
+
+            try:
+                off_dt = datetime.fromisoformat(
                     r["marketStartTime"].replace("Z", "+00:00")
                 )
-            )
+            except Exception:
+                continue
 
-            for r in sorted_rows:
+            minutes_to_off = (off_dt - now).total_seconds() / 60.0
 
-                if len(self.active_slots) >= WINDOW_SIZE:
-                    break
-
-                mid = str(r["marketId"])
-
-                if mid in self.active_slots:
-                    continue
-
-                try:
-                    off_dt = datetime.fromisoformat(
-                        r["marketStartTime"].replace("Z", "+00:00")
-                    )
-                except Exception:
-                    continue
-
-                minutes_to_off = (off_dt - now).total_seconds() / 60.0
-
-                if minutes_to_off > MIN_TRADING_MINUTES:
+            # --------------------------------------------------------------
+            # Startup Seeding Rule
+            # --------------------------------------------------------------
+            if not self.active_slots:
+                if minutes_to_off >= STARTUP_MIN_TRADING_MINUTES:
                     if int(r["runner_count"] or 0) >= MIN_RUNNERS:
                         self.active_slots.add(mid)
+                continue
+
+            # --------------------------------------------------------------
+            # Ongoing Admission Rule (4.5h trading guarantee)
+            # --------------------------------------------------------------
+            if minutes_to_off <= ONGOING_ADMISSION_MINUTES:
+                if int(r["runner_count"] or 0) >= MIN_RUNNERS:
+                    self.active_slots.add(mid)
 
         # ------------------------------------------------------------------
-        # 3️⃣ FINAL ORDERING (earliest first — critical for bus duplication)
+        # FINAL ORDERING
         # ------------------------------------------------------------------
         window_mids = sorted(
             list(self.active_slots),
@@ -461,40 +490,6 @@ class BusRouteSnapshot:
                 for x in rows if str(x["marketId"]) == m
             )
         )
-
-        # ------------------------------------------------------------------
-        # BUILD RUNNER PAIRS FROM window_mids
-        # ------------------------------------------------------------------
-        raw_pairs = []
-
-        if window_mids:
-
-            con = connect_db(ro=True)
-            con.row_factory = sqlite3.Row
-
-            try:
-                rows2 = con.execute(f"""
-                    SELECT marketId, selectionId
-                    FROM bets
-                    WHERE marketId IN ({",".join(["?"]*len(window_mids))})
-                """, window_mids).fetchall()
-            finally:
-                con.close()
-
-            for r in rows2:
-                if r["marketId"] and r["selectionId"]:
-                    raw_pairs.append(
-                        (str(r["marketId"]), str(r["selectionId"]))
-                    )
-
-        if not raw_pairs:
-            raw_pairs = list(get_root_ctx_runner_pairs())
-
-        ordered = _order_runner_pool_by_market_time(raw_pairs) 
-# ======================================================================================================
-# END PATCH
-# ======================================================================================================
-
 
 
         # --------------------------------------------------
