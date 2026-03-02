@@ -12,7 +12,7 @@ from __future__ import annotations
 import os, sys, sqlite3, threading, time, tkinter as tk
 from tkinter import ttk
 from datetime import datetime, timezone
-
+from engines.live_view.live_view import get_live_view_state, start_live_view_loop
 # --- ensure repo root is importable ---
 _here = os.path.dirname(os.path.abspath(__file__))          # .../gui
 _root = os.path.abspath(os.path.join(_here, ".."))          # .../analytics_beta_dev
@@ -712,45 +712,122 @@ class DashboardView(ttk.Frame):
         container.columnconfigure(1, weight=1)  # RIGHT
 
         # ============================================================
-        # LEFT COLUMN (BUS + INPLAY stacked)
+        # LEFT COLUMN — STACKED EXECUTION CARDS (BUS + INPLAY)
         # ============================================================
+
         left = ttk.Frame(container)
-        left.grid(row=0, column=0, sticky="ns", padx=6)
+        left.grid(row=0, column=0, sticky="nsew", padx=6)
         left.columnconfigure(0, weight=1)
 
-        # BUS
-        self.bus_frame = ttk.LabelFrame(left, text="BUS")
-        self.bus_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        self.exec_stack = ttk.Frame(left)
+        self.exec_stack.pack(fill="both", expand=True)
+
+        # --------------------------------------------------
+        # 🚌 BUS HEADER CARD
+        # --------------------------------------------------
+
+        self.bus_header_card = ttk.Frame(self.exec_stack, padding=10, relief="ridge")
+        self.bus_header_card.pack(fill="x", pady=6)
+
+        ttk.Label(
+            self.bus_header_card,
+            text="🚌 V7 BUS LIVE STATE",
+            font=("TkDefaultFont", 11, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 🚌 ROUTE INFO CARD
+        # --------------------------------------------------
+
+        self.bus_route_card = ttk.Frame(self.exec_stack, padding=8, relief="ridge")
+        self.bus_route_card.pack(fill="x", pady=6)
 
         self.bus_vars = {
-            "route": tk.StringVar(value="Route ID: 0"),
-            "stop":  tk.StringVar(value="Bus Stop: 0"),
-            "tick":  tk.StringVar(value="Tick ID: 0"),
-            "hz":    tk.StringVar(value="Hz: 0"),
-            "fill":  tk.StringVar(value="Fill Rate: 0%"),
+            "route": tk.StringVar(value="Route ID: -"),
+            "stop":  tk.StringVar(value="Bus Stop: -"),
+            "tick":  tk.StringVar(value="Tick ID: -"),
+            "hz":    tk.StringVar(value="Hz: -"),
+            "fill":  tk.StringVar(value="Fill Rate: -"),
         }
 
-        for i, v in enumerate(self.bus_vars.values()):
-            ttk.Label(self.bus_frame, textvariable=v).grid(
-                row=i, column=0, sticky="w", padx=6, pady=2
-            )
+        for v in self.bus_vars.values():
+            ttk.Label(self.bus_route_card, textvariable=v).pack(anchor="w")
 
-        # INPLAY
-        self.inplay_frame = ttk.LabelFrame(left, text="INPLAY")
-        self.inplay_frame.grid(row=1, column=0, sticky="nsew")
+        # --------------------------------------------------
+        # 🚌 NEXT STOP RUNNERS HEADER
+        # --------------------------------------------------
 
-        self.inplay_vars = {
+        self.bus_runners_header = ttk.Frame(self.exec_stack, padding=8, relief="ridge")
+        self.bus_runners_header.pack(fill="x", pady=6)
+
+        ttk.Label(
+            self.bus_runners_header,
+            text="🎯 NEXT BUS STOP — RUNNERS",
+            font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 🚌 NEXT STOP RUNNER GRID (2 columns)
+        # --------------------------------------------------
+
+        self.bus_runner_grid = ttk.Frame(self.exec_stack)
+        self.bus_runner_grid.pack(fill="both", expand=True, pady=6)
+
+        self.bus_runner_grid.columnconfigure(0, weight=1)
+        self.bus_runner_grid.columnconfigure(1, weight=1)
+
+        # --------------------------------------------------
+        # 🔥 INPLAY HEADER CARD
+        # --------------------------------------------------
+
+        self.inplay_header_card = ttk.Frame(self.exec_stack, padding=10, relief="ridge")
+        self.inplay_header_card.pack(fill="x", pady=6)
+
+        ttk.Label(
+            self.inplay_header_card,
+            text="🔥 V7 INPLAY LIVE STATE",
+            font=("TkDefaultFont", 11, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 🟢 INPLAY STATE CARD
+        # --------------------------------------------------
+
+        self.inplay_state_card = ttk.Frame(self.exec_stack, padding=8, relief="ridge")
+        self.inplay_state_card.pack(fill="x", pady=6)
+
+        self.inplay_state_vars = {
             "market": tk.StringVar(value="Market: -"),
-            "runner": tk.StringVar(value="Runner: -"),
-            "price": tk.StringVar(value="Price: -"),
-            "armed": tk.StringVar(value="Armed: -"),
-            "triggered": tk.StringVar(value="Triggered: -"),
+            "inplay": tk.StringVar(value="In-Play: NO"),
+            "confidence": tk.StringVar(value="Confidence: 0.0"),
+            "quartile": tk.StringVar(value="Quartile: -"),
         }
 
-        for i, v in enumerate(self.inplay_vars.values()):
-            ttk.Label(self.inplay_frame, textvariable=v).grid(
-                row=i, column=0, sticky="w", padx=6, pady=2
-            )
+        for v in self.inplay_state_vars.values():
+            ttk.Label(self.inplay_state_card, textvariable=v).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 🐎 RUNNERS HEADER
+        # --------------------------------------------------
+
+        self.inplay_runners_header = ttk.Frame(self.exec_stack, padding=8, relief="ridge")
+        self.inplay_runners_header.pack(fill="x", pady=6)
+
+        ttk.Label(
+            self.inplay_runners_header,
+            text="🐎 TOP RUNNERS — NEAREST TO SWEET SPOT",
+            font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 🐎 RUNNER GRID (2 columns)
+        # --------------------------------------------------
+
+        self.inplay_runner_grid = ttk.Frame(self.exec_stack)
+        self.inplay_runner_grid.pack(fill="both", expand=True, pady=6)
+
+        self.inplay_runner_grid.columnconfigure(0, weight=1)
+        self.inplay_runner_grid.columnconfigure(1, weight=1)
 
         # ============================================================
         # RIGHT COLUMN (BANKSTATE + ROUTER side-by-side)
@@ -758,39 +835,79 @@ class DashboardView(ttk.Frame):
         right = ttk.Frame(container)
         right.grid(row=0, column=1, sticky="nsew", padx=6)
 
-        # BANKSTATE and ROUTER side by side
-        right.columnconfigure(0, weight=1)
-        right.columnconfigure(1, weight=1)
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: self.bank_text = tk.Text(
+# 🛠 ACTION: Replace BANKSTATE text widget with responsive 3x2 card grid
+# 📆 PATCHED: 2026-03-02 — BankState Card Grid Layout
+# PURPOSE:
+# - Remove ASCII block
+# - Introduce responsive 3x2 card layout
+# - Mirror existing dashboard card behaviour
+# ==============================================================================
 
         # BANKSTATE (left half of right column)
         self.bank_frame = ttk.LabelFrame(right, text="BANKSTATE")
         self.bank_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
-        self.bank_text = tk.Text(
-            self.bank_frame,
-            height=28,
-            font=("Courier New", 11, "bold"),
-            wrap="none",
-            bg="#ffffff",
-            relief="flat",
-            borderwidth=0
-        )
-        self.bank_text.pack(fill="both", expand=True, padx=8, pady=8)
+        # Replace text block with card container
+        self.bank_cards = ttk.Frame(self.bank_frame)
+        self.bank_cards.pack(fill="both", expand=True, padx=8, pady=8)
+
+# === PATCH END ==============================================================
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: self.router_text = tk.Text(
+# 🛠 ACTION: Replace router ASCII text widget with stacked card container
+# 📆 PATCHED: 2026-03-02 — Router V1 Stacked Layout Container
+# PURPOSE:
+# - Remove monolithic text block
+# - Introduce vertical stacked card structure
+# - Preserve data density + emojis
+# ==============================================================================
 
         # ROUTER (right half)
         self.router_frame = ttk.LabelFrame(right, text="ROUTER")
         self.router_frame.grid(row=0, column=1, sticky="nsew")
 
-        self.router_text = tk.Text(
-            self.router_frame,
-            height=28,
-            font=("Courier New", 11, "bold"),
-            wrap="none",
-            bg="#ffffff",
-            relief="flat",
-            borderwidth=0
+        # Stacked container instead of Text widget
+        self.router_stack = ttk.Frame(self.router_frame)
+        self.router_stack.pack(fill="both", expand=True, padx=8, pady=8)
+
+# === PATCH END ==============================================================
+        # ============================================================
+        # LIVE VIEW (UNDER BANKSTATE + ROUTER)
+        # ============================================================
+
+        self.live_view_frame = ttk.LabelFrame(right, text="LIVE VIEW")
+        self.live_view_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=6)
+
+        right.rowconfigure(1, weight=1)
+      
+
+        self.live_view_container = ttk.Frame(self.live_view_frame)
+        self.live_view_container.pack(fill="both", expand=True)
+
+        # Overview (full height left)
+        self.live_overview_card = ttk.Frame(
+            self.live_view_container,
+            padding=12,
+            relief="ridge"
         )
-        self.router_text.pack(fill="both", expand=True, padx=8, pady=8)
+        self.live_overview_card.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=6, pady=6)
+
+        # Right grid (2 rows × 4)
+        self.live_grid = ttk.Frame(self.live_view_container)
+        self.live_grid.grid(row=0, column=1, rowspan=2, sticky="nsew")
+
+        for c in range(4):
+            self.live_grid.columnconfigure(c, weight=1)
+        for r in range(2):
+            self.live_grid.rowconfigure(r, weight=1)
+
+        self.live_view_container.columnconfigure(0, weight=1)
+        self.live_view_container.columnconfigure(1, weight=3)
 
         self._refresh_execution_intelligence()
 
@@ -841,8 +958,10 @@ class DashboardView(ttk.Frame):
             # BUS SNAPSHOT
             # ─────────────────────────────────────────
             row = con.execute("""
-                SELECT * FROM bus_runtime_snapshot
-                ORDER BY ts DESC LIMIT 1
+                SELECT *
+                FROM bus_runtime_snapshot
+                ORDER BY ts DESC
+                LIMIT 1
             """).fetchone()
 
             if row:
@@ -854,15 +973,51 @@ class DashboardView(ttk.Frame):
                     f"Fill Rate: {round((row['fill_rate'] or 0)*100,1)}%"
                 )
 
+            # Clear previous runner cards
+            for w in self.bus_runner_grid.winfo_children():
+                w.destroy()
+
+            # Example: top 2 runners queued at next stop
+            runners = con.execute("""
+                SELECT marketId, selectionId, side
+                FROM orders
+                WHERE entry_status='QUEUED'
+                ORDER BY opened_at ASC
+                LIMIT 4
+            """).fetchall()
+
+            for i, r in enumerate(runners):
+
+                name_row = con.execute("""
+                    SELECT horse_name, event_name
+                    FROM betsdb.bets
+                    WHERE marketId=? AND selectionId=?
+                    LIMIT 1
+                """, (r["marketId"], r["selectionId"])).fetchone()
+
+                horse = name_row["horse_name"] if name_row else r["selectionId"]
+                event = name_row["event_name"] if name_row else r["marketId"]
+
+                card = ttk.Frame(self.bus_runner_grid, padding=8, relief="ridge")
+                card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+
+                ttk.Label(card, text=horse,
+                          font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+                ttk.Label(card, text=f"Market: {event}").pack(anchor="w")
+                ttk.Label(card, text=f"Side: {r['side']}").pack(anchor="w")
             # ─────────────────────────────────────────
             # INPLAY SNAPSHOT
             # ─────────────────────────────────────────
             row = con.execute("""
-                SELECT * FROM inplay_runtime_snapshot
-                ORDER BY ts DESC LIMIT 1
+                SELECT marketId, selectionId
+                FROM betsdb.bets
+                WHERE datetime(replace(marketStartTime,'Z','')) > datetime('now','utc')
+                ORDER BY datetime(replace(marketStartTime,'Z','')) ASC
+                LIMIT 1
             """).fetchone()
 
             if row:
+
                 name_row = con.execute("""
                     SELECT horse_name, event_name
                     FROM betsdb.bets
@@ -873,15 +1028,127 @@ class DashboardView(ttk.Frame):
                 horse = name_row["horse_name"] if name_row else row["selectionId"]
                 event = name_row["event_name"] if name_row else row["marketId"]
 
-                self.inplay_vars["market"].set(f"Market: {event}")
-                self.inplay_vars["runner"].set(f"Runner: {horse}")
-                self.inplay_vars["price"].set(f"Price: {row['px']}")
-                self.inplay_vars["armed"].set(
-                    f"Armed: L={row['armed_lay']} B={row['armed_back']}"
+                # Update state card
+                self.inplay_state_vars["market"].set(f"Market: {event}")
+                self.inplay_state_vars["inplay"].set(
+                    f"In-Play: {'YES' if row['is_inplay'] else 'NO'}"
                 )
-                self.inplay_vars["triggered"].set(
-                    f"Triggered: {row['triggered']}"
+                self.inplay_state_vars["confidence"].set(
+                    f"Confidence: {row['confidence']:.2f}"
                 )
+                self.inplay_state_vars["quartile"].set(
+                    f"Quartile: {row['race_quartile'] or '-'}"
+                )
+
+                # --------------------------------------------------
+                # Fetch top 4 runners by proximity to SWEETSPOT
+                # --------------------------------------------------
+
+                SWEETSPOT = 7.0
+
+                runners = con.execute("""
+                    SELECT *
+                    FROM inplay_runtime_snapshot
+                    WHERE marketId=?
+                    ORDER BY ABS(px - ?) ASC
+                    LIMIT 4
+                """, (row["marketId"], SWEETSPOT)).fetchall()
+
+                # Clear previous grid cards
+                for w in self.inplay_runner_grid.winfo_children():
+                    w.destroy()
+
+                for i, r in enumerate(runners):
+
+                    name_row = con.execute("""
+                        SELECT horse_name
+                        FROM betsdb.bets
+                        WHERE marketId=? AND selectionId=?
+                        LIMIT 1
+                    """, (r["marketId"], r["selectionId"])).fetchone()
+
+                    horse_name = name_row["horse_name"] if name_row else r["selectionId"]
+
+                    delta = abs(float(r["px"]) - SWEETSPOT)
+
+                    card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
+                    card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+
+                    ttk.Label(
+                        card,
+                        text=horse_name,
+                        font=("TkDefaultFont", 9, "bold")
+                    ).pack(anchor="w")
+
+                    ttk.Label(card, text=f"Px: {float(r['px']):.2f}").pack(anchor="w")
+                    ttk.Label(card, text=f"Δ from 7.0: {delta:.2f}").pack(anchor="w")
+                    ttk.Label(card, text=f"Direction: {r['direction']}").pack(anchor="w")
+                    ttk.Label(card, text=f"Ticks: {r['ticks_moved']:.1f}").pack(anchor="w")
+
+            # ============================================================
+            # LIVE VIEW (UNDER BANKSTATE + ROUTER)
+            # ============================================================
+
+            self.live_view_frame = ttk.LabelFrame(right, text="LIVE VIEW")
+            self.live_view_frame.grid(
+                row=1,
+                column=0,
+                columnspan=2,
+                sticky="nsew",
+                padx=6,
+                pady=6
+            )
+
+            right.rowconfigure(1, weight=1)
+
+            self.live_view_container = ttk.Frame(self.live_view_frame)
+            self.live_view_container.grid(row=0, column=0, sticky="nsew")
+
+            self.live_view_frame.rowconfigure(0, weight=1)
+            self.live_view_frame.columnconfigure(0, weight=1)
+
+            # ─────────────────────────────────────────
+            # LEFT: OVERVIEW (FULL HEIGHT)
+            # ─────────────────────────────────────────
+
+            self.live_overview_card = ttk.Frame(
+                self.live_view_container,
+                padding=12,
+                relief="ridge"
+            )
+            self.live_overview_card.grid(
+                row=0,
+                column=0,
+                rowspan=2,
+                sticky="nsew",
+                padx=6,
+                pady=6
+            )
+
+            # ─────────────────────────────────────────
+            # RIGHT: 2 × 4 RUNNER GRID
+            # ─────────────────────────────────────────
+
+            self.live_grid = ttk.Frame(self.live_view_container)
+            self.live_grid.grid(
+                row=0,
+                column=1,
+                rowspan=2,
+                sticky="nsew"
+            )
+
+            for c in range(4):
+                self.live_grid.columnconfigure(c, weight=1)
+
+            for r in range(2):
+                self.live_grid.rowconfigure(r, weight=1)
+
+            self.live_view_container.columnconfigure(0, weight=1)
+            self.live_view_container.columnconfigure(1, weight=3)
+            self.live_view_container.rowconfigure(0, weight=1)
+            self.live_view_container.rowconfigure(1, weight=1)
+
+
 
             con.close()
 
@@ -896,6 +1163,18 @@ class DashboardView(ttk.Frame):
 
         self.after(2000, self._refresh_execution_intelligence)
 
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: def _render_router_report(self, con):
+# 🛠 ACTION: Replace ASCII router render with stacked card layout
+# 📆 PATCHED: 2026-03-02 — Router V1 Stacked Card Renderer
+# PURPOSE:
+# - Preserve table format
+# - Preserve emojis
+# - Preserve trade summary
+# - Match BankState card style
+# ==============================================================================
+
     def _render_router_report(self, con):
 
         rows = con.execute("""
@@ -905,23 +1184,16 @@ class DashboardView(ttk.Frame):
             ORDER BY ts DESC
         """).fetchall()
 
+        # Clear previous stack
+        for w in self.router_stack.winfo_children():
+            w.destroy()
+
         if not rows:
-            self.router_text.delete("1.0", tk.END)
-            self.router_text.insert("1.0",
-                "🟢 V7 ROUTER LIVE STATE\n"
-                "============================================================\n\n"
-                "📦 PARENTS — ENTRY / EXIT STATUS (BY ENGINE)\n"
-                "------------------------------------------------------------\n"
-                "No trades yet today.\n\n"
-                "👶 CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)\n"
-                "------------------------------------------------------------\n"
-                "No trades yet today.\n\n"
-                "⚡ TRADE SUMMARY\n"
-                "------------------------------------------------------------\n"
-                "Total Open      : 0\n"
-                "Total Matched   : 0\n"
-                "Total Closed    : 0\n"
-            )
+            ttk.Label(
+                self.router_stack,
+                text="No trades yet today.",
+                font=("TkDefaultFont", 10, "italic")
+            ).pack(anchor="w")
             return
 
         from collections import defaultdict
@@ -948,7 +1220,7 @@ class DashboardView(ttk.Frame):
                 children[engine] = bucket_map
 
         # --------------------------------------------------
-        # Totals
+        # Compute totals
         # --------------------------------------------------
 
         total_parents_open = sum(
@@ -963,146 +1235,171 @@ class DashboardView(ttk.Frame):
 
         total_open = total_parents_open + total_children_open
 
-        total_matched = sum(
-            p.get("MATCHED",0) for p in parents.values()
-        ) + sum(
-            c.get("MATCHED",0) for c in children.values()
-        )
+        total_matched = sum(p.get("MATCHED",0) for p in parents.values()) + \
+                        sum(c.get("MATCHED",0) for c in children.values())
 
-        total_closed = sum(
-            p.get("CLOSED",0) for p in parents.values()
-        ) + sum(
-            c.get("CLOSED",0) for c in children.values()
-        )
+        total_closed = sum(p.get("CLOSED",0) for p in parents.values()) + \
+                       sum(c.get("CLOSED",0) for c in children.values())
 
         # --------------------------------------------------
-        # Dynamic header 🔥⚡🟢
+        # 🟢 ROUTER LIVE STATE CARD
         # --------------------------------------------------
 
-        if total_open > 200:
-            header = "🔥 V7 ROUTER LIVE STATE"
-        elif total_open > 100:
-            header = "⚡ V7 ROUTER LIVE STATE"
-        else:
-            header = "🟢 V7 ROUTER LIVE STATE"
-
-        text = []
-        text.append(header)
-        text.append("=" * 60)
-        text.append("")
-
-        # --------------------------------------------------
-        # 📦 PARENTS
-        # --------------------------------------------------
-
-        text.append("📦 PARENTS — ENTRY / EXIT STATUS (BY ENGINE)")
-        text.append("-" * 60)
-        text.append("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
-        text.append("-" * 60)
-
-        for engine in sorted(parents.keys()):
-            p = parents[engine]
-            text.append(
-                f"{engine:<16} "
-                f"{p.get('QUEUED',0):>6} "
-                f"{p.get('PLACING',0):>8} "
-                f"{p.get('PLACED',0):>8} "
-                f"{p.get('MATCHED',0):>8} "
-                f"{p.get('CANCELLED',0):>10} "
-                f"{p.get('CLOSED',0):>8}"
-            )
-
-        # --------------------------------------------------
-        # 👶 CHILDREN
-        # --------------------------------------------------
-
-        text.append("")
-        text.append("👶 CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)")
-        text.append("-" * 60)
-        text.append("ENGINE            QUEUED  PLACING  PLACED  MATCHED  CANCELLED  CLOSED")
-        text.append("-" * 60)
-
-        for engine in sorted(children.keys()):
-            c = children[engine]
-            text.append(
-                f"{engine:<16} "
-                f"{c.get('QUEUED',0):>6} "
-                f"{c.get('PLACING',0):>8} "
-                f"{c.get('PLACED',0):>8} "
-                f"{c.get('MATCHED',0):>8} "
-                f"{c.get('CANCELLED',0):>10} "
-                f"{c.get('CLOSED',0):>8}"
-            )
-
-        # --------------------------------------------------
-        # ⚡ TRADE SUMMARY
-        # --------------------------------------------------
-
-        text.append("")
-        text.append("⚡ TRADE SUMMARY")
-        text.append("-" * 40)
-
+        state_icon = "🟢"
         if total_open > 150:
-            open_display = f"🔥 {total_open}"
+            state_icon = "🔥"
         elif total_open > 75:
-            open_display = f"⚡ {total_open}"
-        else:
-            open_display = f"{total_open}"
+            state_icon = "⚡"
 
-        text.append(f"Total Open      : {open_display}")
-        text.append(f"Total Matched   : ✅ {total_matched}")
-        text.append(f"Total Closed    : {total_closed}")
+        state_card = ttk.Frame(self.router_stack, padding=10, relief="ridge")
+        state_card.pack(fill="x", pady=6)
 
-        self.router_text.delete("1.0", tk.END)
-        self.router_text.insert("1.0", "\n".join(text))
+        ttk.Label(
+            state_card,
+            text=f"{state_icon} V7 ROUTER LIVE STATE",
+            font=("TkDefaultFont", 11, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 📦 PARENTS HEADER CARD
+        # --------------------------------------------------
+
+        parents_header = ttk.Frame(self.router_stack, padding=8, relief="ridge")
+        parents_header.pack(fill="x", pady=6)
+
+        ttk.Label(
+            parents_header,
+            text="📦 PARENTS — ENTRY / EXIT STATUS (BY ENGINE)",
+            font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 📦 PARENTS DATA CARD
+        # --------------------------------------------------
+
+        parents_data = ttk.Frame(self.router_stack, padding=8, relief="ridge")
+        parents_data.pack(fill="x", pady=6)
+
+        table = ttk.Frame(parents_data)
+        table.pack(fill="x")
+
+        columns = ["ENGINE", "QUEUED", "PLACING", "PLACED", "MATCHED", "CANCELLED", "CLOSED"]
+
+        # Configure columns to stretch evenly
+        for col in range(len(columns)):
+            table.columnconfigure(col, weight=1)
+
+        # Header row
+        for col, name in enumerate(columns):
+            ttk.Label(
+                table,
+                text=name,
+                font=("TkDefaultFont", 9, "bold")
+            ).grid(row=0, column=col, sticky="nsew", padx=4, pady=2)
+
+        # Data rows
+        for row_idx, engine in enumerate(sorted(parents.keys()), start=1):
+            p = parents[engine]
+
+            values = [
+                engine,
+                p.get("QUEUED", 0),
+                p.get("PLACING", 0),
+                p.get("PLACED", 0),
+                p.get("MATCHED", 0),
+                p.get("CANCELLED", 0),
+                p.get("CLOSED", 0),
+            ]
+
+            for col, value in enumerate(values):
+                ttk.Label(
+                    table,
+                    text=str(value)
+                ).grid(row=row_idx, column=col, sticky="nsew", padx=4, pady=1)
+
+        # --------------------------------------------------
+        # 👶 CHILDREN HEADER CARD
+        # --------------------------------------------------
+
+        children_header = ttk.Frame(self.router_stack, padding=8, relief="ridge")
+        children_header.pack(fill="x", pady=6)
+
+        ttk.Label(
+            children_header,
+            text="👶 CHILDREN — ENTRY / EXIT STATUS (BY ENGINE)",
+            font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+
+        # --------------------------------------------------
+        # 👶 CHILDREN DATA CARD
+        # --------------------------------------------------
+
+        children_data = ttk.Frame(self.router_stack, padding=8, relief="ridge")
+        children_data.pack(fill="x", pady=6)
+
+        table = ttk.Frame(children_data)
+        table.pack(fill="x")
+
+        for col in range(len(columns)):
+            table.columnconfigure(col, weight=1)
+
+        # Header row
+        for col, name in enumerate(columns):
+            ttk.Label(
+                table,
+                text=name,
+                font=("TkDefaultFont", 9, "bold")
+            ).grid(row=0, column=col, sticky="nsew", padx=4, pady=2)
+
+        # Data rows
+        for row_idx, engine in enumerate(sorted(children.keys()), start=1):
+            c = children[engine]
+
+            values = [
+                engine,
+                c.get("QUEUED", 0),
+                c.get("PLACING", 0),
+                c.get("PLACED", 0),
+                c.get("MATCHED", 0),
+                c.get("CANCELLED", 0),
+                c.get("CLOSED", 0),
+            ]
+
+            for col, value in enumerate(values):
+                ttk.Label(
+                    table,
+                    text=str(value)
+                ).grid(row=row_idx, column=col, sticky="nsew", padx=4, pady=1)    
+        # --------------------------------------------------
+        # ⚡ TRADE SUMMARY CARD
+        # --------------------------------------------------
+
+        summary_card = ttk.Frame(self.router_stack, padding=10, relief="ridge")
+        summary_card.pack(fill="x", pady=6)
+
+        ttk.Label(
+            summary_card,
+            text="⚡ TRADE SUMMARY",
+            font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+
+        ttk.Label(summary_card, text=f"Total Open     : ⚡ {total_open}").pack(anchor="w")
+        ttk.Label(summary_card, text=f"Total Matched  : ✅ {total_matched}").pack(anchor="w")
+        ttk.Label(summary_card, text=f"Total Closed   : {total_closed}").pack(anchor="w")
+
+# === PATCH END ==============================================================
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: def _render_bankstate_report(self, con):
+# 🛠 ACTION: Replace ASCII renderer with 3x2 card grid renderer
+# 📆 PATCHED: 2026-03-02 — BankState Card Rendering
+# PURPOSE:
+# - Render engine capital as cards
+# - Show Pot / Matched (FLOOR) / Reserved / Headroom
+# - Remove negative AVAIL alarm semantics
+# ==============================================================================
 
     def _render_bankstate_report(self, con):
-
-        row = con.execute("""
-            SELECT *
-            FROM bankstate_runtime_snapshot
-            WHERE date(ts) = date('now','utc')
-            ORDER BY ts DESC
-            LIMIT 1
-        """).fetchone()
-
-        if not row:
-            self.bank_text.delete("1.0", tk.END)
-            self.bank_text.insert("1.0",
-                "GLOBAL SUMMARY\n"
-                "------------------------------------------------------------\n"
-                "Open Exposure        : 0.00\n"
-                "Total Pot            : 0.00\n"
-                "Total Used           : 0.00\n"
-                "Total Available      : 0.00\n"
-            )
-            return
-
-        ts = row["ts"]
-
-        text = []
-        text.append("GLOBAL SUMMARY")
-        text.append("-" * 60)
-        text.append(f"Open Exposure        : {row['total_exposure']:.2f}")
-        text.append(f"Total Pot            : {row['total_pot']:.2f}")
-        text.append(f"Total Used           : {row['total_used']:.2f}")
-        available = float(row["total_available"] or 0)
-
-        if available < 0:
-            avail_display = f"🔴 {available:.2f}"
-        else:
-            avail_display = f"🟢 {available:.2f}"
-
-        text.append(f"Total Available      : {avail_display}")
-        text.append("-" * 60)
-        text.append("")
-
-        text.append("🏦 V7 BANKSTATE — LIVE CAPITAL ENGINE")
-        text.append("-" * 70)
-        text.append("{:<18}{:>10}{:>10}{:>10}{:>12}{:>12}".format(
-            "ENGINE","POT","USED","AVAIL","FLOOR","UNMATCHED"
-        ))
-        text.append("-" * 70)
 
         rows = con.execute("""
             SELECT *
@@ -1112,37 +1409,143 @@ class DashboardView(ttk.Frame):
                   SELECT MAX(ts)
                   FROM bankstate_engine_snapshot
                   WHERE date(ts) = date('now','utc')
-              ) 
+              )
         """).fetchall()
 
-        for r in rows:
-            used = float(r["used"] or 0)
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: for w in self.bank_cards.winfo_children():
+# 🛠 ACTION: Insert structured GLOBAL CAPITAL OVERVIEW header above cards
+# 📆 PATCHED: 2026-03-02 — Add BankState Overview Header
+# PURPOSE:
+# - Restore global summary
+# - Keep it structured
+# - Keep inside BANKSTATE block
+# ==============================================================================
+
+        # Clear previous cards
+        for w in self.bank_cards.winfo_children():
+            w.destroy()
+
+        # ─────────────────────────────────────────────
+        # GLOBAL CAPITAL OVERVIEW (Top Section)
+        # ─────────────────────────────────────────────
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: # GLOBAL CAPITAL OVERVIEW (Top Section)
+# 🛠 ACTION: Use FLOOR (matched liability) instead of total_exposure/USED
+# 📆 PATCHED: 2026-03-02 — Fix BankState Overview to use FLOOR not USED
+# PURPOSE:
+# - Align header with Betfair matched liability
+# - Remove reservation distortion
+# - Correct Headroom + Utilisation display
+# ==============================================================================
+
+        summary_row = con.execute("""
+            SELECT *
+            FROM bankstate_runtime_snapshot
+            WHERE date(ts) = date('now','utc')
+            ORDER BY ts DESC
+            LIMIT 1
+        """).fetchone()
+
+        if summary_row:
+
+            total_pot = float(summary_row["total_pot"] or 0)
+
+            # 🔥 IMPORTANT FIX:
+            # Compute matched liability from engine floors (NOT total_exposure / USED)
+            engine_rows = con.execute("""
+                SELECT floor
+                FROM bankstate_engine_snapshot
+                WHERE date(ts) = date('now','utc')
+                  AND ts = (
+                      SELECT MAX(ts)
+                      FROM bankstate_engine_snapshot
+                      WHERE date(ts) = date('now','utc')
+                  )
+            """).fetchall()
+
+            total_floor = sum(float(r["floor"] or 0) for r in engine_rows)
+
+            headroom = total_pot - total_floor
+            utilisation = (total_floor / total_pot) * 100 if total_pot > 0 else 0
+
+            header = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            header.grid(row=0, column=0, columnspan=3, padx=8, pady=(0, 12), sticky="nsew")
+
+            ttk.Label(
+                header,
+                text="GLOBAL CAPITAL OVERVIEW",
+                font=("TkDefaultFont", 11, "bold")
+            ).pack(anchor="w")
+
+            ttk.Label(header, text=f"Total Pot        £{total_pot:,.2f}").pack(anchor="w")
+            ttk.Label(header, text=f"Matched Risk     £{total_floor:,.2f}").pack(anchor="w")
+            ttk.Label(header, text=f"Headroom         £{headroom:,.2f}").pack(anchor="w")
+
+            ttk.Label(
+                header,
+                text=f"Utilisation      {utilisation:.1f}%",
+                font=("TkDefaultFont", 9, "italic")
+            ).pack(anchor="w")
+
+# === PATCH END ==============================================================
+
+
+        if not rows:
+            ttk.Label(
+                self.bank_cards,
+                text="No capital data available",
+                font=("TkDefaultFont", 10, "italic")
+            ).grid(row=0, column=0, columnspan=3, pady=8, sticky="nsew")
+            return
+
+        # Configure responsive 3x2 grid
+        for c in range(3):
+            self.bank_cards.columnconfigure(c, weight=1, uniform="col")
+        for r in range(2):
+            self.bank_cards.rowconfigure(r, weight=1, uniform="row")
+
+        for i, r in enumerate(rows[:6]):
+
+            engine = r["engine"]
             pot = float(r["pot"] or 0)
-            avail = float(r["available"] or 0)
-
-            # 🔥 Over-extended engine
-            if avail < 0:
-                engine_name = f"🔥 {r['engine']}"
-            elif used > pot * 0.8:
-                engine_name = f"⚡ {r['engine']}"
-            else:
-                engine_name = f"{r['engine']}"
-
             floor = float(r["floor"] or 0)
             unmatched = float(r["unmatched"] or 0)
 
-            text.append("{:<18}{:>10.2f}{:>10.2f}{:>10.2f}{:>12.2f}{:>12.2f}".format(
-                engine_name,
-                pot,
-                used,
-                avail,
-                floor,
-                unmatched
-            ))
-            text.append("-" * 70)
+            headroom = pot - floor
+            utilisation = (floor / pot) * 100 if pot > 0 else 0
 
-        self.bank_text.delete("1.0", tk.END)
-        self.bank_text.insert("1.0", "\n".join(text))
+            # Fire indicator based on utilisation
+            if utilisation > 50:
+                icon = "🔥"
+            elif utilisation > 25:
+                icon = "⚡"
+            else:
+                icon = ""
+
+            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            card.grid(row=(i // 3) + 1, column=i % 3, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(
+                card,
+                text=f"{icon} {engine}",
+                font=("TkDefaultFont", 10, "bold")
+            ).pack(anchor="w")
+
+            ttk.Label(card, text=f"Pot        £{pot:,.2f}").pack(anchor="w")
+            ttk.Label(card, text=f"Matched    £{floor:,.2f}").pack(anchor="w")
+            ttk.Label(card, text=f"Reserved   £{unmatched:,.2f}").pack(anchor="w")
+            ttk.Label(card, text=f"Headroom   £{headroom:,.2f}").pack(anchor="w")
+
+            ttk.Label(
+                card,
+                text=f"Utilisation {utilisation:.1f}%",
+                font=("TkDefaultFont", 9, "italic")
+            ).pack(anchor="w", pady=(4, 0))
+
+# === PATCH END ==============================================================
 
       
     def _on_source_change(self,_=None):

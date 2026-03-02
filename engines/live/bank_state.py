@@ -1491,13 +1491,45 @@ def can_place(engine: str, plan: dict) -> bool:
     if delta_floor <= 0:
         return True
 
-    # 4️⃣ Engine allocation check
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: def can_place(
+# 🛠 ACTION: Add strict engine pot isolation gate
+# 📆 PATCHED: 2026-03-02 — Hard per-engine pot cap (no cross-engine freeze)
+#
+# PURPOSE:
+# - Prevent any engine from exceeding its own pot
+# - Block unmatched runaway reservations
+# - Preserve isolation between engines
+#
+# NEW INVARIANT:
+#   ENGINE_USED[engine] <= ENGINE_POTS[engine]
+# ==============================================================================
+
+    # 4️⃣ Engine allocation check (floor delta gate)
     available = get_engine_available(engine)
 
     if delta_floor > available:
         return False
 
+    # 5️⃣ STRICT ENGINE POT CAP (new hard stop)
+    with _LOCK:
+        current_used = _ENGINE_USED.get(engine, 0.0)
+        engine_pot = _ENGINE_POTS.get(engine, 0.0)
+
+    # If engine already at or beyond its pot → block immediately
+    if current_used >= engine_pot:
+        return False
+
+    # Project total used including new bet
+    projected_used = current_used + max(delta_floor, 0.0)
+
+    if projected_used > engine_pot:
+        return False
+
     return True
+
+# === PATCH END ==============================================================
 
 # -------------------------------------------------------------------
 # EVENT API (CALLED BY ROUTER / SETTLEMENTS)

@@ -552,8 +552,14 @@ class InPlayEngine:
 # === PATCH END ==============================================================
 
 # === PATCH START ==============================================================
-# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py (append at end)
-# 📆 PATCHED: 2026-02-27 — Structured runtime snapshot (INPLAY)
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: CREATE TABLE IF NOT EXISTS inplay_runtime_snapshot(
+# 🛠 ACTION: Extend existing runtime snapshot schema (do NOT rename)
+# 📆 PATCHED: 2026-03-02 — Expand inplay_runtime_snapshot for authority layer
+# PURPOSE:
+# - Preserve table name
+# - Add authority fields
+# - No renaming
 # ==============================================================================
 
 def _ensure_inplay_runtime_schema():
@@ -569,16 +575,36 @@ def _ensure_inplay_runtime_schema():
             direction TEXT,
             armed_lay INTEGER,
             armed_back INTEGER,
-            triggered INTEGER
+            triggered INTEGER,
+            is_inplay INTEGER,
+            confidence REAL,
+            race_quartile TEXT,
+            race_elapsed_seconds REAL,
+            collapse_score REAL,
+            ticks_moved REAL,
+            volatility REAL
         )
     """)
     con.close()
+
+# === PATCH END ==============================================================
 
 
 # ==================================================
 # 🟥 INPLAY RUNTIME SNAPSHOT (ENGINE-OWNED)
 # ==================================================
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/micro_scalper_v7/inplay_engine.py
+# 🔎 SEARCH: def _write_inplay_runtime_snapshot(
+# 🛠 ACTION: Expand snapshot payload (no rename)
+# 📆 PATCHED: 2026-03-02 — Authority-aware runtime snapshot
+# PURPOSE:
+# - Persist both armed state + authority intelligence
+# - Keep function name unchanged
+# ==============================================================================
+
 def _write_inplay_runtime_snapshot(ctx, self):
+
     try:
         import sqlite3
         from datetime import datetime, timezone
@@ -586,25 +612,51 @@ def _write_inplay_runtime_snapshot(ctx, self):
 
         ts = datetime.now(timezone.utc).isoformat()
 
+        market_id = str(ctx.get("marketId"))
+        selection_id = str(ctx.get("selectionId"))
+
+        px = float(ctx.get("px") or 0.0)
+        direction = ctx.get("direction")
+        ticks_moved = float(ctx.get("ticks_moved") or 0.0)
+
+        is_inplay = bool(ctx.get("race_started"))
+        confidence = float(ctx.get("confidence") or 0.0)
+        race_quartile = ctx.get("race_quartile")
+        race_elapsed = ctx.get("race_elapsed_seconds")
+
+        collapse_score = float(ctx.get("collapse_score") or 0.0)
+        volatility = float(ctx.get("volatility") or 0.0)
+
+        armed_lay = int(self.armed_lay.get((market_id, selection_id), False))
+        armed_back = int(self.armed_back.get((market_id, selection_id), False))
+        triggered = int(self.triggered.get((market_id, selection_id), False))
+
         con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
 
-        for (mid, sid), _ in self.armed_lay.items():
-
-            con.execute("""
-                INSERT INTO inplay_runtime_snapshot
-                VALUES (?,?,?,?,?,?,?,?)
-            """, (
-                ts,
-                str(mid),
-                str(sid),
-                None,  # px handled via ctx snapshot, not engine memory
-                None,
-                int(self.armed_lay.get((mid, sid), False)),
-                int(self.armed_back.get((mid, sid), False)),
-                int(self.triggered.get((mid, sid), False)),
-            ))
+        con.execute("""
+            INSERT INTO inplay_runtime_snapshot
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            ts,
+            market_id,
+            selection_id,
+            px,
+            direction,
+            armed_lay,
+            armed_back,
+            triggered,
+            int(is_inplay),
+            confidence,
+            race_quartile,
+            race_elapsed,
+            collapse_score,
+            ticks_moved,
+            volatility,
+        ))
 
         con.close()
 
     except Exception:
         pass
+
+# === PATCH END ==============================================================

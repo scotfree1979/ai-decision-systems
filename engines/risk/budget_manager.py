@@ -45,12 +45,12 @@ ENGINES = [
 
 # Baseline allocations (start-of-day percentages)
 BASELINE_PCT = {
-    "MSC_RISK":        0.40,  # Primary engine (dominant allocation)
-    "LEGACY":          0.15,  # Anchors only
-    "MSC_EXPLORATORY": 0.08,  # Reduced exploratory bleed
-    "MSC_INPLAY":      0.25,  # In-play ladder capital
-    "OVERWATCHER":     0.06,  # Protective hedge
-    "SAFETY_NET":      0.06,  # System safety buffer
+    "MSC_RISK":        0.30,  # Primary engine (dominant allocation)
+    "LEGACY":          0.10,  # Anchors only
+    "MSC_EXPLORATORY": 0.20,  # Reduced exploratory bleed
+    "MSC_INPLAY":      0.40,  # In-play ladder capital
+    "OVERWATCHER":     0.00,  # Protective hedge
+    "SAFETY_NET":      0.00,  # System safety buffer
 }
 
 
@@ -60,8 +60,8 @@ FLOOR_PCT = {
     "LEGACY":          0.10,
     "MSC_EXPLORATORY": 0.05,
     "MSC_INPLAY":      0.20,
-    "OVERWATCHER":     0.05,
-    "SAFETY_NET":      0.05,
+    "OVERWATCHER":     0.00,
+    "SAFETY_NET":      0.00,
 }
 
 
