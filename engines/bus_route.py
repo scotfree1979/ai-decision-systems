@@ -342,7 +342,7 @@ class BusRouteSnapshot:
 # - No cumulative state
 # - Self-contained logic
 # ======================================================================================================
-
+        SEED_TARGET = 5
         WINDOW_SIZE = 10
         ENTRY_HOURS = 12
         MIN_RUNNERS = 6
@@ -381,7 +381,7 @@ class BusRouteSnapshot:
         # ==============================================================================
 
         STARTUP_MIN_TRADING_MINUTES = 60        # 🔧 protects midday restart
-        ONGOING_ADMISSION_MINUTES   = 270       # 🔧 4.5 hours guarantee
+        ONGOING_ADMISSION_MINUTES   = 210       # 🔧 3.5 hours guarantee
         POST_OFF_MINUTES            = 120       # unchanged grace
 
         if not hasattr(self, "active_slots"):
@@ -436,7 +436,7 @@ class BusRouteSnapshot:
         # ------------------------------------------------------------------
 
         # Capture seed phase BEFORE modifying active_slots
-        seed_phase = (len(self.active_slots) == 0)
+        seed_phase = len(self.active_slots) < SEED_TARGET
 
         sorted_rows = sorted(
             rows,

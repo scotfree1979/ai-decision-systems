@@ -146,7 +146,7 @@ class InPlayEngine:
         # 🔒 update memory AFTER calculation
         _STATE.setdefault("last_px", {}).setdefault(mid, {})[sid] = px
 
-        confidence = min(1.0, ticks_moved / 3.0)
+      
         to_price = px
 
         # --------------------------------------------------
@@ -197,25 +197,53 @@ class InPlayEngine:
 
                 scheduled_started = now_ts >= scheduled_off
 
-                # Behaviour confirmation
-                behaviour_started = abs(ticks_moved) >= self.VOLATILITY_TICKS_TRIGGER
+                # --------------------------------------------------
+                # MARKET-LEVEL VOLATILITY CONFIDENCE
+                # --------------------------------------------------
 
+                from engines.price_math import calculate_tick_distance
+
+                moved_count = 0
+                last_map = _STATE.get("last_px", {}).get(mid, {})
+
+                for other_sid, other_prev in last_map.items():
+
+                    if other_prev is None:
+                        continue
+
+                    mm_other = classify(mid, other_sid)
+                    if not mm_other:
+                        continue
+
+                    other_px = mm_other.get("px")
+                    if other_px is None:
+                        continue
+
+                    tick_delta = calculate_tick_distance(
+                        float(other_prev),
+                        float(other_px)
+                    )
+
+                    if abs(tick_delta) >= 1:
+                        moved_count += 1
+
+                # Confidence scaling
+                if moved_count <= 0:
+                    confidence = 0.0
+                elif moved_count == 1:
+                    confidence = 0.25
+                elif moved_count == 2:
+                    confidence = 0.5
+                elif moved_count == 3:
+                    confidence = 0.75
+                else:
+                    confidence = 1.0
+
+                # Behaviour trigger
+                behaviour_started = moved_count >= 3
+
+                # Final race state
                 race_started = scheduled_started and behaviour_started
-
-                # Narrative clock (separate from execution)
-                if scheduled_started:
-                    elapsed = now_ts - scheduled_off
-
-                    if elapsed <= 60:
-                        race_quartile = "Q1"
-                    elif elapsed <= 120:
-                        race_quartile = "Q2"
-                    elif elapsed <= 180:
-                        race_quartile = "Q3"
-                    else:
-                        race_quartile = "Q4"
-
-                    race_confidence = min(1.0, abs(ticks_moved) / 3.0)
 
         except Exception:
             race_started = False
