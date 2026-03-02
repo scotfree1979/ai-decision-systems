@@ -285,6 +285,7 @@ class BusRouteSnapshot:
         self.bus_stops = {}
         self.ctx_map = {}  # (marketId, selectionId) -> ctx
         self.active_slots = set()
+        self.ctx_grace_slots = set()
 
     # ======================================================================================================
     # 📍 TARGET: engines/bus_route.py
@@ -346,7 +347,8 @@ class BusRouteSnapshot:
         WINDOW_SIZE = 10
         ENTRY_HOURS = 12
         MIN_RUNNERS = 6
-        POST_OFF_MINUTES = 120  # safety guard only
+        ROOT_POST_OFF_MINUTES = 5
+
 
         now = datetime.now(timezone.utc)
 
@@ -428,8 +430,31 @@ class BusRouteSnapshot:
                 self.active_slots.discard(mid)
                 continue
 
-            if off_dt + timedelta(minutes=POST_OFF_MINUTES) < now:
+            if off_dt + timedelta(minutes=ROOT_POST_OFF_MINUTES) < now:
                 self.active_slots.discard(mid)
+
+        # ------------------------------------------------------------------
+        # 1️⃣B CTX GRACE SURFACE (120 MIN POST-OFF)
+        # ------------------------------------------------------------------
+
+        for r in rows:
+
+            mid = str(r["marketId"])
+
+            try:
+                off_dt = datetime.fromisoformat(
+                    r["marketStartTime"].replace("Z", "+00:00")
+                )
+            except Exception:
+                continue
+
+            minutes_since_off = (now - off_dt).total_seconds() / 60.0
+
+            if 0 <= minutes_since_off <= POST_OFF_MINUTES:
+                self.ctx_grace_slots.add(mid)
+            else:
+                if mid in self.ctx_grace_slots:
+                    self.ctx_grace_slots.discard(mid)
 
         # ------------------------------------------------------------------
         # 2️⃣ ADMIT (SEED + ONGOING ADMISSION — CLEAN SEPARATION)
@@ -526,13 +551,23 @@ class BusRouteSnapshot:
         # BUILD ORDERED RUNNER POOL (EARLIEST → LATEST)
         # --------------------------------------------------
 
+        # --------------------------------------------------
+        # BUILD CTX SURFACE (Route ∪ CTX Grace)
+        # --------------------------------------------------
+
+        ctx_surface_mids = set(window_mids) | set(self.ctx_grace_slots)
+
         ordered = []
 
-        for mid in window_mids:
-            st = get_market_state(mid) or {}
-            runners = st.get("runners") or {}
-            for sid in runners.keys():
-                ordered.append((str(mid), str(sid)))
+        for mid in sorted(
+            ctx_surface_mids,
+            key=lambda m: next(
+                datetime.fromisoformat(
+                    x["marketStartTime"].replace("Z", "+00:00")
+                )
+                for x in rows if str(x["marketId"]) == m
+            )
+        ):
 
         # Final assignment
         self.runner_pool = ordered
