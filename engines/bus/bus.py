@@ -996,6 +996,36 @@ class DecisionBus:
 
         return repair_plans
 
+    # ==================================================
+    # 🟪 LANE 7 — MSC_UNIFIED (SIGNAL ENGINE)
+    # ==================================================
+    def _lane7_msc_unified(self, base_ctx, engine_report):
+        """
+        Unified signal lane.
+        Tick-level engine.
+        Returns plans (Phase 0: none).
+        """
+
+        plans = []
+
+        unified = self.engines.get("MSC_UNIFIED")
+        if not unified:
+            return plans
+
+        try:
+            p = unified.tick(base_ctx)
+
+            engine_report["MSC_UNIFIED"]["evaluated"] = True
+
+            if p and p.get("enter"):
+                p["engine"] = "MSC_UNIFIED"
+                plans.append(("MSC_UNIFIED", p, base_ctx))
+                engine_report["MSC_UNIFIED"]["fired"] += 1
+
+        except Exception as e:
+            _record_reason(engine_report, "MSC_UNIFIED", f"tick_error:{e}")
+
+        return plans
 
 
 # ======================================================================
@@ -1126,7 +1156,7 @@ class DecisionBus:
         """
 
         plans = []
-        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
 
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
@@ -1591,7 +1621,7 @@ class DecisionBus:
 
         # --------------------------------------------------
         # BUS-AUTHORITATIVE EXCLUSIONS (PER LEGACY PARENT)
-   
+        # --------------------------------------------------  
 
         for mid, sid, legacy_parent_id, anchor_px in get_risk_legacy_parent_pairs():
 
@@ -2344,6 +2374,26 @@ class DecisionBus:
             _record("MSC_RISK", False, False, str(e))
 
         # --------------------------------------------------
+        # MSC_RISK
+        # --------------------------------------------------
+        try:
+            eng = self.engines.get("MSC_UNIFIED")
+            if eng:
+                p = eng.tick(ctx)
+
+                if p and p.get("enter"):
+                    # Phase 0: this should never happen
+                    # But structure must exist
+                    p["engine"] = "MSC_UNIFIED"
+                    plans.append(("MSC_UNIFIED", p, ctx))
+                    _record("MSC_UNIFIED", True, True)
+                else:
+                    _record("MSC_UNIFIED", True, False)
+
+        except Exception as e:
+            _record("MSC_UNIFIED", False, False, str(e))
+
+        # --------------------------------------------------
         # OVERWATCHER STOPLOSS
         # --------------------------------------------------
         try:
@@ -3046,6 +3096,15 @@ class DecisionBus:
         if lane6_plans:
             generated_plans.extend(lane6_plans)
             lane_counts[6] += len(lane6_plans)
+
+        # ==================================================
+        # 🟪 LANE 7 — MSC_UNIFIED (ENGINE-STYLE)
+        # ==================================================
+        lane7_plans = self._lane7_msc_unified(base_ctx, engine_report)
+
+        if lane7_plans:
+            generated_plans.extend(lane7_plans)
+            lane_counts[7] += len(lane7_plans)
 
 
 
@@ -4001,6 +4060,7 @@ class DecisionBus:
             print(f"  Lane 4 (MSC_EXPLORATORY): {lane_counts[4]}")
             print(f"  Lane 5 (OVERWATCHDER)   : {lane_counts[5]}")
             print(f"  Lane 6 (DB CORRECTNESS) : {lane_counts[6]}")
+            print(f"  Lane 7 (MSC_UNIFIED)    : {lane_counts[7]}")
 
             if "dup_blocked_by_engine" in tick_ctx:
                 print("\nDUPLICATES BLOCKED")
@@ -4108,6 +4168,14 @@ class DecisionBus:
                 f"delegated={delegated} "
                 f"fill_rate={fill_pct:.1f}% {fill_colour}"
             )
+
+            # ==================================================
+            # 🟪 UNIFIED SNAPSHOT (TICK-DRIVEN)
+            # ==================================================
+            try:
+                _write_unified_runtime_snapshot()
+            except Exception:
+                pass
 
             # ------------------------------------
             # TICK REPORT — ALWAYS PRINT
@@ -4315,7 +4383,168 @@ def _write_bus_runtime_snapshot(data: dict):
     except Exception:
         pass
 # === PATCH END ==============================================================
+def _ensure_unified_runtime_schema():
+    import sqlite3
+    from engines.config_paths import autoscalp_db
 
+    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS unified_runtime_snapshot (
+            ts TEXT PRIMARY KEY,
+
+            route_id INTEGER,
+            bus_stop INTEGER,
+            tick_id INTEGER,
+            hz REAL,
+            fill_rate REAL,
+
+            parents_open INTEGER,
+            children_open INTEGER,
+            children_matched INTEGER,
+
+            total_pot REAL,
+            total_floor REAL,
+            total_reserved REAL,
+            headroom REAL,
+            utilisation_pct REAL,
+
+            worst_case_liability REAL,
+            directional_bias TEXT,
+            imbalance_level TEXT,
+
+            inplay_active INTEGER,
+            inplay_confidence REAL
+        )
+    """)
+
+    con.close()
+
+def _write_unified_runtime_snapshot():
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+        from engines.config_paths import autoscalp_db
+
+        _ensure_unified_runtime_schema()
+
+        con = sqlite3.connect(autoscalp_db(), timeout=6)
+        con.row_factory = sqlite3.Row
+
+        # --------------------------------------------------
+        # BUS
+        # --------------------------------------------------
+        bus = con.execute("""
+            SELECT *
+            FROM bus_runtime_snapshot
+            ORDER BY ts DESC
+            LIMIT 1
+        """).fetchone()
+
+        # --------------------------------------------------
+        # BANKSTATE RUNTIME
+        # --------------------------------------------------
+        bank_rt = con.execute("""
+            SELECT *
+            FROM bankstate_runtime_snapshot
+            ORDER BY ts DESC
+            LIMIT 1
+        """).fetchone()
+
+        # --------------------------------------------------
+        # BANKSTATE ENGINE SNAPSHOT (sum floors)
+        # --------------------------------------------------
+        bank_eng = con.execute("""
+            SELECT
+                SUM(floor)  AS total_floor,
+                SUM(reserved) AS total_reserved
+            FROM bankstate_engine_snapshot
+            WHERE ts = (
+                SELECT MAX(ts)
+                FROM bankstate_engine_snapshot
+            )
+        """).fetchone()
+
+        # --------------------------------------------------
+        # LIABILITY (exchange truth)
+        # --------------------------------------------------
+        liab = con.execute("""
+            SELECT
+                SUM(matched_size) AS total_matched
+            FROM betfair_execution_surface
+            WHERE source='CURRENT'
+        """).fetchone()
+
+        # --------------------------------------------------
+        # INPLAY SNAPSHOT
+        # --------------------------------------------------
+        inplay = con.execute("""
+            SELECT *
+            FROM inplay_runtime_snapshot
+            ORDER BY ts DESC
+            LIMIT 1
+        """).fetchone()
+
+        # --------------------------------------------------
+        # DERIVED FIELDS
+        # --------------------------------------------------
+        total_pot = float(bank_rt["total_pot"] or 0) if bank_rt else 0.0
+        total_floor = float(bank_eng["total_floor"] or 0) if bank_eng else 0.0
+        total_reserved = float(bank_eng["total_reserved"] or 0) if bank_eng else 0.0
+
+        headroom = total_pot - total_floor
+        utilisation = (total_floor / total_pot * 100) if total_pot > 0 else 0.0
+
+        worst_case_liability = float(liab["total_matched"] or 0) if liab else 0.0
+
+        directional_bias = "UNKNOWN"
+        imbalance_level = "NONE"
+
+        # (Light classification only — no recomputation)
+        if worst_case_liability > 1000:
+            imbalance_level = "HIGH"
+        elif worst_case_liability > 200:
+            imbalance_level = "MODERATE"
+        elif worst_case_liability > 0:
+            imbalance_level = "LOW"
+
+        # --------------------------------------------------
+        # INSERT
+        # --------------------------------------------------
+        con.execute("""
+            INSERT INTO unified_runtime_snapshot
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+
+            bus["route_id"] if bus else None,
+            bus["bus_stop"] if bus else None,
+            bus["tick_id"] if bus else None,
+            bus["hz"] if bus else None,
+            bus["fill_rate"] if bus else None,
+
+            bank_rt["parents_opened"] if bank_rt else 0,
+            bank_rt["children_opened"] if bank_rt else 0,
+            bank_rt["children_matched"] if bank_rt else 0,
+
+            total_pot,
+            total_floor,
+            total_reserved,
+            headroom,
+            utilisation,
+
+            worst_case_liability,
+            directional_bias,
+            imbalance_level,
+
+            1 if inplay else 0,
+            float(inplay["confidence"]) if inplay and "confidence" in inplay.keys() else 0.0
+        ))
+
+        con.close()
+
+    except Exception:
+        pass
 
 # Global BUS instance
 BUS = DecisionBus()

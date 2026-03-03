@@ -6,12 +6,13 @@
 from engines.micro_scalper_v7.risk_engine import RiskEngine
 from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
 from engines.micro_scalper_v7.inplay_engine import InPlayEngine
-
+from engines.micro_scalper_v7.unified_engine import UnifiedEngine
 
 
 ENGINE_REGISTRY = {
     "MSC_EXPLORATORY": ExploratoryEngine(),
     "MSC_INPLAY":      InPlayEngine(),
     "MSC_RISK":        RiskEngine(),
+    "MSC_UNIFIED":     UnifiedEngine(),
 
 }

@@ -568,6 +568,11 @@ class BusRouteSnapshot:
                 for x in rows if str(x["marketId"]) == m
             )
         ):
+            st = get_market_state(mid) or {}
+            runners = st.get("runners") or {}
+
+            for sid in runners.keys():
+                ordered.append((str(mid), str(sid)))
 
         # Final assignment
         self.runner_pool = ordered
