@@ -4363,8 +4363,8 @@ class DecisionBus:
 
 def _ensure_bus_runtime_schema():
     import sqlite3
-    from engines.config_paths import autoscalp_db
-    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    from engines.config_paths import open_auto_db
+    con = open_auto_db(rw=True)
     con.execute("""
         CREATE TABLE IF NOT EXISTS bus_runtime_snapshot(
             ts TEXT,
@@ -4388,7 +4388,9 @@ def _write_bus_runtime_snapshot(data: dict):
 
         _ensure_bus_runtime_schema()
 
-        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+        from engines.config_paths import open_auto_db
+
+        con = open_auto_db(rw=True)
         con.execute("""
             INSERT INTO bus_runtime_snapshot
             VALUES (?,?,?,?,?,?,?,?)
@@ -4402,15 +4404,16 @@ def _write_bus_runtime_snapshot(data: dict):
             data.get("avg_ctx_refresh"),
             data.get("fill_rate"),
         ))
+        con.commit()
         con.close()
     except Exception:
         pass
 # === PATCH END ==============================================================
 def _ensure_unified_runtime_schema():
     import sqlite3
-    from engines.config_paths import autoscalp_db
+    from engines.config_paths import open_auto_db
 
-    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    con = open_auto_db(rw=True)
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS unified_runtime_snapshot (
@@ -4447,11 +4450,12 @@ def _write_unified_runtime_snapshot():
     try:
         import sqlite3
         from datetime import datetime, timezone
-        from engines.config_paths import autoscalp_db
+    
 
         _ensure_unified_runtime_schema()
 
-        con = sqlite3.connect(autoscalp_db(), timeout=6)
+        from engines.config_paths import open_auto_db
+        con = open_auto_db(rw=True)
         con.row_factory = sqlite3.Row
 
         # --------------------------------------------------

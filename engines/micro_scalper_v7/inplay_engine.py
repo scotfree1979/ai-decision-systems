@@ -608,7 +608,7 @@ def _write_inplay_runtime_snapshot(ctx, self):
     try:
         import sqlite3
         from datetime import datetime, timezone
-        from engines.config_paths import autoscalp_db
+        from engines.config_paths import open_auto_db
 
         ts = datetime.now(timezone.utc).isoformat()
 
@@ -631,7 +631,7 @@ def _write_inplay_runtime_snapshot(ctx, self):
         armed_back = int(self.armed_back.get((market_id, selection_id), False))
         triggered = int(self.triggered.get((market_id, selection_id), False))
 
-        con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+        con = open_auto_db(rw=True)
 
         con.execute("""
             INSERT INTO inplay_runtime_snapshot

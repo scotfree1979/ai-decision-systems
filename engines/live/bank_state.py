@@ -1724,7 +1724,9 @@ def _write_bank_runtime_snapshot():
 
     import sqlite3
     from datetime import datetime, timezone
-    from engines.config_paths import autoscalp_db
+    from engines.config_paths import open_auto_db
+
+    
 
     ts = datetime.now(timezone.utc).isoformat()
 
@@ -1740,7 +1742,7 @@ def _write_bank_runtime_snapshot():
         used_map = dict(_ENGINE_USED)
         open_exp = _OPEN_EXPOSURE
 
-    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    con = open_auto_db(rw=True)
 
     # GLOBAL
     con.execute("""

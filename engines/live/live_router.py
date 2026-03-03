@@ -724,11 +724,11 @@ def _write_router_runtime_snapshot_from_collect(live: dict):
 
     from datetime import datetime, timezone
     import sqlite3
-    from engines.config_paths import autoscalp_db
+    from engines.config_paths import open_auto_db
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    con = sqlite3.connect(autoscalp_db(), timeout=6)
+    con = open_auto_db(rw=True)
     cur = con.cursor()
 
     # Clear previous snapshot (single-frame table)
@@ -7281,8 +7281,9 @@ def start_router_child_worker():
 
 def _ensure_router_runtime_schema():
     import sqlite3
-    from engines.config_paths import autoscalp_db
-    con = sqlite3.connect(autoscalp_db(), timeout=6, isolation_level=None)
+    ffrom engines.config_paths import open_auto_db
+
+    con = open_auto_db(rw=True)
     con.execute("""
         CREATE TABLE IF NOT EXISTS router_runtime_snapshot(
             ts TEXT,

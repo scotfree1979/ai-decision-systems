@@ -104,25 +104,25 @@ class UnifiedEngine:
     # --------------------------------------------------------------------------------------------------
 
     def _read_unified_snapshot(self) -> Dict[str, Any]:
-        from engines.config_paths import autoscalp_db
-        import sqlite3
+        from engines.config_paths import open_auto_db
 
-        con = sqlite3.connect(autoscalp_db())
-        con.row_factory = sqlite3.Row
+        con = open_auto_db(rw=False)
 
-        row = con.execute("""
-            SELECT *
-            FROM unified_runtime_snapshot
-            ORDER BY ts DESC
-            LIMIT 1
-        """).fetchone()
-
-        con.close()
+        try:
+            row = con.execute("""
+                SELECT *
+                FROM unified_runtime_snapshot
+                ORDER BY ts DESC
+                LIMIT 1
+            """).fetchone()
+        finally:
+            con.close()
 
         if not row:
             return {}
 
-        return dict(row)
+        columns = [c[0] for c in con.description] if con.description else []
+        return dict(zip(columns, row)) if columns else {}
 
     # --------------------------------------------------------------------------------------------------
     # MARKET NAME MAP (BETS AUTHORITY)
@@ -347,8 +347,9 @@ class UnifiedEngine:
         # --------------------------------------------------
         px_map = {}
 
-        con = sqlite3.connect(autoscalp_db())
-        con.row_factory = sqlite3.Row
+        from engines.config_paths import open_auto_db
+
+        con = open_auto_db(rw=False)
 
         try:
             rows = con.execute("""
@@ -360,8 +361,9 @@ class UnifiedEngine:
                 )
             """).fetchall()
 
-            for r in rows:
-                px_map[(str(r["marketId"]), str(r["selectionId"]))] = float(r["px"])
+            for marketId, selectionId, px in rows:
+                if px is not None:
+                    px_map[(str(marketId), str(selectionId))] = float(px)
         finally:
             con.close()
 
