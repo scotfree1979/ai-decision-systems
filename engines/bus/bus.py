@@ -13,7 +13,7 @@ from engines.mastery.context_builder import build_context
 from engines.live.live_router import place_from_bus
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
-
+from engines.bus_route_startup_ctx import StartupCTXBuilder
 from engines.live.overwatcher import evaluate_redistribution
 from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
 from engines.bus_route import PLANS_PER_TICK
@@ -123,6 +123,7 @@ from engines.bus_route import (
     build_full_cycle,
     build_bus_route_tick,
     RunnerRotation,
+    BusRouteSnapshot,      # 🔑 ADD THIS
 )
 from collections import deque
 import time
@@ -2953,14 +2954,6 @@ class DecisionBus:
                     50.0 + (rc["net"] * 10.0)
                 )
             )
-
-
-        # ===============================================================
-        # 4️⃣ ROUTE SNAPSHOT — BUS-OWNED CONTROL (NO LAZY LOOP)
-        # ===============================================================
-
-        from engines.bus_route import BusRouteSnapshot
-        from engines.bus_route_startup_ctx import StartupCTXBuilder
 
         # --------------------------------------------------
         # INIT SNAPSHOT + STARTUP CTX BUILDER (ONCE)
