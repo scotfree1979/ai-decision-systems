@@ -327,12 +327,8 @@ class BusRouteSnapshot:
         import sqlite3
 
         # ==============================================================
-        # 🔁 TIME-RELATIVE ROUTE BUILD (CANONICAL, SIMPLIFIED)
+        # 🔁 CANONICAL 5-MARKET BUILD (DB-Authoritative)
         # ==============================================================
-
-        from engines.config_paths import connect_db
-        from datetime import datetime, timezone
-        import sqlite3
 
         ROUTE_MARKET_COUNT = 5  # hard rule
 
@@ -342,10 +338,6 @@ class BusRouteSnapshot:
         con.row_factory = sqlite3.Row
 
         try:
-            # --------------------------------------------------
-            # Canonical 5-market selection (DB-authoritative)
-            # --------------------------------------------------
-
             rows = con.execute("""
                 WITH runner_counts AS (
                     SELECT
@@ -365,12 +357,14 @@ class BusRouteSnapshot:
                 ORDER BY datetime(marketStartTime) ASC
                 LIMIT ?
             """, (ROUTE_MARKET_COUNT,)).fetchall()
+        finally:
+            con.close()
 
-            if not rows:
-                self.runner_pool = []
-                return
+        if not rows:
+            self.runner_pool = []
+            return
 
-            selected_mids = [str(r["marketId"]) for r in rows]
+        selected_mids = [str(r["marketId"]) for r in rows]
 
         # --------------------------------------------------
         # Build ordered runner pool
