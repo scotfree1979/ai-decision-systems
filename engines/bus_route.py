@@ -284,8 +284,7 @@ class BusRouteSnapshot:
         self.runner_pool = []
         self.bus_stops = {}
         self.ctx_map = {}  # (marketId, selectionId) -> ctx
-        self.active_slots = set()
-        self.ctx_grace_slots = set()
+   
 
     # ======================================================================================================
     # 📍 TARGET: engines/bus_route.py
@@ -327,28 +326,15 @@ class BusRouteSnapshot:
         from datetime import datetime, timezone, timedelta
         import sqlite3
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus_route.py
-# 🔎 ANCHOR: inside BusRouteSnapshot.build_route(), replace window construction block
-# 📆 PATCHED: 2026-04-25 — 3-Hour Pre-Off Admission Model (Deterministic, Clean)
-#
-# PURPOSE:
-# - Market enters route when <= 3 hours to off
-# - Window holds up to 5 qualifying markets
-# - No finish-triggered sliding
-# - Deterministic rebuild every call
-#
-# INVARIANT:
-# - No dependency on scope
-# - No cumulative state
-# - Self-contained logic
-# ======================================================================================================
-        SEED_TARGET = 5
-        WINDOW_SIZE = 10
-        ENTRY_HOURS = 12
-        MIN_RUNNERS = 6
-        ROOT_POST_OFF_MINUTES = 5
+        # ==============================================================
+        # 🔁 TIME-RELATIVE ROUTE BUILD (CANONICAL, SIMPLIFIED)
+        # ==============================================================
 
+        from engines.config_paths import connect_db
+        from datetime import datetime, timezone
+        import sqlite3
+
+        ROUTE_MARKET_COUNT = 5  # hard rule
 
         now = datetime.now(timezone.utc)
 
@@ -359,88 +345,24 @@ class BusRouteSnapshot:
             rows = con.execute("""
                 SELECT
                     marketId,
-                    marketStartTime,
-                    COUNT(DISTINCT selectionId) AS runner_count
+                    marketStartTime
                 FROM bets
                 WHERE date(marketStartTime)=date('now','utc')
-                GROUP BY marketId, marketStartTime
                 ORDER BY datetime(marketStartTime) ASC
             """).fetchall()
         finally:
             con.close()
 
-        # ==============================================================================
-        # 📍 TARGET: engines/bus_route.py
-        # 🔎 ANCHOR: inside BusRouteSnapshot.build_route() — slot logic
-        # 🛠 ACTION: REPLACE ENTIRE WINDOW CONSTRUCTION BLOCK
-        # 📆 PATCHED: 2026-04-28 — Dual Startup + Ongoing Admission Model
-        #
-        # PURPOSE:
-        # - Startup rule protects midday restarts
-        # - Ongoing rule guarantees 4.5h trading per new market
-        # - Markets exit only after off + grace
-        # - Max WINDOW_SIZE maintained deterministically
-        # ==============================================================================
+        if not rows:
+            self.runner_pool = []
+            return
 
-        STARTUP_MIN_TRADING_MINUTES = 60        # 🔧 protects midday restart
-        ONGOING_ADMISSION_MINUTES   = 210       # 🔧 3.5 hours guarantee
-        POST_OFF_MINUTES            = 120       # unchanged grace
-
-        if not hasattr(self, "active_slots"):
-            self.active_slots = set()
-
-        # ------------------------------------------------------------------
-        # 🔒 PARENT PINNING — invariant enforcement
-        # ------------------------------------------------------------------
-        from engines.config_paths import open_auto_db
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-        try:
-            parent_rows = con.execute("""
-                SELECT DISTINCT marketId
-                FROM orders
-                WHERE role='PARENT'
-                  AND engine IN ('LEGACY','MSC_EXPLORATORY')
-                  AND date(opened_at)=date('now','utc')
-            """).fetchall()
-        finally:
-            con.close()
-
-        pinned_markets = {str(r["marketId"]) for r in parent_rows}
-
-        # Ensure parent markets are always in active_slots
-        for mid in pinned_markets:
-            self.active_slots.add(mid)
-
-        # ------------------------------------------------------------------
-        # 1️⃣ REMOVE — only after off + grace
-        # ------------------------------------------------------------------
-        for mid in list(self.active_slots):
-
-            r = next((x for x in rows if str(x["marketId"]) == mid), None)
-            if not r:
-                self.active_slots.discard(mid)
-                continue
-
-            try:
-                off_dt = datetime.fromisoformat(
-                    r["marketStartTime"].replace("Z", "+00:00")
-                )
-            except Exception:
-                self.active_slots.discard(mid)
-                continue
-
-            if off_dt + timedelta(minutes=ROOT_POST_OFF_MINUTES) < now:
-                self.active_slots.discard(mid)
-
-        # ------------------------------------------------------------------
-        # 1️⃣B CTX GRACE SURFACE (120 MIN POST-OFF)
-        # ------------------------------------------------------------------
+        # --------------------------------------------------
+        # Filter markets that have not yet gone off
+        # --------------------------------------------------
+        upcoming = []
 
         for r in rows:
-
-            mid = str(r["marketId"])
-
             try:
                 off_dt = datetime.fromisoformat(
                     r["marketStartTime"].replace("Z", "+00:00")
@@ -448,135 +370,27 @@ class BusRouteSnapshot:
             except Exception:
                 continue
 
-            minutes_since_off = (now - off_dt).total_seconds() / 60.0
-
-            if 0 <= minutes_since_off <= POST_OFF_MINUTES:
-                self.ctx_grace_slots.add(mid)
-            else:
-                if mid in self.ctx_grace_slots:
-                    self.ctx_grace_slots.discard(mid)
-
-        # ------------------------------------------------------------------
-        # 2️⃣ ADMIT (SEED + ONGOING ADMISSION — CLEAN SEPARATION)
-        # ------------------------------------------------------------------
-
-        # Capture seed phase BEFORE modifying active_slots
-        seed_phase = len(self.active_slots) < SEED_TARGET
-
-        sorted_rows = sorted(
-            rows,
-            key=lambda r: datetime.fromisoformat(
-                r["marketStartTime"].replace("Z", "+00:00")
-            )
-        )
-
-        # ==============================================================
-        # 2A️⃣ SEED PHASE (RUN ONCE IF WINDOW EMPTY)
-        # ==============================================================
-        if seed_phase:
-
-            for r in sorted_rows:
-
-                if len(self.active_slots) >= WINDOW_SIZE:
-                    break
-
-                mid = str(r["marketId"])
-
-                if mid in self.active_slots:
-                    continue
-
-                try:
-                    off_dt = datetime.fromisoformat(
-                        r["marketStartTime"].replace("Z", "+00:00")
-                    )
-                except Exception:
-                    continue
-
-                minutes_to_off = (off_dt - now).total_seconds() / 60.0
-
-                # 🔒 Seed rule: must be >= 60 mins away
-                if minutes_to_off >= STARTUP_MIN_TRADING_MINUTES:
-                    if int(r["runner_count"] or 0) >= MIN_RUNNERS:
-                        self.active_slots.add(mid)
-
-        # ==============================================================
-        # 2B️⃣ ONGOING ADMISSION (WINDOW NOT EMPTY)
-        # ==============================================================
-        else:
-
-            for r in sorted_rows:
-
-                if len(self.active_slots) >= WINDOW_SIZE:
-                    break
-
-                mid = str(r["marketId"])
-
-                if mid in self.active_slots:
-                    continue
-
-                try:
-                    off_dt = datetime.fromisoformat(
-                        r["marketStartTime"].replace("Z", "+00:00")
-                    )
-                except Exception:
-                    continue
-
-                minutes_to_off = (off_dt - now).total_seconds() / 60.0
-
-                # 🔒 Admission rule: include when <= 4.5 hours
-                if minutes_to_off <= ONGOING_ADMISSION_MINUTES:
-                    if int(r["runner_count"] or 0) >= MIN_RUNNERS:
-                        self.active_slots.add(mid)
-
-        # ------------------------------------------------------------------
-        # FINAL ORDERING
-        # ------------------------------------------------------------------
-        window_mids = sorted(
-            list(self.active_slots),
-            key=lambda m: next(
-                datetime.fromisoformat(
-                    x["marketStartTime"].replace("Z", "+00:00")
-                )
-                for x in rows if str(x["marketId"]) == m
-            )
-        )
+            if off_dt >= now:
+                upcoming.append(str(r["marketId"]))
 
         # --------------------------------------------------
-        # 🔁 TIME-RELATIVE ROUTE MEMBERSHIP (AUTHORITATIVE)
+        # Take next N markets
         # --------------------------------------------------
-        # Route must reflect CURRENT scope only.
-        # No cumulative day-long accumulation.
+        selected_mids = upcoming[:ROUTE_MARKET_COUNT]
 
         # --------------------------------------------------
-        # BUILD ORDERED RUNNER POOL (EARLIEST → LATEST)
+        # Build ordered runner pool
         # --------------------------------------------------
-
-        # --------------------------------------------------
-        # BUILD CTX SURFACE (Route ∪ CTX Grace)
-        # --------------------------------------------------
-
-        ctx_surface_mids = set(window_mids) | set(self.ctx_grace_slots)
-
         ordered = []
 
-        for mid in sorted(
-            ctx_surface_mids,
-            key=lambda m: next(
-                datetime.fromisoformat(
-                    x["marketStartTime"].replace("Z", "+00:00")
-                )
-                for x in rows if str(x["marketId"]) == m
-            )
-        ):
+        for mid in selected_mids:
             st = get_market_state(mid) or {}
             runners = st.get("runners") or {}
 
             for sid in runners.keys():
                 ordered.append((str(mid), str(sid)))
 
-        # Final assignment
         self.runner_pool = ordered
-
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
         # --------------------------------------------------

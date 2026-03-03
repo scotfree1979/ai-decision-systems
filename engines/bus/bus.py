@@ -1003,7 +1003,7 @@ class DecisionBus:
         """
         Unified signal lane.
         Tick-level engine.
-        Returns plans (Phase 0: none).
+        Phase 0: report-only (no plan emission).
         """
 
         plans = []
@@ -1013,13 +1013,36 @@ class DecisionBus:
             return plans
 
         try:
-            p = unified.tick(base_ctx)
+            result = unified.tick(base_ctx)
 
             engine_report["MSC_UNIFIED"]["evaluated"] = True
 
-            if p and p.get("enter"):
-                p["engine"] = "MSC_UNIFIED"
-                plans.append(("MSC_UNIFIED", p, base_ctx))
+            # --------------------------------------------------
+            # WHY RECORDING (STRUCTURED)
+            # --------------------------------------------------
+            why = result.get("why")
+            if why:
+                _record_reason(engine_report, "MSC_UNIFIED", why)
+
+            # --------------------------------------------------
+            # SIGNAL COUNT RECORDING (Y TABLE)
+            # --------------------------------------------------
+            signals = result.get("signals") or {}
+
+            for key, value in signals.items():
+                if value:
+                    _record_reason(
+                        engine_report,
+                        "MSC_UNIFIED",
+                        f"signal_{key}"
+                    )
+
+            # --------------------------------------------------
+            # PLAN (PHASE 0 = NONE)
+            # --------------------------------------------------
+            if result and result.get("enter"):
+                result["engine"] = "MSC_UNIFIED"
+                plans.append(("MSC_UNIFIED", result, base_ctx))
                 engine_report["MSC_UNIFIED"]["fired"] += 1
 
         except Exception as e:
