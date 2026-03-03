@@ -3781,11 +3781,12 @@ def start_live_loop(*args, **kwargs):
         print(f"[LIABILITY SURFACE][WARN] failed to start: {e}")
 
     # ------------------------------------------------------------------
-    # 6I) START BUS ROUTE LOOP
+    # 6I) START UNIFIED REPORT LOOP
     # ------------------------------------------------------------------
 
-    #from engines.bus_route import start_bus_loop
-    #start_bus_loop()
+    from engines.micro_scalper_v7.unified_engine import start_unified_reporter
+
+    start_unified_reporter(interval_s=5)
 
 
     # ------------------------------------------------------------------

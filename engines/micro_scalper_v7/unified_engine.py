@@ -641,3 +641,78 @@ class UnifiedEngine:
         print(f"  Pressure     : {cls.get('pressure')}")
 
         print("\n══════════════════════════════════════════════════════════════\n")
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🧩 ACTION: ADD — Unified Report Loop (Observability Only)
+# 📆 PATCHED: 2026-04-XX — Star loop reporter
+#
+# PURPOSE:
+# - Periodically print latest unified snapshot
+# - Pure read-only
+# - No engine mutation
+# - Mirrors BankState reporter pattern
+# ======================================================================================================
+
+import threading
+import time
+
+_UNIFIED_REPORT_THREAD = None
+
+
+def _unified_report_loop(interval_s: int = 5):
+    """
+    Periodically prints latest unified V7 snapshot.
+    Snapshot is authoritative (DB-backed).
+    """
+    from engines.config_paths import autoscalp_db
+    import sqlite3
+
+    while True:
+        try:
+            con = sqlite3.connect(autoscalp_db())
+            con.row_factory = sqlite3.Row
+
+            row = con.execute("""
+                SELECT *
+                FROM unified_runtime_snapshot
+                ORDER BY ts DESC
+                LIMIT 1
+            """).fetchone()
+
+            con.close()
+
+            if row:
+                print("\n**************** UNIFIED STAR LOOP ****************")
+                for k in row.keys():
+                    print(f"{k:<24}: {row[k]}")
+                print("***************************************************\n")
+
+        except Exception:
+            pass
+
+        time.sleep(max(1, int(interval_s)))
+
+
+def start_unified_reporter(interval_s: int = 5):
+    """
+    Safe singleton starter.
+    """
+    global _UNIFIED_REPORT_THREAD
+
+    try:
+        if _UNIFIED_REPORT_THREAD and _UNIFIED_REPORT_THREAD.is_alive():
+            return
+    except Exception:
+        pass
+
+    t = threading.Thread(
+        target=_unified_report_loop,
+        args=(interval_s,),
+        name="UnifiedReporter",
+        daemon=True,
+    )
+    _UNIFIED_REPORT_THREAD = t
+    t.start()
+
+    print(f"[UNIFIED] reporter started (interval={interval_s}s)")

@@ -342,41 +342,35 @@ class BusRouteSnapshot:
         con.row_factory = sqlite3.Row
 
         try:
+            # --------------------------------------------------
+            # Canonical 5-market selection (DB-authoritative)
+            # --------------------------------------------------
+
             rows = con.execute("""
+                WITH runner_counts AS (
+                    SELECT
+                        marketId,
+                        marketStartTime,
+                        COUNT(*) AS runner_count
+                    FROM bets
+                    WHERE date(marketStartTime) = date('now','utc')
+                    GROUP BY marketId, marketStartTime
+                )
                 SELECT
                     marketId,
                     marketStartTime
-                FROM bets
-                WHERE date(marketStartTime)=date('now','utc')
+                FROM runner_counts
+                WHERE runner_count >= 6
+                  AND datetime(marketStartTime) >= datetime('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
-            """).fetchall()
-        finally:
-            con.close()
+                LIMIT ?
+            """, (ROUTE_MARKET_COUNT,)).fetchall()
 
-        if not rows:
-            self.runner_pool = []
-            return
+            if not rows:
+                self.runner_pool = []
+                return
 
-        # --------------------------------------------------
-        # Filter markets that have not yet gone off
-        # --------------------------------------------------
-        upcoming = []
-
-        for r in rows:
-            try:
-                off_dt = datetime.fromisoformat(
-                    r["marketStartTime"].replace("Z", "+00:00")
-                )
-            except Exception:
-                continue
-
-            if off_dt >= now:
-                upcoming.append(str(r["marketId"]))
-
-        # --------------------------------------------------
-        # Take next N markets
-        # --------------------------------------------------
-        selected_mids = upcoming[:ROUTE_MARKET_COUNT]
+            selected_mids = [str(r["marketId"]) for r in rows]
 
         # --------------------------------------------------
         # Build ordered runner pool
