@@ -2742,10 +2742,27 @@ class DecisionBus:
     # TICK — authoritative BUS lifecycle (route → ctx → lanes)
     # ======================================================================
     def tick(self):
+
+        # --------------------------------------------------
+        # Ensure snapshot exists (first tick safety)
+        # --------------------------------------------------
+        if self._route_snapshot is None:
+            self._route_snapshot = BusRouteSnapshot()
+            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
         # ===============================================================
         # 0️⃣ BUS IDENTITY
         # ===============================================================
         self.tick_id += 1
+        # Increment bus stop manually
+        self._bus_stop += 1
+        if self._bus_stop > 10:
+            self._bus_stop = 1
+            self._route_id += 1
+
+            # Rebuild route cleanly
+            self._route_snapshot.build_route()
+            self._route_snapshot.refresh_ctx_dynamic_fields()
+            print("[BUS][ROUTE] rebuilt at boundary")
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: inside def tick(self): immediately after self.tick_id += 1
@@ -2979,52 +2996,12 @@ class DecisionBus:
 
             self._route_initialised = True
             print("[BUS][ROUTE] initial route built")
-        # --------------------------------------------------
-        # DERIVE ROUTE + BUS STOP FROM TICK (AUTHORITATIVE)
-        # --------------------------------------------------
-        self._route_id = ((self.tick_id - 1) // 10) + 1
-        self._bus_stop = ((self.tick_id - 1) % 10) + 1
+
 
         # --------------------------------------------------
         # ROUTE BUILD — ONLY AT ROUTE BOUNDARY
         # --------------------------------------------------
-        # ======================================================================================================
-        # 📍 TARGET: engines/bus/bus.py
-        # 🔎 ANCHOR: inside def tick(self): route management section
-        # 🧩 ACTION: PRE-BUILD NEXT ROUTE AT BUS STOP 7
-        # 📆 PATCHED: 2026-04-12 — Non-blocking route rollover
-        #
-        # MODEL:
-        # - Route runs for 10 bus stops
-        # - At bus_stop 7, we build next route in advance
-        # - At bus_stop 1, we simply switch snapshot reference
-        # - No blocking build at route boundary
-        #
-        # INVARIANT:
-        # - Route build NEVER occurs at bus_stop 1
-        # - Route build NEVER blocks first tick of cycle
-        # ======================================================================================================
 
-        # --------------------------------------------------
-        # PRE-BUILD NEXT ROUTE (DELEGATED TO SNAPSHOT)
-        # --------------------------------------------------
-        if self._bus_stop == 7:
-            try:
-                self._route_snapshot.prepare_next_route()
-                self._print_window_snapshot("PREBUILD @ STOP 7")
-                print("[BUS][ROUTE] prebuild delegated to snapshot")
-            except Exception:
-                pass
-
-        # --------------------------------------------------
-        # ROUTE SWITCH (DELEGATED TO SNAPSHOT)
-        # --------------------------------------------------
-        if self._bus_stop == 1:
-            try:
-                self._route_snapshot.activate_next_route()
-                print("[BUS][ROUTE] activated prebuilt route")
-            except Exception:
-                pass
 
 
         # --------------------------------------------------
@@ -4564,8 +4541,9 @@ def _write_unified_runtime_snapshot():
             directional_bias,
             imbalance_level,
 
+
             1 if inplay else 0,
-            float(inplay["confidence"]) if inplay and "confidence" in inplay.keys() else 0.0
+            float(inplay["inplay_confidence"]) if inplay and "inplay_confidence" in inplay.keys() else 0.0
         ))
 
         con.close()

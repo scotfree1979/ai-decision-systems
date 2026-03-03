@@ -7281,7 +7281,7 @@ def start_router_child_worker():
 
 def _ensure_router_runtime_schema():
     import sqlite3
-    ffrom engines.config_paths import open_auto_db
+    from engines.config_paths import open_auto_db
 
     con = open_auto_db(rw=True)
     con.execute("""
