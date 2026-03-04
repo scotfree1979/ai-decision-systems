@@ -99,14 +99,18 @@ class UnifiedEngine:
             "report": full_report,
         }
 
+
+
     # --------------------------------------------------------------------------------------------------
     # SNAPSHOT READER (UNIFIED RUNTIME AUTHORITY)
     # --------------------------------------------------------------------------------------------------
 
     def _read_unified_snapshot(self) -> Dict[str, Any]:
         from engines.config_paths import open_auto_db
+        import sqlite3
 
         con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
 
         try:
             row = con.execute("""
@@ -115,14 +119,14 @@ class UnifiedEngine:
                 ORDER BY ts DESC
                 LIMIT 1
             """).fetchone()
+
+            if not row:
+                return {}
+
+            return dict(row)
+
         finally:
             con.close()
-
-        if not row:
-            return {}
-
-        columns = [c[0] for c in con.description] if con.description else []
-        return dict(zip(columns, row)) if columns else {}
 
     # --------------------------------------------------------------------------------------------------
     # MARKET NAME MAP (BETS AUTHORITY)
@@ -174,103 +178,298 @@ class UnifiedEngine:
         return out
 
     # --------------------------------------------------------------------------------------------------
-    # V7 REPORT BUILDER (SNAPSHOT-DRIVEN)
+    # BUILD RUNTIME CTX
+    # --------------------------------------------------------------------------------------------------
+
+    def _build_runtime_ctx_map(self) -> dict:
+
+        from engines.bus_route import BusRouteSnapshot
+
+        snapshot = BusRouteSnapshot()
+        snapshot.build_route()
+        snapshot.refresh_ctx_dynamic_fields()
+
+        return snapshot.get_ctx_map() or {}
+
+    # --------------------------------------------------------------------------------------------------
+    # V7 REPORT BUILDER — SPEC LOCKED
     # --------------------------------------------------------------------------------------------------
 
     def _build_v7_report(self, ctx: Dict[str, Any], tick_delta: float) -> Dict[str, Any]:
 
-        snap = self._read_unified_snapshot()
+        # 1️⃣ SYSTEM SNAPSHOT (BUS awareness only)
+        system_snapshot = self._read_unified_snapshot()
+
+        # 2️⃣ STRUCTURAL WORLD (self-built, authoritative)
+        self._route_ctx_map = self._build_runtime_ctx_map()
 
         report = {
-            "timing": self._build_timing_surface(snap),
-            "drift": self._build_drift_surface(snap),
-            "rank": self._build_rank_surface(snap),
-            "sweet_spot": self._build_sweet_spot_surface(snap),
-            "volatility": self._build_volatility_surface(snap),
-            "execution": self._build_execution_surface(snap),
-            "liability": self._build_liability_surface(snap),
-            "capital": self._build_capital_surface(snap),
-            "stop": self._build_stop_surface(snap),
-            "classification": self._build_classification_surface(snap),
-            "temporal": self._build_temporal_surface(snap),
-            "cadence": {
-                "tick_delta_sec": tick_delta,
-            },
+            "world": self._build_world_surface(),
+
+            # Structural authority panels
+            "timing": self._build_timing_surface(),
+            "drift": self._build_drift_surface(),
+            "rank": self._build_rank_surface(),
+            "sweet_spot": self._build_sweet_spot_surface(),
+            "volatility": self._build_volatility_surface(),
+
+            # Execution / capital authority panels
+            "execution": self._build_execution_surface(),
+            "liability": self._build_liability_surface(),
+            "capital": self._build_capital_surface(system_snapshot),
+            "stop": self._build_stop_surface(system_snapshot),
+
+            # Internal classification & trade memory
+            "classification": self._build_classification_surface(),
+            "temporal": self._build_temporal_surface(),
         }
 
         return report
+
+    def _build_world_surface(self) -> Dict[str, Any]:
+        from datetime import datetime, timezone
+
+        return {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "engine_state": "CLASSIFICATION_ONLY",
+            "plans_emitted": 0,
+        }
 
     # --------------------------------------------------------------------------------------------------
     # SECTION A — MARKET PHASE + RAW VOLATILITY
     # --------------------------------------------------------------------------------------------------
 
-    def _build_timing_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "route_id": snap.get("route_id"),
-            "bus_stop": snap.get("bus_stop"),
-            "tick_id": snap.get("tick_id"),
-            "hz": snap.get("hz"),
-        }
+    def _build_timing_surface(self) -> Dict[str, Any]:
+
+        from engines.config_paths import open_bets_db
+        from datetime import datetime, timezone
+        import sqlite3
+
+        con = open_bets_db(rw=False)
+        con.row_factory = sqlite3.Row
+        now = datetime.now(timezone.utc)
+
+        try:
+            rows = con.execute("""
+                SELECT marketId, event_name, marketStartTime
+                FROM bets
+                WHERE substr(marketStartTime,1,10)=date('now','utc')
+                ORDER BY datetime(marketStartTime) ASC
+                LIMIT 5
+            """).fetchall()
+        finally:
+            con.close()
+
+        markets = []
+
+        for r in rows:
+            off = datetime.fromisoformat(
+                r["marketStartTime"].replace("Z", "+00:00")
+            )
+
+            delta = (off - now).total_seconds()
+
+            markets.append({
+                "marketId": r["marketId"],
+                "event_name": r["event_name"],
+                "scheduled_off": off.isoformat(),
+                "tto_seconds": int(delta),
+                "post_zero_elapsed": abs(int(delta)) if delta <= 0 else 0,
+                "phase": "LIVE_PHASE" if delta <= 300 else "PRE",
+            })
+
+        return {"markets": markets}
 
     # --------------------------------------------------------------------------------------------------
     # RAW VOLATILITY PER-TICK EXPOSURE (MONITOR-AUTHORITATIVE)
     # --------------------------------------------------------------------------------------------------
 
-    def _build_volatility_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_volatility_surface(self) -> Dict[str, Any]:
+
+        from tools.betfair_runner_trend_surface import get_runner_trend
+
+        moved = 0
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+            trend = get_runner_trend(mid, sid)
+            if trend and abs(trend.get("ticks_moved") or 0) >= 1:
+                moved += 1
+
+        impulse = moved >= 3
+
         return {
-            "inplay_active": snap.get("inplay_active", 0),
-            "inplay_confidence": snap.get("inplay_confidence", 0.0),
+            "runners_moved_last_window": moved,
+            "impulse_detected": impulse,
+            "structural_energy": "SPIKE" if impulse else "LOW",
         }
 
     # --------------------------------------------------------------------------------------------------
     # SECTION B — DRIFT SURFACE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_drift_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "directional_bias": snap.get("directional_bias"),
-            "imbalance_level": snap.get("imbalance_level"),
-        }
+    def _build_drift_surface(self) -> Dict[str, Any]:
+
+        from tools.betfair_runner_trend_surface import get_runner_trend
+
+        runners = []
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            trend = get_runner_trend(mid, sid)
+            if not trend:
+                continue
+
+            runners.append({
+                "marketId": mid,
+                "selectionId": sid,
+                "px": ctx.get("px"),
+                "delta_ticks": trend.get("ticks_moved"),
+                "delta_ticks_per_min": trend.get("ticks_per_min"),
+                "drift_direction": trend.get("direction"),
+            })
+
+        return {"runners": runners}
 
     # --------------------------------------------------------------------------------------------------
     # SECTION C — RANK / CROSSOVER SURFACE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_rank_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "parents_open": snap.get("parents_open"),
-            "children_open": snap.get("children_open"),
-            "children_matched": snap.get("children_matched"),
-        }
+    def _build_rank_surface(self) -> Dict[str, Any]:
+
+        from engines.market_monitor.monitor import get_crossover_signal
+
+        runners = []
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            xo = get_crossover_signal(mid, sid)
+
+            runners.append({
+                "marketId": mid,
+                "selectionId": sid,
+                "previous_rank": xo.get("rank_prev"),
+                "current_rank": xo.get("rank_now"),
+                "rank_delta": xo.get("rank_delta"),
+                "crossed_over": xo.get("crossed_over_recent"),
+            })
+
+        return {"runners": runners}
 
     # --------------------------------------------------------------------------------------------------
     # SECTION D — SWEET SPOT SURFACE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_sweet_spot_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "utilisation_pct": snap.get("utilisation_pct"),
-            "headroom": snap.get("headroom"),
-        }
+    def _build_sweet_spot_surface(self) -> Dict[str, Any]:
+
+        runners = []
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            px = ctx.get("px")
+            if px is None:
+                continue
+
+            if 4 <= px <= 7:
+                zone = "4-7"
+            elif 7 < px <= 10:
+                zone = "7-10"
+            elif px == 12:
+                zone = "12"
+            elif 15 <= px <= 20:
+                zone = "15-20"
+            else:
+                zone = "OUT"
+
+            runners.append({
+                "marketId": mid,
+                "selectionId": sid,
+                "px": px,
+                "zone": zone,
+            })
+
+        return {"runners": runners}
+
 
     # --------------------------------------------------------------------------------------------------
     # SECTION E — EXECUTION SURFACE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_execution_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_execution_surface(self) -> Dict[str, Any]:
+
+        from tools.betfair_match_surface import get_direction_confidence
+
+        parent_matched = 0
+        child_matched = 0
+        direction_conf_total = 0
+        direction_conf_count = 0
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            if ctx.get("anchor_parent_id"):
+                parent_matched += 1
+
+            # Direction confidence must be per-runner
+            try:
+                conf = get_direction_confidence(mid, sid)
+                if conf is not None:
+                    direction_conf_total += conf
+                    direction_conf_count += 1
+            except Exception:
+                pass
+
+        avg_conf = (
+            round(direction_conf_total / direction_conf_count, 2)
+            if direction_conf_count > 0
+            else 0
+        )
+
         return {
-            "fill_rate": snap.get("fill_rate"),
+            "parent_matched_count": parent_matched,
+            "child_matched_count": child_matched,
+            "direction_confidence": avg_conf,
         }
 
     # --------------------------------------------------------------------------------------------------
     # SECTION F — LIABILITY SURFACE (EXCHANGE TRUTH)
     # --------------------------------------------------------------------------------------------------
 
-    def _build_liability_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_liability_surface(self) -> Dict[str, Any]:
+
+        from engines.live.bank_state import _compute_market_floor_from_betfair_surface
+
+        floor_rows = _compute_market_floor_from_betfair_surface()
+
+        if not floor_rows:
+            return {
+                "worst_case_liability": 0.0,
+                "most_exposed_runner": None,
+                "directional_bias": "NONE",
+                "imbalance_level": "NONE",
+            }
+
+        # Worst market exposure
+        worst = max(
+            floor_rows,
+            key=lambda r: float(r.get("true_market_exposure") or 0.0)
+        )
+
+        worst_case = float(worst.get("true_market_exposure") or 0.0)
+
+        # Imbalance classification (simple exposure tiering)
+        if worst_case > 1000:
+            imbalance = "HIGH"
+        elif worst_case > 200:
+            imbalance = "MODERATE"
+        elif worst_case > 0:
+            imbalance = "LOW"
+        else:
+            imbalance = "NONE"
+
         return {
-            "worst_case_liability": snap.get("worst_case_liability"),
-            "directional_bias": snap.get("directional_bias"),
-            "imbalance_level": snap.get("imbalance_level"),
+            "worst_case_liability": worst_case,
+            "most_exposed_runner": worst.get("marketId"),
+            "directional_bias": "NEUTRAL",
+            "imbalance_level": imbalance,
         }
 
     # --------------------------------------------------------------------------------------------------
@@ -278,6 +477,7 @@ class UnifiedEngine:
     # --------------------------------------------------------------------------------------------------
 
     def _build_capital_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+
         return {
             "total_pot": snap.get("total_pot"),
             "total_floor": snap.get("total_floor"),
@@ -430,26 +630,47 @@ class UnifiedEngine:
     # SECTION I — CLASSIFICATION SURFACE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_classification_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "system_mode": (
-                "INPLAY" if snap.get("inplay_active")
-                else "BALANCED"
-            ),
-            "bias": snap.get("directional_bias"),
-            "pressure": snap.get("imbalance_level"),
+    def _build_classification_surface(self) -> Dict[str, Any]:
+
+        buckets = {
+            "PRIMED": 0,
+            "BUILDING": 0,
+            "CONTEXT_ACTIVE": 0,
+            "INACTIVE": 0,
         }
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+            if ctx.get("direction"):
+                buckets["PRIMED"] += 1
+            else:
+                buckets["INACTIVE"] += 1
+
+        return buckets
 
     # --------------------------------------------------------------------------------------------------
     # SECTION J — TEMPORAL SURFACE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_temporal_surface(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "route_id": snap.get("route_id"),
-            "bus_stop": snap.get("bus_stop"),
-            "tick_id": snap.get("tick_id"),
-        }
+    def _build_temporal_surface(self) -> Dict[str, Any]:
+
+        trades = []
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            if not ctx.get("anchor_parent_id"):
+                continue
+
+            trades.append({
+                "marketId": mid,
+                "selectionId": sid,
+                "entry_odds": ctx.get("anchor_entry_odds"),
+                "current_odds": ctx.get("px"),
+                "delta_ticks": None,
+                "duration_seconds": None,
+                "status": "OPEN",
+            })
+
+        return {"active_parents": trades}
 
     # --------------------------------------------------------------------------------------------------
     # SIGNAL SUMMARY (BUS Y TABLE)
@@ -477,170 +698,95 @@ class UnifiedEngine:
     # --------------------------------------------------------------------------------------------------
 
     def print_v7_report(self, report: Dict[str, Any]) -> None:
-        """
-        V7 Unified Visual Report.
-        Snapshot compatible.
-        Phase-0 safe.
-        Fully defensive.
-        """
 
-        # ANSI colours
-        RESET   = "\033[0m"
-        GREEN   = "\033[92m"
-        RED     = "\033[91m"
-        YELLOW  = "\033[93m"
-        CYAN    = "\033[96m"
-        MAGENTA = "\033[95m"
-        BOLD    = "\033[1m"
+        RESET = "\033[0m"
+        CYAN  = "\033[96m"
+        BOLD  = "\033[1m"
 
+        world  = report.get("world", {})
         timing = report.get("timing", {})
+        drift  = report.get("drift", {})
+        rank   = report.get("rank", {})
+        sweet  = report.get("sweet_spot", {})
         vol    = report.get("volatility", {})
+        exec_s = report.get("execution", {})
         liab   = report.get("liability", {})
         cap    = report.get("capital", {})
         stop   = report.get("stop", {})
-        exec_s = report.get("execution", {})
         cls    = report.get("classification", {})
-
-        inplay_active = bool(vol.get("inplay_active", 0))
-
-        # --------------------------------------------------
-        # Phase colour
-        # --------------------------------------------------
-        if inplay_active:
-            phase_colour = RED
-            phase_label  = "IN-PLAY"
-        else:
-            phase_colour = GREEN
-            phase_label  = "PRE-MARKET"
+        temp   = report.get("temporal", {})
 
         print()
         print("══════════════════════════════════════════════════════════════")
         print(f"{BOLD}{CYAN}UNIFIED ENGINE V7 REPORT{RESET}")
         print("══════════════════════════════════════════════════════════════")
 
-        # --------------------------------------------------
+        # WORLD
+        print("\n[WORLD]")
+        print(f"  Timestamp UTC  : {world.get('timestamp_utc')}")
+        print(f"  Engine State   : {world.get('engine_state')}")
+        print(f"  Plans Emitted  : {world.get('plans_emitted')}")
+
         # TIMING
-        # --------------------------------------------------
-        print(f"\n{BOLD}[TIMING]{RESET}")
-        print(f"  Route        : {timing.get('route_id')}")
-        print(f"  Bus Stop     : {timing.get('bus_stop')}")
-        print(f"  Tick         : {timing.get('tick_id')}")
-        print(f"  Hz           : {timing.get('hz')}")
-        print(f"  Tick Δ       : {report.get('cadence', {}).get('tick_delta_sec')}")
-        print(f"  Phase        : {phase_colour}{phase_label}{RESET}")
+        print("\n[TIMING]")
+        for m in timing.get("markets", []):
+            print(f"  {m.get('event_name')} | TTO={m.get('tto_seconds')}s | Phase={m.get('phase')}")
 
-        if inplay_active:
-            print(f"  {RED}>>> LIVE TRADING ZONE ACTIVE <<<{RESET}")
+        # DRIFT
+        print("\n[DRIFT SURFACE]")
+        for r in drift.get("runners", []):
+            print(f"  {r['marketId']}:{r['selectionId']} Δ={r.get('delta_ticks')} dir={r.get('drift_direction')}")
 
-        # --------------------------------------------------
+        # RANK
+        print("\n[RANK / CROSSOVER]")
+        for r in rank.get("runners", []):
+            print(f"  {r['marketId']}:{r['selectionId']} Δrank={r.get('rank_delta')} crossed={r.get('crossed_over')}")
+
+        # SWEET SPOT
+        print("\n[SWEET SPOT]")
+        for r in sweet.get("runners", []):
+            print(f"  {r['marketId']}:{r['selectionId']} zone={r.get('zone')}")
+
+        # VOLATILITY
+        print("\n[VOLATILITY]")
+        print(f"  Moved: {vol.get('runners_moved_last_window')}")
+        print(f"  Impulse: {vol.get('impulse_detected')}")
+        print(f"  Energy: {vol.get('structural_energy')}")
+
         # EXECUTION
-        # --------------------------------------------------
-        print(f"\n{BOLD}[EXECUTION]{RESET}")
+        print("\n[EXECUTION]")
+        print(f"  Parents Matched : {exec_s.get('parent_matched_count')}")
+        print(f"  Children Matched: {exec_s.get('child_matched_count')}")
+        print(f"  Direction Conf  : {exec_s.get('direction_confidence')}")
 
-        fill_rate = exec_s.get("fill_rate") or 0
-
-        if fill_rate >= 75:
-            fill_colour = GREEN
-        elif fill_rate >= 40:
-            fill_colour = YELLOW
-        else:
-            fill_colour = RED
-
-        print(f"  Fill Rate    : {fill_colour}{fill_rate}%{RESET}")
-
-        # --------------------------------------------------
         # LIABILITY
-        # --------------------------------------------------
-        print(f"\n{BOLD}[LIABILITY]{RESET}")
+        print("\n[LIABILITY]")
+        print(f"  Worst Case : {liab.get('worst_case_liability')}")
+        print(f"  Exposed    : {liab.get('most_exposed_runner')}")
+        print(f"  Bias       : {liab.get('directional_bias')}")
 
-        worst      = liab.get("worst_case_liability") or 0
-        bias       = liab.get("directional_bias")
-        imbalance  = liab.get("imbalance_level")
-
-        if worst > 1000:
-            liab_colour = RED
-        elif worst > 200:
-            liab_colour = YELLOW
-        else:
-            liab_colour = GREEN
-
-        print(f"  Worst Case   : {liab_colour}{worst}{RESET}")
-        print(f"  Bias         : {bias}")
-        print(f"  Imbalance    : {imbalance}")
-
-        # Pressure Gauge
-        pressure_map = {
-            "NONE":      "▁▁▁▁▁",
-            "LOW":       "▂▂▁▁▁",
-            "MODERATE":  "▃▃▃▁▁",
-            "HIGH":      "▅▅▅▅▅",
-        }
-
-        gauge = pressure_map.get(imbalance, "▁▁▁▁▁")
-        print(f"  Pressure     : {gauge}")
-
-        # --------------------------------------------------
         # CAPITAL
-        # --------------------------------------------------
-        print(f"\n{BOLD}[CAPITAL]{RESET}")
+        print("\n[CAPITAL]")
+        print(f"  Pot       : {cap.get('total_pot')}")
+        print(f"  Floor     : {cap.get('total_floor')}")
+        print(f"  Reserved  : {cap.get('total_reserved')}")
+        print(f"  Headroom  : {cap.get('headroom')}")
+        print(f"  Utilisation: {cap.get('utilisation_pct')}")
 
-        util = cap.get("utilisation_pct") or 0
+        # STOP
+        print("\n[STOP SURFACE]")
+        print(f"  Reviewed : {stop.get('parents_reviewed')}")
+        print(f"  Triggered: {stop.get('stops_triggered')}")
 
-        if util >= 80:
-            util_colour = RED
-        elif util >= 50:
-            util_colour = YELLOW
-        else:
-            util_colour = GREEN
-
-        print(f"  Total Pot    : {cap.get('total_pot')}")
-        print(f"  Floor        : {cap.get('total_floor')}")
-        print(f"  Reserved     : {cap.get('total_reserved')}")
-        print(f"  Headroom     : {cap.get('headroom')}")
-        print(f"  Utilisation  : {util_colour}{util}%{RESET}")
-
-        if util >= 80:
-            print(f"  {RED}>>> CAPITAL STRESS WARNING <<<{RESET}")
-
-        # --------------------------------------------------
-        # STOP SYSTEM
-        # --------------------------------------------------
-        print(f"\n{BOLD}[STOP SYSTEM]{RESET}")
-
-        parents_reviewed = stop.get("parents_reviewed") or 0
-        stops_triggered  = stop.get("stops_triggered") or 0
-
-        stop_colour = RED if stops_triggered > 0 else GREEN
-
-        print(f"  Parents Reviewed : {parents_reviewed}")
-        print(f"  Stops Triggered  : {stop_colour}{stops_triggered}{RESET}")
-
-        # Engine distribution
-        by_engine = stop.get("by_engine") or {}
-        for eng, count in by_engine.items():
-            print(f"    {eng:<18} : {count}")
-
-        # TS classification breakdown
-        ts_pos = 0
-        ts_neg = 0
-
-        for r in stop.get("rows", []):
-            if r.get("classification") == "TS-POS":
-                ts_pos += 1
-            elif r.get("classification") == "TS-NEG":
-                ts_neg += 1
-
-        if ts_pos or ts_neg:
-            print(f"  TS-POS        : {GREEN}{ts_pos}{RESET}")
-            print(f"  TS-NEG        : {RED}{ts_neg}{RESET}")
-
-        # --------------------------------------------------
         # CLASSIFICATION
-        # --------------------------------------------------
-        print(f"\n{BOLD}[CLASSIFICATION]{RESET}")
-        print(f"  Mode         : {cls.get('system_mode')}")
-        print(f"  Bias         : {cls.get('bias')}")
-        print(f"  Pressure     : {cls.get('pressure')}")
+        print("\n[CLASSIFICATION BUCKETS]")
+        for k, v in cls.items():
+            print(f"  {k}: {v}")
+
+        # TEMPORAL
+        print("\n[TEMPORAL TRADE SURFACE]")
+        for t in temp.get("active_parents", []):
+            print(f"  {t['marketId']}:{t['selectionId']} entry={t.get('entry_odds')} current={t.get('current_odds')}")
 
         print("\n══════════════════════════════════════════════════════════════\n")
 
@@ -664,34 +810,25 @@ _UNIFIED_REPORT_THREAD = None
 
 def _unified_report_loop(interval_s: int = 5):
     """
-    Periodically prints latest unified V7 snapshot.
-    Snapshot is authoritative (DB-backed).
+    Periodically prints the formatted V7 Unified Report.
+    Uses engine report builder — NOT raw DB dump.
     """
-    from engines.config_paths import autoscalp_db
-    import sqlite3
+
+    engine = UnifiedEngine()
 
     while True:
         try:
-            con = sqlite3.connect(autoscalp_db())
-            con.row_factory = sqlite3.Row
+            # Build report from latest snapshot
+            report = engine._build_v7_report(
+                ctx={}, 
+                tick_delta=None
+            )
 
-            row = con.execute("""
-                SELECT *
-                FROM unified_runtime_snapshot
-                ORDER BY ts DESC
-                LIMIT 1
-            """).fetchone()
+            # Print formatted V7 block
+            engine.print_v7_report(report)
 
-            con.close()
-
-            if row:
-                print("\n**************** UNIFIED STAR LOOP ****************")
-                for k in row.keys():
-                    print(f"{k:<24}: {row[k]}")
-                print("***************************************************\n")
-
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UNIFIED][ERR] reporter loop failed: {e}")
 
         time.sleep(max(1, int(interval_s)))
 
@@ -718,3 +855,31 @@ def start_unified_reporter(interval_s: int = 5):
     t.start()
 
     print(f"[UNIFIED] reporter started (interval={interval_s}s)")
+
+# ======================================================================================================
+# 📍 STANDALONE RUNNER
+# 🧩 PURPOSE:
+# - Allow unified engine to run independently
+# - Prints V7 report every 5 seconds
+# - No BUS required
+# ======================================================================================================
+
+if __name__ == "__main__":
+
+    print("\n[UNIFIED] Standalone mode starting...\n")
+
+    engine = UnifiedEngine()
+
+    while True:
+        try:
+            report = engine._build_v7_report(
+                ctx={},
+                tick_delta=None
+            )
+
+            engine.print_v7_report(report)
+
+        except Exception as e:
+            print(f"[UNIFIED][ERR] standalone failed: {e}")
+
+        time.sleep(5)

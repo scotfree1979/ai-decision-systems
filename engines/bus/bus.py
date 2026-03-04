@@ -2756,14 +2756,23 @@ class DecisionBus:
         self.tick_id += 1
         # Increment bus stop manually
         self._bus_stop += 1
+        # ===============================================================
+        # ROUTE BOUNDARY — REBUILD IDENTITY, PRESERVE CTX
+        # ===============================================================
         if self._bus_stop > 10:
             self._bus_stop = 1
             self._route_id += 1
 
-            # Rebuild route cleanly
+            # 🔁 Rebuild route identity only (preserve CTX)
             self._route_snapshot.build_route()
+
+            # Re-partition stops explicitly
+            self._route_snapshot.partition_into_bus_stops()
+
+            # Refresh PX for new identity
             self._route_snapshot.refresh_ctx_dynamic_fields()
-            print("[BUS][ROUTE] rebuilt at boundary")
+
+            print("[BUS][ROUTE] rebuilt (identity refreshed, CTX preserved)")
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: inside def tick(self): immediately after self.tick_id += 1
@@ -4448,19 +4457,20 @@ def _write_unified_runtime_snapshot():
             LIMIT 1
         """).fetchone()
 
+
         # --------------------------------------------------
-        # BANKSTATE ENGINE SNAPSHOT (sum floors)
+        # BANKSTATE RUNTIME SNAPSHOT (REAL SCHEMA)
         # --------------------------------------------------
-        bank_eng = con.execute("""
-            SELECT
-                SUM(floor)  AS total_floor,
-                SUM(reserved) AS total_reserved
-            FROM bankstate_engine_snapshot
-            WHERE ts = (
-                SELECT MAX(ts)
-                FROM bankstate_engine_snapshot
-            )
-        """).fetchone()
+        total_pot = float(bank_rt["total_pot"] or 0) if bank_rt else 0.0
+        total_used = float(bank_rt["total_used"] or 0) if bank_rt else 0.0
+        total_available = float(bank_rt["total_available"] or 0) if bank_rt else 0.0
+
+        # Unified interpretation
+        total_floor = total_used
+        total_reserved = total_used  # or keep 0 if you want strict separation
+        headroom = total_available
+
+        utilisation = (total_used / total_pot * 100.0) if total_pot > 0 else 0.0
 
         # --------------------------------------------------
         # LIABILITY (exchange truth)
@@ -4483,14 +4493,39 @@ def _write_unified_runtime_snapshot():
         """).fetchone()
 
         # --------------------------------------------------
-        # DERIVED FIELDS
+        # DERIVED FIELDS (MATCH DASHBOARD LOGIC)
         # --------------------------------------------------
-        total_pot = float(bank_rt["total_pot"] or 0) if bank_rt else 0.0
-        total_floor = float(bank_eng["total_floor"] or 0) if bank_eng else 0.0
-        total_reserved = float(bank_eng["total_reserved"] or 0) if bank_eng else 0.0
 
+        # 1️⃣ Total pot from runtime snapshot
+        total_pot = float(bank_rt["total_pot"] or 0) if bank_rt else 0.0
+
+        # 2️⃣ Matched floor from engine snapshot (authoritative)
+        engine_rows = con.execute("""
+            SELECT floor
+            FROM bankstate_engine_snapshot
+            WHERE ts = (
+                SELECT MAX(ts)
+                FROM bankstate_engine_snapshot
+            )
+        """).fetchall()
+
+        total_floor = sum(float(r["floor"] or 0) for r in engine_rows)
+
+        # 3️⃣ Reserved = unmatched from engine snapshot
+        engine_unmatched = con.execute("""
+            SELECT unmatched
+            FROM bankstate_engine_snapshot
+            WHERE ts = (
+                SELECT MAX(ts)
+                FROM bankstate_engine_snapshot
+            )
+        """).fetchall()
+
+        total_reserved = sum(float(r["unmatched"] or 0) for r in engine_unmatched)
+
+        # 4️⃣ Headroom & utilisation
         headroom = total_pot - total_floor
-        utilisation = (total_floor / total_pot * 100) if total_pot > 0 else 0.0
+        utilisation = (total_floor / total_pot * 100.0) if total_pot > 0 else 0.0
 
         worst_case_liability = float(liab["total_matched"] or 0) if liab else 0.0
 
@@ -4506,11 +4541,51 @@ def _write_unified_runtime_snapshot():
             imbalance_level = "LOW"
 
         # --------------------------------------------------
+        # ROUTER SNAPSHOT (AGGREGATED)
+        # --------------------------------------------------
+        router_rows = con.execute("""
+            SELECT role,
+                   SUM(queued)    AS queued,
+                   SUM(placing)   AS placing,
+                   SUM(placed)    AS placed,
+                   SUM(matched)   AS matched,
+                   SUM(cancelled) AS cancelled,
+                   SUM(closed)    AS closed
+            FROM router_runtime_snapshot
+            WHERE ts = (
+                SELECT MAX(ts) FROM router_runtime_snapshot
+            )
+            GROUP BY role
+        """).fetchall()
+
+        parents_open = 0
+        children_open = 0
+        children_matched = 0
+
+        for r in router_rows:
+            role = r["role"]
+
+            open_count = (
+                (r["queued"] or 0)
+                + (r["placing"] or 0)
+                + (r["placed"] or 0)
+                + (r["matched"] or 0)
+            )
+
+            if role == "PARENT":
+                parents_open = open_count
+
+            elif role == "CHILD":
+                children_open = open_count
+                children_matched = r["matched"] or 0
+
+
+        # --------------------------------------------------
         # INSERT
         # --------------------------------------------------
         con.execute("""
             INSERT INTO unified_runtime_snapshot
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now(timezone.utc).isoformat(),
 
@@ -4520,9 +4595,9 @@ def _write_unified_runtime_snapshot():
             bus["hz"] if bus else None,
             bus["fill_rate"] if bus else None,
 
-            bank_rt["parents_opened"] if bank_rt else 0,
-            bank_rt["children_opened"] if bank_rt else 0,
-            bank_rt["children_matched"] if bank_rt else 0,
+            parents_open,
+            children_open,
+            children_matched,
 
             total_pot,
             total_floor,
@@ -4534,15 +4609,17 @@ def _write_unified_runtime_snapshot():
             directional_bias,
             imbalance_level,
 
-
             1 if inplay else 0,
-            float(inplay["inplay_confidence"]) if inplay and "inplay_confidence" in inplay.keys() else 0.0
+            float(inplay["confidence"]) if inplay and "confidence" in inplay.keys() else 0.0
         ))
 
+        con.commit()
         con.close()
 
-    except Exception:
-        pass
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print("[UNIFIED SNAPSHOT ERROR]", e)
 
 # Global BUS instance
 BUS = DecisionBus()

@@ -1153,6 +1153,8 @@ class DashboardView(ttk.Frame):
             con.close()
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print("Execution Intelligence Error:", e)
 
         # --- FORCE GEOMETRY REFRESH (prevents resize requirement) ---
