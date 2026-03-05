@@ -390,6 +390,26 @@ class BusRouteSnapshot:
         self.runner_pool = _build_runner_pool()
 
         # --------------------------------------------------
+        # EXECUTION WINDOW — FIRST 5 MARKETS ONLY
+        # --------------------------------------------------
+
+        window_mids = []
+        window_pairs = []
+
+        for mid, sid in self.runner_pool:
+
+            if mid not in window_mids:
+                if len(window_mids) >= 5:
+                    break
+                window_mids.append(mid)
+
+            window_pairs.append((mid, sid))
+
+        self.runner_pool = window_pairs
+
+        print(f"[BUS][WINDOW] markets_in_route={len(window_mids)} runners={len(self.runner_pool)}")
+
+        # --------------------------------------------------
         # Resolve session token ONCE for the entire route
         # --------------------------------------------------
         session_token = (

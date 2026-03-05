@@ -48,8 +48,8 @@ ENGINES = [
 BASELINE_PCT = {
     "MSC_UNIFIED":     0.40,  # New Primary engine (new dominant allocation)     
     "MSC_RISK":        0.30,  # Primary engine (dominant allocation)
-    "LEGACY":          0.05,  # Anchors only
-    "MSC_EXPLORATORY": 0.25,  # Reduced exploratory bleed
+    "LEGACY":          0.10,  # Anchors only
+    "MSC_EXPLORATORY": 0.20,  # Reduced exploratory bleed
     "MSC_INPLAY":      0.00,  # In-play ladder capital
     "OVERWATCHER":     0.00,  # Protective hedge
     "SAFETY_NET":      0.00,  # System safety buffer
@@ -70,7 +70,7 @@ FLOOR_PCT = {
 
 
 # Dynamic pool (total = 10% of daily allocation)
-DYNAMIC_POOL = 0.10
+DYNAMIC_POOL = 0.00
 
 # Exploratory ↔ Legacy performance bonus shift (0 → 10% max)
 _bonus_shift = 0   # increases/decreases by 1 step per rebalance
