@@ -577,6 +577,10 @@ class DecisionBus:
 # ======================================================================================================
 
         self._route_snapshot = None
+        # --------------------------------------------------
+        # Dashboard runner snapshot (read-only surface)
+        # --------------------------------------------------
+        self._runner_surface = []
 
 
 # ======================================================================================================
@@ -1186,7 +1190,7 @@ class DecisionBus:
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
-        self._route_ctx_map = self._route_snapshot.get_ctx_map()
+        ctx_map = self._route_ctx_map
 
         # ==================================================
         # 🔒 HARD PX INVARIANT (BUS AUTHORITY)
@@ -1195,20 +1199,23 @@ class DecisionBus:
 
         missing_px = [
             (mid, sid)
-            for (mid, sid), ctx in self._route_ctx_map.items()
-            if ctx.get("px") is None
+            for mid, sid in bus_stop_pairs
+            if ctx_map.get((mid, sid), {}).get("px") is None
         ]
 
         if missing_px:
             # One forced refresh pass
+            t0 = time.time()
             self._route_snapshot.refresh_ctx_dynamic_fields()
+            dt = time.time() - t0
             self._route_ctx_map = self._route_snapshot.get_ctx_map()
+            self._ctx_refresh_times.append(dt)
 
             # Re-check
             still_missing = [
                 (mid, sid)
-                for (mid, sid), ctx in self._route_ctx_map.items()
-                if ctx.get("px") is None
+                for mid, sid in bus_stop_pairs
+                if self._route_ctx_map.get((mid, sid), {}).get("px") is None
             ]
 
             if still_missing:
@@ -1223,12 +1230,17 @@ class DecisionBus:
         # 📆 PATCHED: 2026-02-07 — fix BUS ctx scoping bug
         # ============================================================================
 
-        for ctx in self._route_ctx_map.values():
-            _normalize_ctx_enums(ctx)
+        for mid, sid in bus_stop_pairs:
+            ctx = ctx_map.get((mid, sid))
+            if ctx:
+                _normalize_ctx_enums(ctx)
   
         from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 
-        for (mid, sid), ctx in self._route_ctx_map.items():
+        for mid, sid in bus_stop_pairs:
+            ctx = ctx_map.get((mid, sid))
+            if not ctx:
+                continue
             try:
                 dec = compute_msc_decision(ctx)
                 if isinstance(dec, dict):
@@ -2555,22 +2567,21 @@ class DecisionBus:
     def get_runner_ctx_snapshot(self):
         """
         Returns the full ctx_map surface for dashboard inspection.
-
-        Structure:
-            {(marketId, selectionId): ctx}
-
-        Contains:
-            px
-            odds
-            band
-            fav_rank
-            anchor fields
         """
-
         if not self._route_snapshot:
             return {}
 
-        return self._route_snapshot.get_ctx_map() or {}
+        return self._route_ctx_map
+
+    def get_runner_surface(self):
+        """
+        Read-only runner surface for dashboard.
+
+        Returns top runners for current BUS stop
+        with px + name already resolved.
+        """
+        return self._runner_surface or []
+
 
 # === PATCH END ==============================================================
     
@@ -2664,7 +2675,10 @@ class DecisionBus:
             # --------------------------------------------------
             # Refresh dynamic fields after hydration
             # --------------------------------------------------
+            t0 = time.time()
             self._route_snapshot.refresh_ctx_dynamic_fields()
+            dt = time.time() - t0
+            self._ctx_refresh_times.append(dt)
 
             print("[BUS][ROUTE] rebuilt + ctx world rehydrated")
 # ======================================================================================================
@@ -2855,8 +2869,11 @@ class DecisionBus:
         if not hasattr(self, "_route_initialised"):
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
+            t0 = time.time()
             self._route_snapshot.refresh_ctx_dynamic_fields()
+            dt = time.time() - t0
             self._print_window_snapshot("INITIAL BUILD")
+            self._ctx_refresh_times.append(dt)
 
             self._route_initialised = True
             print("[BUS][ROUTE] initial route built")
@@ -2877,7 +2894,9 @@ class DecisionBus:
         # --------------------------------------------------
         # REFRESH ODDS — EVERY TICK (AUTHORITATIVE)
         # --------------------------------------------------
-        dt = self._route_snapshot.refresh_ctx_dynamic_fields()
+        t0 = time.time()
+        self._route_snapshot.refresh_ctx_dynamic_fields()
+        dt = time.time() - t0
 
         # --------------------------------------------------
         # BIND CTX MAP (AUTHORITATIVE SNAPSHOT)
@@ -2887,8 +2906,10 @@ class DecisionBus:
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------
-        for ctx in self._route_ctx_map.values():
-            _normalize_ctx_enums(ctx)
+        for mid, sid in bus_stop_pairs:
+            ctx = self._route_ctx_map.get((mid, sid))
+            if ctx:
+                _normalize_ctx_enums(ctx)
 
         self._ctx_refresh_times.append(dt)
 
@@ -2930,6 +2951,32 @@ class DecisionBus:
 
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
         bus_stop_pairs = legacy_slice
+
+        # --------------------------------------------------
+        # Dashboard runner surface snapshot
+        # --------------------------------------------------
+        try:
+            ctx_map = self._route_ctx_map
+
+            surface = []
+
+            for mid, sid in bus_stop_pairs[:4]:
+                ctx = ctx_map.get((mid, sid))
+                if not ctx:
+                    continue
+
+                surface.append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "px": ctx.get("px"),
+                    "horse_name": ctx.get("horse_name"),
+                    "side": ctx.get("side"),
+                })
+
+            self._runner_surface = surface
+
+        except Exception:
+            self._runner_surface = []
 
         # ===============================================================
         # 7️⃣ AUTHORITATIVE PLAN GENERATION (LANES ONLY)
@@ -3957,7 +4004,7 @@ class DecisionBus:
             print(f"  Lane 2 (MSC_RISK)       : {lane_counts[2]}")
             print(f"  Lane 3 (MSC_INPLAY)     : {lane_counts[3]}")
             print(f"  Lane 4 (MSC_EXPLORATORY): {lane_counts[4]}")
-            print(f"  Lane 5 (OVERWATCHDER)   : {lane_counts[5]}")
+            print(f"  Lane 5 (OVERWATCHER)    : {lane_counts[5]}")
             print(f"  Lane 6 (DB CORRECTNESS) : {lane_counts[6]}")
             print(f"  Lane 7 (MSC_UNIFIED)    : {lane_counts[7]}")
 

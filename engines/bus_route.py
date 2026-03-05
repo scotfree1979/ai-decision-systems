@@ -716,12 +716,30 @@ class BusRouteSnapshot:
         return added
 
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def get_ctx_map(self)
+# 🛠 ACTION: return stable ctx map reference (no copy)
+# 📆 PATCHED: 2026-03-05 — remove per-tick ctx rebuild
+#
+# PURPOSE
+# - eliminate per-tick dictionary copy
+# - allow BUS to read route ctx directly
+# - major tick latency reduction
+# ==============================================================================
+
     def get_ctx_map(self):
         """
-        Authoritative CTX map for the entire route.
-        BUS must consume this directly.
+        Return authoritative CTX map.
+
+        IMPORTANT
+        - No copy
+        - Stable reference
+        - Read-only contract for callers
         """
-        return self.ctx_map
+        return self._ctx_map
+
+# === PATCH END ==============================================================
 
 
     def get_bus_stop_pairs(self, tick: int):

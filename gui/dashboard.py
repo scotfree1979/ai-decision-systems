@@ -1056,29 +1056,20 @@ class DashboardView(ttk.Frame):
             bus_pairs = BUS.get_bus_stop_snapshot()[:4]
             ctx_map = BUS.get_runner_ctx_snapshot()
 
-            runners = []
-            for mid, sid in bus_pairs:
-                ctx = ctx_map.get((mid, sid), {})
-                runners.append({
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "px": ctx.get("px"),
-                    "side": ctx.get("side")
-                })
+            # === PATCH START ==============================================================
+            # 📍 TARGET: gui/dashboard.py
+            # 🔎 SEARCH: bus_pairs = BUS.get_bus_stop_snapshot()
+            # 🛠 ACTION: read next runners from RouteSnapshot (DB)
+            # PURPOSE:
+            # - dashboard must read execution state from DB, not BUS memory
+            # ==============================================================================
 
-# === PATCH END ================================================================
+            runners = BUS.get_runner_surface()
 
             for i, r in enumerate(runners):
 
-                name_row = con.execute("""
-                    SELECT horse_name, event_name
-                    FROM betsdb.bets
-                    WHERE marketId=? AND selectionId=?
-                    LIMIT 1
-                """, (r["marketId"], r["selectionId"])).fetchone()
-
-                horse = name_row["horse_name"] if name_row else r["selectionId"]
-                event = name_row["event_name"] if name_row else r["marketId"]
+                horse = r.get("horse_name") or r["selectionId"]
+                event = r["marketId"]
 
                 card = ttk.Frame(self.bus_runner_grid, padding=8, relief="ridge")
                 card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
@@ -1086,7 +1077,9 @@ class DashboardView(ttk.Frame):
                 ttk.Label(card, text=horse,
                           font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
                 ttk.Label(card, text=f"Market: {event}").pack(anchor="w")
-                ttk.Label(card, text=f"Side: {r['side']}").pack(anchor="w")
+                ttk.Label(card, text=f"Px: {r.get('px')}").pack(anchor="w")
+
+            # === PATCH END ================================================================
 
             # ─────────────────────────────────────────
             # INPLAY SNAPSHOT (Unified Authority)
@@ -1117,28 +1110,46 @@ class DashboardView(ttk.Frame):
                 )
                 self.inplay_state_vars["quartile"].set("Quartile: —")
 
-                if inplay_flag:
+                if race:
 
                     # Find the race closest to now
+                    # === PATCH START ==============================================================
+                    # 📍 TARGET: gui/dashboard.py
+                    # 🔎 SEARCH: Market: Unified Timing
+                    # 🛠 ACTION: show countdown to next race
+                    # PURPOSE:
+                    # - display upcoming race
+                    # - countdown timer until off
+                    # ==============================================================================
+
                     race = con.execute("""
-                        SELECT marketId, event_name, market_name
+                        SELECT marketId, event_name, market_name, marketStartTime
                         FROM betsdb.bets
-                        WHERE marketStartTime IS NOT NULL
-                        ORDER BY ABS(
-                            julianday(replace(marketStartTime,'T',' '))
-                            - julianday('now','utc')
-                        )
+                        WHERE marketStartTime > datetime('now','utc')
+                        ORDER BY marketStartTime ASC
                         LIMIT 1
                     """).fetchone()
 
                     if race:
 
-                        mid = race["marketId"]
+                        mto = minutes_to_off(race["marketStartTime"])
 
-                        # instant refresh when race changes
-                        if self._last_live_market != mid:
-                            self._last_live_market = mid
-                            self.after(10, self._refresh_execution_intelligence)
+                        mins = int(mto) if mto else 0
+                        secs = int((mto - mins) * 60) if mto else 0
+
+                        self.inplay_state_vars["market"].set(
+                            f"Market: {race['event_name']} {race['market_name']}"
+                        )
+
+                        self.inplay_state_vars["inplay"].set(
+                            f"Starts In: {mins}m {secs}s"
+                        )
+
+                        self.inplay_state_vars["confidence"].set(
+                            f"Confidence: {confidence:.2f}"
+                        )
+
+                    # === PATCH END ================================================================
 
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
