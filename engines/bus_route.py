@@ -386,16 +386,9 @@ class BusRouteSnapshot:
         # --------------------------------------------------
         # Build ordered runner pool
         # --------------------------------------------------
-        ordered = []
-
-        for mid in selected_mids:
-            st = get_market_state(mid) or {}
-            runners = st.get("runners") or {}
-
-            for sid in runners.keys():
-                ordered.append((str(mid), str(sid)))
 
         self.runner_pool = _build_runner_pool()
+
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
         # --------------------------------------------------
@@ -863,7 +856,7 @@ def _write_bus_route_snapshot(ctx_map):
 
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    con = connect_db(rw=True)
+    con = connect_db(ro=False)
 
     try:
         con.execute("""

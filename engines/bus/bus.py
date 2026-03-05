@@ -286,27 +286,6 @@ def _record_reason(engine_report: dict, engine: str, reason: str | None):
     reasons = eng.setdefault("reasons", {})
     reasons[reason] = reasons.get(reason, 0) + 1
 
-
-
-# NEW — minimal helper, lives inside DecisionBus
-
-def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
-    """
-    Build CTX ONCE per runner for this bus stop.
-    Returns: {(mid, sid): ctx}
-    """
-    ctxs = {}
-
-    for mid, sid in runner_pairs:
-        ctx = dict(self._route_ctx_map.get((mid, sid)))
-
-
-        if not ctx:
-            continue
-        ctxs[(mid, sid)] = ctx
-
-    return ctxs
-
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/bus_route.py
 # 🔎 SEARCH: def get_root_ctx_runner_pairs():
@@ -781,22 +760,6 @@ class DecisionBus:
         return True
 
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: class DecisionBus.__init__
-# 🧩 ACTION: ADD
-# 📆 PATCHED: 2026-03-10 — Cadence Controller initialisation
-# ======================================================================================================
-
-
-
-        # ------------------------------------------------------------------
-        # Cadence Controller (execution admission gate)
-        # ------------------------------------------------------------------
-        self._cadence = CadenceController()
-        self._route_id = 1          # starts at Route #1
-        self._bus_stop = 0          # increments per tick, resets at 10
-
     # ======================================================================
     # LANE 6 — DB CORRECTNESS (CHILD + RISK GAP ENFORCEMENT)
     # ======================================================================
@@ -1209,6 +1172,7 @@ class DecisionBus:
             self._route_snapshot.refresh_ctx_dynamic_fields()
             dt = time.time() - t0
             self._route_ctx_map = self._route_snapshot.get_ctx_map()
+            bus_stop_pairs = self._route_snapshot.get_bus_stop(self._bus_stop) or []
             self._ctx_refresh_times.append(dt)
 
             # Re-check
@@ -2902,7 +2866,7 @@ class DecisionBus:
         # BIND CTX MAP (AUTHORITATIVE SNAPSHOT)
         # --------------------------------------------------
         self._route_ctx_map = self._route_snapshot.get_ctx_map()
-
+        bus_stop_pairs = self._route_snapshot.get_bus_stop(self._bus_stop) or []
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------
