@@ -2495,28 +2495,84 @@ class DecisionBus:
             avg_ctx = 0.0
 
         return {
-            # Identity
             "route_id": self._route_id,
             "bus_stop": self._bus_stop,
             "tick_id": self.tick_id,
             "hz": getattr(self, "_hz", 0.0),
-
-            # Cadence
             "window_size": getattr(self._cadence, "window_seconds", 0),
-
-            # Context
             "avg_ctx_refresh": avg_ctx,
-            "bus_stop_runners":
-                self._route_snapshot.get_bus_stop(self._bus_stop)
-                if self._route_snapshot else [],
-
-            # Fill telemetry
-            "fill_rate": getattr(self, "_last_fill_rate", 0.0),
-            "attempted": getattr(self, "_last_attempted", 0),
-            "delegated": getattr(self, "_last_delegated", 0),
-
-            
+            "plans_generated": getattr(self, "_last_attempted", 0),
+            "plans_routed": getattr(self, "_last_delegated", 0),
         }
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside class DecisionBus (place below dashboard_snapshot)
+# 📆 PATCHED: 2026-04-05 — Expose RouteSnapshot to dashboard (read-only)
+#
+# PURPOSE:
+# - Allow dashboard to read BUS runner surface directly
+# - Avoid DB reconstruction of runners
+# - Preserve BUS performance (no additional queries)
+#
+# CONTRACT:
+# - Read-only
+# - No mutation
+# - No execution side effects
+# - Safe when BUS not yet initialised
+# ==============================================================================
+
+    def get_route_snapshot(self):
+        """
+        Read-only accessor for the active BusRouteSnapshot.
+
+        Used by dashboard to render:
+        • next BUS stop runners
+        • live view runners
+        • px / odds surfaces
+
+        Returns:
+            BusRouteSnapshot | None
+        """
+
+        return self._route_snapshot
+
+
+    def get_bus_stop_snapshot(self):
+        """
+        Convenience helper for dashboard.
+
+        Returns runners for the current BUS stop
+        as (marketId, selectionId) pairs.
+        """
+
+        if not self._route_snapshot:
+            return []
+
+        return self._route_snapshot.get_bus_stop(self._bus_stop) or []
+
+
+    def get_runner_ctx_snapshot(self):
+        """
+        Returns the full ctx_map surface for dashboard inspection.
+
+        Structure:
+            {(marketId, selectionId): ctx}
+
+        Contains:
+            px
+            odds
+            band
+            fav_rank
+            anchor fields
+        """
+
+        if not self._route_snapshot:
+            return {}
+
+        return self._route_snapshot.get_ctx_map() or {}
+
+# === PATCH END ==============================================================
     
     # ======================================================================
     # analytics_report() — unchanged
@@ -4194,7 +4250,8 @@ def _ensure_bus_runtime_schema():
             hz REAL,
             window_size INTEGER,
             avg_ctx_refresh REAL,
-            fill_rate REAL
+            plans_generated INTEGER,
+            plans_routed INTEGER
         )
     """)
     con.close()
@@ -4211,9 +4268,16 @@ def _write_bus_runtime_snapshot(data: dict):
         from engines.config_paths import open_auto_db
 
         con = open_auto_db(rw=True)
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: INSERT INTO bus_runtime_snapshot
+# 🛠 ACTION: Store generated / routed counts instead of fill_rate
+# 📆 PATCHED: 2026-03-05 — snapshot stores raw execution counts
+# ==============================================================================
+
         con.execute("""
-            INSERT INTO bus_runtime_snapshot
-            VALUES (?,?,?,?,?,?,?,?)
+        INSERT INTO bus_runtime_snapshot
+        VALUES (?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now(timezone.utc).isoformat(),
             data.get("route_id"),
@@ -4222,8 +4286,11 @@ def _write_bus_runtime_snapshot(data: dict):
             data.get("hz"),
             data.get("window_size"),
             data.get("avg_ctx_refresh"),
-            data.get("fill_rate"),
+            data.get("plans_generated"),
+            data.get("plans_routed"),
         ))
+
+# === PATCH END ================================================================
         con.commit()
         con.close()
     except Exception:

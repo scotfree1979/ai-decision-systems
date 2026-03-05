@@ -9,16 +9,22 @@ AutoScalp v6 — LIVE-safe version with proper repo-root shim
 """
 
 from __future__ import annotations
-import os, sys, sqlite3, threading, time, tkinter as tk
-from tkinter import ttk
-from datetime import datetime, timezone
-from engines.live_view.live_view import get_live_view_state, start_live_view_loop
-# --- ensure repo root is importable ---
-_here = os.path.dirname(os.path.abspath(__file__))          # .../gui
-_root = os.path.abspath(os.path.join(_here, ".."))          # .../analytics_beta_dev
+import os, sys
+
+# --------------------------------------------------
+# REPO ROOT SHIM (must happen BEFORE engines imports)
+# --------------------------------------------------
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.abspath(os.path.join(_here, ".."))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
+import sqlite3, threading, time, tkinter as tk
+from tkinter import ttk
+from datetime import datetime, timezone
+
+# engines imports AFTER root is injected
+from engines.live_view.live_view import get_live_view_state, start_live_view_loop
 # ── Imports ────────────────────────────────────────────────────────────
 from engines import config_paths as cp
 from engines.session_secrets import get_secret, set_secret
@@ -82,6 +88,21 @@ def run_in_mainthread(func, *args, **kwargs):
         return func(*args, **kwargs)
     elif root:
         root.after(0, lambda: func(*args, **kwargs))
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: from engines.cashout_calc import cashout_calc
+# 🛠 ACTION: Add BUS snapshot access
+# 📆 PATCHED: 2026-04-05 — Dashboard uses BUS route snapshot instead of SQL
+# PURPOSE:
+# - Access runner PX and identity from BUS ctx_map
+# - Remove dependency on betsdb px fields
+# - Prevent sqlite "no such column: px"
+# ==============================================================================
+
+from engines.bus.bus import BUS
+
+# === PATCH END ================================================================
 
 # ── DB connector (LIVE-safe) ───────────────────────────────────────────
 # === PATCH START ===
@@ -155,6 +176,7 @@ class DashboardView(ttk.Frame):
         self._pulse_on = False
         self._pulse_speed = 1200
         self._last_snapshot_ts = None
+        self._last_live_market = None
         self._build_ui()
         self._init_heartbeat_styles()
         self._start_loops()
@@ -961,34 +983,90 @@ class DashboardView(ttk.Frame):
             # ─────────────────────────────────────────
             # BUS SNAPSHOT
             # ─────────────────────────────────────────
-            row = con.execute("""
-                SELECT *
-                FROM bus_runtime_snapshot
-                ORDER BY ts DESC
-                LIMIT 1
-            """).fetchone()
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: FROM bus_runtime_snapshot
+# 🛠 ACTION: detect new snapshot and force immediate refresh
+# 📆 PATCHED: 2026-03-05 — instant BUS telemetry update
+# PURPOSE:
+# - Remove dashboard lag when BUS starts
+# - Update UI immediately when new snapshot arrives
+# ==============================================================================
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: FROM bus_runtime_snapshot
+# 🛠 ACTION: read BUS snapshot directly from memory
+# 📆 PATCHED: 2026-03-05 — dashboard uses BUS in-memory telemetry
+# PURPOSE:
+# - eliminate SQLite polling
+# - instantaneous dashboard updates
+# ==============================================================================
+
+            row = BUS.dashboard_snapshot()
 
             if row:
+
+               # --------------------------------------------------
+               # BUS tick synchronisation
+               # --------------------------------------------------
+                tick = row.get("tick_id")
+
+                if tick != getattr(self, "_last_bus_tick", None):
+                    self._last_bus_tick = tick
+                    self.after(10, self._refresh_execution_intelligence)
+
+                # --------------------------------------------------
+                # BUS telemetry display
+                # --------------------------------------------------
                 self.bus_vars["route"].set(f"Route ID: {row['route_id']}")
                 self.bus_vars["stop"].set(f"Bus Stop: {row['bus_stop']}")
                 self.bus_vars["tick"].set(f"Tick ID: {row['tick_id']}")
                 self.bus_vars["hz"].set(f"Hz: {row['hz']}")
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: Fill Rate
+# 🛠 ACTION: compute fill rate from raw counters
+# 📆 PATCHED: 2026-03-05 — dashboard derives fill rate
+# ==============================================================================
+
+                generated = row["plans_generated"] or 0
+                routed = row["plans_routed"] or 0
+                rate = (routed / generated * 100) if generated else 0.0
+
                 self.bus_vars["fill"].set(
-                    f"Fill Rate: {round((row['fill_rate'] or 0)*100,1)}%"
+                    f"Plans: {generated}  Routed: {routed}  Fill: {rate:.1f}%"
                 )
 
+# === PATCH END ================================================================
             # Clear previous runner cards
             for w in self.bus_runner_grid.winfo_children():
                 w.destroy()
 
-            # Example: top 2 runners queued at next stop
-            runners = con.execute("""
-                SELECT marketId, selectionId, side
-                FROM orders
-                WHERE entry_status='QUEUED'
-                ORDER BY opened_at ASC
-                LIMIT 4
-            """).fetchall()
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: # Example: top 2 runners queued at next stop
+# 🛠 ACTION: Replace SQL runner lookup with BUS route snapshot
+# 📆 PATCHED: 2026-03-05 — Next Bus Stop runners sourced from BUS snapshot
+# PURPOSE:
+# - Display runners scheduled for the current BUS stop
+# - Remove DB queries
+# ==============================================================================
+
+            bus_pairs = BUS.get_bus_stop_snapshot()[:4]
+            ctx_map = BUS.get_runner_ctx_snapshot()
+
+            runners = []
+            for mid, sid in bus_pairs:
+                ctx = ctx_map.get((mid, sid), {})
+                runners.append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "px": ctx.get("px"),
+                    "side": ctx.get("side")
+                })
+
+# === PATCH END ================================================================
 
             for i, r in enumerate(runners):
 
@@ -1021,6 +1099,10 @@ class DashboardView(ttk.Frame):
                 LIMIT 1
             """).fetchone()
 
+            # Clear sidebar runner cards
+            for w in self.inplay_runner_grid.winfo_children():
+                w.destroy()
+
             if unified_row:
 
                 inplay_flag = bool(unified_row["inplay_active"])
@@ -1035,64 +1117,210 @@ class DashboardView(ttk.Frame):
                 )
                 self.inplay_state_vars["quartile"].set("Quartile: —")
 
-                # --------------------------------------------------
-                # ACTIVE INPLAY MARKET (from inplay_runtime_snapshot)
-                # --------------------------------------------------
+                if inplay_flag:
 
-                active_market = con.execute("""
-                    SELECT marketId
-                    FROM inplay_runtime_snapshot
-                    GROUP BY marketId
-                    ORDER BY MAX(ts) DESC
+                    # Find the race closest to now
+                    race = con.execute("""
+                        SELECT marketId, event_name, market_name
+                        FROM betsdb.bets
+                        WHERE marketStartTime IS NOT NULL
+                        ORDER BY ABS(
+                            julianday(replace(marketStartTime,'T',' '))
+                            - julianday('now','utc')
+                        )
+                        LIMIT 1
+                    """).fetchone()
+
+                    if race:
+
+                        mid = race["marketId"]
+
+                        # instant refresh when race changes
+                        if self._last_live_market != mid:
+                            self._last_live_market = mid
+                            self.after(10, self._refresh_execution_intelligence)
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: COALESCE(px, odds, 0) AS px
+# 🛠 ACTION: Use BUS ctx_map for PX instead of bets table
+# 📆 PATCHED: 2026-03-05 — Sweet Spot runners powered by route snapshot
+# PURPOSE:
+# - PX is authoritative in BUS ctx
+# ==============================================================================
+
+                        ctx_map = BUS.get_runner_ctx_snapshot()
+
+                        runners = []
+                        for (m, s), ctx in ctx_map.items():
+                            if m == mid:
+                                runners.append({
+                                    "selectionId": s,
+                                    "horse_name": ctx.get("horse_name", s),
+                                    "px": ctx.get("px")
+                                })
+
+                        runners = sorted(
+                            runners,
+                            key=lambda r: abs((r["px"] or 999) - 7.0)
+                        )[:4]
+
+# === PATCH END ================================================================
+
+                        for i, r in enumerate(runners):
+
+                            delta = abs(float(r["px"]) - 7.0)
+
+                            card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
+                            card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+
+                            ttk.Label(
+                                card,
+                                text=r["horse_name"],
+                                font=("TkDefaultFont", 9, "bold")
+                            ).pack(anchor="w")
+
+                            ttk.Label(card, text=f"Px: {float(r['px']):.2f}").pack(anchor="w")
+                            ttk.Label(card, text=f"Δ from 7.0: {delta:.2f}").pack(anchor="w")
+
+                else:
+
+                    ttk.Label(
+                        self.inplay_runner_grid,
+                        text="No market currently in-play",
+                        font=("TkDefaultFont", 10, "italic")
+                    ).grid(row=0, column=0, columnspan=2, pady=8)
+
+            # ─────────────────────────────────────────
+            # LIVE VIEW PANEL (DYNAMIC RACE VIEW)
+            # ─────────────────────────────────────────
+
+            # Clear previous cards
+            for w in self.live_grid.winfo_children():
+                w.destroy()
+
+            for w in self.live_overview_card.winfo_children():
+                w.destroy()
+
+            # --------------------------------------------------
+            # SELECT RACE FOR LIVE VIEW (snapshot-aware)
+            # --------------------------------------------------
+
+            race = None
+
+            if unified_row and (unified_row["parents_open"] or unified_row["children_open"]):
+
+                race = con.execute("""
+                    SELECT
+                        o.marketId,
+                        b.event_name,
+                        b.market_name,
+                        b.marketStartTime,
+                        COUNT(*) AS activity
+                    FROM orders o
+                    JOIN betsdb.bets b USING (marketId)
+                    WHERE o.role='PARENT'
+                      AND o.entry_status='MATCHED'
+                    GROUP BY o.marketId
+                    ORDER BY activity DESC
                     LIMIT 1
                 """).fetchone()
 
-                # Clear previous grid cards
-                for w in self.inplay_runner_grid.winfo_children():
-                    w.destroy()
+            if not race:
 
-                if active_market:
+                race = con.execute("""
+                    SELECT marketId, event_name, market_name, marketStartTime
+                    FROM betsdb.bets
+                    WHERE marketStartTime > datetime('now','utc')
+                    ORDER BY marketStartTime ASC
+                    LIMIT 1
+                """).fetchone()
 
-                    market_id = active_market["marketId"]
+            if race:
 
-                    SWEETSPOT = 7.0
+                mid = race["marketId"]
 
-                    runners = con.execute("""
-                        SELECT *
-                        FROM inplay_runtime_snapshot
-                        WHERE marketId=?
-                        ORDER BY ABS(px - ?) ASC
-                        LIMIT 4
-                    """, (market_id, SWEETSPOT)).fetchall()
+                ttk.Label(
+                    self.live_overview_card,
+                    text=f"{race['event_name']}\n{race['market_name']}",
+                    font=("TkDefaultFont",11,"bold"),
+                    justify="left"
+                ).pack(anchor="w")
 
-                    for i, r in enumerate(runners):
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: COALESCE(px, odds, 0) AS px
+# 🛠 ACTION: Populate live view runners from BUS snapshot
+# 📆 PATCHED: 2026-03-05 — Live View powered by route ctx
+# PURPOSE:
+# - Remove invalid px column usage
+# - Align dashboard with execution state
+# ==============================================================================
 
-                        name_row = con.execute("""
-                            SELECT horse_name
-                            FROM betsdb.bets
-                            WHERE marketId=? AND selectionId=?
-                            LIMIT 1
-                        """, (r["marketId"], r["selectionId"])).fetchone()
+                ctx_map = BUS.get_runner_ctx_snapshot()
 
-                        horse_name = name_row["horse_name"] if name_row else r["selectionId"]
+                runners = []
+                for (m, s), ctx in ctx_map.items():
+                    if m == mid:
+                        runners.append({
+                            "selectionId": s,
+                            "horse_name": ctx.get("horse_name", s),
+                            "px": ctx.get("px"),
+                            "pnl_if_win": ctx.get("pnl_if_win", 0)
+                        })
 
-                        delta = abs(float(r["px"]) - SWEETSPOT)
+# === PATCH END ================================================================
 
-                        card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
-                        card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+                if runners:
+
+                    # ------------------------------
+                    # ranking sets
+                    # ------------------------------
+
+                    by_odds = sorted(
+                        runners,
+                        key=lambda r: float(r["px"] or 999)
+                    )[:4]
+
+                    by_pnl = sorted(
+                        runners,
+                        key=lambda r: float(r["pnl_if_win"] or 0),
+                        reverse=True
+                    )[:4]
+
+                    display = by_odds + by_pnl
+
+                    for i, r in enumerate(display):
+
+                        card = ttk.Frame(
+                            self.live_grid,
+                            padding=8,
+                            relief="ridge"
+                        )
+
+                        card.grid(
+                            row=i // 4,
+                            column=i % 4,
+                            padx=6,
+                            pady=6,
+                            sticky="nsew"
+                        )
 
                         ttk.Label(
                             card,
-                            text=horse_name,
-                            font=("TkDefaultFont", 9, "bold")
+                            text=r["horse_name"],
+                            font=("TkDefaultFont",9,"bold")
                         ).pack(anchor="w")
 
-                        ttk.Label(card, text=f"Px: {float(r['px']):.2f}").pack(anchor="w")
-                        ttk.Label(card, text=f"Δ from 7.0: {delta:.2f}").pack(anchor="w")
-                        ttk.Label(card, text=f"Direction: {r['direction']}").pack(anchor="w")
-                        ttk.Label(card, text=f"Ticks: {r['ticks_moved']:.1f}").pack(anchor="w")
+                        ttk.Label(
+                            card,
+                            text=f"Odds: {float(r['px']):.2f}"
+                        ).pack(anchor="w")
 
-
+                        ttk.Label(
+                            card,
+                            text=f"PnL if Win: £{float(r['pnl_if_win']):.2f}"
+                        ).pack(anchor="w")
 
             con.close()
 
@@ -1107,7 +1335,7 @@ class DashboardView(ttk.Frame):
         except Exception:
             pass
 
-        self.after(2000, self._refresh_execution_intelligence)
+        self.after(500, self._refresh_execution_intelligence)
 
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py

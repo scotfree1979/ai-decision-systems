@@ -166,7 +166,7 @@ class UnifiedEngine:
                 plans.append({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
-                    "bet_type": "STOPLOSS"
+                    "bet_type": "STOPLOSS",
                     "role": "CHILD",
                     "exit_kind": "STOP",
                     "parent_id": pid,
@@ -218,7 +218,7 @@ class UnifiedEngine:
                 plans.append({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
-                    "bet_type": "INPLAY"
+                    "bet_type": "INPLAY",
                     "role": "PARENT",
                     "marketId": mid,
                     "selectionId": sid,
@@ -233,7 +233,7 @@ class UnifiedEngine:
                 plans.append({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
-                    "bet_type": "INPLAY"
+                    "bet_type": "INPLAY",
                     "role": "PARENT",
                     "marketId": mid,
                     "selectionId": sid,
@@ -267,7 +267,7 @@ class UnifiedEngine:
                     plans.append({
                         "enter": True,
                         "engine": "MSC_UNIFIED",
-                        "bet_type": "CORRECTION"
+                        "bet_type": "CORRECTION",
                         "role": "CHILD",
                         "exit_kind": "CORRECTIVE",
                         "marketId": mid,
