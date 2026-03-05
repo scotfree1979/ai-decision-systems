@@ -471,32 +471,92 @@ def compute_risk_dynamic_stake(*, ctx: dict, engine="MSC_RISK") -> float:
 # - monotonic, deterministic, snap-clamped
 # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/math/dynamic_stake_v7.py
+# 🔎 SEARCH: def compute_dynamic_stake(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-XX-XX — Bet-Type Driven Stake Dispatch (MSC_UNIFIED compatible)
+#
+# PURPOSE:
+# - Unified engine now emits bet_type
+# - Stake logic branches by bet_type first
+# - Engine fallback preserved for legacy engines
+# - No routing change
+# - No BankState change
+# ======================================================================================================
+
 def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
     """
-    Final Dynamic Stake v7.
+    Bet-Type aware Dynamic Stake v7.
 
-    Stake is determined as:
-        ENGINE_MIN + confidence * (ENGINE_MAX - ENGINE_MIN)
+    Priority:
+        1️⃣ bet_type (if present)
+        2️⃣ engine (fallback for legacy engines)
 
-    Confidence is derived from existing signals (letters, phase),
-    with LEGACY borrowing proof from risk_confidence.
-
-    Returns a rounded stake (2dp), always within engine envelope.
+    Guarantees:
+        - Always respects ENGINE_MIN / ENGINE_MAX
+        - Deterministic
+        - No bank % logic
     """
 
-    from engines.daily_config import ENGINE_MIN, ENGINE_MAX, LETTER_MULT
+    from engines.daily_config import ENGINE_MIN, ENGINE_MAX
+
+    bet_type = (ctx.get("bet_type") or "").upper()
+    eng = (engine or "").upper()
 
     # --------------------------------------------------
-    # 1️⃣ Engine envelope (HARD LIMITS)
+    # 1️⃣ BET-TYPE DISPATCH (MSC_UNIFIED)
     # --------------------------------------------------
-    eng = engine.upper()
+
+    if bet_type == "RISK":
+        return compute_risk_dynamic_stake(ctx=ctx, engine="MSC_RISK")
+
+    if bet_type == "EXPLORATORY":
+        return compute_exploratory_dynamic_stake(ctx=ctx, engine="MSC_EXPLORATORY")
+
+    if bet_type == "INPLAY":
+        return compute_inplay_dynamic_stake(ctx=ctx, engine="MSC_INPLAY")
+
+    if bet_type == "STOPLOSS":
+        # stoploss uses parent stake directly
+        parent_stake = float(ctx.get("anchor_entry_stake") or 0.0)
+        return round(max(parent_stake, ENGINE_MIN.get("OVERWATCHER", 2.0)), 2)
+
+    if bet_type == "CORRECTION":
+        # treat correction same as INPLAY sizing unless separated later
+        return compute_inplay_dynamic_stake(ctx=ctx, engine="MSC_INPLAY")
+
+    # --------------------------------------------------
+    # 2️⃣ ENGINE FALLBACK (LEGACY / NON-UNIFIED)
+    # --------------------------------------------------
+
+    if eng == "MSC_RISK":
+        return compute_risk_dynamic_stake(ctx=ctx, engine=eng)
+
+    if eng == "MSC_INPLAY":
+        return compute_inplay_dynamic_stake(ctx=ctx, engine=eng)
+
+    if eng == "MSC_EXPLORATORY":
+        return compute_exploratory_dynamic_stake(ctx=ctx, engine=eng)
+
+    if eng == "OVERWATCHER":
+        return compute_overwatch_dynamic_stake(ctx=ctx)
+
+    # --------------------------------------------------
+    # 3️⃣ LEGACY / DEFAULT ENVELOPE
+    # --------------------------------------------------
 
     min_stake = float(ENGINE_MIN.get(eng, 2.0))
     max_stake = float(ENGINE_MAX.get(eng, min_stake))
 
-    # Safety: broken config should never collapse stake
-    if max_stake < min_stake:
-        max_stake = min_stake
+    confidence = 1.0
+    stake = min_stake + confidence * (max_stake - min_stake)
+
+    stake = max(min_stake, min(stake, max_stake))
+
+    return round(stake, 2)
+
+# ======================================================================================================
 
     # --------------------------------------------------
     # 2️⃣ LEGACY — borrow confidence from RISK

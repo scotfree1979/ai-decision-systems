@@ -319,22 +319,15 @@ def _ingest_tsl_event(ev: dict):
         reason     = ev.get("reason") or "TRAILING"
 
         # ------------------------
-        # 1) mastery_events table
+        # 1) mastery_events table (bets.db schema correct)
         # ------------------------
         try:
             from engines.config_paths import connect_db
             con = connect_db(ro=False)
             con.row_factory = __import__("sqlite3").Row
 
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS mastery_events(
-                    event_type TEXT,
-                    details_json TEXT,
-                    created_at TEXT
-                )
-            """)
-
             import json
+
             payload = {
                 "kind": "trailing_stoploss",
                 "classification": cls,
@@ -347,15 +340,28 @@ def _ingest_tsl_event(ev: dict):
                 "reason": reason,
             }
 
+            # ✅ MATCHES bets.db SCHEMA EXACTLY
             con.execute(
-                "INSERT INTO mastery_events(event_type, details_json, created_at) "
-                "VALUES (?, ?, datetime('now','utc'))",
-                ("tsl_event", json.dumps(payload, separators=(',',':')) )
+                """
+                INSERT INTO mastery_events(
+                    event_type,
+                    details_json,
+                    delta_progress,
+                    source
+                )
+                VALUES (?, ?, 0, 'LIVE')
+                """,
+                (
+                    "tsl_event",
+                    json.dumps(payload, separators=(',', ':'))
+                )
             )
+
             con.commit()
             con.close()
-        except Exception:
-            pass
+
+        except Exception as e:
+            print(f"[TSL][mastery_events] warn: {e}")
 
         # ------------------------
         # 2) Playbooks integration

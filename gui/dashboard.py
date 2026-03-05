@@ -830,79 +830,83 @@ class DashboardView(ttk.Frame):
         self.inplay_runner_grid.columnconfigure(1, weight=1)
 
         # ============================================================
-        # RIGHT COLUMN (BANKSTATE + ROUTER side-by-side)
+        # RIGHT COLUMN (BANKSTATE + ROUTER + LIVE VIEW)
         # ============================================================
         right = ttk.Frame(container)
         right.grid(row=0, column=1, sticky="nsew", padx=6)
 
-# === PATCH START ==============================================================
-# 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: self.bank_text = tk.Text(
-# 🛠 ACTION: Replace BANKSTATE text widget with responsive 3x2 card grid
-# 📆 PATCHED: 2026-03-02 — BankState Card Grid Layout
-# PURPOSE:
-# - Remove ASCII block
-# - Introduce responsive 3x2 card layout
-# - Mirror existing dashboard card behaviour
-# ==============================================================================
+        # 🔥 CRITICAL: configure grid weights
+        right.columnconfigure(0, weight=1)
+        right.columnconfigure(1, weight=1)
+        right.rowconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
 
-        # BANKSTATE (left half of right column)
+        # ------------------------------------------------------------
+        # BANKSTATE (row 0, col 0)
+        # ------------------------------------------------------------
         self.bank_frame = ttk.LabelFrame(right, text="BANKSTATE")
-        self.bank_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.bank_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
 
-        # Replace text block with card container
         self.bank_cards = ttk.Frame(self.bank_frame)
         self.bank_cards.pack(fill="both", expand=True, padx=8, pady=8)
 
-# === PATCH END ==============================================================
-
-# === PATCH START ==============================================================
-# 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: self.router_text = tk.Text(
-# 🛠 ACTION: Replace router ASCII text widget with stacked card container
-# 📆 PATCHED: 2026-03-02 — Router V1 Stacked Layout Container
-# PURPOSE:
-# - Remove monolithic text block
-# - Introduce vertical stacked card structure
-# - Preserve data density + emojis
-# ==============================================================================
-
-        # ROUTER (right half)
+        # ------------------------------------------------------------
+        # ROUTER (row 0, col 1)
+        # ------------------------------------------------------------
         self.router_frame = ttk.LabelFrame(right, text="ROUTER")
-        self.router_frame.grid(row=0, column=1, sticky="nsew")
+        self.router_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 6))
 
-        # Stacked container instead of Text widget
         self.router_stack = ttk.Frame(self.router_frame)
         self.router_stack.pack(fill="both", expand=True, padx=8, pady=8)
 
-# === PATCH END ==============================================================
-        # ============================================================
-        # LIVE VIEW (UNDER BANKSTATE + ROUTER)
-        # ============================================================
-
+        # ------------------------------------------------------------
+        # LIVE VIEW (row 1, full width)
+        # ------------------------------------------------------------
         self.live_view_frame = ttk.LabelFrame(right, text="LIVE VIEW")
-        self.live_view_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=6)
-
-        right.rowconfigure(1, weight=1)
-      
+        self.live_view_frame.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="nsew",
+            padx=6,
+            pady=6
+        )
 
         self.live_view_container = ttk.Frame(self.live_view_frame)
         self.live_view_container.pack(fill="both", expand=True)
 
-        # Overview (full height left)
+        # Layout inside LIVE VIEW
+        self.live_view_container.columnconfigure(0, weight=1)
+        self.live_view_container.columnconfigure(1, weight=3)
+        self.live_view_container.rowconfigure(0, weight=1)
+
+        # Overview (left)
         self.live_overview_card = ttk.Frame(
             self.live_view_container,
             padding=12,
             relief="ridge"
         )
-        self.live_overview_card.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=6, pady=6)
+        self.live_overview_card.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=6,
+            pady=6
+        )
 
-        # Right grid (2 rows × 4)
+        # 2x4 Runner Grid (right)
         self.live_grid = ttk.Frame(self.live_view_container)
-        self.live_grid.grid(row=0, column=1, rowspan=2, sticky="nsew")
+        self.live_grid.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=6,
+            pady=6
+        )
 
         for c in range(4):
             self.live_grid.columnconfigure(c, weight=1)
+
         for r in range(2):
             self.live_grid.rowconfigure(r, weight=1)
 
@@ -1005,148 +1009,88 @@ class DashboardView(ttk.Frame):
                           font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
                 ttk.Label(card, text=f"Market: {event}").pack(anchor="w")
                 ttk.Label(card, text=f"Side: {r['side']}").pack(anchor="w")
+
             # ─────────────────────────────────────────
-            # INPLAY SNAPSHOT
+            # INPLAY SNAPSHOT (Unified Authority)
             # ─────────────────────────────────────────
-            row = con.execute("""
-                SELECT marketId, selectionId
-                FROM betsdb.bets
-                WHERE datetime(replace(marketStartTime,'Z','')) > datetime('now','utc')
-                ORDER BY datetime(replace(marketStartTime,'Z','')) ASC
+
+            unified_row = con.execute("""
+                SELECT *
+                FROM unified_runtime_snapshot
+                ORDER BY ts DESC
                 LIMIT 1
             """).fetchone()
 
-            if row:
+            if unified_row:
 
-                name_row = con.execute("""
-                    SELECT horse_name, event_name
-                    FROM betsdb.bets
-                    WHERE marketId=? AND selectionId=?
-                    LIMIT 1
-                """, (row["marketId"], row["selectionId"])).fetchone()
+                inplay_flag = bool(unified_row["inplay_active"])
+                confidence  = float(unified_row["inplay_confidence"] or 0.0)
 
-                horse = name_row["horse_name"] if name_row else row["selectionId"]
-                event = name_row["event_name"] if name_row else row["marketId"]
-
-                # Update state card
-                self.inplay_state_vars["market"].set(f"Market: {event}")
+                self.inplay_state_vars["market"].set("Market: Unified Timing")
                 self.inplay_state_vars["inplay"].set(
-                    f"In-Play: {'YES' if row['is_inplay'] else 'NO'}"
+                    f"In-Play: {'YES' if inplay_flag else 'NO'}"
                 )
                 self.inplay_state_vars["confidence"].set(
-                    f"Confidence: {row['confidence']:.2f}"
+                    f"Confidence: {confidence:.2f}"
                 )
-                self.inplay_state_vars["quartile"].set(
-                    f"Quartile: {row['race_quartile'] or '-'}"
-                )
+                self.inplay_state_vars["quartile"].set("Quartile: —")
 
                 # --------------------------------------------------
-                # Fetch top 4 runners by proximity to SWEETSPOT
+                # ACTIVE INPLAY MARKET (from inplay_runtime_snapshot)
                 # --------------------------------------------------
 
-                SWEETSPOT = 7.0
-
-                runners = con.execute("""
-                    SELECT *
+                active_market = con.execute("""
+                    SELECT marketId
                     FROM inplay_runtime_snapshot
-                    WHERE marketId=?
-                    ORDER BY ABS(px - ?) ASC
-                    LIMIT 4
-                """, (row["marketId"], SWEETSPOT)).fetchall()
+                    GROUP BY marketId
+                    ORDER BY MAX(ts) DESC
+                    LIMIT 1
+                """).fetchone()
 
                 # Clear previous grid cards
                 for w in self.inplay_runner_grid.winfo_children():
                     w.destroy()
 
-                for i, r in enumerate(runners):
+                if active_market:
 
-                    name_row = con.execute("""
-                        SELECT horse_name
-                        FROM betsdb.bets
-                        WHERE marketId=? AND selectionId=?
-                        LIMIT 1
-                    """, (r["marketId"], r["selectionId"])).fetchone()
+                    market_id = active_market["marketId"]
 
-                    horse_name = name_row["horse_name"] if name_row else r["selectionId"]
+                    SWEETSPOT = 7.0
 
-                    delta = abs(float(r["px"]) - SWEETSPOT)
+                    runners = con.execute("""
+                        SELECT *
+                        FROM inplay_runtime_snapshot
+                        WHERE marketId=?
+                        ORDER BY ABS(px - ?) ASC
+                        LIMIT 4
+                    """, (market_id, SWEETSPOT)).fetchall()
 
-                    card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
-                    card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+                    for i, r in enumerate(runners):
 
-                    ttk.Label(
-                        card,
-                        text=horse_name,
-                        font=("TkDefaultFont", 9, "bold")
-                    ).pack(anchor="w")
+                        name_row = con.execute("""
+                            SELECT horse_name
+                            FROM betsdb.bets
+                            WHERE marketId=? AND selectionId=?
+                            LIMIT 1
+                        """, (r["marketId"], r["selectionId"])).fetchone()
 
-                    ttk.Label(card, text=f"Px: {float(r['px']):.2f}").pack(anchor="w")
-                    ttk.Label(card, text=f"Δ from 7.0: {delta:.2f}").pack(anchor="w")
-                    ttk.Label(card, text=f"Direction: {r['direction']}").pack(anchor="w")
-                    ttk.Label(card, text=f"Ticks: {r['ticks_moved']:.1f}").pack(anchor="w")
+                        horse_name = name_row["horse_name"] if name_row else r["selectionId"]
 
-            # ============================================================
-            # LIVE VIEW (UNDER BANKSTATE + ROUTER)
-            # ============================================================
+                        delta = abs(float(r["px"]) - SWEETSPOT)
 
-            self.live_view_frame = ttk.LabelFrame(right, text="LIVE VIEW")
-            self.live_view_frame.grid(
-                row=1,
-                column=0,
-                columnspan=2,
-                sticky="nsew",
-                padx=6,
-                pady=6
-            )
+                        card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
+                        card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
 
-            right.rowconfigure(1, weight=1)
+                        ttk.Label(
+                            card,
+                            text=horse_name,
+                            font=("TkDefaultFont", 9, "bold")
+                        ).pack(anchor="w")
 
-            self.live_view_container = ttk.Frame(self.live_view_frame)
-            self.live_view_container.grid(row=0, column=0, sticky="nsew")
-
-            self.live_view_frame.rowconfigure(0, weight=1)
-            self.live_view_frame.columnconfigure(0, weight=1)
-
-            # ─────────────────────────────────────────
-            # LEFT: OVERVIEW (FULL HEIGHT)
-            # ─────────────────────────────────────────
-
-            self.live_overview_card = ttk.Frame(
-                self.live_view_container,
-                padding=12,
-                relief="ridge"
-            )
-            self.live_overview_card.grid(
-                row=0,
-                column=0,
-                rowspan=2,
-                sticky="nsew",
-                padx=6,
-                pady=6
-            )
-
-            # ─────────────────────────────────────────
-            # RIGHT: 2 × 4 RUNNER GRID
-            # ─────────────────────────────────────────
-
-            self.live_grid = ttk.Frame(self.live_view_container)
-            self.live_grid.grid(
-                row=0,
-                column=1,
-                rowspan=2,
-                sticky="nsew"
-            )
-
-            for c in range(4):
-                self.live_grid.columnconfigure(c, weight=1)
-
-            for r in range(2):
-                self.live_grid.rowconfigure(r, weight=1)
-
-            self.live_view_container.columnconfigure(0, weight=1)
-            self.live_view_container.columnconfigure(1, weight=3)
-            self.live_view_container.rowconfigure(0, weight=1)
-            self.live_view_container.rowconfigure(1, weight=1)
+                        ttk.Label(card, text=f"Px: {float(r['px']):.2f}").pack(anchor="w")
+                        ttk.Label(card, text=f"Δ from 7.0: {delta:.2f}").pack(anchor="w")
+                        ttk.Label(card, text=f"Direction: {r['direction']}").pack(anchor="w")
+                        ttk.Label(card, text=f"Ticks: {r['ticks_moved']:.1f}").pack(anchor="w")
 
 
 

@@ -26,6 +26,7 @@ except Exception:
         "MSC_INPLAY": 0,
         "MSC_EXPLORATORY": 0,
         "OVERWATCHER": 0,
+        "MSC_UNIFIED": 0,
     }
 
 # BUS authority: legacy letter → concrete strategy name
@@ -594,7 +595,7 @@ class DecisionBus:
         # Route-level CTX (FULL SET — non-LEGACY lanes)
         # ------------------------------------------------------------------
         
-        # Build FULL route CTX map once (AUTHORITATIVE)
+        # Route CTX map initialised later during first tick
         self._route_ctx_map = {}
 
         # Engine + strategy binding (existing working behaviour)
@@ -2558,185 +2559,7 @@ class DecisionBus:
     # ======================================================================
 
     def _phase0_report_db_truth(self):
-
-        """
-        Phase 0: DB-first live truth.
-        Reports ALL markets with live parents, ordered by time-to-off.
-        No mutation. No engine logic.
-        """
-        ordered = []  # 🔒 hard initialise immediately
-        from engines.config_paths import connect_db, open_auto_db
-        from datetime import datetime, timezone
-        import sqlite3
-
-        now = datetime.now(timezone.utc)
-
-        # --------------------------------------------------
-        # 1️⃣ Load all LIVE parents
-        # --------------------------------------------------
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-
-        parents = con.execute("""
-            SELECT
-                id,
-                engine,
-                marketId,
-                selectionId,
-                entry_odds
-            FROM orders
-            WHERE mode='LIVE'
-              AND role='PARENT'
-              AND UPPER(entry_status)='MATCHED'
-              AND (exit_status IS NULL OR UPPER(exit_status)<>'MATCHED')
-              AND date(COALESCE(opened_at, datetime('now','utc'))) = date('now','utc')
-
-        """).fetchall()
-
-        if not parents:
-            con.close()
-            return  # nothing to report
-
-        # --------------------------------------------------
-        # 2️⃣ Group parents by market
-        # --------------------------------------------------
-        by_market = {}
-        for p in parents:
-            by_market.setdefault(p["marketId"], []).append(p)
-
-        # --------------------------------------------------
-        # 3️⃣ Resolve market metadata (bets.db)
-        # --------------------------------------------------
-        bdb = connect_db(ro=True)
-        bdb.row_factory = sqlite3.Row
-
-        market_meta = {}
-        for mid in by_market.keys():
-            row = bdb.execute("""
-                SELECT
-                    horse_name,
-                    event_name,
-                    marketStartTime
-                FROM bets
-                WHERE marketId=?
-                LIMIT 1
-            """, (str(mid),)).fetchone()
-
-            if not row:
-                continue
-
-            off = datetime.fromisoformat(
-                row["marketStartTime"].replace("Z", "+00:00")
-            )
-            secs = (off - now).total_seconds()
-
-            # --------------------------------------------------
-            # ⛔ PHASE-0 CUTOFF — FINISHED MARKETS
-            # Exclude markets ≥ 6 minutes AFTER off
-            # --------------------------------------------------
-            if secs <= -360:
-                continue
-
-
-            market_meta[mid] = {
-                "horse": row["horse_name"],
-                "event": row["event_name"],
-                "off": off,
-                "secs": secs,
-            }
-
-
-        bdb.close()
-        con.close()
-
-        # --------------------------------------------------
-        # 4️⃣ Order markets by time-to-off
-        # --------------------------------------------------
-
-
-        if market_meta:
-            ordered = sorted(
-                market_meta.items(),
-                key=lambda x: x[1]["secs"]
-            )
-
-        print("\n================ BUS PHASE 0 — LIVE DB STATE =================")
-        print(f"[{now.strftime('%H:%M:%S')} UTC] markets={len(ordered)}\n")
-
-        total_parents = 0
-        total_children = 0
-        missing_children = 0
-        engines_missing = set()
-
-        # --------------------------------------------------
-        # 5️⃣ Per-market breakdown
-        # --------------------------------------------------
-        for mid, meta in ordered:
-            mins = int(meta["secs"] // 60)
-            secs = int(meta["secs"] % 60)
-
-            print(f"MARKET: {meta['horse']} @ {meta['event']}")
-
-            print(f"  off_in: {mins:02d}:{secs:02d}\n")
-
-            # parent rows for this market
-            rows = by_market[mid]
-
-            # group by engine → runner → px
-            tree = {}
-            for r in rows:
-                eng = r["engine"]
-                sid = r["selectionId"]
-                px  = round(float(r["entry_odds"]), 2)
-                tree.setdefault(eng, {}).setdefault(sid, {}).setdefault(px, []).append(r["id"])
-
-            # load children map once
-            con = open_auto_db(rw=False)
-            con.row_factory = sqlite3.Row
-            child_rows = con.execute("""
-                SELECT hedge_of
-                FROM orders
-                WHERE role='CHILD'
-                  AND UPPER(entry_status) IN ('PLACED','MATCHED')
-            """).fetchall()
-            con.close()
-
-            has_child = {c["hedge_of"] for c in child_rows}
-
-            for eng, runners in tree.items():
-                print(f"  {eng}")
-                for sid, pxs in runners.items():
-                    for px, pids in pxs.items():
-                        parents_n = len(pids)
-                        children_n = sum(1 for pid in pids if pid in has_child)
-
-                        total_parents += parents_n
-                        total_children += children_n
-
-                        status = "OK"
-                        if children_n < parents_n:
-                            missing_children += (parents_n - children_n)
-                            engines_missing.add(eng)
-                            status = "⚠ MISSING CHILD"
-
-                        print(
-                            f"    Runner {sid} @ px={px:<4} "
-                            f"parents={parents_n}  children={children_n}  {status}"
-                        )
-                print()
-
-            print("-------------------------------------------------------------\n")
-
-        # --------------------------------------------------
-        # 6️⃣ Summary
-        # --------------------------------------------------
-        print("SUMMARY")
-        print(f"  total_markets        : {len(ordered)}")
-        print(f"  total_parents        : {total_parents}")
-        print(f"  total_children       : {total_children}")
-        print(f"  missing_children     : {missing_children}")
-        print(f"  engines_affected     : {', '.join(sorted(engines_missing)) or 'none'}")
-        print("=============================================================\n")
+        return
 
 
     # ======================================================================
@@ -2763,16 +2586,31 @@ class DecisionBus:
             self._bus_stop = 1
             self._route_id += 1
 
-            # 🔁 Rebuild route identity only (preserve CTX)
+            # --------------------------------------------------
+            # 🔁 Rebuild route identity
+            # --------------------------------------------------
             self._route_snapshot.build_route()
 
-            # Re-partition stops explicitly
+            # --------------------------------------------------
+            # 🔁 Repartition bus stops
+            # --------------------------------------------------
             self._route_snapshot.partition_into_bus_stops()
 
-            # Refresh PX for new identity
+            # --------------------------------------------------
+            # 🔁 REINITIALISE CTX BUILDER (CRITICAL FIX)
+            # --------------------------------------------------
+            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
+
+            # Force bounded hydration pass immediately
+            for _ in range(5):
+                self._startup_ctx_builder.step(max_builds=100)
+
+            # --------------------------------------------------
+            # Refresh dynamic fields after hydration
+            # --------------------------------------------------
             self._route_snapshot.refresh_ctx_dynamic_fields()
 
-            print("[BUS][ROUTE] rebuilt (identity refreshed, CTX preserved)")
+            print("[BUS][ROUTE] rebuilt + ctx world rehydrated")
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: inside def tick(self): immediately after self.tick_id += 1
@@ -2896,10 +2734,19 @@ class DecisionBus:
             # Never block BUS tick
             pass
 
-        # ==================================================
-        # PHASE 0 — LIVE DB TRUTH (READ-ONLY)
-        # ==================================================
-        self._phase0_report_db_truth()
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: self._phase0_report_db_truth()
+# 📆 PATCHED: 2026-03-04 — Remove per-tick DB analytics reporting
+# ======================================================================
+
+# OLD
+        #self._phase0_report_db_truth()
+
+# NEW
+# Phase0 DB analytics removed for performance
+# Dashboard now owns reporting
+        pass
 
         # ===============================================================
         # 1️⃣ DIAGNOSTICS (non-fatal, never blocks)
@@ -2910,59 +2757,18 @@ class DecisionBus:
         # ===============================================================
         # 2️⃣ BASE CONTEXT (BUS-OWNED)
         # ===============================================================
-        _bc = build_context(source="LIVE")
-        base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
+        #_bc = build_context(source="LIVE")
+        #base_ctx = _bc[0] if isinstance(_bc, tuple) else _bc
+
+        # NEW
+        # CTX comes exclusively from RouteSnapshot
+        base_ctx = {}
 
         if not self.live_run_id:
             self.live_run_id = f"LIVE-{int(time.time())}"
         base_ctx["run_id"] = self.live_run_id
 
-        # --------------------------------------------------
-        # 🧠 RISK CONFIDENCE (READ-ONLY, PHASE 2)
-        # --------------------------------------------------
-        from engines.shadow_confidence import get as _get_shadow_conf
-
         risk_confidence = {}
-
-        for (mid, sid), ctx in self._route_ctx_map.items():
-            rec = _get_shadow_conf(mid, sid, "MSC_RISK")
-
-            drift = rec.get("DRIFT", 0)
-            steam = rec.get("STEAM", 0)
-
-            if drift or steam:
-                risk_confidence[(mid, sid)] = {
-                    "drift": drift,
-                    "steam": steam,
-                    "net": drift - steam,
-                    "direction": "DRIFT" if drift >= steam else "STEAM",
-                }
-
-        # Persist for diagnostics / future use
-        tick_ctx["risk_confidence"] = risk_confidence
-
-        # Diagnostic only
-        if risk_confidence:
-            print(f"[BUS][RISK][CONF] runners={len(risk_confidence)}")
-
-        # --------------------------------------------------
-        # 🔑 BIND NUMERIC RISK CONFIDENCE TO CTX (AUTHORITATIVE)
-        # --------------------------------------------------
-        for (mid, sid), ctx in self._route_ctx_map.items():
-            rc = risk_confidence.get((mid, sid))
-            if not rc:
-                ctx["risk_confidence"] = 0.0
-                continue
-
-            # Simple linear confidence score (deterministic)
-            # 50 = neutral, >50 = positive edge, <50 = negative edge
-            ctx["risk_confidence"] = max(
-                0.0,
-                min(
-                    100.0,
-                    50.0 + (rc["net"] * 10.0)
-                )
-            )
 
         # --------------------------------------------------
         # INIT SNAPSHOT + STARTUP CTX BUILDER (ONCE)
@@ -3443,6 +3249,41 @@ class DecisionBus:
 
                 engine = plan.get("engine")
                 px = float(plan.get("px") or 0.0)
+
+                # --------------------------------------------------
+                # 🔑 BET TYPE NORMALISATION (BUS AUTHORITY)
+                # --------------------------------------------------
+                # Engines may set bet_type.
+                # If missing, BUS assigns deterministic default.
+
+                bet_type = plan.get("bet_type")
+
+                if not bet_type:
+
+                    if engine == "MSC_RISK":
+                        bet_type = "RISK"
+
+                    elif engine == "MSC_EXPLORATORY":
+                        bet_type = "EXPLORATORY"
+
+                    elif engine == "MSC_INPLAY":
+                        bet_type = "INPLAY"
+
+                    elif engine == "OVERWATCHER":
+                        # distinguish stoploss vs lock if needed
+                        if plan.get("exit_kind") == "STOPLOSS":
+                            bet_type = "STOPLOSS"
+                        else:
+                            bet_type = "CORRECTION"
+
+                    elif engine == "MSC_UNIFIED":
+                        # unified should normally set this itself
+                        bet_type = plan.get("why") or "UNIFIED"
+
+                    else:
+                        bet_type = "LEGACY"
+
+                plan["bet_type"] = bet_type
 
                 if not engine or px <= 0:
                     plan["_bus_block"] = "missing_engine_or_px"

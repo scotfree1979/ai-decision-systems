@@ -46,11 +46,11 @@ ENGINES = [
 
 # Baseline allocations (start-of-day percentages)
 BASELINE_PCT = {
-    "MSC_UNIFIED":     0.00,  # New Primary engine (new dominant allocation)     
+    "MSC_UNIFIED":     0.40,  # New Primary engine (new dominant allocation)     
     "MSC_RISK":        0.30,  # Primary engine (dominant allocation)
-    "LEGACY":          0.10,  # Anchors only
-    "MSC_EXPLORATORY": 0.20,  # Reduced exploratory bleed
-    "MSC_INPLAY":      0.40,  # In-play ladder capital
+    "LEGACY":          0.05,  # Anchors only
+    "MSC_EXPLORATORY": 0.25,  # Reduced exploratory bleed
+    "MSC_INPLAY":      0.00,  # In-play ladder capital
     "OVERWATCHER":     0.00,  # Protective hedge
     "SAFETY_NET":      0.00,  # System safety buffer
 }
@@ -58,19 +58,19 @@ BASELINE_PCT = {
 
 # Hard floors (minimum operational runway)
 FLOOR_PCT = {
-    "MSC_UNIFIED":     0.00,
+    "MSC_UNIFIED":     0.30,
     "MSC_RISK":        0.25,
     "LEGACY":          0.10,
     "MSC_EXPLORATORY": 0.05,
-    "MSC_INPLAY":      0.20,
+    "MSC_INPLAY":      0.00,
     "OVERWATCHER":     0.00,
     "SAFETY_NET":      0.00,
 }
 
 
 
-# Dynamic pool (total = 7% of daily allocation)
-DYNAMIC_POOL = 0.07
+# Dynamic pool (total = 10% of daily allocation)
+DYNAMIC_POOL = 0.10
 
 # Exploratory ↔ Legacy performance bonus shift (0 → 10% max)
 _bonus_shift = 0   # increases/decreases by 1 step per rebalance
