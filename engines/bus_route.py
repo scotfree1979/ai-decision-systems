@@ -238,27 +238,43 @@ def _rotate_from_market(pairs, anchor_mid):
 
 def _build_runner_pool():
     """
-    Authoritative runner pool:
-    - Scope markets
-    - ALL runners included
-    - No band filtering
-    - No engine filtering
+    Canonical runner pool.
+
+    INVARIANT:
+    runner_pool contains ALL runners for all markets remaining today,
+    ordered by marketStartTime, with runners contiguous per market.
     """
 
-    scope = build_and_maintain_scope()
-    markets = scope.get("markets", []) or []
+    from engines.config_paths import connect_db
+    import sqlite3
 
-    pool = []
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
 
-    for m in markets:
-        mid = m["marketId"] if isinstance(m, dict) else str(m)
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT marketId
+            FROM bets
+            WHERE date(marketStartTime) = date('now','utc')
+              AND datetime(marketStartTime) >= datetime('now','utc')
+            ORDER BY datetime(marketStartTime) ASC
+            """
+        ).fetchall()
+    finally:
+        con.close()
+
+    pairs = []
+
+    for r in rows:
+        mid = str(r["marketId"])
         st = get_market_state(mid) or {}
         runners = st.get("runners") or {}
 
         for sid in runners.keys():
-            pool.append((mid, str(sid)))
+            pairs.append((mid, str(sid)))
 
-    return pool
+    return _order_runner_pool_by_market_time(pairs)
 
 
 class RunnerRotation:
@@ -379,7 +395,7 @@ class BusRouteSnapshot:
             for sid in runners.keys():
                 ordered.append((str(mid), str(sid)))
 
-        self.runner_pool = ordered
+        self.runner_pool = _build_runner_pool()
         # --------------------------------------------------
         # Resolve session token ONCE for the entire route
         # --------------------------------------------------
@@ -591,6 +607,7 @@ class BusRouteSnapshot:
             ctx["back"] = odds.get("back")
             ctx["lay"]  = odds.get("lay")
 
+        _write_bus_route_snapshot(self.ctx_map)
 
         return time.time() - t0
 
@@ -737,7 +754,7 @@ class BusRouteSnapshot:
         - Stable reference
         - Read-only contract for callers
         """
-        return self._ctx_map
+        return self.ctx_map
 
 # === PATCH END ==============================================================
 
@@ -826,7 +843,69 @@ class BusRouteSnapshot:
 # INVARIANT ENFORCED:
 # - If an engine can evaluate a runner, that runner MUST be in the route snapshot
 # ======================================================================================================
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: class BusRouteSnapshot
+# 🛠 ACTION: add DB snapshot writer for route ctx
+# 📆 PATCHED: 2026-03-05 — expose PX surface to dashboard
+#
+# PURPOSE
+# - Persist ctx_map so external processes (dashboard) can read PX
+# - Snapshot mirrors execution identity (mid, sid)
+# - No execution logic
+# ==============================================================================
 
+def _write_bus_route_snapshot(ctx_map):
+
+    from engines.config_paths import connect_db
+    import sqlite3
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    con = connect_db(rw=True)
+
+    try:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS bus_route_runtime_snapshot (
+            ts TEXT,
+            marketId TEXT,
+            selectionId TEXT,
+            horse_name TEXT,
+            px REAL,
+            back REAL,
+            lay REAL,
+            band TEXT
+        )
+        """)
+
+        rows = []
+
+        for (mid, sid), ctx in ctx_map.items():
+
+            rows.append((
+                ts,
+                str(mid),
+                str(sid),
+                ctx.get("horse_name"),
+                ctx.get("px"),
+                ctx.get("back"),
+                ctx.get("lay"),
+                ctx.get("band")
+            ))
+
+        con.executemany("""
+            INSERT INTO bus_route_runtime_snapshot
+            (ts, marketId, selectionId, horse_name, px, back, lay, band)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+
+        con.commit()
+
+    finally:
+        con.close()
+
+# === PATCH END ================================================================
 # ======================================================================
 # 📍 TARGET: engines/bus_route.py
 # 🔎 SEARCH: def get_root_ctx_runner_pairs():

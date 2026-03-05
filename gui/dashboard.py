@@ -845,6 +845,7 @@ class DashboardView(ttk.Frame):
         # 🐎 RUNNER GRID (2 columns)
         # --------------------------------------------------
 
+
         self.inplay_runner_grid = ttk.Frame(self.exec_stack)
         self.inplay_runner_grid.pack(fill="both", expand=True, pady=6)
 
@@ -1002,26 +1003,33 @@ class DashboardView(ttk.Frame):
 # - instantaneous dashboard updates
 # ==============================================================================
 
-            row = BUS.dashboard_snapshot()
+            row = con.execute("""
+                SELECT *
+                FROM bus_runtime_snapshot
+                ORDER BY ts DESC
+                LIMIT 1
+            """).fetchone()
 
             if row:
 
-               # --------------------------------------------------
-               # BUS tick synchronisation
-               # --------------------------------------------------
-                tick = row.get("tick_id")
+                row = dict(row)
+
+                self.bus_vars["route"].set(f"Route ID: {row['route_id']}")
+                self.bus_vars["stop"].set(f"Bus Stop: {row['bus_stop']}")
+                self.bus_vars["tick"].set(f"Tick ID: {row['tick_id']}")
+                self.bus_vars["hz"].set(f"Hz: {row['hz']}")
+
+
+
+                # --------------------------------------------------
+                # BUS tick synchronisation
+                # --------------------------------------------------
+                tick = row["tick_id"]
 
                 if tick != getattr(self, "_last_bus_tick", None):
                     self._last_bus_tick = tick
                     self.after(10, self._refresh_execution_intelligence)
 
-                # --------------------------------------------------
-                # BUS telemetry display
-                # --------------------------------------------------
-                self.bus_vars["route"].set(f"Route ID: {row['route_id']}")
-                self.bus_vars["stop"].set(f"Bus Stop: {row['bus_stop']}")
-                self.bus_vars["tick"].set(f"Tick ID: {row['tick_id']}")
-                self.bus_vars["hz"].set(f"Hz: {row['hz']}")
 
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
@@ -1030,9 +1038,10 @@ class DashboardView(ttk.Frame):
 # 📆 PATCHED: 2026-03-05 — dashboard derives fill rate
 # ==============================================================================
 
-                generated = row["plans_generated"] or 0
-                routed = row["plans_routed"] or 0
-                rate = (routed / generated * 100) if generated else 0.0
+                generated = row["plans_generated"] if "plans_generated" in row.keys() else 0
+                routed = row["plans_routed"] if "plans_routed" in row.keys() else 0
+
+                rate = (routed / generated * 100.0) if generated else 0.0
 
                 self.bus_vars["fill"].set(
                     f"Plans: {generated}  Routed: {routed}  Fill: {rate:.1f}%"
@@ -1043,41 +1052,44 @@ class DashboardView(ttk.Frame):
             for w in self.bus_runner_grid.winfo_children():
                 w.destroy()
 
-# === PATCH START ==============================================================
-# 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: # Example: top 2 runners queued at next stop
-# 🛠 ACTION: Replace SQL runner lookup with BUS route snapshot
-# 📆 PATCHED: 2026-03-05 — Next Bus Stop runners sourced from BUS snapshot
-# PURPOSE:
-# - Display runners scheduled for the current BUS stop
-# - Remove DB queries
-# ==============================================================================
-
-            bus_pairs = BUS.get_bus_stop_snapshot()[:4]
-            ctx_map = BUS.get_runner_ctx_snapshot()
-
             # === PATCH START ==============================================================
             # 📍 TARGET: gui/dashboard.py
             # 🔎 SEARCH: bus_pairs = BUS.get_bus_stop_snapshot()
-            # 🛠 ACTION: read next runners from RouteSnapshot (DB)
+            # 🛠 ACTION: Render BUS stop runners from route snapshot
             # PURPOSE:
-            # - dashboard must read execution state from DB, not BUS memory
+            # - Show the four runners in the current BUS stop
+            # - Use authoritative px + horse_name from BUS ctx snapshot
             # ==============================================================================
 
-            runners = BUS.get_runner_surface()
+            bus_pairs = BUS.get_bus_stop_snapshot()[:4]
 
-            for i, r in enumerate(runners):
 
-                horse = r.get("horse_name") or r["selectionId"]
-                event = r["marketId"]
+            for i, (mid, sid) in enumerate(bus_pairs):
+
+                r = con.execute("""
+                    SELECT horse_name, px
+                    FROM bus_route_runtime_snapshot
+                    WHERE marketId = ?
+                      AND selectionId = ?
+                    ORDER BY ts DESC
+                    LIMIT 1
+                """, (mid, sid)).fetchone()
+
+                if not r:
+                    continue
+
+                horse = r["horse_name"] or sid
+                px = r["px"]
 
                 card = ttk.Frame(self.bus_runner_grid, padding=8, relief="ridge")
                 card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
 
                 ttk.Label(card, text=horse,
                           font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
-                ttk.Label(card, text=f"Market: {event}").pack(anchor="w")
-                ttk.Label(card, text=f"Px: {r.get('px')}").pack(anchor="w")
+
+                ttk.Label(card, text=f"Market: {mid}").pack(anchor="w")
+
+                ttk.Label(card, text=f"Px: {px:.2f}").pack(anchor="w")
 
             # === PATCH END ================================================================
 
@@ -1101,6 +1113,7 @@ class DashboardView(ttk.Frame):
                 inplay_flag = bool(unified_row["inplay_active"])
                 confidence  = float(unified_row["inplay_confidence"] or 0.0)
 
+                # Default unified snapshot display
                 self.inplay_state_vars["market"].set("Market: Unified Timing")
                 self.inplay_state_vars["inplay"].set(
                     f"In-Play: {'YES' if inplay_flag else 'NO'}"
@@ -1110,89 +1123,89 @@ class DashboardView(ttk.Frame):
                 )
                 self.inplay_state_vars["quartile"].set("Quartile: —")
 
+                # --------------------------------------------------
+                # Find next race (dashboard timing control)
+                # --------------------------------------------------
+                race = con.execute("""
+                    SELECT marketId, event_name, market_name, marketStartTime
+                    FROM betsdb.bets
+                    WHERE marketStartTime > datetime('now','utc')
+                    ORDER BY marketStartTime ASC
+                    LIMIT 1
+                """).fetchone()
+
                 if race:
 
-                    # Find the race closest to now
+                    mto = minutes_to_off(race["marketStartTime"])
+
+                    if mto is not None:
+                        mins = int(mto)
+                        secs = int((mto - mins) * 60)
+                    else:
+                        mins = 0
+                        secs = 0
+
+                    self.inplay_state_vars["market"].set(
+                        f"Market: {race['event_name']} {race['market_name']}"
+                    )
+
+                    self.inplay_state_vars["inplay"].set(
+                        f"Starts In: {mins}m {secs}s"
+                    )
+
+                    self.inplay_state_vars["confidence"].set(
+                        f"Confidence: {confidence:.2f}"
+                    )
+
                     # === PATCH START ==============================================================
                     # 📍 TARGET: gui/dashboard.py
-                    # 🔎 SEARCH: Market: Unified Timing
-                    # 🛠 ACTION: show countdown to next race
+                    # 🔎 SEARCH: FROM betsdb.bets WHERE marketId = ?
+                    # 🛠 ACTION: Upcoming race runners panel
                     # PURPOSE:
-                    # - display upcoming race
-                    # - countdown timer until off
+                    # - Show the four runners in the next upcoming race
+                    # - Pull px from BUS snapshot if available
                     # ==============================================================================
 
-                    race = con.execute("""
-                        SELECT marketId, event_name, market_name, marketStartTime
-                        FROM betsdb.bets
-                        WHERE marketStartTime > datetime('now','utc')
-                        ORDER BY marketStartTime ASC
-                        LIMIT 1
-                    """).fetchone()
+                    state = get_live_view_state() or {}
 
-                    if race:
+                    lowest_odds = state.get("lowest_odds", [])
+                    most_money = state.get("most_money", [])
 
-                        mto = minutes_to_off(race["marketStartTime"])
+                    display = lowest_odds + most_money
 
-                        mins = int(mto) if mto else 0
-                        secs = int((mto - mins) * 60) if mto else 0
+                    for i, r in enumerate(display):
 
-                        self.inplay_state_vars["market"].set(
-                            f"Market: {race['event_name']} {race['market_name']}"
+                        card = ttk.Frame(
+                            self.live_grid,
+                            padding=8,
+                            relief="ridge"
                         )
 
-                        self.inplay_state_vars["inplay"].set(
-                            f"Starts In: {mins}m {secs}s"
+                        card.grid(
+                            row=i // 4,
+                            column=i % 4,
+                            padx=6,
+                            pady=6,
+                            sticky="nsew"
                         )
 
-                        self.inplay_state_vars["confidence"].set(
-                            f"Confidence: {confidence:.2f}"
-                        )
+                        ttk.Label(
+                            card,
+                            text=r["horse_name"],
+                            font=("TkDefaultFont",9,"bold")
+                        ).pack(anchor="w")
+
+                        ttk.Label(
+                            card,
+                            text=f"Odds: {float(r['odds']):.2f}"
+                        ).pack(anchor="w")
+
+                        ttk.Label(
+                            card,
+                            text=f"PnL if Win: £{float(r['pnl_if_win']):.2f}"
+                        ).pack(anchor="w")
 
                     # === PATCH END ================================================================
-
-# === PATCH START ==============================================================
-# 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: COALESCE(px, odds, 0) AS px
-# 🛠 ACTION: Use BUS ctx_map for PX instead of bets table
-# 📆 PATCHED: 2026-03-05 — Sweet Spot runners powered by route snapshot
-# PURPOSE:
-# - PX is authoritative in BUS ctx
-# ==============================================================================
-
-                        ctx_map = BUS.get_runner_ctx_snapshot()
-
-                        runners = []
-                        for (m, s), ctx in ctx_map.items():
-                            if m == mid:
-                                runners.append({
-                                    "selectionId": s,
-                                    "horse_name": ctx.get("horse_name", s),
-                                    "px": ctx.get("px")
-                                })
-
-                        runners = sorted(
-                            runners,
-                            key=lambda r: abs((r["px"] or 999) - 7.0)
-                        )[:4]
-
-# === PATCH END ================================================================
-
-                        for i, r in enumerate(runners):
-
-                            delta = abs(float(r["px"]) - 7.0)
-
-                            card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
-                            card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
-
-                            ttk.Label(
-                                card,
-                                text=r["horse_name"],
-                                font=("TkDefaultFont", 9, "bold")
-                            ).pack(anchor="w")
-
-                            ttk.Label(card, text=f"Px: {float(r['px']):.2f}").pack(anchor="w")
-                            ttk.Label(card, text=f"Δ from 7.0: {delta:.2f}").pack(anchor="w")
 
                 else:
 
@@ -1268,18 +1281,17 @@ class DashboardView(ttk.Frame):
 # - Align dashboard with execution state
 # ==============================================================================
 
-                ctx_map = BUS.get_runner_ctx_snapshot()
-
-                runners = []
-                for (m, s), ctx in ctx_map.items():
-                    if m == mid:
-                        runners.append({
-                            "selectionId": s,
-                            "horse_name": ctx.get("horse_name", s),
-                            "px": ctx.get("px"),
-                            "pnl_if_win": ctx.get("pnl_if_win", 0)
-                        })
-
+                runners = con.execute("""
+                    SELECT
+                        marketId,
+                        selectionId,
+                        horse_name,
+                        px
+                    FROM bus_route_runtime_snapshot
+                    WHERE marketId = ?
+                    ORDER BY ABS(px - 7.0)
+                    LIMIT 4
+                """, (race["marketId"],)).fetchall()
 # === PATCH END ================================================================
 
                 if runners:
@@ -1295,8 +1307,10 @@ class DashboardView(ttk.Frame):
 
                     by_pnl = sorted(
                         runners,
-                        key=lambda r: float(r["pnl_if_win"] or 0),
-                        reverse=True
+                        key=lambda r: (
+                            -float(r["pnl_if_win"] or 0),   # primary → max pnl
+                            float(r["px"] or 999)           # secondary → lowest odds
+                        )
                     )[:4]
 
                     display = by_odds + by_pnl
