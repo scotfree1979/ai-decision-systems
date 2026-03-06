@@ -312,6 +312,15 @@ class DashboardView(ttk.Frame):
             """Show the three most recently settled markets (zero liability)."""
             try:
                 con = _dashboard_con()
+                con.row_factory = sqlite3.Row
+
+                race = con.execute("""
+                    SELECT marketId, event_name, market_name, marketStartTime
+                    FROM betsdb.bets
+                    WHERE marketStartTime > datetime('now','utc')
+                    ORDER BY marketStartTime ASC
+                    LIMIT 1
+                """).fetchone()
                 # 1️⃣ fetch last 3 races that have already started
                 rows = con.execute("""
                     SELECT DISTINCT b.marketId,
@@ -947,6 +956,15 @@ class DashboardView(ttk.Frame):
             con = _dashboard_con()
             con.row_factory = sqlite3.Row
 
+            # Use the same race as V7 INPLAY LIVE STATE
+            race = con.execute("""
+                SELECT marketId, event_name, market_name, marketStartTime
+                FROM betsdb.bets
+                WHERE marketStartTime > datetime('now','utc')
+                ORDER BY marketStartTime ASC
+                LIMIT 1
+            """).fetchone()
+
             bank_row = con.execute("""
                 SELECT *
                 FROM bankstate_runtime_snapshot
@@ -1052,6 +1070,118 @@ class DashboardView(ttk.Frame):
             for w in self.bus_runner_grid.winfo_children():
                 w.destroy()
 
+            # -----------------------------
+            # NEXT BUS STOP — FALLBACK
+            # -----------------------------
+            next_bus_runners = con.execute("""
+                SELECT
+                    selectionId,
+                    horse_name
+                FROM betsdb.bets
+                WHERE marketId = ?
+                  AND date(marketStartTime) = date('now','utc')
+                GROUP BY selectionId, horse_name
+                ORDER BY selectionId
+                LIMIT 4
+            """, (race["marketId"],)).fetchall()
+
+            for i, r in enumerate(next_bus_runners):
+
+                card = ttk.Frame(self.bus_runner_grid, padding=8, relief="ridge")
+                card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+
+                ttk.Label(
+                    card,
+                    text=r["horse_name"],
+                    font=("TkDefaultFont", 9, "bold")
+                ).pack(anchor="w")
+
+                ttk.Label(card, text="Odds: 0.00").pack(anchor="w")
+
+            # -----------------------------
+            # SWEET SPOT — FALLBACK
+            # -----------------------------
+            sweet_spot_runners = con.execute("""
+                SELECT
+                    selectionId,
+                    horse_name
+                FROM betsdb.bets
+                WHERE marketId = ?
+                  AND date(marketStartTime) = date('now','utc')
+                GROUP BY selectionId, horse_name
+                ORDER BY selectionId
+                LIMIT 4
+            """, (race["marketId"],)).fetchall()
+
+            for w in self.inplay_runner_grid.winfo_children():
+                w.destroy()
+
+            for i, r in enumerate(sweet_spot_runners):
+
+                card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
+                card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+
+                ttk.Label(
+                    card,
+                    text=r["horse_name"],
+                    font=("TkDefaultFont", 9, "bold")
+                ).pack(anchor="w")
+
+                ttk.Label(card, text="Odds: 0.00").pack(anchor="w")
+
+
+            # -----------------------------
+            # SWEET SPOT — SNAPSHOT UPDATE
+            # -----------------------------
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: SWEET SPOT — SNAPSHOT UPDATE
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Populate sweet spot runners from MarketMonitor snapshot
+# ==============================================================================
+
+            snapshot = con.execute("""
+                SELECT
+                    selectionId,
+                    horse_name,
+                    px,
+                    band,
+                    rank
+                FROM market_monitor_snapshot
+                WHERE marketId = ?
+                ORDER BY ABS(px - 7.0)
+                LIMIT 4
+            """, (race["marketId"],)).fetchall()
+
+            if snapshot:
+
+                for w in self.inplay_runner_grid.winfo_children():
+                    w.destroy()
+
+                for i, r in enumerate(snapshot):
+
+                    card = ttk.Frame(self.inplay_runner_grid, padding=8, relief="ridge")
+                    card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+
+                    ttk.Label(
+                        card,
+                        text=r["horse_name"],
+                        font=("TkDefaultFont",9,"bold")
+                    ).pack(anchor="w")
+
+                    ttk.Label(
+                        card,
+                        text=f"Odds: {float(r['px'] or 0):.2f}"
+                    ).pack(anchor="w")
+
+                    ttk.Label(
+                        card,
+                        text=f"Band: {r['band']}"
+                    ).pack(anchor="w")
+
+# === PATCH END ================================================================
+
             # === PATCH START ==============================================================
             # 📍 TARGET: gui/dashboard.py
             # 🔎 SEARCH: bus_pairs = BUS.get_bus_stop_snapshot()
@@ -1078,19 +1208,32 @@ class DashboardView(ttk.Frame):
                 if not r:
                     continue
 
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: NEXT BUS STOP — RUNNERS render block
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Add live odds display to BUS stop runners
+# ==============================================================================
+
                 horse = r["horse_name"] or sid
-                px = r["px"]
+                px = float(r["px"] or 0)
 
                 card = ttk.Frame(self.bus_runner_grid, padding=8, relief="ridge")
                 card.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
 
-                ttk.Label(card, text=horse,
-                          font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+                ttk.Label(
+                    card,
+                    text=horse,
+                    font=("TkDefaultFont",9,"bold")
+                ).pack(anchor="w")
 
-                ttk.Label(card, text=f"Market: {mid}").pack(anchor="w")
+                ttk.Label(
+                    card,
+                    text=f"Odds: {px:.2f}"
+                ).pack(anchor="w")
 
-                ttk.Label(card, text=f"Px: {px:.2f}").pack(anchor="w")
-
+# === PATCH END ================================================================
             # === PATCH END ================================================================
 
             # ─────────────────────────────────────────
@@ -1104,9 +1247,27 @@ class DashboardView(ttk.Frame):
                 LIMIT 1
             """).fetchone()
 
-            # Clear sidebar runner cards
-            for w in self.inplay_runner_grid.winfo_children():
-                w.destroy()
+            # --------------------------------------------------
+            # UNIFIED MARKET LIFECYCLE SIGNAL
+            # --------------------------------------------------
+            market_finished = False
+
+            if unified_row:
+                inplay_flag = bool(unified_row["inplay_active"])
+                liability   = float(unified_row["worst_case_liability"] or 0)
+
+                # finished when:
+                # • inplay no longer active
+                # • and no liability remains
+                if not inplay_flag and liability == 0:
+                    market_finished = True
+
+            # --------------------------------------------------
+            # CLEAR RUNNER GRID WHEN MARKET ENDS
+            # --------------------------------------------------
+            if market_finished:
+                for w in self.live_grid.winfo_children():
+                    w.destroy()
 
             if unified_row:
 
@@ -1202,7 +1363,7 @@ class DashboardView(ttk.Frame):
 
                         ttk.Label(
                             card,
-                            text=f"PnL if Win: £{float(r['pnl_if_win']):.2f}"
+                            text="PnL if Win: £0.00"
                         ).pack(anchor="w")
 
                     # === PATCH END ================================================================
@@ -1230,46 +1391,82 @@ class DashboardView(ttk.Frame):
             # SELECT RACE FOR LIVE VIEW (snapshot-aware)
             # --------------------------------------------------
 
-            race = None
 
-            if unified_row and (unified_row["parents_open"] or unified_row["children_open"]):
-
-                race = con.execute("""
-                    SELECT
-                        o.marketId,
-                        b.event_name,
-                        b.market_name,
-                        b.marketStartTime,
-                        COUNT(*) AS activity
-                    FROM orders o
-                    JOIN betsdb.bets b USING (marketId)
-                    WHERE o.role='PARENT'
-                      AND o.entry_status='MATCHED'
-                    GROUP BY o.marketId
-                    ORDER BY activity DESC
-                    LIMIT 1
-                """).fetchone()
-
-            if not race:
-
-                race = con.execute("""
-                    SELECT marketId, event_name, market_name, marketStartTime
-                    FROM betsdb.bets
-                    WHERE marketStartTime > datetime('now','utc')
-                    ORDER BY marketStartTime ASC
-                    LIMIT 1
-                """).fetchone()
 
             if race:
 
                 mid = race["marketId"]
 
-                ttk.Label(
-                    self.live_overview_card,
-                    text=f"{race['event_name']}\n{race['market_name']}",
-                    font=("TkDefaultFont",11,"bold"),
-                    justify="left"
-                ).pack(anchor="w")
+                # -------------------------------
+                # LIVE VIEW OVERVIEW PANEL
+                # -------------------------------
+
+                runners_total = con.execute("""
+                    SELECT COUNT(DISTINCT selectionId)
+                    FROM betsdb.bets
+                    WHERE marketId = ?
+                """, (race["marketId"],)).fetchone()[0]
+
+                spread = con.execute("""
+                    SELECT MIN(px) AS lo, MAX(px) AS hi
+                    FROM bus_route_runtime_snapshot
+                    WHERE marketId = ?
+                """, (race["marketId"],)).fetchone()
+
+                fav = con.execute("""
+                    SELECT horse_name
+                    FROM bus_route_runtime_snapshot
+                    WHERE marketId = ?
+                    ORDER BY px ASC
+                    LIMIT 1
+                """, (race["marketId"],)).fetchone()
+
+                spread_txt = "—"
+                if spread and spread["lo"] and spread["hi"]:
+                    spread_txt = f"{spread['lo']:.2f} → {spread['hi']:.0f}"
+
+                fav_name = fav["horse_name"] if fav else "—"
+
+                # --------------------------------------------------
+                # MARKET PnL (if this market settles now)
+                # --------------------------------------------------
+                market_pnl = con.execute("""
+                    SELECT SUM(
+                        CASE
+                            WHEN side='LAY' THEN entry_stake
+                            WHEN side='BACK' THEN -entry_stake
+                            ELSE 0
+                        END
+                    )
+                    FROM orders
+                    WHERE marketId=?
+                      AND role='PARENT'
+                      AND entry_status='MATCHED'
+                      AND date(opened_at)=date('now','utc')
+                """, (race["marketId"],)).fetchone()[0]
+
+                market_pnl = float(market_pnl or 0.0)
+
+                overview_lines = [
+                    "Next Race",
+                    f"{race['event_name']} — {race['market_name']}",
+                    "",
+                    f"Runners: {runners_total}",
+                    f"Spread: {spread_txt}",
+                    "",
+                    f"Favourite: {fav_name}",
+                    f"Market PnL: £{market_pnl:.2f}",
+                    "Steam Bias: —",
+                    "Liquidity: —"
+                ]
+
+                for line in overview_lines:
+                    ttk.Label(
+                        self.live_overview_card,
+                        text=line,
+                        font=("TkDefaultFont",10),
+                        anchor="w"
+                    ).pack(anchor="w")
 
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
@@ -1286,12 +1483,29 @@ class DashboardView(ttk.Frame):
                         marketId,
                         selectionId,
                         horse_name,
-                        px
+                        px,
+                        0 AS pnl_if_win
                     FROM bus_route_runtime_snapshot
                     WHERE marketId = ?
                     ORDER BY ABS(px - 7.0)
                     LIMIT 4
                 """, (race["marketId"],)).fetchall()
+
+                if not runners:
+
+                    runners = con.execute("""
+                        SELECT
+                            marketId,
+                            selectionId,
+                            horse_name,
+                            0 AS px,
+                            0 AS pnl_if_win
+                        FROM betsdb.bets
+                        WHERE marketId = ?
+                          AND date(marketStartTime) = date('now','utc')
+                        GROUP BY selectionId, horse_name
+                        LIMIT 4
+                    """, (race["marketId"],)).fetchall()
 # === PATCH END ================================================================
 
                 if runners:
@@ -1317,6 +1531,49 @@ class DashboardView(ttk.Frame):
 
                     for i, r in enumerate(display):
 
+                        horse = r["horse_name"]
+                        px = float(r["px"] or 0)
+
+                        # --------------------------------------------------
+                        # PnL IF THIS RUNNER WINS
+                        # --------------------------------------------------
+                        pnl_if_win = con.execute("""
+                            SELECT SUM(
+                                CASE
+                                    WHEN side='LAY' AND selectionId=? THEN -entry_stake*(entry_odds-1)
+                                    WHEN side='LAY' AND selectionId!=? THEN entry_stake
+                                    WHEN side='BACK' AND selectionId=? THEN entry_stake*(entry_odds-1)
+                                    WHEN side='BACK' AND selectionId!=? THEN -entry_stake
+                                    ELSE 0
+                                END
+                            )
+                            FROM orders
+                            WHERE marketId=?
+                              AND role='PARENT'
+                              AND entry_status='MATCHED'
+                              AND date(opened_at)=date('now','utc')
+                        """, (
+                            r["selectionId"],
+                            r["selectionId"],
+                            r["selectionId"],
+                            r["selectionId"],
+                            race["marketId"]
+                        )).fetchone()[0]
+
+                        pnl_if_win = float(pnl_if_win or 0.0)
+
+                        mm = con.execute("""
+                            SELECT band, rank
+                            FROM market_monitor_snapshot
+                            WHERE marketId = ?
+                            AND selectionId = ?
+                            ORDER BY ts DESC
+                            LIMIT 1
+                        """, (race["marketId"], r["selectionId"])).fetchone()
+
+                        band = mm["band"] if mm else "—"
+                        rank = mm["rank"] if mm else "—"
+
                         card = ttk.Frame(
                             self.live_grid,
                             padding=8,
@@ -1333,19 +1590,30 @@ class DashboardView(ttk.Frame):
 
                         ttk.Label(
                             card,
-                            text=r["horse_name"],
+                            text=horse,
                             font=("TkDefaultFont",9,"bold")
                         ).pack(anchor="w")
 
                         ttk.Label(
                             card,
-                            text=f"Odds: {float(r['px']):.2f}"
+                            text=f"Odds: {px:.2f}"
                         ).pack(anchor="w")
 
                         ttk.Label(
                             card,
-                            text=f"PnL if Win: £{float(r['pnl_if_win']):.2f}"
+                            text=f"Band: {band}"
                         ).pack(anchor="w")
+
+                        ttk.Label(
+                            card,
+                            text=f"Rank: {rank}"
+                        ).pack(anchor="w")
+
+                        ttk.Label(
+                            card,
+                            text=f"PnL if Win: £{pnl_if_win:.2f}"
+                        ).pack(anchor="w")
+
 
             con.close()
 

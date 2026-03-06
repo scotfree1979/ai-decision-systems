@@ -24,6 +24,35 @@ DEFAULT_POLICY = {
 # ------------------------------------------------------------------
 _STATE: Dict[str, dict] = {}
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py
+# 🔎 SEARCH: _STATE: Dict[str, dict] = {}
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Persist runner monitoring snapshot for dashboard
+# ==============================================================================
+
+def _ensure_monitor_snapshot_table():
+    con = _adb()
+    try:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS market_monitor_snapshot (
+            ts REAL,
+            marketId TEXT,
+            selectionId TEXT,
+            horse_name TEXT,
+            px REAL,
+            band TEXT,
+            rank INTEGER,
+            is_fav INTEGER,
+            PRIMARY KEY (marketId, selectionId)
+        )
+        """)
+    finally:
+        con.close()
+
+# === PATCH END ================================================================
+
 # band / fav / price memory
 _STATE.setdefault("runner_band", {})       # {mid: {sid: (band, ts)}}
 _STATE.setdefault("high_seen", {})         # {mid: {sid: float}}
@@ -134,6 +163,95 @@ def update_runner_state(mid: str, sid: str, band: str, px: float | None, is_fav:
             promote_market_on_signal(mid, ttl_s=180)
         except Exception:
             pass
+
+# ─────────────────────────────────────────────────────────────
+# MARKET SNAPSHOT DATABASE WRITER (HIGH PERFORMANCE)
+# ─────────────────────────────────────────────────────────────
+
+from engines.config_paths import LOCAL_AUTO
+import sqlite3
+import threading
+import time
+
+_SNAPSHOT_CONN = None
+_SNAPSHOT_LOCK = threading.Lock()
+
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py:_snapshot_db
+# 🔎 SEARCH: def _snapshot_db():
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Route MarketMonitor snapshot writes through the DAL writer
+# instead of opening a direct sqlite3 connection.
+# ==============================================================================
+
+from engines.config_paths import open_auto_db
+
+def _snapshot_db():
+    """
+    DAL-safe snapshot connection.
+
+    Returns the DAL-controlled writer connection for autoscalp_gui.db.
+    Ensures the snapshot table exists before returning the connection.
+    """
+
+    con = open_auto_db(rw=True)
+
+    con.execute("""
+    CREATE TABLE IF NOT EXISTS market_runner_snapshot (
+        ts REAL,
+        marketId TEXT,
+        selectionId TEXT,
+        horse_name TEXT,
+        px REAL,
+        ltp REAL,
+        band TEXT,
+        is_fav INTEGER,
+        PRIMARY KEY (marketId, selectionId)
+    )
+    """)
+
+    return con
+
+# === PATCH END ================================================================
+
+def _write_snapshot_batch(rows):
+    """
+    Ultra-fast batch UPSERT of runner snapshots.
+    rows = [(ts, mid, sid, horse, px, ltp, band, fav), ...]
+    """
+
+    if not rows:
+        return
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py:_write_snapshot_batch
+# 🔎 SEARCH: con = _snapshot_db()
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Route snapshot writes through DAL instead of raw sqlite
+# ==============================================================================
+
+    con = _snapshot_db()
+
+    with _SNAPSHOT_LOCK:
+
+        for row in rows:
+            con.execute("""
+            INSERT INTO market_runner_snapshot
+            (ts, marketId, selectionId, horse_name, px, ltp, band, is_fav)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(marketId, selectionId)
+            DO UPDATE SET
+                ts = excluded.ts,
+                px = excluded.px,
+                ltp = excluded.ltp,
+                band = excluded.band,
+                is_fav = excluded.is_fav
+            """, row)
+
+# === PATCH END ================================================================
 
 def signals_for_runner(mid: str, sid: str, px: float | None, *, recent_s: int = 10) -> dict:
     """Compute flip signals; *does not* promote (promotion is done in update_runner_state)."""
@@ -412,18 +530,98 @@ def refresh(mids: list[str] | None = None, *, max_runners: int = 50) -> None:
     # --------------------------------------------------
     # 5️⃣ Commit to _STATE
     # --------------------------------------------------
+    snapshot_rows = []
+
     for mid, data in markets.items():
+
         _STATE[mid] = data
         _update_rank_state(mid, data["runners"])
 
         for sid, info in data["runners"].items():
+
+            band = info.get("band", "UNKNOWN")
+            px = info.get("px")
+            fav = bool(info.get("is_fav"))
+
             update_runner_state(
                 mid,
                 sid,
-                info.get("band", "UNKNOWN"),
-                info.get("px"),
-                bool(info.get("is_fav")),
+                band,
+                px,
+                fav,
             )
+
+            snapshot_rows.append((
+                time.time(),
+                mid,
+                sid,
+                info.get("horse_name") or sid,
+                px,
+                px,
+                band,
+                1 if fav else 0
+            ))
+
+    # write snapshots once per refresh
+    _write_snapshot_batch(snapshot_rows)
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py:refresh
+# 🔎 SEARCH: for mid, data in markets.items():
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Persist snapshot used by dashboard panels
+# ==============================================================================
+
+    _ensure_monitor_snapshot_table()
+
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/market_monitor/monitor.py:refresh
+# 🔎 SEARCH: con = _adb()
+# 📆 PATCHED: 2026-03-06
+# PURPOSE:
+# Route dashboard snapshot writes through DAL writer
+# ==============================================================================
+
+    from engines.config_paths import open_auto_db
+
+    con = open_auto_db(rw=True)
+
+# === PATCH END ================================================================
+    try:
+
+        for mid, data in markets.items():
+
+            runners = data["runners"]
+
+            ranked = sorted(
+                runners.items(),
+                key=lambda x: (x[1]["px"] is None, x[1]["px"])
+            )
+
+            for rank, (sid, r) in enumerate(ranked, start=1):
+
+                con.execute("""
+                INSERT OR REPLACE INTO market_monitor_snapshot
+                (ts, marketId, selectionId, horse_name, px, band, rank, is_fav)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    now,
+                    mid,
+                    sid,
+                    sid,
+                    r["px"],
+                    r["band"],
+                    rank,
+                    1 if r["is_fav"] else 0
+                ))
+
+        con.commit()
+
+    finally:
+        con.close()
+
+# === PATCH END ================================================================
 
 # === PATCH START ============================================================
 # 📍 TARGET: engines/market_monitor/monitor.py:ensure_for_markets
