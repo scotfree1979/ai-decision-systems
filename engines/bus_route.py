@@ -396,6 +396,15 @@ class BusRouteSnapshot:
         window_mids = []
         window_pairs = []
 
+        legacy_parents = get_legacy_parent_odds_snapshot(
+            session_token=session_token
+        )
+
+        legacy_parent_by_runner = {
+            (str(p["marketId"]), str(p["selectionId"])): p
+            for p in legacy_parents
+        }
+
         for mid, sid in self.runner_pool:
 
             if mid not in window_mids:
@@ -422,7 +431,7 @@ class BusRouteSnapshot:
 
         helper_pairs |= get_exploratory_active_parent_pairs()
         helper_pairs |= get_inplay_parent_runner_pairs()
-        helper_pairs |= get_stoploss_parent_pairs()
+        helper_pairs |= set(get_stoploss_parent_pairs())
 
         # --------------------------------------------------
         # FULL RUNNER POOL
@@ -474,7 +483,43 @@ class BusRouteSnapshot:
             key = (str(mid), str(sid))
 
             # 🔒 REUSE — do NOT rebuild CTX
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: if key in ctx_map:
+# 🛠 ACTION: REFRESH ANCHORS FOR EXISTING CTX RUNNERS
+# 📆 PATCHED: 2026-03-06 — Fix late parent binding for MSC_RISK
+#
+# PURPOSE:
+# - CTX objects persist across route rebuilds
+# - LEGACY parents may appear AFTER CTX creation
+# - Anchor fields must therefore refresh every route build
+#
+# ROOT CAUSE:
+# - anchor_parent_id only injected during first CTX build
+# - later parents were invisible to MSC_RISK
+#
+# RESULT:
+# - anchor injection always reflects live parent state
+# ======================================================================================================
+
             if key in ctx_map:
+
+                ctx = ctx_map[key]
+
+                parent = legacy_parent_by_runner.get((str(mid), str(sid)))
+
+                if parent:
+
+                    ctx["anchor_parent_id"]   = parent.get("parent_id")
+                    ctx["anchor_entry_odds"]  = parent.get("entry_odds")
+                    ctx["anchor_entry_stake"] = parent.get("entry_stake")
+                    ctx["anchor_engine"]      = parent.get("engine")
+
+                    ctx["legacy_parent_id"]   = parent.get("parent_id")
+                    ctx["legacy_entry_odds"]  = parent.get("entry_odds")
+                    ctx["legacy_entry_side"]  = parent.get("side")
+                    ctx["legacy_entry_stake"] = parent.get("entry_stake")
+
                 continue
 
             # 🔁 Progressive warm-up limit
@@ -514,15 +559,7 @@ class BusRouteSnapshot:
                 # --------------------------------------------------
                 # LEGACY parent binding (STATIC FOR ROUTE)
                 # --------------------------------------------------
-                legacy_parents = get_legacy_parent_odds_snapshot(
-                    session_token=session_token
-                )
 
-                # Index for O(1) lookup
-                legacy_parent_by_runner = {
-                    (str(p["marketId"]), str(p["selectionId"])): p
-                    for p in legacy_parents
-                }
 
                 # --------------------------------------------------
                 # LEGACY parent binding (STATIC FOR ROUTE)
@@ -1430,16 +1467,6 @@ def build_bus_route_tick(rotation: RunnerRotation):
     for mid, sid in rotation.next("LEGACY", pool, ROUTE_SPLIT["LEGACY"]):
         plans.append(("LEGACY", mid, sid))
 
-    # RISK — only if legacy parents exist
-    legacy_parents = get_legacy_parent_odds_snapshot(
-        session_token=session_token
-    )
-
-
-    legacy_runner_set = {
-        (p["marketId"], p["selectionId"])
-        for p in legacy_parents
-    }
 
     risk_pool = [r for r in pool if r in legacy_runner_set]
 

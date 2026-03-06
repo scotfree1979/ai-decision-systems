@@ -692,7 +692,7 @@ class DecisionBus:
 
         snapshot = self._route_snapshot
 
-        runner_pool = snapshot.get_all_runners() or []
+        runner_pool = set(snapshot.get_all_runners() or [])
         mids = sorted({mid for (mid, _sid) in runner_pool})
 
         bus_stops = snapshot.bus_stops or {}
@@ -4537,7 +4537,22 @@ def _write_unified_runtime_snapshot():
             bus["bus_stop"] if bus else None,
             bus["tick_id"] if bus else None,
             bus["hz"] if bus else None,
-            bus["fill_rate"] if bus else None,
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: bus["fill_rate"]
+# 🛠 ACTION: derive fill_rate from generated/routed counters
+# 📆 PATCHED: 2026-03-06 — unified snapshot compatibility fix
+#
+# PURPOSE:
+# - bus_runtime_snapshot no longer stores fill_rate
+# - derive it from plans_generated / plans_routed
+# - prevents IndexError in unified snapshot writer
+# ======================================================================================================
+
+            (
+                (bus["plans_routed"] / bus["plans_generated"])
+                if bus and bus["plans_generated"] else 0.0
+            ),
 
             parents_open,
             children_open,
