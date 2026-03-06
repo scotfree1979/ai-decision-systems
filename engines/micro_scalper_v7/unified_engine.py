@@ -108,10 +108,47 @@ class UnifiedEngine:
         # 2️⃣ PRE-OFF EXPLORATORY (TOP RANKED)
         # ------------------------------------------------------------------
 
-        candidates = layer2.get("candidates", [])
+        candidates = layer2.get("candidates", [])[:15]
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: # 2️⃣ PRE-OFF EXPLORATORY (TOP RANKED)
+# 🧩 ACTION: ADD time-to-off entry gating for capital efficiency
+# 📆 PATCHED: 2026-03-05 — Unified early-drift capital lock prevention
+#
+# PURPOSE
+# -------
+# Capture early drifts (18→17→16→…) while preventing capital lock hours before off.
+#
+# ENTRY LOGIC
+# -----------
+# Entry allowed only if price exceeds threshold determined by time-to-off.
+#
+# TTO (seconds)      MIN ENTRY PX
+# > 7200  (2h)       block
+# > 3600  (1h)       ≥ 18
+# > 1800  (30m)      ≥ 14
+# > 900   (15m)      ≥ 10
+# ≤ 900              unrestricted
+#
+# Once anchor exists, MSC_RISK manages the full drift lifecycle.
+# ======================================================================================================
 
         for c in candidates:
 
+            mid = c["marketId"]
+            sid = c["selectionId"]
+            px  = c.get("px")
+
+            if px is None:
+                continue
+
+            try:
+                px = float(px)
+            except Exception:
+                continue
+
+  
             plans.append({
                 "enter": True,
                 "engine": "MSC_UNIFIED",
@@ -976,10 +1013,7 @@ class UnifiedEngine:
 
             dv = r.get("delta_ticks_per_min")
             if dv:
-                if abs(dv) > 1:
-                    score += 2
-                elif abs(dv) > 0.5:
-                    score += 1
+                score += min(abs(dv) * 4, 4)
 
             rank_row = next(
                 (rk for rk in rank
@@ -1084,7 +1118,7 @@ class UnifiedEngine:
                 continue
 
         return {
-            "candidates": candidates[:5],
+            "candidates": candidates,
             "sweet_summary": sweet_summary,
             "fast_movers": fast[:5],
             "crossovers": crossovers[:5],

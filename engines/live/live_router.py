@@ -6465,7 +6465,16 @@ def place_parent_and_hedge(
     # ==================================================
     # MSC_INPLAY SEQUENTIAL PROMOTION GATE (ROUTER AUTH)
     # ==================================================
-    if engine == "MSC_INPLAY":
+    # Treat Unified INPLAY plans the same as MSC_INPLAY
+    is_inplay_engine = (
+        engine == "MSC_INPLAY"
+        or (
+            engine == "MSC_UNIFIED"
+            and (_plan or {}).get("bet_type") == "INPLAY"
+        )
+    )
+
+    if is_inplay_engine:
 
         con = _orders_conn()
         con.row_factory = sqlite3.Row

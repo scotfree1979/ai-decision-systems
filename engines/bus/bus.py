@@ -81,17 +81,17 @@ def _normalize_ctx_enums(ctx: dict) -> None:
     """
 
     # ---- band ----
-    band = ctx.get("band")
-    if isinstance(band, str):
-        ctx["band"] = _BAND_MAP.get(band.upper(), -1)
+    #band = ctx.get("band")
+    #if isinstance(band, str):
+    #    ctx["band"] = _BAND_MAP.get(band.upper(), -1)
 
     # ---- prominence ----
-    for key in ("prominence", "prominent"):
-        val = ctx.get(key)
-        if isinstance(val, str):
-            ctx[key] = _PROMINENCE_MAP.get(val.upper(), 1)
-        elif isinstance(val, bool):
-            ctx[key] = 1 if val else 0
+    #for key in ("prominence", "prominent"):
+    #    val = ctx.get(key)
+    #    if isinstance(val, str):
+    #        ctx[key] = _PROMINENCE_MAP.get(val.upper(), 1)
+    #    elif isinstance(val, bool):
+    #        ctx[key] = 1 if val else 0
 
     # ---- positional / rank fields (defensive) ----
     for key in ("pos_inplay", "position", "rank", "lane_rank"):
@@ -653,14 +653,20 @@ class DecisionBus:
         # IGNORED = 0
 
         if engine in ("LEGACY", "MSC_EXPLORATORY"):
-            return band >= 2   # ACTIVE + PASSIVE
+            return band in ("ACTIVE", "PASSIVE")   # ACTIVE + PASSIVE
+
+        # --------------------------------------------------
+        # UNIFIED
+        # --------------------------------------------------
+        if engine == "MSC_UNIFIED":
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")
 
         
         if engine == "MSC_INPLAY":
-            return band >= 1   # ACTIVE + PASSIVE + EXTENDED
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")   # ACTIVE + PASSIVE + EXTENDED
 
         if engine == "MSC_RISK":
-            return band >= 1  # ACTIVE + PASSIVE + EXTENDED
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")  # ACTIVE + PASSIVE + EXTENDED
 
         # OVERWATCHER and others
         return True
@@ -1005,6 +1011,25 @@ class DecisionBus:
                         "MSC_UNIFIED",
                         f"signal_{key}"
                     )
+
+            # --------------------------------------------------
+            # BATCH SUPPORT (REQUIRED)
+            # --------------------------------------------------
+
+            if result.get("batch") and isinstance(result.get("plans"), list):
+
+                for p in result["plans"]:
+                    plan = dict(p)
+                    plan["engine"] = "MSC_UNIFIED"
+
+                    plans.append(("MSC_UNIFIED", plan, base_ctx))
+                    engine_report["MSC_UNIFIED"]["fired"] += 1
+
+            elif result.get("enter"):
+
+                result["engine"] = "MSC_UNIFIED"
+                plans.append(("MSC_UNIFIED", result, base_ctx))
+                engine_report["MSC_UNIFIED"]["fired"] += 1
 
             # --------------------------------------------------
             # PLAN (PHASE 0 = NONE)

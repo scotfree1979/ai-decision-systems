@@ -405,7 +405,36 @@ class BusRouteSnapshot:
 
             window_pairs.append((mid, sid))
 
-        self.runner_pool = window_pairs
+        # --------------------------------------------------
+        # EXECUTION WINDOW (ROOT)
+        # --------------------------------------------------
+
+        root_pairs = window_pairs
+
+        # --------------------------------------------------
+        # HELPER RUNNERS (already traded)
+        # --------------------------------------------------
+
+        helper_pairs = set()
+
+        for mid, sid, *_ in get_risk_legacy_parent_pairs():
+            helper_pairs.add((str(mid), str(sid)))
+
+        helper_pairs |= get_exploratory_active_parent_pairs()
+        helper_pairs |= get_inplay_parent_runner_pairs()
+        helper_pairs |= get_stoploss_parent_pairs()
+
+        # --------------------------------------------------
+        # FULL RUNNER POOL
+        # --------------------------------------------------
+
+        self.runner_pool = list(set(root_pairs) | helper_pairs)
+
+        # --------------------------------------------------
+        # BUS STOPS BUILT ONLY FROM ROOT
+        # --------------------------------------------------
+
+        self._root_pairs = root_pairs
 
         print(f"[BUS][WINDOW] markets_in_route={len(window_mids)} runners={len(self.runner_pool)}")
 
@@ -799,14 +828,25 @@ class BusRouteSnapshot:
 
     def partition_into_bus_stops(self):
 
-        if not self.runner_pool:
+        """
+        Build BUS stops ONLY from the execution window (root_pairs).
+
+        runner_pool contains:
+            root runners + traded runners
+
+        BUT bus stops must rotate ONLY over root_pairs.
+        """
+
+        pairs = getattr(self, "_root_pairs", None)
+
+        if not pairs:
             self.bus_stops = {}
             return
 
-        n = len(self.runner_pool)
+        n = len(pairs)
         self.bus_stops = {}
 
-        # Even distribution across TICKS_PER_CYCLE
+        # distribute root runners evenly across ticks
         per_stop = max(1, (n + TICKS_PER_CYCLE - 1) // TICKS_PER_CYCLE)
 
         for tick in range(1, TICKS_PER_CYCLE + 1):
@@ -815,7 +855,7 @@ class BusRouteSnapshot:
 
             for i in range(per_stop):
                 idx = ((tick - 1) * per_stop + i) % n
-                runners.append(self.runner_pool[idx])
+                runners.append(pairs[idx])
 
             self.bus_stops[tick] = runners
     # === PATCH END ==============================================================
