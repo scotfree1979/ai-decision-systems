@@ -396,6 +396,11 @@ class BusRouteSnapshot:
         window_mids = []
         window_pairs = []
 
+        session_token = (
+            os.getenv("SESSION_TOKEN")
+            or os.getenv("BETFAIR_SESSION_TOKEN")
+        )
+
         legacy_parents = get_legacy_parent_odds_snapshot(
             session_token=session_token
         )
@@ -446,14 +451,6 @@ class BusRouteSnapshot:
         self._root_pairs = root_pairs
 
         print(f"[BUS][WINDOW] markets_in_route={len(window_mids)} runners={len(self.runner_pool)}")
-
-        # --------------------------------------------------
-        # Resolve session token ONCE for the entire route
-        # --------------------------------------------------
-        session_token = (
-            os.getenv("SESSION_TOKEN")
-            or os.getenv("BETFAIR_SESSION_TOKEN")
-        )
 
         # --------------------------------------------------
         # BUILD / REUSE CTX (AUTHORITATIVE, STATIC HERE)

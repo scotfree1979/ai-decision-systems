@@ -15,6 +15,24 @@ _ROUTER_LIVE_STATE = {
     "movement": defaultdict(int),
 }
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py (module scope)
+# 🧩 ADD: Router execution snapshots (parent + child)
+# 📆 PATCHED: 2026-XX-XX — BUS execution snapshot surface
+#
+# PURPOSE:
+# - Provide O(1) runtime access to parent / child state
+# - Eliminate DB lookups from BUS lanes (especially MSC_RISK)
+# - Snapshot is runtime-only (not persisted)
+#
+# STRUCTURE:
+#   _ROUTER_PARENT_SURFACE[(marketId, selectionId)] → parent execution state
+#   _ROUTER_CHILD_SURFACE[parent_id] → child lifecycle state
+# ======================================================================================================
+
+_ROUTER_PARENT_SURFACE = {}
+_ROUTER_CHILD_SURFACE  = {}
+
 import uuid
 import requests
 from engines.config_paths import auto_conn as _cp_auto_conn, q_retry as _cp_q_retry, autoscalp_db, connect_db
@@ -45,6 +63,17 @@ import traceback
 _ROUTER_CHILD_QUEUE: "queue.Queue[tuple[dict, dict]]" = queue.Queue()
 _ROUTER_CHILD_WORKER = None
 child_id = None
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: BUS snapshot accessors
+# ======================================================================================================
+
+def get_parent_snapshot(mid: str, sid: str):
+    return _ROUTER_PARENT_SURFACE.get((str(mid), str(sid)))
+
+def get_child_snapshot(parent_id: int):
+    return _ROUTER_CHILD_SURFACE.get(int(parent_id))
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py (module scope)
@@ -3799,6 +3828,23 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
 
         con.commit()   # 🔑 parent state is now correct and durable
 
+        # --------------------------------------------------
+        # ROUTER SNAPSHOT — parent execution state
+        # --------------------------------------------------
+        try:
+            key = (str(parent["marketId"]), str(parent["selectionId"]))
+
+            _ROUTER_PARENT_SURFACE[key] = {
+                "parent_id": parent_id,
+                "entry_odds": float(parent["entry_odds"]),
+                "entry_stake": float(parent["entry_stake"]),
+                "side": parent_side,
+                "engine": parent["engine"],
+                "customerOrderRef": str(cor),
+            }
+        except Exception:
+            pass
+
     except Exception as e:
         _log_event(
             "ERROR",
@@ -4887,6 +4933,18 @@ def _orders_update_child_matched(cor, hedge_ref, exit_side, exit_odds, exit_stak
             """, (pid,))
 
             con.commit()
+
+            # --------------------------------------------------
+            # ROUTER SNAPSHOT — child matched state
+            # --------------------------------------------------
+            try:
+                __ROUTER_CHILD_SURFACE[parent_id] = {
+                    "child_id": child_id,
+                    "entry_status": "MATCHED",
+                    "exit_status": "MATCHED",
+                }
+            except Exception:
+                pass
 
             _log_event(
                 "INFO",
@@ -5996,7 +6054,21 @@ def _orders_insert_child_queued(parent_cor: str) -> int | None:
         ))
 
         con.commit()
-        return int(cur.lastrowid)
+        child_id = int(cur.lastrowid)
+
+        # --------------------------------------------------
+        # ROUTER SNAPSHOT — child lifecycle state
+        # --------------------------------------------------
+        try:
+            _ROUTER_CHILD_SURFACE[parent_id] = {
+                "child_id": child_id,
+                "entry_status": "QUEUED",
+                "exit_status": None,
+            }
+        except Exception:
+            pass
+
+        return child_id
 
     except Exception as e:
         _log_event(

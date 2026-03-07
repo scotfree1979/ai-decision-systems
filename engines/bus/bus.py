@@ -9,13 +9,26 @@ from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
 from engines.micro_scalper_v7.inplay_engine import InPlayEngine
 from engines.micro_scalper_v7.risk_engine import RiskEngine
 from engines.mastery.mastery_policy import plan_for_strategy
-from engines.mastery.context_builder import build_context
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: from engines.mastery.context_builder import build_context
+# 🧩 ACTION: DELETE unused CTX builder import
+# 📆 PATCHED: 2026-03-05 — enforce CTX ownership invariant
+#
+# WHY:
+# BUS must never construct CTX.
+# CTX construction is restricted to StartupCTXBuilder.
+# ======================================================================================================
+
+# DELETE THIS LINE
+#from engines.mastery.context_builder import build_context
 from engines.live.live_router import place_from_bus
 from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
 from engines.bus_route_startup_ctx import StartupCTXBuilder
 from engines.live.overwatcher import evaluate_redistribution
-from engines.risk.risk_price_helper_v2 import get_legacy_parent_odds_snapshot
+
+from engines.live.live_router import get_parent_snapshot
 from engines.bus_route import PLANS_PER_TICK
 try:
     from engines.bus_route import ROUTE_SPLIT
@@ -988,7 +1001,10 @@ class DecisionBus:
             return plans
 
         try:
-            result = unified.tick(base_ctx)
+            ctx_unified = dict(base_ctx)
+            ctx_unified["_route_ctx_map"] = self._route_ctx_map
+
+            result = unified.tick(ctx_unified)
 
             engine_report["MSC_UNIFIED"]["evaluated"] = True
 
@@ -1096,21 +1112,18 @@ class DecisionBus:
             "inplay_pnl_if_win":   row.get("pnl_if_win"),
         }
 
-
-
-    # 🔑 THIS MUST BE HERE — SAME INDENT AS tick(), _build_ctx_for_market(), etc.
-    def _build_bus_stop_ctxs(self, base_ctx, runner_pairs):
-        """
-        Build CTX ONCE per runner for this bus stop.
-        Returns: {(mid, sid): ctx}
-        """
-        ctxs = {}
-        for mid, sid in runner_pairs:
-            ctx = self._route_ctx_map.get((mid, sid))            
-            if not ctx:
-                continue
-            ctxs[(mid, sid)] = ctx
-        return ctxs
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _build_bus_stop_ctxs(
+# 🧩 ACTION: COMMENT CORRECTION — clarify CTX reuse invariant
+# 📆 PATCHED: 2026-03-07 — BUS never constructs CTX
+#
+# WHY:
+# The function does NOT build CTX.
+# It simply reuses the ctx_map created by BusRouteSnapshot.
+#
+# Clarifying this prevents future architectural regression.
+# ======================================================================================================
 
 
 # ======================================================================================================
@@ -1135,7 +1148,7 @@ class DecisionBus:
     # 📍 TARGET: engines/bus/bus.py
     # 🔎 SEARCH: def _evaluate_runner(
     # 🧩 ACTION: REPLACE (FINAL CANONICAL LANE EXECUTION)
-    # 📆 PATCHED: 2026-03-18 — Lock BUS lane semantics + helper-owned odds
+    # 📆 PATCHED: 2026-03-05 — Lock BUS lane semantics + helper-owned odds
     #
     # ARCHITECTURAL CONTRACT (DO NOT VIOLATE):
     # ---------------------------------------
@@ -1180,38 +1193,6 @@ class DecisionBus:
         # --------------------------------------------------
         ctx_map = self._route_ctx_map
 
-        # ==================================================
-        # 🔒 HARD PX INVARIANT (BUS AUTHORITY)
-        # Every CTX must have px before lanes execute
-        # ==================================================
-
-        missing_px = [
-            (mid, sid)
-            for mid, sid in bus_stop_pairs
-            if ctx_map.get((mid, sid), {}).get("px") is None
-        ]
-
-        if missing_px:
-            # One forced refresh pass
-            t0 = time.time()
-            self._route_snapshot.refresh_ctx_dynamic_fields()
-            dt = time.time() - t0
-            self._route_ctx_map = self._route_snapshot.get_ctx_map()
-            bus_stop_pairs = self._route_snapshot.get_bus_stop(self._bus_stop) or []
-            self._ctx_refresh_times.append(dt)
-
-            # Re-check
-            still_missing = [
-                (mid, sid)
-                for mid, sid in bus_stop_pairs
-                if self._route_ctx_map.get((mid, sid), {}).get("px") is None
-            ]
-
-            if still_missing:
-                print(
-                    f"[BUS][PX][WARN] still missing px for {len(still_missing)} runners"
-                )
-        
         # === PATCH START ============================================================
         # 📍 TARGET: engines/bus/bus.py
         # 🔎 SEARCH: _normalize_ctx_enums(ctx)
@@ -2216,8 +2197,21 @@ class DecisionBus:
             "errors": [],
         }
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # CTX BUILDER — ROUTE-AUTHORITATIVE (FINAL)
+# 🧩 ACTION: COMMENT CORRECTION
+# 📆 PATCHED: 2026-03-05 — clarify CTX reuse architecture
+#
+# WHY:
+# BUS does NOT build CTX.
+# BUS consumes CTX surfaces produced by BusRouteSnapshot.
+# ======================================================================================================
+
+# REPLACE HEADER WITH:
+
     # ======================================================================
-    # CTX BUILDER — ROUTE-AUTHORITATIVE (FINAL)
+    # CTX CONSUMER — ROUTE-AUTHORITATIVE (FINAL)
     # ======================================================================
     # 📍 TARGET: engines/bus/bus.py
     # 🔎 REPLACES: _build_ctx_for_market + _run_engines_for_tick
@@ -2284,13 +2278,34 @@ class DecisionBus:
 
         ctx["orders_by_runner"] = [dict(r) for r in rows] if rows else []
 
-        # --------------------------------------------------
-        # ENGINE-NEUTRAL ANCHOR INJECTION (FINAL)
-        # --------------------------------------------------
+# ======================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: _build_ctx_for_market()
+# 🧩 REPLACE: anchor discovery logic
+# 📆 PATCHED: 2026-03-07 — router snapshot anchor resolution
+#
+# PURPOSE:
+# - Remove DB scan for anchor discovery
+# - Use router execution snapshot (authoritative runtime surface)
+# - Guarantee O(1) anchor lookup
+#
+# ARCHITECTURE:
+# Router owns execution truth.
+# BUS consumes snapshot surfaces.
+# ======================================================================
+
         ctx["anchor_parent_id"] = None
         ctx["anchor_entry_odds"] = None
         ctx["anchor_entry_stake"] = None
         ctx["anchor_engine"] = None
+
+        parent = get_parent_snapshot(mid, sid)
+
+        if parent:
+            ctx["anchor_parent_id"] = parent.get("parent_id")
+            ctx["anchor_entry_odds"] = parent.get("entry_odds")
+            ctx["anchor_entry_stake"] = parent.get("entry_stake")
+            ctx["anchor_engine"] = parent.get("engine")
 
         # --------------------------------------------------
         # 🔑 ANCHOR ODD (STRUCTURAL AXIS) — BUS AUTHORITY
@@ -2320,17 +2335,6 @@ class DecisionBus:
                 con_b.close()
             except Exception:
                 pass
-
-        for o in ctx["orders_by_runner"]:
-            if (
-                o.get("role") == "PARENT"
-                and str(o.get("entry_status")).upper() == "MATCHED"
-            ):
-                ctx["anchor_parent_id"] = o.get("id")
-                ctx["anchor_entry_odds"] = o.get("entry_odds")
-                ctx["anchor_entry_stake"] = o.get("entry_stake")
-                ctx["anchor_engine"] = o.get("engine")
-                break
 
         return ctx
 
@@ -2658,8 +2662,22 @@ class DecisionBus:
             self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
 
             # Force bounded hydration pass immediately
-            for _ in range(5):
-                self._startup_ctx_builder.step(max_builds=100)
+     
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: for _ in range(5):
+# 🧩 REPLACE: partial CTX warmup with full CTX world hydration
+# 📆 PATCHED: 2026-03-05 — Build CTX world at route boundary only
+#
+# WHY:
+# Partial hydration requires BUS to continue building CTX during ticks.
+# That violates the invariant that BUS must only reuse CTX.
+#
+# The CTX world must be fully constructed before trading begins.
+# ======================================================================================================
+
+            while not self._startup_ctx_builder.done:
+                self._startup_ctx_builder.step(max_builds=200)
 
             # --------------------------------------------------
             # Refresh dynamic fields after hydration
@@ -2874,11 +2892,30 @@ class DecisionBus:
 
 
 
-        # --------------------------------------------------
-        # CTX BATCH BUILDER — PROGRESSIVE WARM-UP
-        # --------------------------------------------------
-        if hasattr(self, "_startup_ctx_builder"):
-            self._startup_ctx_builder.step(max_builds=25)
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: CTX BATCH BUILDER — PROGRESSIVE WARM-UP
+# 🧩 ACTION: DELETE progressive CTX build inside tick()
+# 📆 PATCHED: 2026-03-05 — Enforce CTX reuse invariant
+#
+# WHY:
+# BUS must NEVER build CTX.
+# CTX is built exclusively by:
+#   - StartupCTXBuilder
+#   - BusRouteSnapshot route rebuild
+#
+# Leaving this block causes:
+# - DB reads every tick
+# - partial CTX world mutation
+# - unpredictable tick latency
+#
+# CTX must be fully constructed at route boundary only.
+# ======================================================================================================
+
+# DELETE THIS BLOCK COMPLETELY
+
+#if hasattr(self, "_startup_ctx_builder"):
+#    self._startup_ctx_builder.step(max_builds=25)
 
         # --------------------------------------------------
         # REFRESH ODDS — EVERY TICK (AUTHORITATIVE)
@@ -3952,7 +3989,7 @@ class DecisionBus:
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: PHASE 3 — ROUTING REPORT
 # 🧩 ACTION: REPLACE (reporting only, routing untouched)
-# 📆 PATCHED: 2025-12-18 — Collapse PHASE 3 to BUS-truthful routing diagnostics
+# 📆 PATCHED: 2025-12-05 — Collapse PHASE 3 to BUS-truthful routing diagnostics
 #
 # RATIONALE:
 # BUS must report only what it knows synchronously.

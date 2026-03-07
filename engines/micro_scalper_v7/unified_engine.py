@@ -161,60 +161,181 @@ class UnifiedEngine:
                 "why": "unified_exploratory",
             })
 
-        # ------------------------------------------------------------------
-        # 3️⃣ STOP LOSS CHILD EMISSION (ANCHOR-BASED)
-        # ------------------------------------------------------------------
+        # ======================================================================================================
+        # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+        # 🔎 ANCHOR: inside tick(), immediately AFTER STOPLOSS section
+        # 🧩 ACTION: INSERT — Unified InPlay Engine (arming → detection → ladder emit)
+        # 📆 PATCHED: 2026-04-XX — Replace legacy InPlay logic with Unified signal model
+        #
+        # PURPOSE
+        # -------
+        # Implement full InPlay trading inside Unified using existing signal surfaces:
+        #
+        #   timing surface
+        #   volatility surface
+        #   drift surface
+        #   sweet spot surface
+        #   layer2 candidate ranking
+        #
+        # This replaces the legacy MSC_INPLAY engine behaviour.
+        #
+        # CONTRACT
+        # --------
+        # - No stake logic
+        # - No router mutation
+        # - Emits batch ladder plans
+        # - Uses Unified signal surfaces only
+        #
+        # ======================================================================================================
 
-        for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
+        # ensure in-play memory exists
+        if not hasattr(self, "_inplay_state"):
+            self._inplay_state = {
+                "armed_lay": {},
+                "armed_back": {},
+                "triggered": {},
+                "markets_started": set(),
+            }
 
-            pid        = rctx.get("anchor_parent_id")
-            entry_px   = rctx.get("anchor_entry_odds")
-            entry_side = rctx.get("legacy_entry_side")
-            current_px = rctx.get("px")
+        mem = self._inplay_state
 
-            if not pid or not entry_px or not current_px:
+        # --------------------------------------------------
+        # 1️⃣ MARKET-LEVEL INPLAY DETECTION
+        # --------------------------------------------------
+
+        moved = volatility.get("runners_moved_last_window", 0)
+
+        for m in timing.get("markets", []):
+            mid = m.get("marketId")
+            tto = m.get("tto_seconds")
+
+            if mid is None or tto is None:
                 continue
 
-            entry_px   = float(entry_px)
-            current_px = float(current_px)
+            # robust detection
+            if tto <= 0 or moved >= 5:
+                mem["markets_started"].add(mid)
 
-            adverse_ticks = 0
+        # --------------------------------------------------
+        # 2️⃣ RUNNER ARMING (DRIFT SIGNAL)
+        # --------------------------------------------------
 
-            # determine adverse direction
-            if entry_side == "BACK":
-                if current_px > entry_px:
-                    adverse_ticks = current_px - entry_px
-            elif entry_side == "LAY":
-                if current_px < entry_px:
-                    adverse_ticks = entry_px - current_px
+        for c in candidates:
 
-            # simple 3-tick stop threshold
-            if adverse_ticks >= 3:
+            mid = c["marketId"]
+            sid = c["selectionId"]
+            px  = c.get("px")
 
-                child_key = (mid, sid, pid)
+            if px is None:
+                continue
 
-                if child_key in self._emitted_children:
-                    continue
+            key = (mid, sid)
 
-                self._emitted_children.add(child_key)
+            rctx = self._route_ctx_map.get(key)
+            if not rctx:
+                continue
 
-                opposite = "LAY->BACK" if entry_side == "BACK" else "BACK->LAY"
+            direction = rctx.get("direction")
+
+            if direction == "LAY->BACK":
+                mem["armed_lay"][key] = True
+
+            elif direction == "BACK->LAY":
+                mem["armed_back"][key] = True
+
+        # --------------------------------------------------
+        # 3️⃣ LADDER TRIGGER
+        # --------------------------------------------------
+
+        for c in candidates:
+
+            mid = c["marketId"]
+            sid = c["selectionId"]
+            px  = c.get("px")
+
+            if mid not in mem["markets_started"]:
+                continue
+
+            if px is None:
+                continue
+
+            key = (mid, sid)
+
+            if mem["triggered"].get(key):
+                continue
+
+            px = float(px)
+
+            # ---- LAY ladder ----
+            if mem["armed_lay"].get(key) and px >= 7:
+
+                ladder = [7, 8, 9, 10, 11, 12]
+
+                for lvl in ladder:
+                    if lvl >= px:
+                        plans.append({
+                            "enter": True,
+                            "engine": "MSC_UNIFIED",
+                            "bet_type": "INPLAY",
+                            "role": "PARENT",
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "direction": "LAY->BACK",
+                            "px": lvl,
+                            "why": "unified_inplay_lay_ladder",
+                        })
+
+                mem["triggered"][key] = True
+
+            # ---- BACK ladder ----
+            elif mem["armed_back"].get(key) and px <= 7:
+
+                ladder = [5, 4, 3]
+
+                for lvl in ladder:
+                    if lvl <= px:
+                        plans.append({
+                            "enter": True,
+                            "engine": "MSC_UNIFIED",
+                            "bet_type": "INPLAY",
+                            "role": "PARENT",
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "direction": "BACK->LAY",
+                            "px": lvl,
+                            "why": "unified_inplay_back_ladder",
+                        })
+
+                mem["triggered"][key] = True
+
+        # --------------------------------------------------
+        # 4️⃣ SECONDARY HARVEST (LOSERS 15-20)
+        # --------------------------------------------------
+
+        for c in candidates:
+
+            mid = c["marketId"]
+            sid = c["selectionId"]
+            px  = c.get("px")
+
+            if px is None:
+                continue
+
+            px = float(px)
+
+            if 15 <= px <= 20:
 
                 plans.append({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
-                    "bet_type": "STOPLOSS",
-                    "role": "CHILD",
-                    "exit_kind": "STOP",
-                    "parent_id": pid,
+                    "bet_type": "INPLAY",
+                    "role": "PARENT",
                     "marketId": mid,
                     "selectionId": sid,
-                    "direction": opposite,
-                    "px": current_px,
-                    "why": "unified_stop_loss",
-                })
-
-        # ------------------------------------------------------------------
+                    "direction": "LAY->BACK",
+                    "px": px,
+                    "why": "unified_inplay_secondary_harvest",
+                })        # ------------------------------------------------------------------
         # 4️⃣ IN-PLAY DETECTION (STRICT RULE)
         # Must be AFTER zero AND 3-runner volatility spike
         # ------------------------------------------------------------------
@@ -418,15 +539,39 @@ class UnifiedEngine:
     # BUILD RUNTIME CTX
     # --------------------------------------------------------------------------------------------------
 
-    def _build_runtime_ctx_map(self) -> dict:
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: def _build_runtime_ctx_map(self)
+# 🧩 ACTION: REPLACE — reuse BUS world instead of rebuilding snapshot
+# 📆 PATCHED: 2026-03-07 — Unified engine consumes BUS ctx_map
+#
+# PURPOSE
+# -------
+# Remove duplicate BusRouteSnapshot construction.
+#
+# Unified must consume the same world used by BUS:
+#     BusRouteSnapshot → ctx_map
+#
+# This prevents:
+#     • duplicate route builds
+#     • duplicate odds refresh
+#     • inconsistent world state
+#
+# CONTRACT
+# --------
+# BUS injects ctx_map into Unified via ctx["_route_ctx_map"].
+# If unavailable (standalone mode), fallback to empty.
+# ======================================================================================================
 
-        from engines.bus_route import BusRouteSnapshot
+    def _build_runtime_ctx_map(self, ctx: Dict[str, Any]) -> dict:
 
-        snapshot = BusRouteSnapshot()
-        snapshot.build_route()
-        snapshot.refresh_ctx_dynamic_fields()
+        route_ctx = ctx.get("_route_ctx_map")
 
-        return snapshot.get_ctx_map() or {}
+        if isinstance(route_ctx, dict):
+            return route_ctx
+
+        # Standalone fallback (report mode only)
+        return {}
 
     # --------------------------------------------------------------------------------------------------
     # V7 REPORT BUILDER — SPEC LOCKED
@@ -438,7 +583,14 @@ class UnifiedEngine:
         system_snapshot = self._read_unified_snapshot()
 
         # 2️⃣ STRUCTURAL WORLD (self-built, authoritative)
-        self._route_ctx_map = self._build_runtime_ctx_map()
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: self._route_ctx_map = self._build_runtime_ctx_map()
+# 🧩 ACTION: REPLACE — pass BUS world
+# 📆 PATCHED: 2026-XX-XX — Unified uses BUS ctx_map
+# ======================================================================================================
+
+        self._route_ctx_map = self._build_runtime_ctx_map(ctx)
 
         report = {
             "world": self._build_world_surface(),
