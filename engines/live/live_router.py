@@ -17,6 +17,77 @@ _ROUTER_LIVE_STATE = {
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py (module scope)
+# 🧩 ADD: Parent placement execution queue
+# 📆 PATCHED: 2026-03-07 — parallel Betfair parent placement
+#
+# PURPOSE:
+# - Prevent router blocking on Betfair API
+# - Allow BUS to continue producing plans
+# - Parent placements executed in worker threads
+# ======================================================================================================
+
+_PARENT_PLACE_QUEUE: "queue.Queue[tuple]" = queue.Queue()
+_PARENT_PLACE_WORKERS = []
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: Parent placement worker
+# ======================================================================================================
+
+def _router_parent_worker_loop():
+
+    while True:
+
+        try:
+            (
+                parent_ref,
+                market_id,
+                selection_id,
+                side,
+                entry_odds,
+                stake,
+                persistence
+            ) = _PARENT_PLACE_QUEUE.get()
+
+        except Exception:
+            time.sleep(0.05)
+            continue
+
+        try:
+
+            app_key, token = _keys()
+
+            bet_id, detail = _place(
+                app_key,
+                token,
+                market_id,
+                selection_id,
+                side,
+                float(entry_odds),
+                float(stake),
+                parent_ref,
+                persistence=persistence
+            )
+
+            if bet_id:
+                _orders_update_parent_placed(parent_ref, bet_id)
+
+            else:
+                _orders_update_parent_failed(parent_ref, "BETFAIR_PLACE_FAILED")
+
+        except Exception as e:
+
+            _log_event(
+                "ERROR",
+                "live_router",
+                f"[PARENT WORKER] placement failed ref={parent_ref}: {e}"
+            )
+
+        finally:
+            _PARENT_PLACE_QUEUE.task_done()
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py (module scope)
 # 🧩 ADD: Router execution snapshots (parent + child)
 # 📆 PATCHED: 2026-XX-XX — BUS execution snapshot surface
 #
@@ -6638,10 +6709,19 @@ def place_parent_and_hedge(
         # ROUTER TRACE — FINAL EXECUTION BOUNDARY
         # --------------------------------------------------
 
-
-        bf_parent_id, detail = _place(app_key, token, market_id, selection_id, side,
-                                      float(entry_odds), float(stake), parent_ref,
-                                      persistence=parent_persistence)
+        # --------------------------------------------------
+        # ASYNC PARENT PLACEMENT
+        # --------------------------------------------------
+        _PARENT_PLACE_QUEUE.put_nowait((
+            parent_ref,
+            market_id,
+            selection_id,
+            side,
+            entry_odds,
+            stake,
+            parent_persistence,
+        ))
+        return None, parent_ref
         # 1️⃣ Reserve After Bet Placed
         # --------------------------------------------------
         # ROUTER RESERVE — MUTATE ONLY AFTER APPROVAL
@@ -7354,6 +7434,41 @@ def start_router_child_worker():
 
 
     print("[ROUTER] child execution worker started")
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ADD: Parent placement worker starter
+# 📆 PATCHED: 2026-03-07 — parallel parent placement execution
+#
+# PURPOSE
+# - Execute Betfair placeOrders asynchronously
+# - Prevent BUS ticks blocking on network latency
+# - Lifecycle owned by orchestrator
+# ======================================================================================================
+
+_PARENT_PLACE_THREAD = None
+
+
+def start_router_parent_worker():
+
+    global _PARENT_PLACE_THREAD
+
+    try:
+        if _PARENT_PLACE_THREAD and _PARENT_PLACE_THREAD.is_alive():
+            return
+    except Exception:
+        pass
+
+    t = threading.Thread(
+        target=_router_parent_worker_loop,
+        name="RouterParentWorker",
+        daemon=True,
+    )
+
+    t.start()
+    _PARENT_PLACE_THREAD = t
+
+    print("[ROUTER] parent execution worker started")
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/live/live_router.py (append at end)

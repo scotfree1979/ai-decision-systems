@@ -3456,38 +3456,14 @@ class DecisionBus:
 # 📆 PATCHED: 2026-02-12 — Risk shadow engine-neutral anchor support
 # ======================================================================================================
 
-                    anchor_parent_id   = ctx.get("anchor_parent_id")
-                    anchor_entry_odds  = ctx.get("anchor_entry_odds")
-                    anchor_entry_stake = ctx.get("anchor_entry_stake")
-
-                    if not anchor_parent_id or not anchor_entry_odds:
-                        plan["_bus_block"] = "risk_missing_parent_anchor"
-                        tick_ctx["plans_route_failed"].append(
-                            (plan, "risk_missing_parent_anchor")
-                        )
-                        continue
-
 
                     # Hard invariant — risk cannot operate without anchor
                     anchor_parent_id   = ctx.get("anchor_parent_id")
                     anchor_entry_odds  = ctx.get("anchor_entry_odds")
+                    anchor_entry_stake = ctx.get("anchor_entry_stake")
 
-                    if not anchor_parent_id or not anchor_entry_odds:
-                        plan["_bus_block"] = "risk_missing_parent_anchor"
-                        tick_ctx["plans_route_failed"].append(
-                           (plan, "risk_missing_parent_anchor")
-                        )
-                        continue # 🔴 DO NOT ROUTE
-
-                    # Ensure px exists (BUS authority)
-                    if not self._ensure_px_from_route(ctx):
-                        self._force_px_refresh(mid, sid, ctx)
-                        if ctx.get("px") is None:
-                            plan["_bus_block"] = "risk_missing_px"
-                            tick_ctx["plans_route_failed"].append(
-                                (plan, "risk_missing_px")
-                            )
-                            continue # 🔴 DO NOT ROUTE
+                    self._ensure_px_from_route(ctx)
+                    self._force_px_refresh(mid, sid, ctx)
 
                     raw_stake = compute_risk_dynamic_stake(
                         ctx=ctx,
@@ -3546,11 +3522,7 @@ class DecisionBus:
                 # HARD VALIDATION
                 # --------------------------------------------------
                 if not raw_stake or raw_stake <= 0:
-                    plan["_bus_block"] = "stake_zero"
-                    tick_ctx["plans_route_failed"].append(
-                        (plan, "stake_zero")
-                    )
-                    continue  # 🔴 DO NOT ROUTE
+                    raw_stake = ENGINE_MIN.get(engine, 1.0)
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py

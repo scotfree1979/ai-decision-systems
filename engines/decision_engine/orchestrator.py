@@ -3682,12 +3682,13 @@ def start_live_loop(*args, **kwargs):
 
     # NEW
     from engines.decision_engine.decide_once.placement import start_placement_worker
-    from engines.live.live_router import start_router_child_worker, _router_child_recovery_sweep
+    from engines.live.live_router import start_router_child_worker, _router_child_recovery_sweep, start_router_parent_worker
 
     
     start_placement_worker(run_id=run_id)
     _router_child_recovery_sweep()
     start_router_child_worker()
+    start_router_parent_worker()
 
     # --------------------------------------------------------------
     # 6C.1) START ROUTER HOUSEKEEPING LOOP (REHEDGE / CLEANUP)

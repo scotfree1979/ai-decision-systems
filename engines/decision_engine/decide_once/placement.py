@@ -589,7 +589,7 @@ def _insert_pending_parent(
     # -------------------------------
     plan = plan or {}
     ctx  = ctx or {}
-
+    bet_type = str(plan.get("bet_type") or "").upper() or None
     # -------------------------------
     # REQUIRED INVARIANT
     # -------------------------------
@@ -649,6 +649,7 @@ def _insert_pending_parent(
                     role,
                     source,
                     engine,
+                    bet_type,
                     stoploss_mode,
                     notes,
                     opened_at
@@ -676,6 +677,7 @@ def _insert_pending_parent(
                     plan.get("tick_id"),
                     str(letter),
                     str(engine),
+                    bet_type,
                     str(stoploss_mode).upper(),
                     f"{letter}{trade_index:02d}",
                     datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
