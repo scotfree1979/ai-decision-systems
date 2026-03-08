@@ -3464,7 +3464,7 @@ def _orders_insert_parent_queued(
                 customerOrderRef, run_id, mode, marketId, selectionId,
                 side, entry_odds, entry_stake, required_exposure,
                 entry_status, opened_at,
-                role, source, engine, stop_loss_px
+                role, source, engine, bet_type, stop_loss_px
             )
             VALUES (
                 ?, ?, 'LIVE', ?, ?, ?, ?, ?, ?,
@@ -3498,6 +3498,7 @@ def _orders_insert_parent_queued(
             _utcnow_str(),
             source,
             eng,
+            bet_type,
             stop_loss_px
         ))
 
