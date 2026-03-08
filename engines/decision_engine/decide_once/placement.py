@@ -657,8 +657,7 @@ def _insert_pending_parent(
                 VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?,
-                    'QUEUED', 'PARENT',
-                    ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -675,6 +674,8 @@ def _insert_pending_parent(
                     plan.get("route_id"),
                     plan.get("bus_stop"),
                     plan.get("tick_id"),
+                    "QUEUED",
+                    "PARENT",
                     str(letter),
                     str(engine),
                     bet_type,
