@@ -27,7 +27,7 @@ _ROUTER_LIVE_STATE = {
 # ======================================================================================================
 
 _PARENT_PLACE_QUEUE: "queue.Queue[tuple]" = queue.Queue()
-_PARENT_PLACE_WORKERS = []
+
 
 
 # ======================================================================================================
@@ -40,18 +40,10 @@ def _router_parent_worker_loop():
     while True:
 
         try:
-            (
-                parent_ref,
-                market_id,
-                selection_id,
-                side,
-                entry_odds,
-                stake,
-                persistence
-            ) = _PARENT_PLACE_QUEUE.get()
+            parent_ref, market_id, selection_id, side, entry_odds, stake, persistence = _PARENT_PLACE_QUEUE.get_nowait()
 
-        except Exception:
-            time.sleep(0.05)
+        except queue.Empty:
+            time.sleep(0.01)
             continue
 
         try:
@@ -7418,23 +7410,28 @@ def init_live_router():
     _ensure_router_runtime_schema()
     _repair_orphan_run_ids_on_startup()
 
-_ROUTER_CHILD_THREAD = None
+_ROUTER_CHILD_THREADS = []
 
-def start_router_child_worker():
-    global _ROUTER_CHILD_THREAD
-    if _ROUTER_CHILD_THREAD and _ROUTER_CHILD_THREAD.is_alive():
+def start_router_child_worker(worker_count: int = 6):
+
+    global _ROUTER_CHILD_THREADS
+
+    # prevent double start
+    if _ROUTER_CHILD_THREADS:
         return
 
-    t = threading.Thread(
-        target=_router_child_worker_loop,
-        name="RouterChildWorker",
-        daemon=True,
-    )
-    t.start()
-    _ROUTER_CHILD_THREAD = t
+    for i in range(worker_count):
 
+        t = threading.Thread(
+            target=_router_child_worker_loop,
+            name=f"RouterChildWorker-{i}",
+            daemon=True,
+        )
 
-    print("[ROUTER] child execution worker started")
+        t.start()
+        _ROUTER_CHILD_THREADS.append(t)
+
+    print(f"[ROUTER] child execution workers started ({worker_count})")
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -7447,29 +7444,29 @@ def start_router_child_worker():
 # - Lifecycle owned by orchestrator
 # ======================================================================================================
 
-_PARENT_PLACE_THREAD = None
+_PARENT_PLACE_THREADS = []
 
 
-def start_router_parent_worker():
+def start_router_parent_worker(worker_count: int = 4):
 
-    global _PARENT_PLACE_THREAD
+    global _PARENT_PLACE_THREADS
 
-    try:
-        if _PARENT_PLACE_THREAD and _PARENT_PLACE_THREAD.is_alive():
-            return
-    except Exception:
-        pass
+    # Prevent double start
+    if _PARENT_PLACE_THREADS:
+        return
 
-    t = threading.Thread(
-        target=_router_parent_worker_loop,
-        name="RouterParentWorker",
-        daemon=True,
-    )
+    for i in range(worker_count):
 
-    t.start()
-    _PARENT_PLACE_THREAD = t
+        t = threading.Thread(
+            target=_router_parent_worker_loop,
+            name=f"RouterParentWorker-{i}",
+            daemon=True,
+        )
 
-    print("[ROUTER] parent execution worker started")
+        t.start()
+        _PARENT_PLACE_THREADS.append(t)
+
+    print(f"[ROUTER] parent execution workers started ({worker_count})")
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/live/live_router.py (append at end)
