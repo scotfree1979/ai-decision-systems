@@ -62,7 +62,37 @@ class UnifiedEngine:
         # Phase clock cache
         self._daily_markets = {}         # {marketId: {...}}
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: self._daily_markets =
+# 🧩 ADD: runner narrative memory containers
+# PURPOSE:
+# Enables temporal reasoning about runners across ticks.
+# Tracks trend persistence, breakouts, and favourite transitions.
+# ======================================================================================================
 
+        # Structural runner memory (narrative tracking)
+        self._runner_structure = {}
+
+        # Market structural memory
+        self._market_structure = {}
+
+        # Runner breakout counters
+        self._runner_breakouts = {}
+
+        # Favourite transition tracking
+        self._fav_history = {}
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:__init__
+# 🔎 SEARCH: self._fav_history =
+# 🧩 ADD: ensure opportunity schema exists
+# ======================================================================================================
+
+        try:
+            ensure_opp_schema()
+        except Exception:
+            pass
     # --------------------------------------------------------------------------------------------------
     # PUBLIC ENTRYPOINT
     # --------------------------------------------------------------------------------------------------
@@ -865,6 +895,20 @@ class UnifiedEngine:
                 "collapse_detected": state["collapse_detected"],
             })
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_timing_surface
+# 🔎 SEARCH: markets.append({
+# 🧩 ADD: cleanup structural memory for completed markets
+# ======================================================================================================
+
+            if phase == "COMPLETE":
+
+                for key in list(self._runner_structure.keys()):
+                    if key[0] == mid:
+                        self._runner_structure.pop(key, None)
+                        self._runner_breakouts.pop(key, None)
+                        self._fav_history.pop(key, None)
+
         return {"markets": markets}
 
     # --------------------------------------------------------------------------------------------------
@@ -1280,6 +1324,20 @@ class UnifiedEngine:
                 "trend": None,
             })
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_update_runner_structure
+# 🔎 SEARCH: if px > mem["high_seen"]:
+# 🧩 FIX: breakout detection must occur BEFORE updating highs/lows
+# ======================================================================================================
+
+            br = self._runner_breakouts.setdefault(key, {"up": 0, "down": 0})
+
+            if px >= mem["high_seen"]:
+                br["up"] += 1
+
+            if px <= mem["low_seen"]:
+                br["down"] += 1
+
             if px > mem["high_seen"]:
                 mem["high_seen"] = px
 
@@ -1290,6 +1348,24 @@ class UnifiedEngine:
 
             if prev is not None:
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_update_runner_structure
+# 🔎 SEARCH: if prev is not None:
+# 🧩 ADD: trend persistence tracking
+# PURPOSE:
+# Measures how long a drift/steam direction persists.
+# ======================================================================================================
+
+                trend_mem = mem.setdefault("trend_mem", {"dir": None, "duration": 0})
+
+                direction = "DRIFT" if px > prev else "STEAM" if px < prev else None
+
+                if direction == trend_mem["dir"]:
+                    trend_mem["duration"] += 1
+                else:
+                    trend_mem["dir"] = direction
+                    trend_mem["duration"] = 1
+
                 if px > prev:
                     mem["trend"] = "DRIFT"
 
@@ -1297,6 +1373,35 @@ class UnifiedEngine:
                     mem["trend"] = "STEAM"
 
             mem["last_px"] = px
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_update_runner_structure
+# 🔎 SEARCH: mem["last_px"] = px
+# 🧩 ADD: favourite transition detection
+# PURPOSE:
+# Detect when runners move into or out of favourite leadership.
+# ======================================================================================================
+
+            fav_state = ctx.get("is_fav")
+
+            hist = self._fav_history.setdefault(key, {"prev": fav_state, "flips": 0})
+
+            if hist["prev"] is not None and fav_state != hist["prev"]:
+                hist["flips"] += 1
+
+            hist["prev"] = fav_state
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_update_runner_structure
+# 🔎 SEARCH: mem = self._runner_structure.setdefault
+# 🧩 ADD: anchor distance tracking
+# PURPOSE:
+# Enables anchor-based graph interpretation of price movement.
+# ======================================================================================================
+
+            mem["distance_from_anchor"] = px - mem["anchor_px"]
+            mem["distance_from_high"] = px - mem["high_seen"]
+            mem["distance_from_low"] = px - mem["low_seen"]
 
 
     # ================================================================================================
@@ -1313,6 +1418,18 @@ class UnifiedEngine:
             "direction": [],
             "volatility": [],
         }
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_candidate_pools
+# 🔎 SEARCH: pools = {
+# 🧩 ADD: structural scoring fields
+# PURPOSE:
+# Adds additional structural signal categories for candidate ranking.
+# ======================================================================================================
+
+        pools["momentum"] = []
+
+        pools["favourite"] = []
 
         drift_rows = report.get("drift", {}).get("runners", [])
         rank_rows  = report.get("rank", {}).get("runners", [])
@@ -1373,6 +1490,36 @@ class UnifiedEngine:
 
             mid, sid = key
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_candidate_pools
+# 🔎 SEARCH: for key, mem in getattr(self, "_runner_structure", {}).items():
+# 🧩 ADD: context scoring
+# PURPOSE:
+# Uses structural runner memory to influence candidate ranking.
+# ======================================================================================================
+
+            trend_mem = mem.get("trend_mem")
+
+            if trend_mem and trend_mem["duration"] >= 3:
+
+                pools["momentum"].append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "score": trend_mem["duration"]
+                })
+
+            fav = self._fav_history.get(key)
+
+            if fav and fav["flips"] > 0:
+
+                pools["favourite"].append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "score": fav["flips"] * 2
+                })
+
+            mid, sid = key
+
             px = mem["last_px"]
 
             if px >= mem["high_seen"]:
@@ -1414,8 +1561,27 @@ class UnifiedEngine:
 
         pools = self._build_candidate_pools(report)
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
+# 🔎 SEARCH: pools = self._build_candidate_pools(report)
+# 🧩 ADD: multi-signal ranking pool
+# PURPOSE:
+# Expands candidate pool using additional signal layers.
+# ======================================================================================================
         selected = []
         seen = set()
+
+        extra = []
+        extra += pools.get("momentum", [])
+        extra += pools.get("favourite", [])
+
+        for r in extra:
+            key = (r["marketId"], r["selectionId"])
+            if key not in seen:
+                selected.append(r)
+                seen.add(key)
+
+
 
         def pick(pool_name, limit):
 
@@ -1459,6 +1625,38 @@ class UnifiedEngine:
         rank  = self._build_rank_surface().get("runners", [])
 
         candidates = []
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_layer2_surface
+# 🔎 SEARCH: candidates = []
+# 🧩 ADD: confidence scoring
+# PURPOSE:
+# Produces a unified confidence metric combining bias, form, and direction engines.
+# ======================================================================================================
+
+        confidence_rows = []
+
+        for (mid, sid), ctx in getattr(self, "_route_ctx_map", {}).items():
+
+            try:
+                bias_out = compute_bias(ctx, None)
+                form_val = get_form_adjustment(mid, int(sid))
+                decision = compute_msc_decision(ctx)
+
+                conf = (
+                    abs(bias_out.conf) +
+                    abs(form_val - 1.0) * 5 +
+                    decision.get("win_prob", 0)
+                )
+
+                confidence_rows.append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "confidence": round(conf, 3)
+                })
+
+            except Exception:
+                continue
 
         for r in drift:
 
@@ -1586,6 +1784,14 @@ class UnifiedEngine:
             except Exception:
                 continue
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_layer2_surface
+# 🔎 SEARCH: return {
+# 🧩 FIX: expose confidence rows for debugging
+# ======================================================================================================
+
+        confidence_rows.sort(key=lambda x: x["confidence"], reverse=True)
+
         return {
             "candidates": candidates,
             "sweet_summary": sweet_summary,
@@ -1595,6 +1801,7 @@ class UnifiedEngine:
             "form_weak": weak_form,
             "bias_calls": bias_rows[:5],
             "direction_calls": direction_rows[:5],
+            "confidence_rows": confidence_rows[:5],
         }
 
     # --------------------------------------------------------------------------------------------------
