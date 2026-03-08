@@ -108,7 +108,7 @@ class UnifiedEngine:
         # 2️⃣ PRE-OFF EXPLORATORY (TOP RANKED)
         # ------------------------------------------------------------------
 
-        candidates = layer2.get("candidates", [])[:15]
+        candidates = self._select_exploratory_candidates(report)
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -160,6 +160,115 @@ class UnifiedEngine:
                 "px": c.get("px"),
                 "why": "unified_exploratory",
             })
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 ANCHOR: inside tick(), immediately AFTER exploratory plan emission loop
+# 🧩 ACTION: ADD — Unified Risk Harvest Loop
+# 📆 PATCHED: 2026-03-08
+#
+# PURPOSE
+# -------
+# Unified must manage its own risk harvesting rather than relying on MSC_RISK.
+#
+# This loop monitors existing parent anchors and emits CHILD risk hedges when
+# price moves away from the anchor entry price.
+#
+# LOGIC
+# -----
+# LAY parent  → price drifts up   → BACK hedge
+# BACK parent → price steams down → LAY hedge
+#
+# DATA SOURCE
+# -----------
+# Uses BUS ctx_map fields:
+#
+#   ctx["anchor_parent_id"]
+#   ctx["anchor_entry_odds"]
+#   ctx["legacy_entry_side"]
+#   ctx["px"]
+#
+# No database access required.
+#
+# OUTPUT
+# ------
+# Emits:
+#
+#   bet_type = "RISK"
+#   role     = "CHILD"
+#
+# These plans are later limited by the slot allocator:
+#
+#   exploratory → 5
+#   risk        → 21
+#   inplay      → 24
+#
+# DEBUG NOTES
+# -----------
+# If risk is not firing, check:
+#
+#   ctx["anchor_parent_id"]
+#   ctx["anchor_entry_odds"]
+#   ctx["legacy_entry_side"]
+#   ctx["px"]
+#
+# Risk cannot trigger without an anchor parent.
+# ======================================================================================================
+
+        for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
+
+            anchor_id  = rctx.get("anchor_parent_id")
+            anchor_odds = rctx.get("anchor_entry_odds")
+            side       = rctx.get("legacy_entry_side")
+            px         = rctx.get("px")
+
+            if not anchor_id:
+                continue
+
+            if anchor_odds is None or px is None:
+                continue
+
+            try:
+                anchor_odds = float(anchor_odds)
+                px = float(px)
+            except Exception:
+                continue
+
+            # --------------------------------------------------
+            # LAY → BACK risk harvest
+            # --------------------------------------------------
+
+            if side == "LAY" and px > anchor_odds:
+
+                plans.append({
+                    "enter": True,
+                    "engine": "MSC_UNIFIED",
+                    "bet_type": "RISK",
+                    "role": "CHILD",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "direction": "BACK",
+                    "px": px,
+                    "why": "unified_risk_drift_harvest",
+                })
+
+            # --------------------------------------------------
+            # BACK → LAY risk harvest
+            # --------------------------------------------------
+
+            elif side == "BACK" and px < anchor_odds:
+
+                plans.append({
+                    "enter": True,
+                    "engine": "MSC_UNIFIED",
+                    "bet_type": "RISK",
+                    "role": "CHILD",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "direction": "LAY",
+                    "px": px,
+                    "why": "unified_risk_steam_harvest",
+                })
 
         # ======================================================================================================
         # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -434,6 +543,21 @@ class UnifiedEngine:
                         "px": px,
                         "why": "unified_corrective",
                     })
+
+        # --------------------------------------------------
+        # SLOT ALLOCATION (UNIFIED CAPACITY CONTROL)
+        # --------------------------------------------------
+
+        exploratory = [p for p in plans if p.get("bet_type") == "EXPLORATORY"]
+        risk        = [p for p in plans if p.get("bet_type") == "RISK"]
+        inplay      = [p for p in plans if p.get("bet_type") == "INPLAY"]
+
+        # deterministic caps
+        exploratory = exploratory[:5]
+        risk        = risk[:21]
+        inplay      = inplay[:24]
+
+        plans = exploratory + risk + inplay
 
         # ------------------------------------------------------------------
         # RETURN CONTRACT
@@ -1130,6 +1254,199 @@ class UnifiedEngine:
             "system_imbalance": 0,
             "corrective_pressure": 0,
         }
+
+    # ================================================================================================
+    # STRUCTURAL RUNNER MEMORY
+    # ================================================================================================
+
+    def _update_runner_structure(self):
+
+        if not hasattr(self, "_runner_structure"):
+            self._runner_structure = {}
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            px = ctx.get("px")
+            if px is None:
+                continue
+
+            key = (mid, sid)
+
+            mem = self._runner_structure.setdefault(key, {
+                "anchor_px": px,
+                "high_seen": px,
+                "low_seen": px,
+                "last_px": px,
+                "trend": None,
+            })
+
+            if px > mem["high_seen"]:
+                mem["high_seen"] = px
+
+            if px < mem["low_seen"]:
+                mem["low_seen"] = px
+
+            prev = mem["last_px"]
+
+            if prev is not None:
+
+                if px > prev:
+                    mem["trend"] = "DRIFT"
+
+                elif px < prev:
+                    mem["trend"] = "STEAM"
+
+            mem["last_px"] = px
+
+
+    # ================================================================================================
+    # BUILD STRUCTURAL POOLS
+    # ================================================================================================
+
+    def _build_candidate_pools(self, report):
+
+        pools = {
+            "crossover": [],
+            "drift": [],
+            "sweet": [],
+            "breakout": [],
+            "direction": [],
+            "volatility": [],
+        }
+
+        drift_rows = report.get("drift", {}).get("runners", [])
+        rank_rows  = report.get("rank", {}).get("runners", [])
+        sweet_rows = report.get("sweet_spot", {}).get("runners", [])
+
+        layer2 = report.get("layer2", {})
+
+        # CROSSOVERS
+
+        for r in rank_rows:
+
+            if r.get("crossed_over"):
+
+                pools["crossover"].append({
+                    "marketId": r["marketId"],
+                    "selectionId": r["selectionId"],
+                    "score": abs(r.get("rank_delta", 0)) + 5
+                })
+
+        # DRIFT
+
+        for r in drift_rows:
+
+            speed = abs(r.get("delta_ticks_per_min") or 0)
+
+            if speed > 0:
+
+                pools["drift"].append({
+                    "marketId": r["marketId"],
+                    "selectionId": r["selectionId"],
+                    "score": speed
+                })
+
+        # SWEET SPOT
+
+        for r in sweet_rows:
+
+            zone = r.get("zone")
+
+            if zone == "4-7":
+                score = 3
+
+            elif zone == "7-10":
+                score = 2
+
+            else:
+                continue
+
+            pools["sweet"].append({
+                "marketId": r["marketId"],
+                "selectionId": r["selectionId"],
+                "score": score
+            })
+
+        # BREAKOUT
+
+        for key, mem in getattr(self, "_runner_structure", {}).items():
+
+            mid, sid = key
+
+            px = mem["last_px"]
+
+            if px >= mem["high_seen"]:
+
+                pools["breakout"].append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "score": 4
+                })
+
+            elif px <= mem["low_seen"]:
+
+                pools["breakout"].append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "score": 4
+                })
+
+        # DIRECTION ENGINE
+
+        for row in layer2.get("direction_calls", []):
+
+            pools["direction"].append({
+                "marketId": row["marketId"],
+                "selectionId": row["selectionId"],
+                "score": row.get("win_prob", 0)
+            })
+
+        return pools
+
+
+    # ================================================================================================
+    # FINAL CANDIDATE SELECTION
+    # ================================================================================================
+
+    def _select_exploratory_candidates(self, report):
+
+        self._update_runner_structure()
+
+        pools = self._build_candidate_pools(report)
+
+        selected = []
+        seen = set()
+
+        def pick(pool_name, limit):
+
+            rows = sorted(
+                pools.get(pool_name, []),
+                key=lambda x: x["score"],
+                reverse=True
+            )
+
+            for r in rows:
+
+                key = (r["marketId"], r["selectionId"])
+
+                if key in seen:
+                    continue
+
+                selected.append(r)
+
+                seen.add(key)
+
+                if len(selected) >= limit:
+                    break
+
+        # candidate distribution
+
+        pick("crossover", 2)
+        pick("drift", 3)
+        pick("sweet", 4)
+        pick("breakout", 5)
+
+        return selected[:5]
 
     # --------------------------------------------------------------------------------------------------
     # LAYER 2 — TRADE SIGNAL INTELLIGENCE
