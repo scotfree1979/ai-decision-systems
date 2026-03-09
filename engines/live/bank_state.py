@@ -778,14 +778,61 @@ def _reconcile_market_exposure_live():
     # 3️⃣ Compute unmatched (working capital)
     unmatched_map = _compute_engine_unmatched_working_capital()
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: # 4️⃣ Rebuild ENGINE_USED fresh (NO DRIFT)
+# 🧩 ACTION: REPLACE — enforce hard engine pot invariant
+# 📆 PATCHED: 2026-04-XX — Prevent negative engine pots
+#
+# ROOT CAUSE
+# ----------
+# ENGINE_USED was computed as:
+#
+#     USED = FLOOR + UNMATCHED
+#
+# If FLOOR + UNMATCHED exceeded the engine pot, AVAILABLE became negative.
+#
+# CORRECT MODEL
+# -------------
+# USED must never exceed the engine pot.
+#
+#     USED = min(POT, FLOOR + UNMATCHED)
+#
+# where:
+#
+#     FLOOR      = matched worst-case exposure
+#     UNMATCHED  = working capital reserved at Betfair
+#
+# HARD INVARIANT
+# --------------
+#     USED ≤ POT
+#     AVAILABLE ≥ 0
+#
+# RESULT
+# ------
+# • prevents negative engine pots
+# • preserves full exposure math
+# • protects against placement gate failures
+# • does not change floor or unmatched logic
+# ======================================================================================================
+
     # 4️⃣ Rebuild ENGINE_USED fresh (NO DRIFT)
     with _LOCK:
 
         for engine in _ENGINE_POTS.keys():
+
             floor_part = engine_floor.get(engine, 0.0)
             unmatched_part = unmatched_map.get(engine, 0.0)
 
-            _ENGINE_USED[engine] = _clamp(floor_part + unmatched_part)
+            pot = _ENGINE_POTS.get(engine, 0.0)
+
+            used = floor_part + unmatched_part
+
+            # 🔒 HARD SAFETY INVARIANT
+            # Engine usage can never exceed its pot
+            used = min(pot, used)
+
+            _ENGINE_USED[engine] = _clamp(used)
 
         _OPEN_EXPOSURE = _clamp(sum(_ENGINE_USED.values()))
 
@@ -811,7 +858,7 @@ def _reconcile_market_exposure_live():
 
         except Exception:
             pass
-      
+
     return engine_floor, unmatched_map, floor_rows
 
 # -------------------------------------------------------------------
@@ -1471,6 +1518,48 @@ def can_place(engine: str, plan: dict) -> bool:
 
     mid = str(plan.get("marketId"))
     if not mid:
+        return False
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: def can_place(engine: str, plan: dict)
+# 🧩 ACTION: ADD hard engine-pot exhaustion gate
+# 📆 PATCHED: 2026-04-XX — Prevent engines consuming other engine pots
+#
+# ROOT CAUSE
+# ----------
+# Exploratory could continue placing bets even after its pot was exhausted
+# because floor delta checks only considered market exposure effects.
+#
+# This allowed unmatched orders to consume system capital and starve
+# other engines (MSC_RISK / MSC_INPLAY).
+#
+# CORRECT MODEL
+# -------------
+# Each engine has an isolated capital pool.
+#
+# If an engine has already used its entire pot, it must not place any
+# additional orders regardless of floor simulation.
+#
+# HARD INVARIANT
+# --------------
+#     ENGINE_USED[engine] ≤ ENGINE_POTS[engine]
+#
+# If the pot is exhausted, placement is blocked immediately.
+#
+# EFFECT
+# ------
+# • prevents exploratory starving other engines
+# • guarantees pots never go negative
+# • preserves existing floor + unmatched computation
+# ======================================================================================================
+
+    with _LOCK:
+        current_used = _ENGINE_USED.get(engine, 0.0)
+        engine_pot = _ENGINE_POTS.get(engine, 0.0)
+
+    # Hard stop: engine pot exhausted
+    if current_used >= engine_pot:
         return False
 
     # 1️⃣ Current floor
