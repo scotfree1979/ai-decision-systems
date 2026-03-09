@@ -86,6 +86,14 @@ class UnifiedEngine:
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:__init__
 # 🔎 SEARCH: self._fav_history =
+# 🧩 ACTION: ADD structural trigger memory
+# ======================================================================================================
+
+        self._structural_fired = {}
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:__init__
+# 🔎 SEARCH: self._fav_history =
 # 🧩 ADD: ensure opportunity schema exists
 # ======================================================================================================
 
@@ -119,13 +127,35 @@ class UnifiedEngine:
         # ------------------------------------------------------------------
 
         report = self._build_v7_report(ctx=ctx, tick_delta=tick_delta)
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: report = self._build_v7_report
+# 🧩 ACTION: ADD route alias for structural loops
+# ======================================================================================================
+
+        route = self._route_ctx_map
 
         layer2     = report.get("layer2", {})
         timing     = report.get("timing", {})
         volatility = report.get("volatility", {})
         liability  = report.get("liability", {})
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: volatility = report.get("volatility", {})
+# 🧩 ACTION: ADD cached volatility
+# ======================================================================================================
+
+        runners_moved = volatility.get("runners_moved_last_window", 0)
 
         plans = []
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: plans = []
+# 🧩 ACTION: ADD append alias
+# ======================================================================================================
+
+        emit_plan = plans.append
 
         # ensure memory containers exist
         if not hasattr(self, "_emitted_children"):
@@ -179,7 +209,7 @@ class UnifiedEngine:
                 continue
 
   
-            plans.append({
+            emit_plan({
                 "enter": True,
                 "engine": "MSC_UNIFIED",
                 "bet_type": "EXPLORATORY",
@@ -246,7 +276,13 @@ class UnifiedEngine:
 # Risk cannot trigger without an anchor parent.
 # ======================================================================================================
 
-        for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
+# 🧩 ACTION: REPLACE — use cached route map
+# ======================================================================================================
+
+        for (mid, sid), rctx in route.items():
 
             anchor_id  = rctx.get("anchor_parent_id")
             anchor_odds = rctx.get("anchor_entry_odds")
@@ -271,7 +307,7 @@ class UnifiedEngine:
 
             if side == "LAY" and px > anchor_odds:
 
-                plans.append({
+                emit_plan({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
                     "bet_type": "RISK",
@@ -289,7 +325,7 @@ class UnifiedEngine:
 
             elif side == "BACK" and px < anchor_odds:
 
-                plans.append({
+                emit_plan({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
                     "bet_type": "RISK",
@@ -357,7 +393,7 @@ class UnifiedEngine:
                 mem["markets_started"].add(mid)
 
         # --------------------------------------------------
-        # 2️⃣ RUNNER ARMING (DRIFT SIGNAL)
+        # 1️⃣ RUNNER ARMING (DRIFT SIGNAL)
         # --------------------------------------------------
 
         for c in candidates:
@@ -383,9 +419,12 @@ class UnifiedEngine:
             elif direction == "BACK->LAY":
                 mem["armed_back"][key] = True
 
+
         # --------------------------------------------------
-        # 3️⃣ LADDER TRIGGER
+        # 2️⃣ STRUCTURAL LADDER TRIGGER (ANYTIME)
         # --------------------------------------------------
+
+
 
         for c in candidates:
 
@@ -393,27 +432,23 @@ class UnifiedEngine:
             sid = c["selectionId"]
             px  = c.get("px")
 
-            if mid not in mem["markets_started"]:
-                continue
-
             if px is None:
                 continue
 
             key = (mid, sid)
 
-            if mem["triggered"].get(key):
-                continue
-
             px = float(px)
 
-            # ---- LAY ladder ----
-            if mem["armed_lay"].get(key) and px >= 7:
+            fired = self._structural_fired.get(key)
+
+            # ---- SWEET SPOT COLLAPSE ----
+            if mem["armed_lay"].get(key) and px >= 7 and fired is None:
 
                 ladder = [7, 8, 9, 10, 11, 12]
 
                 for lvl in ladder:
                     if lvl >= px:
-                        plans.append({
+                        emit_plan({
                             "enter": True,
                             "engine": "MSC_UNIFIED",
                             "bet_type": "INPLAY",
@@ -422,20 +457,38 @@ class UnifiedEngine:
                             "selectionId": sid,
                             "direction": "LAY->BACK",
                             "px": lvl,
-                 
-                            "why": "unified_inplay_lay_ladder",
+                            "why": "unified_structural_ladder",
                         })
 
-                mem["triggered"][key] = True
+                self._structural_fired[key] = "SWEET"
 
-            # ---- BACK ladder ----
-            elif mem["armed_back"].get(key) and px <= 7:
+
+            # ---- 15-20 COLLAPSE BAND ----
+            elif 15 <= px <= 20 and fired is None:
+
+                emit_plan({
+                    "enter": True,
+                    "engine": "MSC_UNIFIED",
+                    "bet_type": "INPLAY",
+                    "role": "PARENT",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "direction": "LAY->BACK",
+                    "px": px,
+                    "why": "unified_structural_15_20",
+                })
+
+                self._structural_fired[key] = "HIGH"
+
+
+            # ---- REBOUND BACKS (5 / 4 / 3) ----
+            elif mem["armed_back"].get(key) and px <= 5:
 
                 ladder = [5, 4, 3]
 
                 for lvl in ladder:
                     if lvl <= px:
-                        plans.append({
+                        emit_plan({
                             "enter": True,
                             "engine": "MSC_UNIFIED",
                             "bet_type": "INPLAY",
@@ -444,10 +497,8 @@ class UnifiedEngine:
                             "selectionId": sid,
                             "direction": "BACK->LAY",
                             "px": lvl,
-                            "why": "unified_inplay_back_ladder",
+                            "why": "unified_structural_rebound",
                         })
-
-                mem["triggered"][key] = True
 
         # --------------------------------------------------
         # 4️⃣ SECONDARY HARVEST (LOSERS 15-20)
@@ -466,7 +517,7 @@ class UnifiedEngine:
 
             if 15 <= px <= 20:
 
-                plans.append({
+                emit_plan({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
                     "bet_type": "INPLAY",
@@ -476,7 +527,9 @@ class UnifiedEngine:
                     "direction": "LAY->BACK",
                     "px": px,
                     "why": "unified_inplay_secondary_harvest",
-                })        # ------------------------------------------------------------------
+                })        
+        
+        # ------------------------------------------------------------------
         # 4️⃣ IN-PLAY DETECTION (STRICT RULE)
         # Must be AFTER zero AND 3-runner volatility spike
         # ------------------------------------------------------------------
@@ -514,7 +567,7 @@ class UnifiedEngine:
             # Lay losers drifting past sweet spot
             if px >= 7:
 
-                plans.append({
+                emit_plan({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
                     "bet_type": "INPLAY",
@@ -529,7 +582,7 @@ class UnifiedEngine:
             # Back collapsing contenders
             elif px <= 5:
 
-                plans.append({
+                emit_plan({
                     "enter": True,
                     "engine": "MSC_UNIFIED",
                     "bet_type": "INPLAY",
@@ -541,40 +594,232 @@ class UnifiedEngine:
                     "why": "unified_inplay_back",
                 })
 
-        # ------------------------------------------------------------------
-        # 6️⃣ CORRECTIVE FLATTEN (ONLY IF MARKET LIABILITY EXISTS)
-        # ------------------------------------------------------------------
+        # --------------------------------------------------
+        # STRUCTURAL BREAKDOWN ENGINE (ANYTIME)
+        # --------------------------------------------------
+        # Replaces the previous INPLAY race-phase trigger.
+        # Detects runner collapse structurally using:
+        #   drift surface
+        #   rank crossover
+        #   sweet-spot exit
+        #
+        # Fires when a runner drifts out of competitiveness.
+        # One structural trigger per runner.
 
-        worst = liability.get("worst_case_liability", 0)
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: sweet_rows =
+# 🧩 ACTION: ADD zone set
+# ======================================================================================================
 
-        if worst and worst > 0:
+        collapse_zones = {"7-10", "15-20"}
 
-            for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
+        drift_rows = report.get("drift", {}).get("runners", [])
+        rank_rows  = report.get("rank", {}).get("runners", [])
+        sweet_rows = report.get("sweet_spot", {}).get("runners", [])
 
-                px     = rctx.get("px")
-                anchor = rctx.get("anchor_entry_odds")
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: sweet_rows = report.get("sweet_spot", {}).get("runners", [])
+# 🧩 ACTION: ADD — Precompute runner surface maps
+# PURPOSE:
+# Replace repeated list scans with O(1) lookups
+# PERFORMANCE:
+# Removes O(n²) behaviour in structural loops
+# ======================================================================================================
 
-                if not px or not anchor:
-                    continue
+        drift_map = {(r["marketId"], r["selectionId"]): r for r in drift_rows}
+        rank_map  = {(r["marketId"], r["selectionId"]): r for r in rank_rows}
+        sweet_map = {(r["marketId"], r["selectionId"]): r for r in sweet_rows}
 
-                px     = float(px)
-                anchor = float(anchor)
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: for (mid, sid), rctx in self._route_ctx_map.items():
+# 🧩 ACTION: REPLACE
+# ======================================================================================================
 
-                # collapsing toward win
-                if px < anchor and px <= 5:
+        for (mid, sid), rctx in route.items():
 
-                    plans.append({
+            px = rctx.get("px")
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: px = rctx.get("px")
+# 🧩 ACTION: ADD single conversion
+# ======================================================================================================
+
+            try:
+                px = float(px)
+            except Exception:
+                continue
+
+            if px is None:
+                continue
+
+            key = (mid, sid)
+
+            px = float(px)
+
+            fired = self._structural_fired.get(key)
+
+            drift_row = drift_map.get((mid, sid))
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: rank_row = next(
+# 🧩 ACTION: REPLACE — O(1) rank lookup
+# ======================================================================================================
+
+            rank_row = rank_map.get((mid, sid))
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: sweet_row = next(
+# 🧩 ACTION: REPLACE — O(1) sweet lookup
+# ======================================================================================================
+
+            sweet_row = sweet_map.get((mid, sid))
+
+            drift_speed = 0
+            if drift_row:
+                drift_speed = abs(drift_row.get("delta_ticks_per_min") or 0)
+
+            rank_delta = 0
+            if rank_row:
+                rank_delta = abs(rank_row.get("rank_delta") or 0)
+
+            zone = None
+            if sweet_row:
+                zone = sweet_row.get("zone")
+
+            # --------------------------------------------------
+            # STRUCTURAL DRIFT DETECTION
+            # --------------------------------------------------
+            # Runner drifting through rank boundaries and leaving
+            # competitive zone.
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: zone in collapse_zones
+# 🧩 ACTION: REPLACE numeric comparison
+# ======================================================================================================
+
+            zone_collapse = (7 <= px <= 10) or (15 <= px <= 20)
+
+            structural_break = (
+                drift_speed >= 0.5
+                or rank_delta >= 2
+                or zone_collapse
+            )
+
+            if structural_break and fired is None:
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: if structural_break and fired is None:
+# 🧩 ACTION: INSERT — Late Drift Collapse Capture
+# 📆 PATCHED: 2026-03-09
+#
+# PURPOSE
+# -------
+# Capture runners that drifted past the sweet-spot without the engine
+# detecting the earlier progression (3→4→5→6→7).
+#
+# Example drift missed by engine timing:
+#
+#     9 → 11 → 13 → 14 → 15
+#
+# Without this patch the runner would be missed.
+#
+# This patch ensures the collapse is still captured once the runner
+# drifts into the upper collapse zone.
+#
+# SAFETY
+# ------
+# • Fires only if runner has not already fired (`_structural_fired`)
+# • Does NOT interfere with sweet-spot ladder
+# • Does NOT interfere with rebound ladder
+#
+# ======================================================================================================
+
+                # --------------------------------------------------
+                # LATE COLLAPSE DETECTION (MISSED SWEET SPOT)
+                # --------------------------------------------------
+
+                elif px >= 13 and px < 15 and fired is None:
+
+                    emit_plan({
                         "enter": True,
                         "engine": "MSC_UNIFIED",
-                        "bet_type": "CORRECTION",
-                        "role": "CHILD",
-                        "exit_kind": "CORRECTIVE",
+                        "bet_type": "INPLAY",
+                        "role": "PARENT",
                         "marketId": mid,
                         "selectionId": sid,
-                        "direction": "BACK->LAY",
+                        "direction": "LAY->BACK",
                         "px": px,
-                        "why": "unified_corrective",
+                        "why": "unified_late_structural_collapse",
                     })
+
+                    self._structural_fired[key] = "LATE"
+
+                # SWEET SPOT LADDER
+                if px >= 7 and px < 15:
+
+                    ladder = [7, 8, 9, 10, 11, 12]
+
+                    for lvl in ladder:
+                        if lvl >= px:
+                            emit_plan({
+                                "enter": True,
+                                "engine": "MSC_UNIFIED",
+                                "bet_type": "INPLAY",
+                                "role": "PARENT",
+                                "marketId": mid,
+                                "selectionId": sid,
+                                "direction": "LAY->BACK",
+                                "px": lvl,
+                                "why": "unified_structural_breakdown",
+                            })
+
+                    self._structural_fired[key] = "SWEET"
+
+                # HIGH COLLAPSE BAND
+                elif 15 <= px <= 20:
+
+                    emit_plan({
+                        "enter": True,
+                        "engine": "MSC_UNIFIED",
+                        "bet_type": "INPLAY",
+                        "role": "PARENT",
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "direction": "LAY->BACK",
+                        "px": px,
+                        "why": "unified_structural_15_20",
+                    })
+
+                    self._structural_fired[key] = "HIGH"
+
+            # --------------------------------------------------
+            # REBOUND BACK LADDER
+            # --------------------------------------------------
+
+            if px <= 5:
+
+                ladder = [5, 4, 3]
+
+                for lvl in ladder:
+                    if lvl <= px:
+                        emit_plan({
+                            "enter": True,
+                            "engine": "MSC_UNIFIED",
+                            "bet_type": "INPLAY",
+                            "role": "PARENT",
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "direction": "BACK->LAY",
+                            "px": lvl,
+                            "why": "unified_structural_rebound",
+                        })
 
         # --------------------------------------------------
         # SLOT ALLOCATION (UNIFIED CAPACITY CONTROL)
@@ -585,9 +830,20 @@ class UnifiedEngine:
         inplay      = [p for p in plans if p.get("bet_type") == "INPLAY"]
 
         # deterministic caps
-        exploratory = exploratory[:5]
-        risk        = risk[:21]
-        inplay      = inplay[:24]
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: exploratory = exploratory[:5]
+# 🧩 ACTION: REPLACE safe slicing
+# ======================================================================================================
+
+        if len(exploratory) > 5:
+            exploratory = exploratory[:5]
+
+        if len(risk) > 21:
+            risk = risk[:21]
+
+        if len(inplay) > 24:
+            inplay = inplay[:24]
 
         plans = exploratory + risk + inplay
 
@@ -746,7 +1002,70 @@ class UnifiedEngine:
 # 📆 PATCHED: 2026-XX-XX — Unified uses BUS ctx_map
 # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report
+# 🔎 ANCHOR: self._route_ctx_map = self._build_runtime_ctx_map(ctx)
+# 🧩 ACTION: REPLACE — restore PX memory for BUS world
+# 📆 PATCHED: 2026-03-09
+#
+# ROOT CAUSE
+# ----------
+# BUS rebuilds ctx_map every tick, so fields like:
+#     ctx["_prev_px"]
+#     ctx["_prev_vol_px"]
+# no longer persist between ticks.
+#
+# Older Unified versions implicitly preserved this memory
+# because the runtime world was persistent.
+#
+# Without PX memory:
+#     drift surface collapses
+#     volatility surface collapses
+#     breakout detection fails
+#     candidate pools become empty
+#
+# FIX
+# ---
+# Store PX history inside Unified and inject previous values
+# back into ctx_map before surfaces execute.
+# ======================================================================================================
+
         self._route_ctx_map = self._build_runtime_ctx_map(ctx)
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: self._route_ctx_map = self._build_runtime_ctx_map(ctx)
+# 🧩 ACTION: ADD local alias
+# PURPOSE: reduce attribute lookups
+# ======================================================================================================
+
+        route = self._route_ctx_map
+
+        # initialise PX memory store
+        if not hasattr(self, "_runner_px_memory"):
+            self._runner_px_memory = {}
+
+        for key, rctx in self._route_ctx_map.items():
+
+            px = rctx.get("px")
+
+            if px is None:
+                continue
+
+            try:
+                px = float(px)
+            except Exception:
+                continue
+
+            prev = self._runner_px_memory.get(key)
+
+            # restore previous tick memory
+            if prev is not None:
+                rctx["_prev_px"] = prev
+                rctx["_prev_vol_px"] = prev
+
+            # update stored memory
+            self._runner_px_memory[key] = px
 
         report = {
             "world": self._build_world_surface(),
@@ -910,6 +1229,18 @@ class UnifiedEngine:
                         self._runner_structure.pop(key, None)
                         self._runner_breakouts.pop(key, None)
                         self._fav_history.pop(key, None)
+
+                # --- NEW: clear PX memory ---
+                if hasattr(self, "_runner_px_memory"):
+                    for key in list(self._runner_px_memory.keys()):
+                        if key[0] == mid:
+                            self._runner_px_memory.pop(key, None)
+
+                # --- NEW: clear structural candidates ---
+                if hasattr(self, "_structural_candidates"):
+                    for key in list(self._structural_candidates.keys()):
+                        if key[0] == mid:
+                            self._structural_candidates.pop(key, None)
 
         return {"markets": markets}
 
@@ -1795,12 +2126,13 @@ class UnifiedEngine:
 
             score = 0
 
-            sweet_row = next(
-                (s for s in sweet
-                 if s["marketId"] == r["marketId"]
-                 and s["selectionId"] == r["selectionId"]),
-                None
-            )
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: sweet_row = next(
+# 🧩 ACTION: REPLACE — use sweet_map lookup
+# ======================================================================================================
+
+            sweet_row = sweet_map.get((mid, sid))
 
             if sweet_row:
                 zone = sweet_row.get("zone")
@@ -1815,12 +2147,13 @@ class UnifiedEngine:
             if dv:
                 score += min(abs(dv) * 4, 4)
 
-            rank_row = next(
-                (rk for rk in rank
-                 if rk["marketId"] == r["marketId"]
-                 and rk["selectionId"] == r["selectionId"]),
-                None
-            )
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: rank_row = next(
+# 🧩 ACTION: REPLACE — use rank_map lookup
+# ======================================================================================================
+
+            rank_row = rank_map.get((mid, sid))
 
             if rank_row and rank_row.get("rank_delta"):
                 score += 2
