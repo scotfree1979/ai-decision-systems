@@ -1050,10 +1050,7 @@ class DecisionBus:
             # --------------------------------------------------
             # PLAN (PHASE 0 = NONE)
             # --------------------------------------------------
-            if result and result.get("enter"):
-                result["engine"] = "MSC_UNIFIED"
-                plans.append(("MSC_UNIFIED", result, base_ctx))
-                engine_report["MSC_UNIFIED"]["fired"] += 1
+
 
         except Exception as e:
             _record_reason(engine_report, "MSC_UNIFIED", f"tick_error:{e}")
@@ -1191,6 +1188,7 @@ class DecisionBus:
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
+        route = self._route_ctx_map
         ctx_map = self._route_ctx_map
 
         # === PATCH START ============================================================
@@ -1973,7 +1971,7 @@ class DecisionBus:
 # critical execution loops.
 # ======================================================================================================
 
-            for (mid, sid), ctx in route.items():
+            for (mid, sid), ctx in self._route_ctx_map.items():
                 if (mid, sid) in exclusions or ctx.get("px") is None:
                     continue
 
@@ -2420,22 +2418,13 @@ class DecisionBus:
             _record("MSC_RISK", False, False, str(e))
 
         # --------------------------------------------------
-        # MSC_RISK
+        # MSC_UNIFIED
         # --------------------------------------------------
         try:
-            eng = self.engines.get("MSC_UNIFIED")
-            if eng:
-                p = eng.tick(ctx)
-
-                if p and p.get("enter"):
-                    # Phase 0: this should never happen
-                    # But structure must exist
-                    p["engine"] = "MSC_UNIFIED"
-                    plans.append(("MSC_UNIFIED", p, ctx))
-                    _record("MSC_UNIFIED", True, True)
-                else:
-                    _record("MSC_UNIFIED", True, False)
-
+            # Unified runs via Lane 7 now.
+            # This stub preserves engine report structure
+            # without executing the engine twice.
+            _record("MSC_UNIFIED", True, False)
         except Exception as e:
             _record("MSC_UNIFIED", False, False, str(e))
 
@@ -3000,7 +2989,7 @@ class DecisionBus:
 # critical execution loops.
 # ======================================================================================================
 
-            for (mid, sid), ctx in route.items():
+            for (mid, sid), ctx in self._route_ctx_map.items():
                 row = con.execute(
                     """
                     SELECT anchor_odd

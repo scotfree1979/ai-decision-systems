@@ -711,56 +711,31 @@ class UnifiedEngine:
                 or zone_collapse
             )
 
-            if structural_break and fired is None:
-
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: if structural_break and fired is None:
-# 🧩 ACTION: INSERT — Late Drift Collapse Capture
-# 📆 PATCHED: 2026-03-09
-#
-# PURPOSE
-# -------
-# Capture runners that drifted past the sweet-spot without the engine
-# detecting the earlier progression (3→4→5→6→7).
-#
-# Example drift missed by engine timing:
-#
-#     9 → 11 → 13 → 14 → 15
-#
-# Without this patch the runner would be missed.
-#
-# This patch ensures the collapse is still captured once the runner
-# drifts into the upper collapse zone.
-#
-# SAFETY
-# ------
-# • Fires only if runner has not already fired (`_structural_fired`)
-# • Does NOT interfere with sweet-spot ladder
-# • Does NOT interfere with rebound ladder
-#
+# LATE COLLAPSE DETECTION (MISSED SWEET SPOT)
 # ======================================================================================================
 
-                # --------------------------------------------------
-                # LATE COLLAPSE DETECTION (MISSED SWEET SPOT)
-                # --------------------------------------------------
+            if px >= 13 and px < 15 and fired is None:
 
-                elif px >= 13 and px < 15 and fired is None:
+                emit_plan({
+                    "enter": True,
+                    "engine": "MSC_UNIFIED",
+                    "bet_type": "INPLAY",
+                    "role": "PARENT",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "direction": "LAY->BACK",
+                    "px": px,
+                    "why": "unified_late_structural_collapse",
+                })
 
-                    emit_plan({
-                        "enter": True,
-                        "engine": "MSC_UNIFIED",
-                        "bet_type": "INPLAY",
-                        "role": "PARENT",
-                        "marketId": mid,
-                        "selectionId": sid,
-                        "direction": "LAY->BACK",
-                        "px": px,
-                        "why": "unified_late_structural_collapse",
-                    })
+                self._structural_fired[key] = "LATE"
 
-                    self._structural_fired[key] = "LATE"
+# ======================================================================================================
+# STRUCTURAL BREAK
+# ======================================================================================================
 
+            elif structural_break and fired is None:
                 # SWEET SPOT LADDER
                 if px >= 7 and px < 15:
 
