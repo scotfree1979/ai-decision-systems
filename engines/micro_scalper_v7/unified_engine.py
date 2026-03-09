@@ -1310,6 +1310,67 @@ class UnifiedEngine:
 
         for (mid, sid), ctx in self._route_ctx_map.items():
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_update_runner_structure
+# 🔎 ANCHOR: immediately after "for (mid, sid), ctx in self._route_ctx_map.items():"
+# 🧩 ACTION: ADD — restore persistent PX memory (runner history)
+# 📆 PATCHED: 2026-03-09 — restore Unified runner memory after BUS world refactor
+#
+# ROOT CAUSE
+# ----------
+# When Unified was refactored to consume BUS ctx_map, runner PX memory was lost.
+# BUS recreates ctx every tick, so fields like _prev_px and _prev_vol_px no longer persist.
+#
+# RESULT
+# ------
+# All structural surfaces became empty:
+#   • drift surface
+#   • volatility surface
+#   • breakout detection
+#   • candidate pools
+#
+# FIX
+# ---
+# Persist PX memory inside Unified instead of ctx.
+# This restores:
+#   • drift calculations
+#   • volatility detection
+#   • breakout tracking
+#   • candidate generation
+#
+# PERFORMANCE
+# -----------
+# O(runners) dictionary lookups only.
+# No DB calls.
+# No route rebuild.
+# ======================================================================================================
+
+            mem_px = getattr(self, "_runner_px_memory", None)
+            if mem_px is None:
+                self._runner_px_memory = {}
+                mem_px = self._runner_px_memory
+
+            key = (mid, sid)
+
+            px = ctx.get("px")
+            if px is None:
+                continue
+
+            try:
+                px = float(px)
+            except Exception:
+                continue
+
+            prev = mem_px.get(key)
+
+            # restore previous px memory into ctx for existing surfaces
+            if prev is not None:
+                ctx["_prev_px"] = prev
+                ctx["_prev_vol_px"] = prev
+
+            # update stored memory
+            mem_px[key] = px
+
             px = ctx.get("px")
             if px is None:
                 continue
