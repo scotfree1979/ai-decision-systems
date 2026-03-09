@@ -188,6 +188,7 @@ class UnifiedEngine:
                 "selectionId": c["selectionId"],
                 "direction": "LAY->BACK",
                 "px": c.get("px"),
+                "target_ticks": 1,
                 "why": "unified_exploratory",
             })
 
@@ -421,6 +422,7 @@ class UnifiedEngine:
                             "selectionId": sid,
                             "direction": "LAY->BACK",
                             "px": lvl,
+                 
                             "why": "unified_inplay_lay_ladder",
                         })
 
@@ -1616,39 +1618,77 @@ class UnifiedEngine:
     # FINAL CANDIDATE SELECTION
     # ================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: def _select_exploratory_candidates(self, report):
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-09 — Unified candidate hierarchy + structural loop
+#
+# PURPOSE
+# -------
+# Correct candidate selection doctrine.
+#
+# STRUCTURAL SIGNAL HIERARCHY
+# ---------------------------
+# 1️⃣ crossover
+# 2️⃣ direction
+# 3️⃣ breakout
+# 4️⃣ drift
+#
+# OVERLAYS (NOT candidate sources)
+# --------------------------------
+# sweet_spot
+# momentum
+# favourite
+#
+# STRUCTURAL LOOP
+# ---------------
+# Once a runner becomes a candidate it remains tracked
+# for the lifetime of the market unless the market completes.
+#
+# RULES
+# -----
+# • Max exploratory candidates = 5
+# • Structural signals only create candidates
+# • Overlay signals only influence later scoring
+# • Candidates persist via _structural_candidates
+#
+# PERFORMANCE
+# -----------
+# O(runners) per tick.
+# No DB access.
+# ======================================================================================================
+
     def _select_exploratory_candidates(self, report):
+
+        # --------------------------------------------------
+        # Ensure structural candidate memory exists
+        # --------------------------------------------------
+        if not hasattr(self, "_structural_candidates"):
+            self._structural_candidates = {}
 
         self._update_runner_structure()
 
         pools = self._build_candidate_pools(report)
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
-# 🔎 SEARCH: pools = self._build_candidate_pools(report)
-# 🧩 ADD: multi-signal ranking pool
-# PURPOSE:
-# Expands candidate pool using additional signal layers.
-# ======================================================================================================
-        selected = []
+        # --------------------------------------------------
+        # Candidate hierarchy (structural signals only)
+        # --------------------------------------------------
+        hierarchy = [
+            "crossover",
+            "direction",
+            "breakout",
+            "drift",
+        ]
+
+        new_candidates = []
         seen = set()
 
-        extra = []
-        extra += pools.get("momentum", [])
-        extra += pools.get("favourite", [])
-
-        for r in extra:
-            key = (r["marketId"], r["selectionId"])
-            if key not in seen:
-                selected.append(r)
-                seen.add(key)
-
-
-
-        def pick(pool_name, limit):
+        for pool_name in hierarchy:
 
             rows = sorted(
                 pools.get(pool_name, []),
-                key=lambda x: x["score"],
+                key=lambda x: x.get("score", 0),
                 reverse=True
             )
 
@@ -1659,21 +1699,53 @@ class UnifiedEngine:
                 if key in seen:
                     continue
 
-                selected.append(r)
-
+                new_candidates.append(r)
                 seen.add(key)
 
-                if len(selected) >= limit:
+                if len(new_candidates) >= 5:
                     break
 
-        # candidate distribution
+            if len(new_candidates) >= 5:
+                break
 
-        pick("crossover", 2)
-        pick("drift", 3)
-        pick("sweet", 4)
-        pick("breakout", 5)
+        # --------------------------------------------------
+        # Merge with structural memory (candidate loop)
+        # --------------------------------------------------
+        final = []
 
-        return selected[:5]
+        for r in new_candidates:
+
+            key = (r["marketId"], r["selectionId"])
+
+            if key not in self._structural_candidates:
+
+                self._structural_candidates[key] = {
+                    "first_seen_ts": time.time(),
+                    "signal": r,
+                }
+
+            final.append(r)
+
+        # --------------------------------------------------
+        # Re-add previously discovered candidates
+        # --------------------------------------------------
+        for key, data in list(self._structural_candidates.items()):
+
+            mid, sid = key
+
+            if key in seen:
+                continue
+
+            final.append({
+                "marketId": mid,
+                "selectionId": sid,
+                "score": 0,
+            })
+
+            if len(final) >= 5:
+                break
+
+        return final[:5]
 
     # --------------------------------------------------------------------------------------------------
     # LAYER 2 — TRADE SIGNAL INTELLIGENCE

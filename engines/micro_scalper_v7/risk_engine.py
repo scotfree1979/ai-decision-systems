@@ -249,6 +249,7 @@ class RiskEngine:
             "selectionId": sid,
             "direction": direction,
             "px": px,
+            "target_ticks": 1,
             "why": "risk_shadow_microcycle",
         }
 

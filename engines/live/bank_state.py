@@ -1520,50 +1520,21 @@ def can_place(engine: str, plan: dict) -> bool:
     if not mid:
         return False
 
-# ======================================================================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 ANCHOR: def can_place(engine: str, plan: dict)
-# 🧩 ACTION: ADD hard engine-pot exhaustion gate
-# 📆 PATCHED: 2026-04-XX — Prevent engines consuming other engine pots
-#
-# ROOT CAUSE
-# ----------
-# Exploratory could continue placing bets even after its pot was exhausted
-# because floor delta checks only considered market exposure effects.
-#
-# This allowed unmatched orders to consume system capital and starve
-# other engines (MSC_RISK / MSC_INPLAY).
-#
-# CORRECT MODEL
-# -------------
-# Each engine has an isolated capital pool.
-#
-# If an engine has already used its entire pot, it must not place any
-# additional orders regardless of floor simulation.
-#
-# HARD INVARIANT
-# --------------
-#     ENGINE_USED[engine] ≤ ENGINE_POTS[engine]
-#
-# If the pot is exhausted, placement is blocked immediately.
-#
-# EFFECT
-# ------
-# • prevents exploratory starving other engines
-# • guarantees pots never go negative
-# • preserves existing floor + unmatched computation
-# ======================================================================================================
-
+    # --------------------------------------------------
+    # HARD ENGINE POT GATE
+    # --------------------------------------------------
     with _LOCK:
         current_used = _ENGINE_USED.get(engine, 0.0)
         engine_pot = _ENGINE_POTS.get(engine, 0.0)
 
-    # Hard stop: engine pot exhausted
     if current_used >= engine_pot:
         return False
 
-    # 1️⃣ Current floor
+    # --------------------------------------------------
+    # CURRENT FLOOR
+    # --------------------------------------------------
     floor_rows = _compute_market_floor_from_betfair_surface()
+
     floor_by_market = {
         r["marketId"]: float(r["true_market_exposure"])
         for r in floor_rows
@@ -1571,47 +1542,34 @@ def can_place(engine: str, plan: dict) -> bool:
 
     current_floor = floor_by_market.get(mid, 0.0)
 
-    # 2️⃣ Projected floor
+    # --------------------------------------------------
+    # PROJECTED FLOOR
+    # --------------------------------------------------
     projected_floor = _simulate_floor_with_new_bet(mid, plan)
-
     delta_floor = projected_floor - current_floor
 
-    # 3️⃣ Floor reduction → always allow
-    if delta_floor <= 0:
-        return True
+    # --------------------------------------------------
+    # UNMATCHED LIABILITY OF NEW ORDER
+    # --------------------------------------------------
+    direction = str(plan.get("direction", "")).upper()
+    size = float(plan.get("size", 0.0))
+    px = float(plan.get("px", 0.0))
 
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/live/bank_state.py
-# 🔎 SEARCH: def can_place(
-# 🛠 ACTION: Add strict engine pot isolation gate
-# 📆 PATCHED: 2026-03-02 — Hard per-engine pot cap (no cross-engine freeze)
-#
-# PURPOSE:
-# - Prevent any engine from exceeding its own pot
-# - Block unmatched runaway reservations
-# - Preserve isolation between engines
-#
-# NEW INVARIANT:
-#   ENGINE_USED[engine] <= ENGINE_POTS[engine]
-# ==============================================================================
+    if direction.startswith("LAY"):
+        new_unmatched = size * (px - 1.0)
+    else:
+        new_unmatched = size
 
-    # 4️⃣ Engine allocation check (floor delta gate)
-    available = get_engine_available(engine)
+    # --------------------------------------------------
+    # TOTAL CAPITAL IMPACT
+    # --------------------------------------------------
+    capital_delta = max(delta_floor, 0.0) + new_unmatched
 
-    if delta_floor > available:
-        return False
-
-    # 5️⃣ STRICT ENGINE POT CAP (new hard stop)
+    # --------------------------------------------------
+    # ENGINE POT CHECK
+    # --------------------------------------------------
     with _LOCK:
-        current_used = _ENGINE_USED.get(engine, 0.0)
-        engine_pot = _ENGINE_POTS.get(engine, 0.0)
-
-    # If engine already at or beyond its pot → block immediately
-    if current_used >= engine_pot:
-        return False
-
-    # Project total used including new bet
-    projected_used = current_used + max(delta_floor, 0.0)
+        projected_used = current_used + capital_delta
 
     if projected_used > engine_pot:
         return False
