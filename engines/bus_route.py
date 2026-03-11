@@ -27,16 +27,16 @@ _session.mount("http://", _adapter)
 # BUS ROUTE CONFIG (LOCKED)
 # ============================================================
 
-PLANS_PER_TICK = 100
-CYCLE_SIZE = 1000          # parents per full cycle
+PLANS_PER_TICK = 85
+CYCLE_SIZE = 850          # parents per full cycle
 TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
 ROUTE_SPLIT = {
-    "LEGACY": 5,
+    "LEGACY": 2,
     "MSC_RISK": 30,
     "MSC_INPLAY": 0,
-    "MSC_EXPLORATORY": 15,
+    "MSC_EXPLORATORY": 3,
     "OVERWATCHER": 0,
     "MSC_UNIFIED": 50, 
 }

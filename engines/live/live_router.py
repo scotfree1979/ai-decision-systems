@@ -16,6 +16,25 @@ _ROUTER_LIVE_STATE = {
     "movement": defaultdict(int),
 }
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🧩 ACTION: Add failed-child retry timer
+# 📆 PATCHED: 2026-04-XX — ensure children eventually placed
+#
+# PURPOSE
+# - Prevent temporary Betfair failures (INSUFFICIENT_FUNDS)
+# - Retry children every 5 minutes
+# - Avoid hammering Betfair
+#
+# INVARIANT
+#   CHILD FAILED → RETRY UNTIL MARKET FINISHED
+# ==============================================================================
+
+_LAST_CHILD_RETRY = 0
+_CHILD_RETRY_INTERVAL = 5  # seconds
+
+# === PATCH END ==============================================================
+
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py (module scope)
 # 🧩 ADD: Parent placement execution queue
@@ -3266,7 +3285,82 @@ def _rescue_queued_children(limit: int = 50) -> int:
 
     return PLACED
 
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: after _rescue_queued_children
+# 🧩 ACTION: Add failed-child retry sweep
+# 📆 PATCHED: 2026-04-XX — ensure child eventually placed
+#
+# PURPOSE
+# - Retry children rejected by Betfair (INSUFFICIENT_FUNDS etc)
+# - Convert FAILED → QUEUED
+# - Re-enqueue for placement
+#
+# SAFETY
+# - Idempotent
+# - Runs only every retry interval
+# - Never blocks router
+# ==============================================================================
 
+def _retry_failed_children(limit: int = 100) -> int:
+
+    con = _orders_conn()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    try:
+
+        rows = _q_retry(cur, """
+            SELECT id
+            FROM orders
+            WHERE role='CHILD'
+              AND entry_status='FAILED'
+              AND mode='LIVE'
+              AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+            LIMIT ?
+        """, (int(limit),)).fetchall()
+
+    finally:
+        con.close()
+
+    retried = 0
+
+    for r in rows:
+
+        child_id = int(r["id"])
+
+        try:
+            con = _orders_conn()
+
+            _q_retry(con, """
+                UPDATE orders
+                SET entry_status='QUEUED'
+                WHERE id=?
+            """, (child_id,))
+
+            con.commit()
+            con.close()
+
+            enqueue_router_child(
+                {"child_id": child_id},
+                {}
+            )
+
+            retried += 1
+
+        except Exception:
+            pass
+
+    if retried:
+        _log_event(
+            "INFO",
+            "live_router",
+            f"[CHILD RETRY] retried={retried}"
+        )
+
+    return retried
+
+# === PATCH END ==============================================================
 
 # Re-hedge background loop (singleton)
 _REHEDGE_THREAD = None
@@ -3281,6 +3375,27 @@ def _rehedge_loop(period_s: float = 10.0, default_ticks: int = 1):
         # 🔑 NEW: rescue queued children
         try:
             _rescue_queued_children(limit=50)
+
+            # === PATCH START ==============================================================
+            # 📍 TARGET: engines/live/live_router.py:_rehedge_loop
+            # 🧩 ACTION: Retry failed children every 5 minutes
+            # 📆 PATCHED: 2026-04-11
+            # ==============================================================================
+
+            global _LAST_CHILD_RETRY
+
+            now = time.time()
+
+            if now - _LAST_CHILD_RETRY > _CHILD_RETRY_INTERVAL:
+
+                try:
+                    _retry_failed_children(limit=100)
+                except Exception as e:
+                    _log_event("ERROR", "live_router", f"child retry failed: {e}")
+
+                _LAST_CHILD_RETRY = now
+
+            # === PATCH END ==============================================================
         except Exception as e:
             _log_event("ERROR", "live_router", f"child rescue error: {e}")
 

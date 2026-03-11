@@ -2063,6 +2063,13 @@ class UnifiedEngine:
         sweet = self._build_sweet_spot_surface().get("runners", [])
         rank  = self._build_rank_surface().get("runners", [])
 
+# ------------------------------------------------------------------
+# Build fast lookup maps (required for O(1) access)
+# ------------------------------------------------------------------
+
+        sweet_map = {(r["marketId"], r["selectionId"]): r for r in sweet}
+        rank_map  = {(r["marketId"], r["selectionId"]): r for r in rank}
+
         candidates = []
 
 # ======================================================================================================

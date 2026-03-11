@@ -1520,18 +1520,10 @@ def can_place(engine: str, plan: dict) -> bool:
     if not mid:
         return False
 
-    # --------------------------------------------------
-    # HARD ENGINE POT GATE
-    # --------------------------------------------------
-    with _LOCK:
-        current_used = _ENGINE_USED.get(engine, 0.0)
-        engine_pot = _ENGINE_POTS.get(engine, 0.0)
-
-    if current_used >= engine_pot:
-        return False
+    pot = _ENGINE_POTS.get(engine, 0.0)
 
     # --------------------------------------------------
-    # CURRENT FLOOR
+    # 1️⃣ current market floor
     # --------------------------------------------------
     floor_rows = _compute_market_floor_from_betfair_surface()
 
@@ -1540,43 +1532,90 @@ def can_place(engine: str, plan: dict) -> bool:
         for r in floor_rows
     }
 
-    current_floor = floor_by_market.get(mid, 0.0)
+    # --------------------------------------------------
+    # 2️⃣ compute engine floor share (same as reconciliation)
+    # --------------------------------------------------
+    from engines.config_paths import open_auto_db
+    con = open_auto_db(rw=False)
+    cur = con.cursor()
+
+    engine_floor = 0.0
+
+    rows = cur.execute("""
+        SELECT
+            o.selectionId,
+            o.engine,
+            SUM(
+                CASE
+                    WHEN o.side='LAY'
+                        THEN o.entry_stake * (o.entry_odds - 1)
+                    ELSE
+                        -o.entry_stake
+                END
+            ) AS net_exposure
+        FROM orders o
+        WHERE o.role='PARENT'
+          AND o.entry_status='MATCHED'
+          AND date(o.opened_at)=date('now','utc')
+          AND o.marketId=?
+        GROUP BY o.selectionId, o.engine
+    """, (mid,)).fetchall()
+
+    runner_engine = {}
+    runner_totals = {}
+
+    for selectionId, eng, net in rows:
+        net = float(net or 0.0)
+        runner_engine.setdefault(selectionId, {})
+        runner_engine[selectionId][eng] = net
+        runner_totals[selectionId] = runner_totals.get(selectionId, 0.0) + net
+
+    if runner_totals:
+        worst_runner = max(runner_totals.items(), key=lambda x: x[1])[0]
+        engine_floor = max(
+            0.0,
+            float(runner_engine.get(worst_runner, {}).get(engine, 0.0))
+        )
+
+    con.close()
 
     # --------------------------------------------------
-    # PROJECTED FLOOR
+    # 3️⃣ unmatched working capital
+    # --------------------------------------------------
+    unmatched_map = _compute_engine_unmatched_working_capital()
+    unmatched = unmatched_map.get(engine, 0.0)
+
+    current_used = engine_floor + unmatched
+
+    # --------------------------------------------------
+    # 4️⃣ simulate new order floor impact
     # --------------------------------------------------
     projected_floor = _simulate_floor_with_new_bet(mid, plan)
-    delta_floor = projected_floor - current_floor
+    current_floor = floor_by_market.get(mid, 0.0)
+
+    delta_floor = max(projected_floor - current_floor, 0.0)
 
     # --------------------------------------------------
-    # UNMATCHED LIABILITY OF NEW ORDER
+    # 5️⃣ unmatched impact of new order
     # --------------------------------------------------
-    direction = str(plan.get("direction", "")).upper()
+    side = str(plan.get("side", "")).upper()
     size = float(plan.get("size", 0.0))
     px = float(plan.get("px", 0.0))
 
-    if direction.startswith("LAY"):
+    if side == "LAY":
         new_unmatched = size * (px - 1.0)
     else:
         new_unmatched = size
 
     # --------------------------------------------------
-    # TOTAL CAPITAL IMPACT
+    # 6️⃣ final capital check
     # --------------------------------------------------
-    capital_delta = max(delta_floor, 0.0) + new_unmatched
+    projected_used = current_used + delta_floor + new_unmatched
 
-    # --------------------------------------------------
-    # ENGINE POT CHECK
-    # --------------------------------------------------
-    with _LOCK:
-        projected_used = current_used + capital_delta
-
-    if projected_used > engine_pot:
+    if projected_used > pot:
         return False
 
     return True
-
-# === PATCH END ==============================================================
 
 # -------------------------------------------------------------------
 # EVENT API (CALLED BY ROUTER / SETTLEMENTS)
