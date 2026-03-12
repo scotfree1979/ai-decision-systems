@@ -257,7 +257,7 @@ def _build_runner_pool():
             SELECT DISTINCT marketId
             FROM bets
             WHERE date(marketStartTime) = date('now','utc')
-              AND datetime(marketStartTime) >= datetime('now','utc')
+    
             ORDER BY datetime(marketStartTime) ASC
             """
         ).fetchall()

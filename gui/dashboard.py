@@ -637,6 +637,24 @@ class DashboardView(ttk.Frame):
         style.configure("Router.Race.TLabelframe", background="#ffeaea")
         style.configure("Router.Crit.TLabelframe", background="#ffd6d6")
 
+    def _open_full_dashboard(self):
+        """
+        Opens a secondary window containing the below-fold dashboard.
+        """
+
+        win = tk.Toplevel(self)
+        win.title("AutoScalp — Extended Dashboard")
+        win.geometry("1400x900")
+
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text="Extended Dashboard",
+            font=("TkDefaultFont", 14, "bold")
+        ).pack(anchor="w", padx=10, pady=10)
+
     def _compute_heartbeat_state(self, bank_row, row):
 
         if not bank_row:
@@ -880,6 +898,7 @@ class DashboardView(ttk.Frame):
         self.bank_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
 
         self.bank_cards = ttk.Frame(self.bank_frame)
+        self.bank_cards.pack(fill="x", expand=False, padx=8, pady=8)
         self.bank_cards.pack(fill="both", expand=True, padx=8, pady=8)
 
         # ------------------------------------------------------------
@@ -939,8 +958,18 @@ class DashboardView(ttk.Frame):
         for c in range(4):
             self.live_grid.columnconfigure(c, weight=1)
 
-        for r in range(2):
-            self.live_grid.rowconfigure(r, weight=1)
+        # === PATCH START ===
+        # 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+        # 🛠 ACTION: compact Unified telemetry layout
+        # PURPOSE:
+        # Remove vertical gaps so telemetry sits directly under header
+        # ===
+
+        self.bank_cards.rowconfigure(0, weight=0)
+        self.bank_cards.rowconfigure(1, weight=0)
+        self.bank_cards.rowconfigure(2, weight=0)
+
+        # === PATCH END ===
 
         self.live_view_container.columnconfigure(0, weight=1)
         self.live_view_container.columnconfigure(1, weight=3)
@@ -1854,6 +1883,14 @@ class DashboardView(ttk.Frame):
         ttk.Label(summary_card, text=f"Total Matched  : ✅ {total_matched}").pack(anchor="w")
         ttk.Label(summary_card, text=f"Total Closed   : {total_closed}").pack(anchor="w")
 
+        btn = ttk.Button(
+            summary_card,
+            text="Open Full Dashboard",
+            command=self._open_full_dashboard
+        )
+
+        btn.pack(anchor="e", pady=(6,0))
+
 # === PATCH END ==============================================================
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
@@ -1897,67 +1934,212 @@ class DashboardView(ttk.Frame):
         # ─────────────────────────────────────────────
         # GLOBAL CAPITAL OVERVIEW (Top Section)
         # ─────────────────────────────────────────────
-# === PATCH START ==============================================================
-# 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: # GLOBAL CAPITAL OVERVIEW (Top Section)
-# 🛠 ACTION: Use FLOOR (matched liability) instead of total_exposure/USED
-# 📆 PATCHED: 2026-03-02 — Fix BankState Overview to use FLOOR not USED
-# PURPOSE:
-# - Align header with Betfair matched liability
-# - Remove reservation distortion
-# - Correct Headroom + Utilisation display
-# ==============================================================================
 
-        summary_row = con.execute("""
+# ======================================================================================================
+# 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+# 🔎 SEARCH: unified_row = con.execute(
+# 🧩 ACTION: ADD unified header
+# 📆 PATCHED: 2026-03-12
+# ======================================================================================================
+
+        # === PATCH START ===
+        # 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+        # 🔎 SEARCH: header = ttk.Frame(self.bank_cards
+        # 🛠 ACTION: convert unified header to compact label frame
+        # 📆 PATCHED: 2026-03-12
+        # PURPOSE:
+        # Make the Unified Engine header match BUS/ROUTER header height
+        # (compact strip, no vertical expansion)
+
+        # === PATCH START ===
+        # 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+        # 🔎 SEARCH: V7 UNIFIED ENGINE STATS
+        # 🛠 ACTION: match header style with BUS / ROUTER headers
+        # 📆 PATCHED: 2026-03-12
+
+        unified_header = ttk.Frame(self.bank_cards, padding=8, relief="ridge")
+        unified_header.grid(row=0, column=0, columnspan=3, padx=8, pady=6, sticky="ew")
+
+        ttk.Label(
+            unified_header,
+            text="🧠 V7 UNIFIED ENGINE STATS",
+            font=("TkDefaultFont", 11, "bold")
+         ).pack(anchor="w")
+
+        # === PATCH END ===
+
+        # prevent vertical stretch
+        self.bank_cards.rowconfigure(0, weight=0)
+
+        # === PATCH END ===
+# ======================================================================================================
+# 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+# 🔎 SEARCH: # GLOBAL CAPITAL OVERVIEW (Top Section)
+# 🧩 ACTION: REPLACE — Unified Intelligence Dashboard (6 panels)
+# 📆 PATCHED: 2026-03-12
+#
+# PURPOSE
+# -------
+# Replace the old Global Capital Overview with Unified Engine telemetry.
+#
+# PANELS
+# ------
+# 1. Timing
+# 2. Volatility
+# 3. Drift
+# 4. Structure
+# 5. Signal Intelligence
+# 6. P&L per Engine
+#
+# DESIGN
+# ------
+# Uses the same card style as existing BankState panels.
+# Layout: 3 × 2 grid.
+#
+# SAFE
+# ----
+# Read-only dashboard surface.
+# No effect on trading.
+# ======================================================================================================
+
+        unified_row = con.execute("""
             SELECT *
-            FROM bankstate_runtime_snapshot
-            WHERE date(ts) = date('now','utc')
+            FROM unified_runtime_snapshot
             ORDER BY ts DESC
             LIMIT 1
         """).fetchone()
 
-        if summary_row:
+        if unified_row:
 
-            total_pot = float(summary_row["total_pot"] or 0)
+            report = None
 
-            # 🔥 IMPORTANT FIX:
-            # Compute matched liability from engine floors (NOT total_exposure / USED)
-            engine_rows = con.execute("""
-                SELECT floor
-                FROM bankstate_engine_snapshot
-                WHERE date(ts) = date('now','utc')
-                  AND ts = (
-                      SELECT MAX(ts)
-                      FROM bankstate_engine_snapshot
-                      WHERE date(ts) = date('now','utc')
-                  )
+            try:
+                import json
+                report = json.loads(unified_row["report_json"])
+            except Exception:
+                report = None
+
+            # configure responsive grid
+            for c in range(3):
+                self.bank_cards.columnconfigure(c, weight=1, uniform="col")
+
+            for r in range(2):
+                self.bank_cards.rowconfigure(r, weight=1, uniform="row")
+
+            # --------------------------------------------------
+            # TIMING
+            # --------------------------------------------------
+
+            timing_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            timing_card.grid(row=1, column=2, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(
+                timing_card,
+                text="⏱ TIMING",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            markets = report.get("timing", {}).get("markets", []) if report else []
+            ttk.Label(
+                timing_card,
+                text=f"Markets tracked: {len(markets)}"
+            ).pack(anchor="w")
+
+            # --------------------------------------------------
+            # VOLATILITY
+            # --------------------------------------------------
+
+            vol = report.get("volatility", {}) if report else {}
+
+            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            card.grid(row=1, column=1, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(card, text="🌊 VOLATILITY",
+                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
+
+            ttk.Label(
+                card,
+                text=f"Runners moved: {vol.get('runners_moved_last_window',0)}"
+            ).pack(anchor="w")
+
+            ttk.Label(
+                card,
+                text=f"Energy: {vol.get('structural_energy','LOW')}"
+            ).pack(anchor="w")
+
+            # --------------------------------------------------
+            # DRIFT
+            # --------------------------------------------------
+
+            drift_rows = report.get("drift", {}).get("runners", []) if report else []
+
+            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            card.grid(row=2, column=1, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(card, text="📉 DRIFT",
+                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
+
+            ttk.Label(card, text=f"Runners tracked: {len(drift_rows)}").pack(anchor="w")
+
+            # --------------------------------------------------
+            # STRUCTURE
+            # --------------------------------------------------
+
+            sweet_rows = report.get("sweet_spot", {}).get("runners", []) if report else []
+
+            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            card.grid(row=2, column=0, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(card, text="🧠 STRUCTURE",
+                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
+
+            ttk.Label(card, text=f"Sweet spot runners: {len(sweet_rows)}").pack(anchor="w")
+
+            # --------------------------------------------------
+            # SIGNAL INTELLIGENCE
+            # --------------------------------------------------
+
+            layer2 = report.get("layer2", {}) if report else {}
+
+            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            card.grid(row=2, column=2, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(card, text="📊 SIGNAL INTEL",
+                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
+
+            candidates = layer2.get("candidates", [])
+            ttk.Label(card, text=f"Candidates: {len(candidates)}").pack(anchor="w")
+
+            # --------------------------------------------------
+            # P&L PER ENGINE
+            # --------------------------------------------------
+
+            pnl_rows = con.execute("""
+                SELECT engine, SUM(
+                    CASE
+                        WHEN side='LAY' THEN entry_stake
+                        WHEN side='BACK' THEN -entry_stake
+                        ELSE 0
+                    END
+                ) AS pnl
+                FROM orders
+                WHERE role='PARENT'
+                  AND entry_status='MATCHED'
+                  AND date(opened_at)=date('now','utc')
+                GROUP BY engine
             """).fetchall()
 
-            total_floor = sum(float(r["floor"] or 0) for r in engine_rows)
+            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            card.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
 
-            headroom = total_pot - total_floor
-            utilisation = (total_floor / total_pot) * 100 if total_pot > 0 else 0
+            ttk.Label(card, text="💰 P&L PER ENGINE",
+                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
 
-            header = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            header.grid(row=0, column=0, columnspan=3, padx=8, pady=(0, 12), sticky="nsew")
-
-            ttk.Label(
-                header,
-                text="GLOBAL CAPITAL OVERVIEW",
-                font=("TkDefaultFont", 11, "bold")
-            ).pack(anchor="w")
-
-            ttk.Label(header, text=f"Total Pot        £{total_pot:,.2f}").pack(anchor="w")
-            ttk.Label(header, text=f"Matched Risk     £{total_floor:,.2f}").pack(anchor="w")
-            ttk.Label(header, text=f"Headroom         £{headroom:,.2f}").pack(anchor="w")
-
-            ttk.Label(
-                header,
-                text=f"Utilisation      {utilisation:.1f}%",
-                font=("TkDefaultFont", 9, "italic")
-            ).pack(anchor="w")
-
-# === PATCH END ==============================================================
+            for r in pnl_rows:
+                ttk.Label(
+                    card,
+                    text=f"{r[0]}   £{float(r[1] or 0):.2f}"
+                ).pack(anchor="w")
 
 
         if not rows:
@@ -1969,10 +2151,34 @@ class DashboardView(ttk.Frame):
             return
 
         # Configure responsive 3x2 grid
+        # --------------------------------------------------
+        # STABLE BANKSTATE GRID
+        # --------------------------------------------------
+        # Columns stretch horizontally
         for c in range(3):
-            self.bank_cards.columnconfigure(c, weight=1, uniform="col")
-        for r in range(2):
-            self.bank_cards.rowconfigure(r, weight=1, uniform="row")
+            self.bank_cards.columnconfigure(c, weight=1)
+
+        # Rows do NOT stretch vertically (prevents gaps)
+        for r in range(10):
+            self.bank_cards.rowconfigure(r, weight=0)
+
+        # === PATCH START ===
+        # 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+        # 🛠 ACTION: add Engine Pot section header
+        # PURPOSE:
+        # visually separate Unified telemetry from engine capital cards
+        # ===
+
+        engine_header = ttk.Frame(self.bank_cards, padding=8, relief="ridge")
+        engine_header.grid(row=3, column=0, columnspan=3, padx=8, pady=(4,6), sticky="ew")
+
+        ttk.Label(
+            engine_header,
+            text="💰 ENGINE POT",
+            font=("TkDefaultFont", 11, "bold")
+        ).pack(anchor="w")
+
+        # === PATCH END ===
 
         for i, r in enumerate(rows[:6]):
 
@@ -1993,7 +2199,7 @@ class DashboardView(ttk.Frame):
                 icon = ""
 
             card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=(i // 3) + 1, column=i % 3, padx=8, pady=8, sticky="nsew")
+            card.grid(row=(i // 3) + 4, column=i % 3, padx=8, pady=8, sticky="nsew")
 
             ttk.Label(
                 card,

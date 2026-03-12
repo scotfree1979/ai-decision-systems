@@ -1067,14 +1067,14 @@ class UnifiedEngine:
 # If unavailable (standalone mode), fallback to empty.
 # ======================================================================================================
 
-    def _build_runtime_ctx_map(self, ctx: Dict[str, Any]) -> dict:
+    def _build_runtime_ctx_map(self, ctx):
 
         route_ctx = ctx.get("_route_ctx_map")
 
         if isinstance(route_ctx, dict):
             return route_ctx
 
-        # Standalone fallback (report mode only)
+        # fallback only for standalone reporter mode
         return {}
 
     # --------------------------------------------------------------------------------------------------
@@ -1122,7 +1122,33 @@ class UnifiedEngine:
 # back into ctx_map before surfaces execute.
 # ======================================================================================================
 
-        self._route_ctx_map = self._build_runtime_ctx_map(ctx)
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: self._route_ctx_map = self._build_runtime_ctx_map(ctx)
+# 🧩 ACTION: REPLACE — read BUS world directly
+# 📆 PATCHED: 2026-03-12 — Unified report uses BUS execution world
+#
+# ROOT CAUSE
+# ----------
+# The Unified report loop was creating a new engine instance with no route world.
+# That instance had no BUS ctx_map so all report surfaces appeared empty.
+#
+# FIX
+# ---
+# Pull the authoritative world from BUS instead of rebuilding it.
+#
+# CONTRACT
+# --------
+# BUS owns the route world.
+# Unified report only observes it.
+# ======================================================================================================
+
+        from engines.bus.bus import BUS
+
+        try:
+            self._route_ctx_map = BUS.get_runner_ctx_snapshot()
+        except Exception:
+            self._route_ctx_map = {}
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -2695,23 +2721,35 @@ def _unified_report_loop(interval_s: int = 5):
     Uses engine report builder — NOT raw DB dump.
     """
 
-    engine = UnifiedEngine()
+    # ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: engine = UnifiedEngine()
+# 🧩 ACTION: REPLACE reporter world source
+# 📆 PATCHED: 2026-03-12 — reporter reads BUS world
+#
+# PURPOSE
+# -------
+# The reporter must inspect the live BUS execution world rather than creating
+# a new UnifiedEngine instance.
+#
+# RESULT
+# ------
+# Reports now reflect the actual running engine state.
+# ======================================================================================================
 
-    while True:
-        try:
-            # Build report from latest snapshot
-            report = engine._build_v7_report(
-                ctx={}, 
-                tick_delta=None
-            )
+    from engines.bus.bus import BUS
 
-            # Print formatted V7 block
-            engine.print_v7_report(report)
+    engine = BUS.engines.get("MSC_UNIFIED")
 
-        except Exception as e:
-            print(f"[UNIFIED][ERR] reporter loop failed: {e}")
+    report = engine._build_v7_report(
+        ctx={
+            "_route_ctx_map": BUS.get_runner_ctx_snapshot(),
+            "_route_snapshot": BUS.get_route_snapshot(),
+        },
+        tick_delta=None,
+    )
 
-        time.sleep(max(1, int(interval_s)))
+    time.sleep(max(1, int(interval_s)))
 
 
 def start_unified_reporter(interval_s: int = 5):

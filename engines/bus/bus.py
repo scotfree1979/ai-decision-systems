@@ -1199,21 +1199,31 @@ class DecisionBus:
         plans = []
         lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
 
-        if self._deprecated_engines:
+        # --------------------------------------------------
+        # ENGINE DEPRECATION SWITCH
+        # --------------------------------------------------
+
+        if "LEGACY" in self._deprecated_engines:
             engine_report["LEGACY"]["evaluated"] = True
             _record_reason(engine_report, "LEGACY", "deprecated_lane")
 
+        if "MSC_RISK" in self._deprecated_engines:
             engine_report["MSC_RISK"]["evaluated"] = True
             _record_reason(engine_report, "MSC_RISK", "deprecated_lane")
 
+        if "MSC_INPLAY" in self._deprecated_engines:
             engine_report["MSC_INPLAY"]["evaluated"] = True
             _record_reason(engine_report, "MSC_INPLAY", "deprecated_lane")
 
+        if "MSC_EXPLORATORY" in self._deprecated_engines:
             engine_report["MSC_EXPLORATORY"]["evaluated"] = True
             _record_reason(engine_report, "MSC_EXPLORATORY", "deprecated_lane")
 
+        if "OVERWATCHER" in self._deprecated_engines:
             engine_report["OVERWATCHER"]["evaluated"] = True
             _record_reason(engine_report, "OVERWATCHER", "deprecated_lane")
+   
+
 
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
@@ -3060,6 +3070,43 @@ class DecisionBus:
 
         legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
         bus_stop_pairs = legacy_slice
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: bus_stop_pairs = legacy_slice
+# 🧩 ACTION: ADD pair sanitiser
+# 📆 PATCHED: 2026-03-12 — prevent BUS tick crash from malformed route pairs
+#
+# ROOT CAUSE
+# ----------
+# Occasionally BusRouteSnapshot can return items that are not (mid, sid)
+# tuples. When BUS loops with:
+#
+#     for mid, sid in bus_stop_pairs:
+#
+# Python raises:
+#
+#     not enough values to unpack (expected 2, got 0)
+#
+# RESULT
+# ------
+# BUS tick aborts and Unified never executes.
+#
+# FIX
+# ---
+# Filter invalid entries before iteration.
+# Invalid pairs are logged but do NOT crash the tick.
+# ======================================================================================================
+
+        clean_pairs = []
+
+        for p in bus_stop_pairs:
+            if isinstance(p, (tuple, list)) and len(p) == 2:
+                clean_pairs.append((str(p[0]), str(p[1])))
+            else:
+                print(f"[BUS][PAIR_SANITISE] dropped invalid pair: {p}")
+
+        bus_stop_pairs = clean_pairs
 
         # --------------------------------------------------
         # Dashboard runner surface snapshot
