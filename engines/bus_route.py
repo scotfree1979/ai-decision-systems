@@ -33,12 +33,12 @@ TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
 ROUTE_SPLIT = {
-    "LEGACY": 2,
-    "MSC_RISK": 30,
+    "LEGACY": 0,
+    "MSC_RISK": 0,
     "MSC_INPLAY": 0,
-    "MSC_EXPLORATORY": 3,
+    "MSC_EXPLORATORY": 0,
     "OVERWATCHER": 0,
-    "MSC_UNIFIED": 50, 
+    "MSC_UNIFIED": 85, 
 }
 
 def _order_runner_pool_by_market_time(pairs):

@@ -21,7 +21,7 @@ from engines.math.dynamic_stake_v7 import get_form_adjustment
 from engines.bias.engine import compute_bias
 from engines.indicators.opportunities import ensure_schema as ensure_opp_schema
 from engines.micro_scalper_v7.direction_engine import compute_msc_decision
-
+from engines.bus_route import build_bus_route_tick
 
 class UnifiedEngine:
     """
@@ -104,7 +104,64 @@ class UnifiedEngine:
     # --------------------------------------------------------------------------------------------------
     # PUBLIC ENTRYPOINT
     # --------------------------------------------------------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: class UnifiedEngine:
+# 🧩 ACTION: ADD bucket extraction helper
+# 📆 PATCHED: 2026-03-12 — BUS route bucket reader
+#
+# PURPOSE:
+# - Convert BUS route schedule into priority buckets
+# - Avoid repeated TTO computation
+# ======================================================================================================
 
+    def _get_bus_buckets(self):
+
+        try:
+            route = build_bus_route_tick()
+
+        except Exception:
+            return {}
+
+        buckets = {
+            "5m": [],
+            "10m": [],
+            "20m": [],
+            "40m": [],
+            "60m": [],
+            "long": [],
+        }
+
+        for r in route:
+
+            mid = r.get("marketId")
+            sid = r.get("selectionId")
+            tto = r.get("tto_seconds")
+
+            if tto is None:
+                continue
+
+            key = (mid, sid)
+
+            if tto <= 300:
+                buckets["5m"].append(key)
+
+            elif tto <= 600:
+                buckets["10m"].append(key)
+
+            elif tto <= 1200:
+                buckets["20m"].append(key)
+
+            elif tto <= 2400:
+                buckets["40m"].append(key)
+
+            elif tto <= 3600:
+                buckets["60m"].append(key)
+
+            else:
+                buckets["long"].append(key)
+
+        return buckets
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: def tick(self, ctx:
@@ -128,12 +185,22 @@ class UnifiedEngine:
 
         report = self._build_v7_report(ctx=ctx, tick_delta=tick_delta)
 
-        route = self._route_ctx_map
+        route = getattr(self, "_route_ctx_map", {})
 
         layer2     = report.get("layer2", {})
         timing     = report.get("timing", {})
         volatility = report.get("volatility", {})
         liability  = report.get("liability", {})
+
+        # ------------------------------------------------------------------
+        # MARKET TIME LOOKUP (FAST ACCESS)
+        # ------------------------------------------------------------------
+
+        market_map = {
+            m.get("marketId"): m
+            for m in timing.get("markets", [])
+            if m.get("marketId")
+        }
 
         runners_moved = volatility.get("runners_moved_last_window", 0)
 
@@ -186,6 +253,40 @@ class UnifiedEngine:
 # ======================================================================================================
 
         for c in candidates:
+
+            mid = c["marketId"]
+
+            market = market_map.get(mid)
+            if not market:
+                continue
+
+            tto = market.get("tto_seconds")
+
+            # --------------------------------------------------
+            # EXPLORATORY WINDOW
+            # 60min → 5min
+            # --------------------------------------------------
+            if tto is None or not (300 <= tto <= 3600):
+                continue
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: if tto is None or not (300 <= tto <= 3600):
+# 🧩 ACTION: ALLOW STRUCTURAL SIGNALS >60m
+# 📆 PATCHED: 2026-03-12 — Early structural signal trading
+#
+# PURPOSE:
+# - Capture early favourite collapses
+# - Allow breakout trades long before race
+# - Prevent ordinary exploratory entries >60m
+# ======================================================================================================
+
+            if tto is None:
+                continue
+
+            if tto > 3600:
+                if c.get("score", 0) < 4:
+                    continue
 
             mid = c["marketId"]
             sid = c["selectionId"]
@@ -274,6 +375,19 @@ class UnifiedEngine:
 # ======================================================================================================
 
         for (mid, sid), rctx in route.items():
+
+            market = market_map.get(mid)
+            if not market:
+                continue
+
+            tto = market.get("tto_seconds")
+
+            # --------------------------------------------------
+            # RISK WINDOW
+            # 60min → 2min
+            # --------------------------------------------------
+            if tto is None or not (120 <= tto <= 3600):
+                continue
 
             anchor_id  = rctx.get("anchor_parent_id")
             anchor_odds = rctx.get("anchor_entry_odds")
@@ -631,6 +745,18 @@ class UnifiedEngine:
 
         for (mid, sid), rctx in route.items():
 
+            market = market_map.get(mid)
+            if not market:
+                continue
+
+            tto = market.get("tto_seconds")
+
+            # --------------------------------------------------
+            # STRUCTURAL ENGINE ACTIVE ONLY ≤5min
+            # --------------------------------------------------
+            if tto is None or tto > 300:
+                continue
+
             px = rctx.get("px")
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -805,11 +931,11 @@ class UnifiedEngine:
         if len(exploratory) > 5:
             exploratory = exploratory[:5]
 
-        if len(risk) > 21:
-            risk = risk[:21]
+        if len(risk) > 50:
+            risk = risk[:50]
 
-        if len(inplay) > 24:
-            inplay = inplay[:24]
+        if len(inplay) > 30:
+            inplay = inplay[:30]
 
         plans = exploratory + risk + inplay
 
@@ -1005,7 +1131,7 @@ class UnifiedEngine:
 # PURPOSE: reduce attribute lookups
 # ======================================================================================================
 
-        route = self._route_ctx_map
+        route = getattr(self, "_route_ctx_map", {})
 
         # initialise PX memory store
         if not hasattr(self, "_runner_px_memory"):
@@ -2062,81 +2188,73 @@ class UnifiedEngine:
 
         pools = self._build_candidate_pools(report)
 
-        # --------------------------------------------------
-        # Candidate hierarchy (structural signals only)
-        # --------------------------------------------------
-        hierarchy = [
-            "crossover",
-            "direction",
-            "breakout",
-            "drift",
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: def _select_exploratory_candidates
+# 🧩 ACTION: PRIORITISE BUS buckets
+# 📆 PATCHED: 2026-03-12 — Unified candidate priority by route buckets
+#
+# PURPOSE:
+# - Always trade closest markets first
+# - Prevent far markets starving near markets
+# - Allow structural trades >60m
+# ======================================================================================================
+
+        buckets = self._get_bus_buckets()
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: buckets = self._get_bus_buckets()
+# 🧩 ACTION: ADD candidate source list
+# 📆 PATCHED: 2026-03-12 — fix candidate source reference
+#
+# PURPOSE:
+# Candidate ordering must operate on the structural candidate list
+# produced by Layer 2 intelligence.
+# ======================================================================================================
+
+        candidates = report.get("layer2", {}).get("candidates", [])
+
+        priority_order = [
+            "5m",
+            "10m",
+            "20m",
+            "40m",
+            "60m",
+            "long",
         ]
 
-        new_candidates = []
+        ordered = []
+
+        for bucket in priority_order:
+
+            for key in buckets.get(bucket, []):
+
+                mid, sid = key
+
+                for r in candidates:
+
+                    if r["marketId"] == mid and r["selectionId"] == sid:
+                        ordered.append(r)
+
+        # remove duplicates while preserving order
         seen = set()
-
-        for pool_name in hierarchy:
-
-            rows = sorted(
-                pools.get(pool_name, []),
-                key=lambda x: x.get("score", 0),
-                reverse=True
-            )
-
-            for r in rows:
-
-                key = (r["marketId"], r["selectionId"])
-
-                if key in seen:
-                    continue
-
-                new_candidates.append(r)
-                seen.add(key)
-
-                if len(new_candidates) >= 5:
-                    break
-
-            if len(new_candidates) >= 5:
-                break
-
-        # --------------------------------------------------
-        # Merge with structural memory (candidate loop)
-        # --------------------------------------------------
         final = []
 
-        for r in new_candidates:
+        for r in ordered:
 
-            key = (r["marketId"], r["selectionId"])
+            k = (r["marketId"], r["selectionId"])
 
-            if key not in self._structural_candidates:
-
-                self._structural_candidates[key] = {
-                    "first_seen_ts": time.time(),
-                    "signal": r,
-                }
-
-            final.append(r)
-
-        # --------------------------------------------------
-        # Re-add previously discovered candidates
-        # --------------------------------------------------
-        for key, data in list(self._structural_candidates.items()):
-
-            mid, sid = key
-
-            if key in seen:
+            if k in seen:
                 continue
 
-            final.append({
-                "marketId": mid,
-                "selectionId": sid,
-                "score": 0,
-            })
+            final.append(r)
+            seen.add(k)
 
             if len(final) >= 5:
                 break
 
-        return final[:5]
+        return final
 
     # --------------------------------------------------------------------------------------------------
     # LAYER 2 — TRADE SIGNAL INTELLIGENCE
@@ -2190,6 +2308,9 @@ class UnifiedEngine:
                 continue
 
         for r in drift:
+
+            mid = r["marketId"]
+            sid = r["selectionId"]
 
             score = 0
 

@@ -574,6 +574,19 @@ class DecisionBus:
         # --------------------------------------------------
         self._runner_surface = []
 
+        # ------------------------------------------------------------------
+        # ENGINE DEPRECATION (V7 UNIFIED MODE)
+        # ------------------------------------------------------------------
+        # Only Unified + DB correctness lanes are active.
+        # All legacy engines remain loaded but are skipped.
+
+        self._deprecated_engines = {
+            "LEGACY",
+            "MSC_RISK",
+            "MSC_INPLAY",
+            "MSC_EXPLORATORY",
+            "OVERWATCHER",
+        }
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -1003,6 +1016,7 @@ class DecisionBus:
         try:
             ctx_unified = dict(base_ctx)
             ctx_unified["_route_ctx_map"] = self._route_ctx_map
+            ctx_unified["_route_snapshot"] = self._route_snapshot   # <-- ADD THIS
 
             result = unified.tick(ctx_unified)
 
@@ -1185,6 +1199,22 @@ class DecisionBus:
         plans = []
         lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
 
+        if self._deprecated_engines:
+            engine_report["LEGACY"]["evaluated"] = True
+            _record_reason(engine_report, "LEGACY", "deprecated_lane")
+
+            engine_report["MSC_RISK"]["evaluated"] = True
+            _record_reason(engine_report, "MSC_RISK", "deprecated_lane")
+
+            engine_report["MSC_INPLAY"]["evaluated"] = True
+            _record_reason(engine_report, "MSC_INPLAY", "deprecated_lane")
+
+            engine_report["MSC_EXPLORATORY"]["evaluated"] = True
+            _record_reason(engine_report, "MSC_EXPLORATORY", "deprecated_lane")
+
+            engine_report["OVERWATCHER"]["evaluated"] = True
+            _record_reason(engine_report, "OVERWATCHER", "deprecated_lane")
+
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
@@ -1280,7 +1310,9 @@ class DecisionBus:
         # --------------------------------------------------
         engine_report["LEGACY"]["evaluated"] = True
 
+
         for mid, sid in bus_stop_pairs:
+      
             ctx = self._route_ctx_map.get((mid, sid))
             if not ctx:
                 continue
@@ -1610,6 +1642,8 @@ class DecisionBus:
         # --------------------------------------------------
         engine_report["MSC_RISK"]["evaluated"] = True
 
+
+
         from engines.bus_route import get_risk_legacy_parent_pairs
 
         from tools.betfair_match_surface import query_bet_match_surface
@@ -1707,6 +1741,8 @@ class DecisionBus:
         # 🟥 LANE 3 — MSC_INPLAY (BUS-AUTHORISED, DB-FIRST)
         # --------------------------------------------------
         engine_report["MSC_INPLAY"]["evaluated"] = True
+
+ 
 
         from engines.bus_route import get_v7_inplay_snapshot, get_inplay_parent_runner_pairs
         from engines.config_paths import connect_db
@@ -1948,6 +1984,8 @@ class DecisionBus:
 
         engine_report["MSC_EXPLORATORY"]["evaluated"] = True
 
+
+
         from engines.bus_route import get_exploratory_active_parent_pairs
 
         exclusions = get_exploratory_active_parent_pairs()
@@ -2021,6 +2059,8 @@ class DecisionBus:
 # ==============================================================================
 
         engine_report["OVERWATCHER"]["evaluated"] = True
+
+
 
         overwatcher = self.engines.get("OVERWATCHER")
 
