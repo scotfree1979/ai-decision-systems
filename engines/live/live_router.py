@@ -1207,65 +1207,29 @@ def _router_child_worker_loop():
 
     RESCUE_DELAY_SECONDS = 120
 
+    last_authority = 0
+
     while True:
 
-        # ==================================================
-        # PHASE 0 — STATUS AUTHORITY (ALWAYS FIRST)
-        # ==================================================
-        _router_enforce_status_authority()
+        now = time.time()
+
+        if now - last_authority > 1.0:
+            _router_enforce_status_authority()
+            last_authority = now
+
+        # --------------------------------------------------
+        # WORKER MODE — consume queue item
+        # --------------------------------------------------
+        try:
+            plan, ctx = _ROUTER_CHILD_QUEUE.get(timeout=0.01)
+        except queue.Empty:
+            continue
 
         try:
+
             # --------------------------------------------------
-            # DRAIN QUEUE — process ALL children immediately
+            # IMMEDIATE PRIORITY PATH
             # --------------------------------------------------
-# ======================================================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 ANCHOR: inside _router_child_worker_loop(), queue drain section
-# 🧩 ACTION: Fix queue drain accounting (preserve newest plan)
-# 📆 PATCHED: 2026-04-XX
-#
-# BUG
-# ---
-# Queue drain overwrote `plan` repeatedly and silently dropped
-# earlier queue items without calling task_done().
-#
-# RESULT
-# ------
-# Worker lost queued children and queue accounting broke.
-#
-# FIX
-# ---
-# Drain queue but mark earlier items done.
-# Keep only the newest plan for execution.
-# ======================================================================================================
-
-            plan = None
-            ctx = None
-
-            while True:
-                try:
-                    p, c = _ROUTER_CHILD_QUEUE.get_nowait()
-
-                    # mark previously drained item done
-                    if plan is not None:
-                        _ROUTER_CHILD_QUEUE.task_done()
-
-                    plan, ctx = p, c
-
-                except queue.Empty:
-                    break
-
-# ======================================================================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 ANCHOR: inside _router_child_worker_loop(), before normal queue handling
-# 🧩 ACTION: Immediate execution for emergency children
-# 📆 PATCHED: 2026-04-XX — Overwatch emergency fast lane
-#
-# RULE:
-# - If plan['priority']=='IMMEDIATE'
-# - Place child instantly (no delay)
-# ======================================================================================================
-
             if plan and plan.get("priority") == "IMMEDIATE":
                 child_id = plan.get("child_id")
                 if child_id:
@@ -1297,13 +1261,12 @@ def _router_child_worker_loop():
 
                 placed = _attempt_place_child_with_retry(int(child_id))
 
-
                 if not placed:
                     _ROUTER_CHILD_QUEUE.task_done()
                     continue
 
                 # ==================================================
-                # PHASE 1.5 — PROMOTE TO MATCHED (EXCHANGE TRUTH)
+                # PHASE 1.5 — PROMOTE TO MATCHED
                 # ==================================================
                 try:
                     con = _orders_conn()
@@ -1313,11 +1276,11 @@ def _router_child_worker_loop():
                         con,
                         """
                         SELECT entry_bet_id
-                          FROM orders
-                         WHERE id=?
-                           AND role='CHILD'
-                           AND entry_status='PLACED'
-                         LIMIT 1
+                        FROM orders
+                        WHERE id=?
+                        AND role='CHILD'
+                        AND entry_status='PLACED'
+                        LIMIT 1
                         """,
                         (int(child_id),)
                     ).fetchone()
@@ -1341,6 +1304,7 @@ def _router_child_worker_loop():
             # ==================================================
             # PHASE 2 — RESCUE UNHEDGED MATCHED PARENTS
             # ==================================================
+
             from engines.market_monitor.phase_clock import MarketPhaseClock
 
             con = _orders_conn()
@@ -1349,19 +1313,19 @@ def _router_child_worker_loop():
 
             rows = _q_retry(cur, """
                 SELECT customerOrderRef, marketId
-                  FROM orders p
-                 WHERE p.role='PARENT'
-                   AND UPPER(p.entry_status)='MATCHED'
-                   AND COALESCE(p.parent_closed,0)=0
-                   AND (p.exit_status IS NULL OR UPPER(p.exit_status) NOT IN ('CANCELLED','EXPIRED','SETTLED'))
-                   AND COALESCE(p.exposure_released,0)=0
-                   AND datetime(p.opened_at) <= datetime('now','utc', ?)
-                   AND NOT EXISTS (
-                         SELECT 1 FROM orders c
-                          WHERE c.hedge_of = p.id
-                   )
-                 ORDER BY p.opened_at ASC
-                 LIMIT 20
+                FROM orders p
+                WHERE p.role='PARENT'
+                AND UPPER(p.entry_status)='MATCHED'
+                AND COALESCE(p.parent_closed,0)=0
+                AND (p.exit_status IS NULL OR UPPER(p.exit_status) NOT IN ('CANCELLED','EXPIRED','SETTLED'))
+                AND COALESCE(p.exposure_released,0)=0
+                AND datetime(p.opened_at) <= datetime('now','utc', ?)
+                AND NOT EXISTS (
+                    SELECT 1 FROM orders c
+                    WHERE c.hedge_of = p.id
+                )
+                ORDER BY p.opened_at ASC
+                LIMIT 20
             """, (f"-{RESCUE_DELAY_SECONDS // 60} minutes",)).fetchall()
 
             con.close()
@@ -1377,8 +1341,8 @@ def _router_child_worker_loop():
             print("[ROUTER][CHILD][ERR]")
             traceback.print_exc()
 
-        # Micro sleep to prevent CPU spin
-        time.sleep(0.05)
+        # Micro sleep
+        time.sleep(0.01)
 
 # ======================================================================
 # 📍 TARGET: engines/live/live_router.py
@@ -4574,6 +4538,48 @@ def _release_parent_exposure_db(parent_id: int) -> bool:
 
 # ======================================================================================================
 # 📍 TARGET: engines/live/live_router.py
+# 🧩 ACTION: cancel hedge child for parent
+# PURPOSE: used by unified stoploss lifecycle
+# ======================================================================================================
+
+def cancel_child_for_parent(parent_id):
+
+    from engines.config_paths import open_auto_db
+
+    con = open_auto_db(rw=True)
+    cur = con.cursor()
+
+    row = cur.execute("""
+        SELECT id, entry_bet_id
+        FROM orders
+        WHERE hedge_of = ?
+          AND role = 'CHILD'
+          AND entry_status IN ('QUEUED','PLACING','PLACED')
+        LIMIT 1
+    """, (parent_id,)).fetchone()
+
+    if not row:
+        con.close()
+        return
+
+    child_id, bet_id = row
+
+    try:
+        cancel_order(bet_id)
+    except Exception:
+        pass
+
+    cur.execute("""
+        UPDATE orders
+        SET entry_status='CANCELLED'
+        WHERE id=?
+    """, (child_id,))
+
+    con.commit()
+    con.close()
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
 # 🔎 SEARCH: def _ensure_child_queued_for_matched_parent(parent_cor: str)
 # 🧩 ACTION: Enforce enqueue invariant on child creation
 # 📆 PATCHED: 2026-04-23 — Centralise child enqueue authority
@@ -4615,6 +4621,40 @@ def _ensure_child_queued_for_matched_parent(parent_cor: str) -> int | None:
               AND (exit_status IS NULL OR exit_status NOT IN ('CANCELLED','EXPIRED','SETTLED'))
             LIMIT 1
         """, (str(parent_cor),)).fetchone()
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: inside _ensure_child_queued_for_matched_parent(), immediately after parent row is loaded
+# 🧩 ACTION: Allow sterile STOPLOSS parents (do not spawn hedge children)
+# 📆 PATCHED: 2026-04-XX — Router support for sterile parents
+#
+# PURPOSE
+# -------
+# Stop-loss trades are implemented as standalone parents rather than
+# sibling children. These parents must NEVER generate hedge children.
+#
+# ARCHITECTURE
+# ------------
+# NORMAL TRADE
+#     parent → hedge child
+#
+# STOPLOSS TRADE
+#     parent → (no children)
+#
+# INVARIANT
+# ---------
+# If exit_kind == 'STOPLOSS'
+#     → Router must NOT create a child
+#
+# This preserves the system rule:
+#
+#     1 parent → max 1 child
+#
+# and avoids sibling-child complexity.
+# ======================================================================================================
+
+        if (parent["exit_kind"] or "").upper() == "STOPLOSS":
+            return None
 
         if not parent:
             return None

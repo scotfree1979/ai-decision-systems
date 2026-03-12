@@ -127,11 +127,6 @@ class UnifiedEngine:
         # ------------------------------------------------------------------
 
         report = self._build_v7_report(ctx=ctx, tick_delta=tick_delta)
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: report = self._build_v7_report
-# 🧩 ACTION: ADD route alias for structural loops
-# ======================================================================================================
 
         route = self._route_ctx_map
 
@@ -139,23 +134,19 @@ class UnifiedEngine:
         timing     = report.get("timing", {})
         volatility = report.get("volatility", {})
         liability  = report.get("liability", {})
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: volatility = report.get("volatility", {})
-# 🧩 ACTION: ADD cached volatility
-# ======================================================================================================
 
         runners_moved = volatility.get("runners_moved_last_window", 0)
 
         plans = []
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: plans = []
-# 🧩 ACTION: ADD append alias
-# ======================================================================================================
-
         emit_plan = plans.append
+
+        # --------------------------------------------------
+        # Merge stoploss plans from stop surface
+        # --------------------------------------------------
+
+        stop_plans = report.get("stop", {}).get("plans", [])
+        plans.extend(stop_plans)
 
         # ensure memory containers exist
         if not hasattr(self, "_emitted_children"):
@@ -1442,6 +1433,9 @@ class UnifiedEngine:
             }
 
         stats = self._shadow_stop_stats
+
+        stop_plans = []
+
         now = time.time()
 
         for (mid, sid), ctx in getattr(self, "_route_ctx_map", {}).items():
@@ -1462,17 +1456,84 @@ class UnifiedEngine:
                 entry_stake=entry_stake,
             )
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 ANCHOR: inside _build_stop_surface(), after ParentState creation
+# 🧩 ACTION: Evaluate StopLossEngine to generate stop event
+# 📆 PATCHED: 2026-XX-XX — activate stoploss engine evaluation
+#
+# PURPOSE
+# -------
+# The StopLossEngine evaluates whether a parent trade has reached its stop
+# threshold based on current market price.
+#
+# Without this call the variable `event` is undefined and the entire
+# stoploss execution block never runs.
+#
+# CONTRACT
+# --------
+# Input
+#   parent      → ParentState object
+#   current_px  → current market price
+#
+# Output
+#   event → None or dict containing stop classification
+#
+# If event != None
+#   Unified emits STOPLOSS parent plan.
+# ======================================================================================================
+
             event = self._shadow_stop_engine.evaluate(
                 parent=parent,
-                mid=mid,
-                sid=sid,
-                current_odds=px,
-                oc_phase=0,
+                current_px=float(px)
             )
 
-            stats["total_trades"] += 1
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 ANCHOR: inside _build_stop_surface() immediately after stop engine evaluation
+# 🧩 ACTION: emit stoploss parent + cancel hedge child on match
+# 📆 PATCHED: stoploss baseline (final)
+# ======================================================================================================
 
             if event:
+
+                # --------------------------------------------------
+                # Emit STOPLOSS parent
+                # --------------------------------------------------
+
+                stop_plans.append({
+                    "enter": True,
+                    "engine": ctx.get("anchor_engine"),
+                    "bet_type": "STOPLOSS",
+                    "role": "PARENT",
+                    "exit_kind": "STOPLOSS",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "direction": (
+                        "BACK->LAY"
+                        if parent.entry_side == "BACK"
+                        else "LAY->BACK"
+                    ),
+                    "px": px,
+                    "size": parent.entry_stake,
+                    "why": "unified_global_stoploss",
+                })
+
+                # --------------------------------------------------
+                # Register stoploss watch (for child cancellation)
+                # --------------------------------------------------
+
+                if not hasattr(self, "_stoploss_watch"):
+                    self._stoploss_watch = {}
+
+                self._stoploss_watch[(mid, sid)] = {
+                    "parent_id": parent.parent_id,
+                    "child_cancelled": False,
+                }
+
+                # --------------------------------------------------
+                # Statistics
+                # --------------------------------------------------
 
                 stats["total_stops"] += 1
 
@@ -1490,8 +1551,31 @@ class UnifiedEngine:
                     "classification": event.get("classification"),
                 })
 
-                # Keep last 10
                 stats["recent"] = stats["recent"][-10:]
+
+        # --------------------------------------------------
+        # Stoploss match monitor → cancel hedge child
+        # --------------------------------------------------
+
+        if hasattr(self, "_stoploss_watch"):
+
+            for (mid, sid), state in list(self._stoploss_watch.items()):
+
+                if state["child_cancelled"]:
+                    continue
+
+                rctx = self._route_ctx_map.get((mid, sid))
+                if not rctx:
+                    continue
+
+                if rctx.get("entry_status") == "MATCHED":
+
+                    try:
+                        from engines.live.live_router import cancel_child_for_parent
+                        cancel_child_for_parent(state["parent_id"])
+                        state["child_cancelled"] = True
+                    except Exception:
+                        pass
 
         stop_rate = (
             round(stats["total_stops"] / stats["total_trades"], 2)
@@ -1505,6 +1589,7 @@ class UnifiedEngine:
             "by_engine": stats["by_engine"],
             "by_runner": stats["by_runner"],
             "recent_stop_events": stats["recent"],
+            "plans": stop_plans,
         }
 
     # --------------------------------------------------------------------------------------------------

@@ -1503,6 +1503,33 @@ def can_place(engine: str, plan: dict) -> bool:
 
     pot = _ENGINE_POTS.get(engine, 0.0)
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: start of can_place()
+# 🧩 ACTION: stop-loss parent bypass
+# 📆 PATCHED: 2026-XX-XX — stop-loss orders must never be blocked
+#
+# PURPOSE
+# -------
+# Stop-loss parents reduce exposure and must always be executable.
+#
+# Even though the floor-delta model should naturally allow them
+# (delta_floor <= 0), this explicit bypass guarantees they can never
+# be blocked by the placement gate.
+#
+# INVARIANT
+# ---------
+# bet_type == STOPLOSS  → always allowed
+#
+# SAFETY
+# ------
+# Only applies to STOPLOSS plans emitted by Unified.
+# Does not affect normal parents or children.
+# ======================================================================================================
+
+    if plan.get("bet_type") == "STOPLOSS":
+        return True
+
     # --------------------------------------------------
     # 1️⃣ current market floor
     # --------------------------------------------------
