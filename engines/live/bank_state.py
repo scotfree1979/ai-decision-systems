@@ -909,59 +909,40 @@ def _bankstate_report_loop(interval_s: int = 60):
                 # --------------------------------------------------
                 # Compute per-engine floor + unmatched
                 # --------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 ANCHOR: inside _bankstate_report_loop() after reconciliation call
+# 🧩 ACTION: Remove duplicated floor recomputation in report
+# 📆 PATCHED: 2026-04-XX — BankState report must use reconciliation values
+#
+# ROOT CAUSE
+# ----------
+# The report recomputed floor/unmatched independently from
+# _reconcile_market_exposure_live().
+#
+# This produced incorrect floor attribution per engine.
+#
+# FIX
+# ---
+# The report must display the authoritative values already
+# returned by reconciliation.
+#
+# INVARIANT
+# ---------
+# Report values MUST equal runtime accounting values.
+# ======================================================================================================
 
- 
+                # Use authoritative values returned from reconciliation
+                # DO NOT recompute floor or unmatched
+
                 floor_by_market = {
                     r["marketId"]: float(r["true_market_exposure"])
                     for r in floor_rows
                 }
 
-                unmatched_map = _compute_engine_unmatched_working_capital()
+                # engine_floor and unmatched_map are already correct
+                # from _reconcile_market_exposure_live()
 
-                # Engine floor share rebuild (same logic as reconcile)
-                engine_floor = {eng: 0.0 for eng in _ENGINE_POTS.keys()}
-
-                from engines.config_paths import open_auto_db
-                con = open_auto_db(rw=False)
-                cur = con.cursor()
-
-                for mid in floor_by_market.keys():
-
-                    rows = cur.execute("""
-                        SELECT
-                            o.selectionId,
-                            o.engine,
-                            SUM(
-                                CASE
-                                    WHEN o.side='LAY'
-                                        THEN o.entry_stake * (o.entry_odds - 1)
-                                    ELSE
-                                        -o.entry_stake
-                                END
-                            ) AS net_exposure
-                        FROM orders o
-                        WHERE o.role='PARENT'
-                          AND o.entry_status='MATCHED'
-                          AND date(o.opened_at)=date('now','utc')
-                          AND o.marketId=?
-                        GROUP BY o.selectionId, o.engine
-                    """, (mid,)).fetchall()
-
-                    runner_engine = {}
-                    runner_totals = {}
-
-                    for selectionId, engine, net in rows:
-                        net = float(net or 0.0)
-                        runner_engine.setdefault(selectionId, {})
-                        runner_engine[selectionId][engine] = net
-                        runner_totals[selectionId] = runner_totals.get(selectionId, 0.0) + net
-
-                    if runner_totals:
-                        worst_runner = max(runner_totals.items(), key=lambda x: x[1])[0]
-                        for engine, net in runner_engine.get(worst_runner, {}).items():
-                            engine_floor[engine] += max(0.0, float(net))
-
-                con.close()
 
                 # --------------------------------------------------
                 # Build atomic report block

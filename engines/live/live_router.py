@@ -1218,13 +1218,40 @@ def _router_child_worker_loop():
             # --------------------------------------------------
             # DRAIN QUEUE — process ALL children immediately
             # --------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 ANCHOR: inside _router_child_worker_loop(), queue drain section
+# 🧩 ACTION: Fix queue drain accounting (preserve newest plan)
+# 📆 PATCHED: 2026-04-XX
+#
+# BUG
+# ---
+# Queue drain overwrote `plan` repeatedly and silently dropped
+# earlier queue items without calling task_done().
+#
+# RESULT
+# ------
+# Worker lost queued children and queue accounting broke.
+#
+# FIX
+# ---
+# Drain queue but mark earlier items done.
+# Keep only the newest plan for execution.
+# ======================================================================================================
 
             plan = None
             ctx = None
 
             while True:
                 try:
-                    plan, ctx = _ROUTER_CHILD_QUEUE.get_nowait()
+                    p, c = _ROUTER_CHILD_QUEUE.get_nowait()
+
+                    # mark previously drained item done
+                    if plan is not None:
+                        _ROUTER_CHILD_QUEUE.task_done()
+
+                    plan, ctx = p, c
+
                 except queue.Empty:
                     break
 
