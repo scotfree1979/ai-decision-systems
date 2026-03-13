@@ -2769,6 +2769,13 @@ class DecisionBus:
         if self._route_snapshot is None:
             self._route_snapshot = BusRouteSnapshot()
             self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
+
+            # 🔴 FORCE WORLD BUILD
+            self._route_snapshot.build_route()
+            self._route_snapshot.partition_into_bus_stops()
+            self._route_snapshot.refresh_ctx_dynamic_fields()
+
+            self._route_ctx_map = self._route_snapshot.get_ctx_map()
         # ===============================================================
         # 0️⃣ BUS IDENTITY
         # ===============================================================

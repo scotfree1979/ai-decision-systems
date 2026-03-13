@@ -23,6 +23,42 @@ from engines.indicators.opportunities import ensure_schema as ensure_opp_schema
 from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 from engines.bus_route import build_bus_route_tick
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: import time
+# 🧩 ACTION: ADD — session token bootstrap (standalone compatibility)
+# 📆 PATCHED: 2026-03-14 — unified standalone execution support
+#
+# PURPOSE
+# -------
+# Allow UnifiedEngine to run standalone with Betfair API access.
+#
+# Mirrors BUS / odds writer behaviour:
+#   • Uses SESSION_TOKEN env var if present
+#   • Falls back to BETFAIR_SESSION_TOKEN
+#   • Prompts user when running standalone
+#
+# LIVE MODE
+# ---------
+# When launched by BUS the token already exists and no prompt occurs.
+#
+# STANDALONE MODE
+# ---------------
+# Prompts once so drift / odds / match surfaces can function.
+# ======================================================================================================
+
+import os
+
+SESSION_TOKEN = (
+    os.getenv("SESSION_TOKEN")
+    or os.getenv("BETFAIR_SESSION_TOKEN")
+)
+
+if __name__ == "__main__":
+    if not SESSION_TOKEN:
+        SESSION_TOKEN = input("🔐 Enter Betfair session token: ").strip()
+        os.environ["SESSION_TOKEN"] = SESSION_TOKEN
+
 class UnifiedEngine:
     """
     Unified Engine — Phase 0 (Signal Surface Only)
@@ -53,6 +89,8 @@ class UnifiedEngine:
     def __init__(self):
         self._boot_ts = time.time()
         self._last_tick_ts = None
+        # canonical runner world container
+        self._route_ctx_map = {}
 
         # Market anchor storage
         self._market_anchor_px = {}      # {marketId: {selectionId: px}}
@@ -1077,61 +1115,61 @@ class UnifiedEngine:
         # fallback only for standalone reporter mode
         return {}
 
-            # --------------------------------------------------------------------------------------------------
-            # WORLD READER (BUS ROUTE SNAPSHOT AUTHORITY)
-            # --------------------------------------------------------------------------------------------------
+    # --------------------------------------------------------------------------------------------------
+    # WORLD READER (BUS ROUTE SNAPSHOT AUTHORITY)
+    # --------------------------------------------------------------------------------------------------
 
-            def _read_route_world(self):
-                """
-                Read full runner world from BUS snapshot surface.
+    def _read_route_world(self):
+        """
+        Read full runner world from BUS snapshot surface.
 
-                This is the canonical WORLD surface:
-                - contains all runners currently known to BUS
-                - independent of BUS stop / execution window
-                """
+        This is the canonical WORLD surface:
+        - contains all runners currently known to BUS
+        - independent of BUS stop / execution window
+        """
 
-                from engines.config_paths import connect_db
-                import sqlite3
+        from engines.config_paths import connect_db
+        import sqlite3
 
-                con = connect_db(ro=True)
-                con.row_factory = sqlite3.Row
+        con = connect_db(ro=True)
+        con.row_factory = sqlite3.Row
 
-                try:
+        try:
 
-                    rows = con.execute("""
-                        SELECT
-                            marketId,
-                            selectionId,
-                            px,
-                            back,
-                            lay,
-                            band
-                        FROM bus_route_runtime_snapshot
-                        WHERE ts = (
-                            SELECT MAX(ts)
-                            FROM bus_route_runtime_snapshot
-                        )
-                    """).fetchall()
+            rows = con.execute("""
+                SELECT
+                    marketId,
+                    selectionId,
+                    px,
+                    back,
+                    lay,
+                    band
+                FROM bus_route_runtime_snapshot
+                WHERE ts = (
+                    SELECT MAX(ts)
+                    FROM bus_route_runtime_snapshot
+                )
+            """).fetchall()
 
-                finally:
-                    con.close()
+        finally:
+            con.close()
 
-                world = {}
+        world = {}
 
-                for r in rows:
+        for r in rows:
 
-                    key = (str(r["marketId"]), str(r["selectionId"]))
+            key = (str(r["marketId"]), str(r["selectionId"]))
 
-                    world[key] = {
-                        "marketId": str(r["marketId"]),
-                        "selectionId": str(r["selectionId"]),
-                        "px": r["px"],
-                        "back": r["back"],
-                        "lay": r["lay"],
-                        "band": r["band"],
-                    }
+            world[key] = {
+                "marketId": str(r["marketId"]),
+                "selectionId": str(r["selectionId"]),
+                "px": r["px"],
+                "back": r["back"],
+                "lay": r["lay"],
+                "band": r["band"],
+            }
 
-                return world
+        return world
 
     # --------------------------------------------------------------------------------------------------
     # V7 REPORT BUILDER — SPEC LOCKED
@@ -1179,32 +1217,34 @@ class UnifiedEngine:
 # ======================================================================================================
 
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: self._route_ctx_map = self._build_runtime_ctx_map(ctx)
-# 🧩 ACTION: REPLACE — read BUS world directly
-# 📆 PATCHED: 2026-03-12 — Unified report uses BUS execution world
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report
+# 🔎 SEARCH: from engines.bus.bus import BUS
+# 🧩 ACTION: REPLACE — snapshot-first world loader
+# 📆 PATCHED: 2026-03-14 — standalone + BUS compatibility
 #
-# ROOT CAUSE
-# ----------
-# The Unified report loop was creating a new engine instance with no route world.
-# That instance had no BUS ctx_map so all report surfaces appeared empty.
+# PURPOSE
+# -------
+# Unified must operate purely from snapshots when BUS is not available.
 #
-# FIX
-# ---
-# Pull the authoritative world from BUS instead of rebuilding it.
+# WORLD SOURCES
+# -------------
+# 1️⃣ ctx["_route_ctx_map"] injected by BUS (live mode)
+# 2️⃣ bus_route_runtime_snapshot table (standalone mode)
 #
-# CONTRACT
-# --------
-# BUS owns the route world.
-# Unified report only observes it.
+# RESULT
+# ------
+# Unified report can run independently from snapshots.
 # ======================================================================================================
 
-        from engines.bus.bus import BUS
+        route_ctx = ctx.get("_route_ctx_map")
 
-        try:
-            self._route_ctx_map = self._read_route_world()
-        except Exception:
-            self._route_ctx_map = {}
+        if isinstance(route_ctx, dict) and route_ctx:
+            self._route_ctx_map = route_ctx
+        else:
+            try:
+                self._route_ctx_map = self._read_route_world()
+            except Exception:
+                self._route_ctx_map = {}
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -3037,8 +3077,11 @@ if __name__ == "__main__":
 
     while True:
         try:
+            # 🔴 LOAD WORLD SNAPSHOT FIRST
+            engine._route_ctx_map = engine._read_route_world()
+
             report = engine._build_v7_report(
-                ctx={},
+                ctx={"_route_ctx_map": engine._route_ctx_map},
                 tick_delta=None
             )
 
