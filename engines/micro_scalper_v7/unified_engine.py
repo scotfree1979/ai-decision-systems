@@ -2525,6 +2525,17 @@ class UnifiedEngine:
         pools = self._build_candidate_pools(report)
 
 # ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
+# 🔎 SEARCH: pools = self._build_candidate_pools(report)
+# 🧩 ACTION: ADD — restore candidate source
+# PURPOSE:
+# Layer2 surface is the canonical candidate generator.
+# Unified selection operates on those candidates.
+# ======================================================================================================
+
+        candidates = report.get("layer2", {}).get("candidates", [])
+
+# ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: def _select_exploratory_candidates
 # 🧩 ACTION: PRIORITISE BUS buckets
