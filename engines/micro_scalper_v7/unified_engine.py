@@ -2161,6 +2161,32 @@ class UnifiedEngine:
     # BUILD STRUCTURAL POOLS
     # ================================================================================================
 
+    # ======================================================================================================
+    # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_candidate_pools
+    # 🔎 SEARCH: def _build_candidate_pools(self, report):
+    # 🧩 ACTION: REPLACE ENTIRE METHOD
+    # 📆 PATCHED: 2026-03-13 — Drift strength + trend validation
+    #
+    # PURPOSE
+    # -------
+    # Introduce proper drift classification and trend validation.
+    #
+    # NEW SIGNAL RULES
+    # ----------------
+    # Drift = short-term movement strength
+    # Trend = structural movement from anchor
+    #
+    # Drift must align with trend to create a valid signal.
+    #
+    # Drift strength scale:
+    #   <0.1   → ignore
+    #   <0.25  → 1
+    #   <0.5   → 2
+    #   <1     → 3
+    #   <2     → 4
+    #   >=2    → 5
+    # ======================================================================================================
+
     def _build_candidate_pools(self, report):
 
         pools = {
@@ -2170,27 +2196,18 @@ class UnifiedEngine:
             "breakout": [],
             "direction": [],
             "volatility": [],
+            "momentum": [],
+            "favourite": [],
         }
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_candidate_pools
-# 🔎 SEARCH: pools = {
-# 🧩 ADD: structural scoring fields
-# PURPOSE:
-# Adds additional structural signal categories for candidate ranking.
-# ======================================================================================================
-
-        pools["momentum"] = []
-
-        pools["favourite"] = []
 
         drift_rows = report.get("drift", {}).get("runners", [])
         rank_rows  = report.get("rank", {}).get("runners", [])
         sweet_rows = report.get("sweet_spot", {}).get("runners", [])
+        layer2     = report.get("layer2", {})
 
-        layer2 = report.get("layer2", {})
-
+        # --------------------------------------------------
         # CROSSOVERS
+        # --------------------------------------------------
 
         for r in rank_rows:
 
@@ -2202,21 +2219,57 @@ class UnifiedEngine:
                     "score": abs(r.get("rank_delta", 0)) + 5
                 })
 
-        # DRIFT
+        # --------------------------------------------------
+        # DRIFT (validated against structural trend)
+        # --------------------------------------------------
 
         for r in drift_rows:
 
+            mid = r["marketId"]
+            sid = r["selectionId"]
+
             speed = abs(r.get("delta_ticks_per_min") or 0)
 
-            if speed > 0:
+            if speed < 0.1:
+                continue
 
-                pools["drift"].append({
-                    "marketId": r["marketId"],
-                    "selectionId": r["selectionId"],
-                    "score": speed
-                })
+            # Drift strength classification
+            if speed < 0.25:
+                drift_strength = 1
+            elif speed < 0.5:
+                drift_strength = 2
+            elif speed < 1:
+                drift_strength = 3
+            elif speed < 2:
+                drift_strength = 4
+            else:
+                drift_strength = 5
 
+            mem = self._runner_structure.get((mid, sid))
+            if not mem:
+                continue
+
+            dist = mem.get("distance_from_anchor")
+
+            if dist is None:
+                continue
+
+            drift_dir = "DRIFT" if r.get("delta_ticks_per_min", 0) > 0 else "STEAM"
+            trend_dir = "DRIFT" if dist > 0 else "STEAM"
+
+            # Reject conflicting signals
+            if drift_dir != trend_dir:
+                continue
+
+            pools["drift"].append({
+                "marketId": mid,
+                "selectionId": sid,
+                "score": drift_strength
+            })
+
+        # --------------------------------------------------
         # SWEET SPOT
+        # --------------------------------------------------
 
         for r in sweet_rows:
 
@@ -2224,10 +2277,8 @@ class UnifiedEngine:
 
             if zone == "4-7":
                 score = 3
-
             elif zone == "7-10":
                 score = 2
-
             else:
                 continue
 
@@ -2237,19 +2288,31 @@ class UnifiedEngine:
                 "score": score
             })
 
-        # BREAKOUT
+        # --------------------------------------------------
+        # STRUCTURAL BREAKOUT
+        # --------------------------------------------------
 
         for key, mem in getattr(self, "_runner_structure", {}).items():
 
             mid, sid = key
+            px = mem.get("last_px")
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_candidate_pools
-# 🔎 SEARCH: for key, mem in getattr(self, "_runner_structure", {}).items():
-# 🧩 ADD: context scoring
-# PURPOSE:
-# Uses structural runner memory to influence candidate ranking.
-# ======================================================================================================
+            if px is None:
+                continue
+
+            if px >= mem.get("high_seen"):
+                pools["breakout"].append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "score": 4
+                })
+
+            elif px <= mem.get("low_seen"):
+                pools["breakout"].append({
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "score": 4
+                })
 
             trend_mem = mem.get("trend_mem")
 
@@ -2263,7 +2326,7 @@ class UnifiedEngine:
 
             fav = self._fav_history.get(key)
 
-            if fav and fav["flips"] > 0:
+            if fav and fav.get("flips", 0) > 0:
 
                 pools["favourite"].append({
                     "marketId": mid,
@@ -2271,27 +2334,9 @@ class UnifiedEngine:
                     "score": fav["flips"] * 2
                 })
 
-            mid, sid = key
-
-            px = mem["last_px"]
-
-            if px >= mem["high_seen"]:
-
-                pools["breakout"].append({
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "score": 4
-                })
-
-            elif px <= mem["low_seen"]:
-
-                pools["breakout"].append({
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "score": 4
-                })
-
+        # --------------------------------------------------
         # DIRECTION ENGINE
+        # --------------------------------------------------
 
         for row in layer2.get("direction_calls", []):
 
@@ -2302,8 +2347,6 @@ class UnifiedEngine:
             })
 
         return pools
-
-
     # ================================================================================================
     # FINAL CANDIDATE SELECTION
     # ================================================================================================

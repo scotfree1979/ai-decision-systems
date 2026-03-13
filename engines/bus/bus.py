@@ -552,6 +552,31 @@ class DecisionBus:
         self._cadence = CadenceController()
         self._ctx_refresh_times = []
         self._optional_intel_cache = {}
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus.__init__
+# 🔎 SEARCH: self._optional_intel_cache = {}
+# 🧩 ACTION: INSERT BELOW — snapshot cadence controller
+# 📆 PATCHED: 2026-03-16 — decouple snapshot cadence from BUS ticks
+#
+# PURPOSE
+# -------
+# Snapshots must update independently of execution cadence.
+# This prevents dashboard freeze when ticks slow down.
+#
+# DESIGN
+# ------
+# BUS still owns snapshot data, but cadence is time-driven.
+#
+# SAFETY
+# ------
+# No execution logic affected.
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # Snapshot cadence controller
+        # --------------------------------------------------
+        self._snapshot_interval = 2.0
+        self._last_snapshot_ts = 0.0
         # 🔑 REQUIRED — MSC_INPLAY prewarm tracking
         self._inplay_ctx_prewarmed = set()  
     
@@ -2565,6 +2590,62 @@ class DecisionBus:
             "plans_routed": getattr(self, "_last_delegated", 0),
         }
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus
+# 🔎 SEARCH: def dashboard_snapshot(self)
+# 🧩 ACTION: INSERT BELOW — snapshot scheduler
+# 📆 PATCHED: 2026-03-16 — time-driven telemetry loop
+#
+# PURPOSE
+# -------
+# Write runtime snapshots every 2 seconds regardless of tick cadence.
+#
+# SAFETY
+# ------
+# Read-only telemetry.
+# Never blocks execution.
+# ======================================================================================================
+
+    def _run_snapshots(self):
+
+        now = time.time()
+
+        if now - self._last_snapshot_ts < self._snapshot_interval:
+            return
+
+        self._last_snapshot_ts = now
+
+        try:
+            _write_bus_runtime_snapshot(self.dashboard_snapshot())
+        except Exception:
+            pass
+
+        try:
+            from engines.live.bank_state import _write_bank_runtime_snapshot
+            _write_bank_runtime_snapshot()
+        except Exception:
+            pass
+
+        try:
+            inplay_engine = self.engines.get("MSC_INPLAY")
+            if inplay_engine:
+                inplay_engine.write_runtime_snapshot()
+        except Exception:
+            pass
+
+        try:
+            from engines.live.live_router import collect_router_live_state
+            from engines.live.live_router import _write_router_runtime_snapshot_from_collect
+            live = collect_router_live_state()
+            _write_router_runtime_snapshot_from_collect(live)
+        except Exception:
+            pass
+
+        try:
+            _write_unified_runtime_snapshot()
+        except Exception:
+            pass
+
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 ANCHOR: inside class DecisionBus (place below dashboard_snapshot)
@@ -2692,6 +2773,26 @@ class DecisionBus:
         # 0️⃣ BUS IDENTITY
         # ===============================================================
         self.tick_id += 1
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus.tick
+# 🔎 SEARCH: self.tick_id += 1
+# 🧩 ACTION: INSERT BELOW — snapshot cadence execution
+# 📆 PATCHED: 2026-03-16 — run telemetry independent of ticks
+#
+# PURPOSE
+# -------
+# Ensures dashboard telemetry refreshes every ~2 seconds
+# even if BUS ticks are slow.
+#
+# SAFETY
+# ------
+# Does not affect execution flow.
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # Snapshot telemetry scheduler
+        # --------------------------------------------------
+        self._run_snapshots()
         # Increment bus stop manually
         self._bus_stop += 1
         # ===============================================================
