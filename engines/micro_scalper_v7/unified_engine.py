@@ -1300,6 +1300,8 @@ class UnifiedEngine:
             # update stored memory
             self._runner_px_memory[key] = px
 
+        timing_surface = self._build_timing_surface()
+
         report = {
             "world": self._build_world_surface(),
 
@@ -1321,7 +1323,7 @@ class UnifiedEngine:
             # ─────────────────────────────────────────
             # LAYER 2 — TRADE SIGNAL INTELLIGENCE
             # ─────────────────────────────────────────
-            "layer2": self._build_layer2_surface(report),
+            "layer2": self._build_layer2_surface(timing_surface),
         }
 
 # ======================================================================================================
@@ -2537,58 +2539,6 @@ class UnifiedEngine:
         buckets = self._get_bus_buckets()
 
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: buckets = self._get_bus_buckets()
-# 🧩 ACTION: ADD candidate source list
-# 📆 PATCHED: 2026-03-12 — fix candidate source reference
-#
-# PURPOSE:
-# Candidate ordering must operate on the structural candidate list
-# produced by Layer 2 intelligence.
-# ======================================================================================================
-
-        candidates = report.get("layer2", {}).get("candidates", [])
-
-        priority_order = [
-            "5m",
-            "10m",
-            "20m",
-            "40m",
-            "60m",
-            "long",
-        ]
-
-        ordered = []
-
-        for bucket in priority_order:
-
-            for key in buckets.get(bucket, []):
-
-                mid, sid = key
-
-                for r in candidates:
-
-                    if r["marketId"] == mid and r["selectionId"] == sid:
-                        ordered.append(r)
-
-        # remove duplicates while preserving order
-        seen = set()
-        final = []
-
-        for r in ordered:
-
-            k = (r["marketId"], r["selectionId"])
-
-            if k in seen:
-                continue
-
-            final.append(r)
-            seen.add(k)
-
-            if len(final) >= 5:
-                break
-
-# ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
 # 🔎 SEARCH: return final
 # 🧩 ACTION: configurable long-bucket expansion
@@ -2611,40 +2561,70 @@ class UnifiedEngine:
 # This allows early anchors to exist without interfering with the core
 # top-ranked candidates.
 # ======================================================================================================
-
+        
+        candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
         BASE_EXPLORATORY = 5
         LONG_BUCKET_EXTRA = 1   # ← toggle here
+
+
+        core = candidates[:BASE_EXPLORATORY]
 
         # --------------------------------------------------
         # Core top candidates
         # --------------------------------------------------
 
-        core = final[:BASE_EXPLORATORY]
+        core = candidates[:BASE_EXPLORATORY]
 
         # --------------------------------------------------
         # Long bucket candidates
         # --------------------------------------------------
+
+        # ======================================================================================================
+        # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
+        # 🧩 ACTION: add best long-bucket candidate
+        # ======================================================================================================
+
+        core_keys = {(r["marketId"], r["selectionId"]) for r in core}
 
         long_candidates = [
             r for r in candidates
             if (r["marketId"], r["selectionId"]) in buckets.get("long", [])
         ]
 
-        long_candidates.sort(key=lambda x: x["score"], reverse=True)
+        long_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         extra = []
 
         for r in long_candidates:
 
-            k = (r["marketId"], r["selectionId"])
+            key = (r["marketId"], r["selectionId"])
 
-            if k in seen:
+            if key in core_keys:
                 continue
 
             extra.append(r)
 
             if len(extra) >= LONG_BUCKET_EXTRA:
                 break
+
+        # --------------------------------------------------
+        # Rebind execution fields from route ctx
+        # --------------------------------------------------
+
+        route = getattr(self, "_route_ctx_map", {})
+
+        for r in core + extra:
+
+            key = (r["marketId"], r["selectionId"])
+            rctx = route.get(key)
+
+            if rctx:
+
+                if not r.get("direction"):
+                    r["direction"] = rctx.get("direction")
+
+                if not r.get("px"):
+                    r["px"] = rctx.get("px")        
 
         return core + extra
 
@@ -2674,7 +2654,7 @@ class UnifiedEngine:
 # Pass report into the function so timing surfaces can be read.
 # ======================================================================================================
 
-    def _build_layer2_surface(self, report) -> Dict[str, Any]:
+    def _build_layer2_surface(self, timing_surface) -> Dict[str, Any]:
 
         drift = self._build_drift_surface().get("runners", [])
         sweet = self._build_sweet_spot_surface().get("runners", [])
@@ -2748,7 +2728,7 @@ class UnifiedEngine:
             bucket_score = 0
 
             market = next(
-                (m for m in report.get("timing", {}).get("markets", [])
+                (m for m in timing_surface.get("markets", [])
                  if m.get("marketId") == mid),
                 None
             )
