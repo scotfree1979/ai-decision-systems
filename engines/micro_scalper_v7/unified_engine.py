@@ -434,6 +434,25 @@ class UnifiedEngine:
         for (mid, sid), rctx in route.items():
 
             market = market_map.get(mid)
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: market = market_map.get(mid)
+# 🧩 ACTION: ADD — ignore COMPLETE markets for exploratory
+# 📆 PATCHED: 2026-03-16 — prevent Betfair rejection on finished markets
+#
+# PURPOSE
+# -------
+# Betfair rejects orders when markets are finished.
+#
+# Unified exploratory signals must ignore COMPLETE markets.
+#
+# INPLAY logic remains unaffected and may still operate post-off.
+# ======================================================================================================
+
+            if market.get("phase") == "COMPLETE":
+                continue
+
             if not market:
                 continue
 
