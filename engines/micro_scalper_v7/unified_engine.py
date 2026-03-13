@@ -292,7 +292,7 @@ class UnifiedEngine:
         # 2️⃣ PRE-OFF EXPLORATORY (TOP 5 ALWAYS TRADE)
         # --------------------------------------------------
 
-        for c in candidates[:5]:
+        for c in candidates:
 
             mid = c["marketId"]
             sid = c["selectionId"]
@@ -1321,7 +1321,7 @@ class UnifiedEngine:
             # ─────────────────────────────────────────
             # LAYER 2 — TRADE SIGNAL INTELLIGENCE
             # ─────────────────────────────────────────
-            "layer2": self._build_layer2_surface(),
+            "layer2": self._build_layer2_surface(report),
         }
 
 # ======================================================================================================
@@ -2653,7 +2653,28 @@ class UnifiedEngine:
     # LAYER 2 — TRADE SIGNAL INTELLIGENCE
     # --------------------------------------------------------------------------------------------------
 
-    def _build_layer2_surface(self) -> Dict[str, Any]:
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: def _build_layer2_surface(self)
+# 🧩 ACTION: REPLACE FUNCTION SIGNATURE
+# 📆 PATCHED: 2026-03-16 — fix undefined report reference
+#
+# ROOT CAUSE
+# ----------
+# _build_layer2_surface referenced the variable `report`
+# but the function did not receive it as an argument.
+#
+# RESULT
+# ------
+# tick() crashes with:
+#     tick_error:name 'report' is not defined
+#
+# FIX
+# ---
+# Pass report into the function so timing surfaces can be read.
+# ======================================================================================================
+
+    def _build_layer2_surface(self, report) -> Dict[str, Any]:
 
         drift = self._build_drift_surface().get("runners", [])
         sweet = self._build_sweet_spot_surface().get("runners", [])
