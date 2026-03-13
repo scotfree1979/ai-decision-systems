@@ -1209,6 +1209,139 @@ class UnifiedEngine:
             "layer2": self._build_layer2_surface(),
         }
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: report = {
+# 🧩 ACTION: ADD — Unified lifecycle snapshot writer
+# 📆 PATCHED: 2026-03-13 — SR5 lifecycle snapshot export
+#
+# PURPOSE
+# -------
+# Extend unified_runtime_snapshot with market lifecycle telemetry required by dashboard.
+#
+# FIELDS EXPORTED
+# ---------------
+# current_market_id
+# current_market_state
+# next_market_id
+# delayed_market_id
+#
+# SOURCE
+# ------
+# Derived directly from timing surface produced by:
+#     _build_timing_surface()
+#
+# No trading logic modified.
+# Snapshot is telemetry only.
+#
+# CONTRACT
+# --------
+# Dashboard reads latest row using:
+#
+#   SELECT * FROM unified_runtime_snapshot
+#   ORDER BY ts DESC
+#   LIMIT 1
+#
+# ======================================================================================================
+
+        try:
+
+            timing_surface = report.get("timing", {})
+            markets = timing_surface.get("markets", [])
+
+            current_market_id = None
+            current_market_state = None
+            next_market_id = None
+            delayed_market_id = None
+
+            # --------------------------------------------------
+            # determine current / next market
+            # --------------------------------------------------
+
+            active_index = None
+
+            for i, m in enumerate(markets):
+
+                phase = m.get("phase")
+                mid = m.get("marketId")
+
+                if phase != "COMPLETE":
+
+                    current_market_id = mid
+
+                    if phase == "PRE":
+                        current_market_state = "PRE"
+                    elif phase == "LIVE_PHASE":
+                        current_market_state = "ACTIVE"
+                    else:
+                        current_market_state = phase
+
+                    active_index = i
+                    break
+
+            # --------------------------------------------------
+            # next market
+            # --------------------------------------------------
+
+            if active_index is not None:
+
+                if active_index + 1 < len(markets):
+
+                    next_market_id = markets[active_index + 1].get("marketId")
+
+            # --------------------------------------------------
+            # delayed detection
+            # --------------------------------------------------
+
+            for m in markets:
+
+                tto = m.get("tto_seconds")
+                off_detected = m.get("off_detected")
+
+                if tto is not None and tto < 0 and not off_detected:
+
+                    delayed_market_id = m.get("marketId")
+                    break
+
+            # --------------------------------------------------
+            # write snapshot
+            # --------------------------------------------------
+
+            from engines.config_paths import open_auto_db
+            import time
+
+            con = open_auto_db(rw=True)
+
+            try:
+
+                con.execute(
+                    """
+                    INSERT INTO unified_runtime_snapshot (
+                        ts,
+                        current_market_id,
+                        current_market_state,
+                        next_market_id,
+                        delayed_market_id
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(time.time()),
+                        current_market_id,
+                        current_market_state,
+                        next_market_id,
+                        delayed_market_id,
+                    ),
+                )
+
+                con.commit()
+
+            finally:
+                con.close()
+
+        except Exception:
+            pass
+
         return report
 
     def _build_world_surface(self) -> Dict[str, Any]:
@@ -1244,7 +1377,7 @@ class UnifiedEngine:
                 FROM bets
                 WHERE substr(marketStartTime,1,10)=date('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
-                LIMIT 5
+
             """).fetchall()
         finally:
             con.close()

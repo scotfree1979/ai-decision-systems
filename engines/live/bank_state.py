@@ -1807,6 +1807,16 @@ def _ensure_bank_runtime_schema():
             unmatched REAL
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bankstate_runner_snapshot(
+            ts TEXT,
+            marketId TEXT,
+            selectionId TEXT,
+            horse_name TEXT,
+            pnl_if_win REAL,
+            engine TEXT
+        )
+    """)
     con.close()
 
 # === PATCH START ==============================================================
@@ -1867,6 +1877,63 @@ def _write_bank_runtime_snapshot():
             floor_part,
             unmatched_part,
         ))
+
+    # --------------------------------------------------
+    # RUNNER PnL SNAPSHOT (dashboard intelligence layer)
+    # --------------------------------------------------
+
+    try:
+
+        from engines.config_paths import open_auto_db
+
+        con2 = open_auto_db(rw=True)
+        cur2 = con2.cursor()
+
+        rows = cur2.execute("""
+            SELECT
+                o.marketId,
+                o.selectionId,
+                COALESCE(b.horse_name,'') AS horse_name,
+                o.engine,
+                SUM(
+                    CASE
+                        WHEN o.side='LAY'
+                             THEN -o.entry_stake*(o.entry_odds-1)
+                        WHEN o.side='BACK'
+                             THEN  o.entry_stake*(o.entry_odds-1)
+                        ELSE 0
+                    END
+                ) AS pnl_if_win
+            FROM orders o
+            LEFT JOIN bets b
+                   ON b.selectionId=o.selectionId
+                  AND b.marketId=o.marketId
+            WHERE o.role='PARENT'
+              AND o.entry_status='MATCHED'
+              AND date(o.opened_at)=date('now','utc')
+            GROUP BY o.marketId, o.selectionId, o.engine
+        """).fetchall()
+
+        for mid, sid, horse, engine, pnl in rows:
+
+            cur2.execute("""
+                INSERT INTO bankstate_runner_snapshot
+                (ts, marketId, selectionId, horse_name, pnl_if_win, engine)
+                VALUES (?,?,?,?,?,?)
+            """, (
+                ts,
+                str(mid),
+                str(sid),
+                str(horse or sid),
+                float(pnl or 0.0),
+                str(engine),
+            ))
+
+        con2.commit()
+        con2.close()
+
+    except Exception:
+        pass
 
     con.close()
 
