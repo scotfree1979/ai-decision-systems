@@ -115,6 +115,7 @@ def _router_parent_worker_loop():
 
 _ROUTER_PARENT_SURFACE = {}
 _ROUTER_CHILD_SURFACE  = {}
+_ROUTER_SNAPSHOT_LOCK = threading.Lock()
 
 import uuid
 import requests
@@ -840,48 +841,53 @@ def _write_router_runtime_snapshot_from_collect(live: dict):
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    con = open_auto_db(rw=True)
-    cur = con.cursor()
+    # --------------------------------------------------
+    # SERIALIZE SNAPSHOT WRITES
+    # --------------------------------------------------
+    with _ROUTER_SNAPSHOT_LOCK:
 
-    # Clear previous snapshot (single-frame table)
-    cur.execute("DELETE FROM router_runtime_snapshot")
+        con = open_auto_db(rw=True)
+        cur = con.cursor()
 
-    # ---------------- PARENTS ----------------
-    for engine, buckets in live["parents"].items():
-        cur.execute("""
-            INSERT INTO router_runtime_snapshot
-            (ts, engine, role, queued, placing, placed, matched, cancelled, closed)
-            VALUES (?, ?, 'PARENT', ?, ?, ?, ?, ?, ?)
-        """, (
-            ts,
-            engine,
-            buckets.get("QUEUED", 0),
-            buckets.get("PLACING", 0),
-            buckets.get("PLACED", 0),
-            buckets.get("MATCHED", 0),
-            buckets.get("CANCELLED", 0),
-            buckets.get("CLOSED", 0),
-        ))
+        # Clear previous snapshot (single-frame table)
+        cur.execute("DELETE FROM router_runtime_snapshot")
 
-    # ---------------- CHILDREN ----------------
-    for engine, buckets in live["children"].items():
-        cur.execute("""
-            INSERT INTO router_runtime_snapshot
-            (ts, engine, role, queued, placing, placed, matched, cancelled, closed)
-            VALUES (?, ?, 'CHILD', ?, ?, ?, ?, ?, ?)
-        """, (
-            ts,
-            engine,
-            buckets.get("QUEUED", 0),
-            buckets.get("PLACING", 0),
-            buckets.get("PLACED", 0),
-            buckets.get("MATCHED", 0),
-            buckets.get("CANCELLED", 0),
-            buckets.get("CLOSED", 0),
-        ))
+        # ---------------- PARENTS ----------------
+        for engine, buckets in live["parents"].items():
+            cur.execute("""
+                INSERT INTO router_runtime_snapshot
+                (ts, engine, role, queued, placing, placed, matched, cancelled, closed)
+                VALUES (?, ?, 'PARENT', ?, ?, ?, ?, ?, ?)
+            """, (
+                ts,
+                engine,
+                buckets.get("QUEUED", 0),
+                buckets.get("PLACING", 0),
+                buckets.get("PLACED", 0),
+                buckets.get("MATCHED", 0),
+                buckets.get("CANCELLED", 0),
+                buckets.get("CLOSED", 0),
+            ))
 
-    con.commit()
-    con.close()
+        # ---------------- CHILDREN ----------------
+        for engine, buckets in live["children"].items():
+            cur.execute("""
+                INSERT INTO router_runtime_snapshot
+                (ts, engine, role, queued, placing, placed, matched, cancelled, closed)
+                VALUES (?, ?, 'CHILD', ?, ?, ?, ?, ?, ?)
+            """, (
+                ts,
+                engine,
+                buckets.get("QUEUED", 0),
+                buckets.get("PLACING", 0),
+                buckets.get("PLACED", 0),
+                buckets.get("MATCHED", 0),
+                buckets.get("CANCELLED", 0),
+                buckets.get("CLOSED", 0),
+            ))
+
+        con.commit()
+        con.close()
 
 # ======================================================================
 # ROUTER STATUS AUTHORITY — Betfair is truth, Router enforces DB

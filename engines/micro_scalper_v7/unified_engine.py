@@ -267,64 +267,32 @@ class UnifiedEngine:
         candidates = self._select_exploratory_candidates(report)
 
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
 # 🔎 SEARCH: # 2️⃣ PRE-OFF EXPLORATORY (TOP RANKED)
-# 🧩 ACTION: ADD time-to-off entry gating for capital efficiency
-# 📆 PATCHED: 2026-03-05 — Unified early-drift capital lock prevention
+# 🧩 ACTION: REPLACE ENTIRE EXPLORATORY LOOP
+# 📆 PATCHED: 2026-03-16 — Top 5 candidates always emit exploratory plans
 #
 # PURPOSE
 # -------
-# Capture early drifts (18→17→16→…) while preventing capital lock hours before off.
+# Remove time gating and allow the highest scoring candidates to always
+# generate exploratory parent plans.
 #
-# ENTRY LOGIC
-# -----------
-# Entry allowed only if price exceeds threshold determined by time-to-off.
+# DESIGN
+# ------
+# Layer2 produces ranked candidates.
+# Unified emits the top 5 directly.
 #
-# TTO (seconds)      MIN ENTRY PX
-# > 7200  (2h)       block
-# > 3600  (1h)       ≥ 18
-# > 1800  (30m)      ≥ 14
-# > 900   (15m)      ≥ 10
-# ≤ 900              unrestricted
-#
-# Once anchor exists, MSC_RISK manages the full drift lifecycle.
+# DIRECTION
+# ---------
+# Direction must come from the signal layer (candidate / ctx),
+# never be hard-coded.
 # ======================================================================================================
 
-        for c in candidates:
+        # --------------------------------------------------
+        # 2️⃣ PRE-OFF EXPLORATORY (TOP 5 ALWAYS TRADE)
+        # --------------------------------------------------
 
-            mid = c["marketId"]
-
-            market = market_map.get(mid)
-            if not market:
-                continue
-
-            tto = market.get("tto_seconds")
-
-            # --------------------------------------------------
-            # EXPLORATORY WINDOW
-            # 60min → 5min
-            # --------------------------------------------------
-            if tto is None or not (300 <= tto <= 3600):
-                continue
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: if tto is None or not (300 <= tto <= 3600):
-# 🧩 ACTION: ALLOW STRUCTURAL SIGNALS >60m
-# 📆 PATCHED: 2026-03-12 — Early structural signal trading
-#
-# PURPOSE:
-# - Capture early favourite collapses
-# - Allow breakout trades long before race
-# - Prevent ordinary exploratory entries >60m
-# ======================================================================================================
-
-            if tto is None:
-                continue
-
-            if tto > 3600:
-                if c.get("score", 0) < 4:
-                    continue
+        for c in candidates[:5]:
 
             mid = c["marketId"]
             sid = c["selectionId"]
@@ -338,18 +306,69 @@ class UnifiedEngine:
             except Exception:
                 continue
 
-  
+            # --------------------------------------------------
+            # Direction comes from signal layer
+            # --------------------------------------------------
+            direction = c.get("direction")
+
+            if not direction:
+                rctx = route.get((mid, sid))
+                if rctx:
+                    direction = rctx.get("direction")
+
+            if not direction:
+                direction = "LAY->BACK"
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+# 🔎 SEARCH: emit_plan({
+# 🧩 ADD: persist signal fingerprint for learning system
+# 📆 PATCHED: 2026-03-16 — Unified signal telemetry
+#
+# PURPOSE
+# -------
+# Persist scoring + signal composition so P&L can later be analysed
+# against signal patterns.
+# ======================================================================================================
+
+            score = c.get("score", 0)
+
+            signal_vector = []
+
+            if c.get("direction"):
+                signal_vector.append("direction")
+
+            if c.get("bias"):
+                signal_vector.append("bias")
+
+            if c.get("drift"):
+                signal_vector.append("drift")
+
+            if c.get("sweet"):
+                signal_vector.append("sweet")
+
+            if c.get("bucket"):
+                signal_vector.append("bucket")
+
+            signal_vector_str = "|".join(signal_vector)
+
             emit_plan({
                 "enter": True,
                 "engine": "MSC_UNIFIED",
                 "bet_type": "EXPLORATORY",
                 "role": "PARENT",
-                "marketId": c["marketId"],
-                "selectionId": c["selectionId"],
-                "direction": "LAY->BACK",
-                "px": c.get("px"),
+                "marketId": mid,
+                "selectionId": sid,
+                "direction": direction,
+                "px": px,
                 "target_ticks": 1,
-                "why": "unified_exploratory",
+
+                # 🔑 learning system fields
+                "signal_score": score,
+                "signal_vector": signal_vector_str,
+                "signal_source": "unified_v1",
+
+                "why": "unified_top5_candidate",
             })
 
 # ======================================================================================================
@@ -966,14 +985,14 @@ class UnifiedEngine:
 # 🧩 ACTION: REPLACE safe slicing
 # ======================================================================================================
 
-        if len(exploratory) > 5:
-            exploratory = exploratory[:5]
+        if len(exploratory) > 6:
+            exploratory = exploratory[:6]
 
         if len(risk) > 50:
             risk = risk[:50]
 
-        if len(inplay) > 30:
-            inplay = inplay[:30]
+        if len(inplay) > 29:
+            inplay = inplay[:29]
 
         plans = exploratory + risk + inplay
 
@@ -1306,43 +1325,40 @@ class UnifiedEngine:
         }
 
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: report = {
-# 🧩 ACTION: ADD — Unified lifecycle snapshot writer
-# 📆 PATCHED: 2026-03-13 — SR5 lifecycle snapshot export
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report
+# 🔎 SEARCH: INSERT INTO unified_runtime_snapshot (
+# 🧩 ACTION: REPLACE — extend snapshot with Unified signal telemetry
+# 📆 PATCHED: 2026-03-14 — dashboard signal wiring fix
 #
 # PURPOSE
 # -------
-# Extend unified_runtime_snapshot with market lifecycle telemetry required by dashboard.
+# Dashboard panels read signal counts directly from unified_runtime_snapshot.
 #
-# FIELDS EXPORTED
-# ---------------
-# current_market_id
-# current_market_state
-# next_market_id
-# delayed_market_id
+# The original snapshot only exported lifecycle fields.
+# This patch adds the signal metrics already produced by the Unified report.
 #
-# SOURCE
+# SIGNALS EXPORTED
+# ----------------
+# timing_markets_tracked
+# volatility_runners_moved
+# drift_runners_tracked
+# sweet_spot_runners
+# candidate_count
+#
+# RESULT
 # ------
-# Derived directly from timing surface produced by:
-#     _build_timing_surface()
-#
-# No trading logic modified.
-# Snapshot is telemetry only.
-#
-# CONTRACT
-# --------
-# Dashboard reads latest row using:
-#
-#   SELECT * FROM unified_runtime_snapshot
-#   ORDER BY ts DESC
-#   LIMIT 1
-#
+# Dashboard becomes a pure snapshot reader.
+# No JSON, no recomputation, no duplicate logic.
 # ======================================================================================================
 
         try:
 
             timing_surface = report.get("timing", {})
+            drift_surface = report.get("drift", {})
+            sweet_surface = report.get("sweet_spot", {})
+            vol_surface = report.get("volatility", {})
+            layer2_surface = report.get("layer2", {})
+
             markets = timing_surface.get("markets", [])
 
             current_market_id = None
@@ -1351,20 +1367,16 @@ class UnifiedEngine:
             delayed_market_id = None
 
             # --------------------------------------------------
-            # determine current / next market
+            # lifecycle detection
             # --------------------------------------------------
 
             active_index = None
-            current_market_id = None
-            current_market_state = None
-            next_market_id = None
 
             for i, m in enumerate(markets):
 
                 phase = m.get("phase")
                 mid = m.get("marketId")
 
-                # current = first market not COMPLETE
                 if phase != "COMPLETE":
 
                     current_market_id = mid
@@ -1379,10 +1391,6 @@ class UnifiedEngine:
                     active_index = i
                     break
 
-            # --------------------------------------------------
-            # next market detection
-            # --------------------------------------------------
-
             if active_index is not None:
 
                 for j in range(active_index + 1, len(markets)):
@@ -1393,15 +1401,10 @@ class UnifiedEngine:
 
                         next_market_id = nxt.get("marketId")
 
-                        # safety guard (never equal)
                         if next_market_id == current_market_id:
                             continue
 
                         break
-
-            # --------------------------------------------------
-            # delayed detection
-            # --------------------------------------------------
 
             for m in markets:
 
@@ -1409,9 +1412,18 @@ class UnifiedEngine:
                 off_detected = m.get("off_detected")
 
                 if tto is not None and tto < 0 and not off_detected:
-
                     delayed_market_id = m.get("marketId")
                     break
+
+            # --------------------------------------------------
+            # signal counts (for dashboard)
+            # --------------------------------------------------
+
+            timing_markets_tracked = len(markets)
+            volatility_runners_moved = vol_surface.get("runners_moved_last_window", 0)
+            drift_runners_tracked = len(drift_surface.get("runners", []))
+            sweet_spot_runners = len(sweet_surface.get("runners", []))
+            candidate_count = len(layer2_surface.get("candidates", []))
 
             # --------------------------------------------------
             # write snapshot
@@ -1431,9 +1443,14 @@ class UnifiedEngine:
                         current_market_id,
                         current_market_state,
                         next_market_id,
-                        delayed_market_id
+                        delayed_market_id,
+                        timing_markets_tracked,
+                        volatility_runners_moved,
+                        drift_runners_tracked,
+                        sweet_spot_runners,
+                        candidate_count
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(time.time()),
@@ -1441,6 +1458,11 @@ class UnifiedEngine:
                         current_market_state,
                         next_market_id,
                         delayed_market_id,
+                        timing_markets_tracked,
+                        volatility_runners_moved,
+                        drift_runners_tracked,
+                        sweet_spot_runners,
+                        candidate_count,
                     ),
                 )
 
@@ -2566,7 +2588,66 @@ class UnifiedEngine:
             if len(final) >= 5:
                 break
 
-        return final
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
+# 🔎 SEARCH: return final
+# 🧩 ACTION: configurable long-bucket expansion
+# 📆 PATCHED: 2026-03-16 — exploratory capacity + long-market toggle
+#
+# PURPOSE
+# -------
+# Allow exploratory capacity to include additional long-distance markets.
+#
+# DESIGN
+# ------
+# BASE_EXPLORATORY = 5
+# LONG_BUCKET_EXTRA = configurable toggle
+#
+# RESULT
+# ------
+# total exploratory candidates =
+#     BASE_EXPLORATORY + LONG_BUCKET_EXTRA
+#
+# This allows early anchors to exist without interfering with the core
+# top-ranked candidates.
+# ======================================================================================================
+
+        BASE_EXPLORATORY = 5
+        LONG_BUCKET_EXTRA = 1   # ← toggle here
+
+        # --------------------------------------------------
+        # Core top candidates
+        # --------------------------------------------------
+
+        core = final[:BASE_EXPLORATORY]
+
+        # --------------------------------------------------
+        # Long bucket candidates
+        # --------------------------------------------------
+
+        long_candidates = [
+            r for r in candidates
+            if (r["marketId"], r["selectionId"]) in buckets.get("long", [])
+        ]
+
+        long_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        extra = []
+
+        for r in long_candidates:
+
+            k = (r["marketId"], r["selectionId"])
+
+            if k in seen:
+                continue
+
+            extra.append(r)
+
+            if len(extra) >= LONG_BUCKET_EXTRA:
+                break
+
+        return core + extra
+
 
     # --------------------------------------------------------------------------------------------------
     # LAYER 2 — TRADE SIGNAL INTELLIGENCE
@@ -2625,6 +2706,56 @@ class UnifiedEngine:
             sid = r["selectionId"]
 
             score = 0
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_layer2_surface
+# 🔎 SEARCH: score = 0
+# 🧩 ADD: bucket priority weighting
+# 📆 PATCHED: 2026-03-16 — market proximity scoring
+#
+# PURPOSE
+# -------
+# Replace old window gating with score weighting.
+#
+# Closer races receive higher priority in candidate ranking.
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # Bucket priority weighting
+            # --------------------------------------------------
+
+            bucket_score = 0
+
+            market = next(
+                (m for m in report.get("timing", {}).get("markets", [])
+                 if m.get("marketId") == mid),
+                None
+            )
+
+            if market:
+                tto = market.get("tto_seconds")
+
+                if tto is not None:
+
+                    if tto <= 300:
+                        bucket_score = 4      # 5m
+
+                    elif tto <= 600:
+                        bucket_score = 3      # 10m
+
+                    elif tto <= 1200:
+                        bucket_score = 5      # 20m sweet spot
+
+                    elif tto <= 2400:
+                        bucket_score = 2      # 40m
+
+                    elif tto <= 3600:
+                        bucket_score = 1      # 60m
+
+                    else:
+                        bucket_score = 0.5    # long
+
+            score += bucket_score
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
