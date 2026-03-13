@@ -1259,6 +1259,7 @@ class UnifiedEngine:
             # --------------------------------------------------
 
             active_index = None
+            next_market_id = None
 
             for i, m in enumerate(markets):
 
@@ -1280,14 +1281,18 @@ class UnifiedEngine:
                     break
 
             # --------------------------------------------------
-            # next market
+            # next market detection (robust)
             # --------------------------------------------------
 
             if active_index is not None:
 
-                if active_index + 1 < len(markets):
+                for j in range(active_index + 1, len(markets)):
 
-                    next_market_id = markets[active_index + 1].get("marketId")
+                    nxt = markets[j].get("marketId")
+
+                    if nxt and nxt != current_market_id:
+                        next_market_id = nxt
+                        break
 
             # --------------------------------------------------
             # delayed detection

@@ -1458,6 +1458,8 @@ class DashboardView(ttk.Frame):
 
                 if delayed_market_id:
 
+                    self.delayed_card.pack(fill="x", pady=4)
+
                     r = con.execute("""
                         SELECT event_name, market_name, marketStartTime
                         FROM betsdb.bets
@@ -1467,28 +1469,29 @@ class DashboardView(ttk.Frame):
 
                     if r:
 
+                        off = datetime.fromisoformat(
+                            r["marketStartTime"].replace("Z","+00:00")
+                        ).strftime("%H:%M")
+
+                        self.current_vars["market"].set(
+                            f"{r['event_name']} {r['market_name']}  ({off})"
+                        )
+
                         mto = minutes_to_off(r["marketStartTime"], now_utc)
 
                         self.delayed_vars["market"].set(
-                            f"{r['event_name']} {r['market_name']}"
+                            f"{r['event_name']} {r['market_name']}  ({off})"
                         )
 
                         self.delayed_vars["state"].set("State: DELAYED")
 
                         if mto is not None:
-
                             mins = int(mto)
-                            secs = int((mto - mins) * 60)
-
-                            self.delayed_vars["time"].set(
-                                f"{mins}m {secs}s"
-                            )
+                            secs = int((mto-mins)*60)
+                            self.delayed_vars["time"].set(f"{mins}m {secs}s")
 
                 else:
-
-                    self.delayed_vars["market"].set("Market: —")
-                    self.delayed_vars["state"].set("State: —")
-                    self.delayed_vars["time"].set("—")
+                    self.delayed_card.pack_forget()
 
                 # --------------------------------------------------
                 # 🔥 CURRENT MARKET
@@ -1539,6 +1542,18 @@ class DashboardView(ttk.Frame):
 
                 next_market_id = unified_row["next_market_id"]
 
+                if not next_market_id:
+                    nxt = con.execute("""
+                        SELECT marketId
+                        FROM betsdb.bets
+                        WHERE marketStartTime > datetime('now','utc')
+                        ORDER BY marketStartTime ASC
+                        LIMIT 2
+                    """).fetchall()
+
+                    if len(nxt) == 2:
+                        next_market_id = nxt[1]["marketId"]
+
                 if next_market_id:
 
                     r = con.execute("""
@@ -1550,25 +1565,24 @@ class DashboardView(ttk.Frame):
 
                     if r:
 
+                        off = datetime.fromisoformat(
+                            r["marketStartTime"].replace("Z","+00:00")
+                        ).strftime("%H:%M")
+
                         mto = minutes_to_off(r["marketStartTime"], now_utc)
 
                         self.next_vars["market"].set(
-                            f"{r['event_name']} {r['market_name']}"
+                            f"{r['event_name']} {r['market_name']}  ({off})"
                         )
 
                         self.next_vars["state"].set("State: PRE")
 
                         if mto is not None:
-
                             mins = int(mto)
-                            secs = int((mto - mins) * 60)
-
-                            self.next_vars["time"].set(
-                                f"Starts In: {mins}m {secs}s"
-                            )
+                            secs = int((mto-mins)*60)
+                            self.next_vars["time"].set(f"Starts In: {mins}m {secs}s")
 
                 else:
-
                     self.next_vars["market"].set("Market: —")
                     self.next_vars["state"].set("State: PRE")
                     self.next_vars["time"].set("Starts In: —")
@@ -1576,18 +1590,6 @@ class DashboardView(ttk.Frame):
 
             if unified_row:
 
-                inplay_flag = bool(unified_row["inplay_active"])
-                confidence  = float(unified_row["inplay_confidence"] or 0.0)
-
-                # Default unified snapshot display
-                self.inplay_state_vars["market"].set("Market: Unified Timing")
-                self.inplay_state_vars["inplay"].set(
-                    f"In-Play: {'YES' if inplay_flag else 'NO'}"
-                )
-                self.inplay_state_vars["confidence"].set(
-                    f"Confidence: {confidence:.2f}"
-                )
-                self.inplay_state_vars["quartile"].set("Quartile: —")
 
                 # --------------------------------------------------
                 # Find next race (dashboard timing control)
@@ -1611,16 +1613,16 @@ class DashboardView(ttk.Frame):
                         mins = 0
                         secs = 0
 
-                    self.inplay_state_vars["market"].set(
-                        f"Market: {race['event_name']} {race['market_name']}"
+                    # Map legacy timing update to CURRENT MARKET lifecycle card
+
+                    self.current_vars["market"].set(
+                        f"{race['event_name']} {race['market_name']}"
                     )
 
-                    self.inplay_state_vars["inplay"].set(
+                    self.current_vars["state"].set("State: PRE")
+
+                    self.current_vars["time"].set(
                         f"Starts In: {mins}m {secs}s"
-                    )
-
-                    self.inplay_state_vars["confidence"].set(
-                        f"Confidence: {confidence:.2f}"
                     )
 
                     # === PATCH START ==============================================================
