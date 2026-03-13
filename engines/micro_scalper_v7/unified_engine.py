@@ -1259,6 +1259,8 @@ class UnifiedEngine:
             # --------------------------------------------------
 
             active_index = None
+            current_market_id = None
+            current_market_state = None
             next_market_id = None
 
             for i, m in enumerate(markets):
@@ -1266,6 +1268,7 @@ class UnifiedEngine:
                 phase = m.get("phase")
                 mid = m.get("marketId")
 
+                # current = first market not COMPLETE
                 if phase != "COMPLETE":
 
                     current_market_id = mid
@@ -1281,17 +1284,23 @@ class UnifiedEngine:
                     break
 
             # --------------------------------------------------
-            # next market detection (robust)
+            # next market detection
             # --------------------------------------------------
 
             if active_index is not None:
 
                 for j in range(active_index + 1, len(markets)):
 
-                    nxt = markets[j].get("marketId")
+                    nxt = markets[j]
 
-                    if nxt and nxt != current_market_id:
-                        next_market_id = nxt
+                    if nxt.get("phase") != "COMPLETE":
+
+                        next_market_id = nxt.get("marketId")
+
+                        # safety guard (never equal)
+                        if next_market_id == current_market_id:
+                            continue
+
                         break
 
             # --------------------------------------------------

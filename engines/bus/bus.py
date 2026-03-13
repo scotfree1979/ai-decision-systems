@@ -4502,7 +4502,12 @@ def _ensure_unified_runtime_schema():
             imbalance_level TEXT,
 
             inplay_active INTEGER,
-            inplay_confidence REAL
+            inplay_confidence REAL,
+
+            current_market_id TEXT,
+            current_market_state TEXT,
+            next_market_id TEXT,
+            delayed_market_id TEXT
         )
     """)
 
@@ -4667,8 +4672,32 @@ def _write_unified_runtime_snapshot():
         # INSERT
         # --------------------------------------------------
         con.execute("""
-            INSERT INTO unified_runtime_snapshot
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO unified_runtime_snapshot (
+                ts,
+                route_id,
+                bus_stop,
+                tick_id,
+                hz,
+                fill_rate,
+                parents_open,
+                children_open,
+                children_matched,
+                total_pot,
+                total_floor,
+                total_reserved,
+                headroom,
+                utilisation_pct,
+                worst_case_liability,
+                directional_bias,
+                imbalance_level,
+                inplay_active,
+                inplay_confidence,
+                current_market_id,
+                current_market_state,
+                next_market_id,
+                delayed_market_id
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now(timezone.utc).isoformat(),
 
@@ -4676,17 +4705,6 @@ def _write_unified_runtime_snapshot():
             bus["bus_stop"] if bus else None,
             bus["tick_id"] if bus else None,
             bus["hz"] if bus else None,
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: bus["fill_rate"]
-# 🛠 ACTION: derive fill_rate from generated/routed counters
-# 📆 PATCHED: 2026-03-06 — unified snapshot compatibility fix
-#
-# PURPOSE:
-# - bus_runtime_snapshot no longer stores fill_rate
-# - derive it from plans_generated / plans_routed
-# - prevents IndexError in unified snapshot writer
-# ======================================================================================================
 
             (
                 (bus["plans_routed"] / bus["plans_generated"])
@@ -4708,7 +4726,12 @@ def _write_unified_runtime_snapshot():
             imbalance_level,
 
             1 if inplay else 0,
-            float(inplay["confidence"]) if inplay and "confidence" in inplay.keys() else 0.0
+            float(inplay["confidence"]) if inplay and "confidence" in inplay.keys() else 0.0,
+
+            None,  # current_market_id (written by unified engine)
+            None,  # current_market_state
+            None,  # next_market_id
+            None   # delayed_market_id
         ))
 
         con.commit()
