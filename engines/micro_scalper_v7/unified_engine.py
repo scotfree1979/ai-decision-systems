@@ -1077,6 +1077,62 @@ class UnifiedEngine:
         # fallback only for standalone reporter mode
         return {}
 
+            # --------------------------------------------------------------------------------------------------
+            # WORLD READER (BUS ROUTE SNAPSHOT AUTHORITY)
+            # --------------------------------------------------------------------------------------------------
+
+            def _read_route_world(self):
+                """
+                Read full runner world from BUS snapshot surface.
+
+                This is the canonical WORLD surface:
+                - contains all runners currently known to BUS
+                - independent of BUS stop / execution window
+                """
+
+                from engines.config_paths import connect_db
+                import sqlite3
+
+                con = connect_db(ro=True)
+                con.row_factory = sqlite3.Row
+
+                try:
+
+                    rows = con.execute("""
+                        SELECT
+                            marketId,
+                            selectionId,
+                            px,
+                            back,
+                            lay,
+                            band
+                        FROM bus_route_runtime_snapshot
+                        WHERE ts = (
+                            SELECT MAX(ts)
+                            FROM bus_route_runtime_snapshot
+                        )
+                    """).fetchall()
+
+                finally:
+                    con.close()
+
+                world = {}
+
+                for r in rows:
+
+                    key = (str(r["marketId"]), str(r["selectionId"]))
+
+                    world[key] = {
+                        "marketId": str(r["marketId"]),
+                        "selectionId": str(r["selectionId"]),
+                        "px": r["px"],
+                        "back": r["back"],
+                        "lay": r["lay"],
+                        "band": r["band"],
+                    }
+
+                return world
+
     # --------------------------------------------------------------------------------------------------
     # V7 REPORT BUILDER — SPEC LOCKED
     # --------------------------------------------------------------------------------------------------
@@ -1146,7 +1202,7 @@ class UnifiedEngine:
         from engines.bus.bus import BUS
 
         try:
-            self._route_ctx_map = BUS.get_runner_ctx_snapshot()
+            self._route_ctx_map = self._read_route_world()
         except Exception:
             self._route_ctx_map = {}
 

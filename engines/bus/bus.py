@@ -3241,7 +3241,7 @@ class DecisionBus:
 
         generated_plans, lane_counts = self._evaluate_runner(
             base_ctx=base_ctx,
-            bus_stop_pairs=legacy_slice,
+            bus_stop_pairs=bus_stop_pairs,
             engine_report=engine_report,
         )
 
