@@ -1048,6 +1048,12 @@ class DecisionBus:
             engine_report["MSC_UNIFIED"]["evaluated"] = True
 
             # --------------------------------------------------
+            # MARKET TERMINATION (finished markets return None)
+            # --------------------------------------------------
+            if result is None:
+                _record_reason(engine_report, "MSC_UNIFIED", "market_finished")
+                return plans
+            # --------------------------------------------------
             # WHY RECORDING (STRUCTURED)
             # --------------------------------------------------
             why = result.get("why")
@@ -1078,13 +1084,13 @@ class DecisionBus:
                     plan["engine"] = "MSC_UNIFIED"
 
                     plans.append(("MSC_UNIFIED", plan, base_ctx))
-                    engine_report["MSC_UNIFIED"]["fired"] += 1
+                    engine_report["MSC_UNIFIED"]["fired"] = engine_report["MSC_UNIFIED"].get("fired", 0) + 1
 
             elif result.get("enter"):
 
                 result["engine"] = "MSC_UNIFIED"
                 plans.append(("MSC_UNIFIED", result, base_ctx))
-                engine_report["MSC_UNIFIED"]["fired"] += 1
+                engine_report["MSC_UNIFIED"]["fired"] = engine_report["MSC_UNIFIED"].get("fired", 0) + 1
 
             # --------------------------------------------------
             # PLAN (PHASE 0 = NONE)
@@ -1120,6 +1126,17 @@ class DecisionBus:
             result = unified.tick(ctx_unified)
 
             engine_report["MSC_BLUEPRINT"]["evaluated"] = True
+
+            if not result:
+                _record_reason(engine_report, "MSC_BLUEPRINT", "no_result")
+                return plans
+
+            # --------------------------------------------------
+            # MARKET TERMINATION (finished markets return None)
+            # --------------------------------------------------
+            if result is None:
+                _record_reason(engine_report, "MSC_BLUEPRINT", "market_finished")
+                return plans
 
             # --------------------------------------------------
             # WHY RECORDING (STRUCTURED)
@@ -2093,7 +2110,9 @@ class DecisionBus:
 
         engine_report["MSC_EXPLORATORY"]["evaluated"] = True
 
-
+        if "MSC_EXPLORATORY" in self._deprecated_engines:
+            _record_reason(engine_report, "MSC_EXPLORATORY", "deprecated_lane")
+            return plans, lane_counts
 
         from engines.bus_route import get_exploratory_active_parent_pairs
 
@@ -3742,91 +3761,25 @@ class DecisionBus:
                     )
                     continue  # 🔴 DO NOT ROUTE
 
-                # --------------------------------------------------
-                # STAKE COMPUTATION — BUS OWNED (ALL ENGINES)
-                # --------------------------------------------------
 
                 # --------------------------------------------------
-                # MSC_RISK — mechanical sizing (BUS-owned)
+                # STAKE COMPUTATION — BUS OWNED (UNIFIED DISPATCH)
                 # --------------------------------------------------
-                # ======================================================================
-                # 📍 TARGET: engines/bus/bus.py
-                # 🔎 SEARCH: if engine == "MSC_RISK":
-                # 🛠 ACTION: REPLACE BLOCK
-                # 📆 PATCHED: 2026-02-11 — Fix legacy_parent_id resolution for MSC_RISK
+                # All engines use the unified dynamic stake dispatcher.
+                # Stake logic is now fully owned by dynamic_stake_v7.
                 #
-                # WHY:
-                # - legacy_parent_id was referenced as a free variable
-                # - Risk parent metrics must be sourced from ctx (Lane 2 injection)
-                # - BUS must never depend on undefined variables
+                # Dispatch order inside compute_dynamic_stake():
+                #   1️⃣ bet_type (preferred for Unified / Blueprint)
+                #   2️⃣ engine fallback (legacy compatibility)
                 #
-                # GUARANTEE:
-                # - Risk always resolves parent anchor from ctx
-                # - No DB lookup required here
-                # - Eliminates name 'legacy_parent_id' is not defined
-                # ======================================================================
+                # BUS no longer calls engine-specific stake functions.
 
-                if engine == "MSC_RISK":
+                from engines.math.dynamic_stake_v7 import compute_dynamic_stake
 
-                    from engines.math.dynamic_stake_v7 import compute_risk_dynamic_stake
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: inside MSC_RISK stake computation block
-# 🧩 ACTION: REPLACE — use engine-neutral anchor fields
-# 📆 PATCHED: 2026-02-12 — Risk shadow engine-neutral anchor support
-# ======================================================================================================
-
-
-                    # Hard invariant — risk cannot operate without anchor
-                    anchor_parent_id   = ctx.get("anchor_parent_id")
-                    anchor_entry_odds  = ctx.get("anchor_entry_odds")
-                    anchor_entry_stake = ctx.get("anchor_entry_stake")
-
-                    self._ensure_px_from_route(ctx)
-                    self._force_px_refresh(mid, sid, ctx)
-
-                    raw_stake = compute_risk_dynamic_stake(
-                        ctx=ctx,
-                        engine=engine,
-                    )
-
-                # --------------------------------------------------
-                # MSC_INPLAY — momentum / position sizing (BUS-owned)
-                # --------------------------------------------------
-                elif engine == "MSC_INPLAY":
-
-                    from engines.math.dynamic_stake_v7 import compute_inplay_dynamic_stake
-
-                    raw_stake = compute_inplay_dynamic_stake(
-                        ctx=ctx,
-                        engine=engine,
-                    )
-
-                # --------------------------------------------------
-                # MSC_EXPLORATORY — conviction-weighted sizing (BUS-owned)
-                # --------------------------------------------------
-                elif engine == "MSC_EXPLORATORY":
-
-                    from engines.math.dynamic_stake_v7 import compute_exploratory_dynamic_stake
-
-                    raw_stake = compute_exploratory_dynamic_stake(
-                        ctx=ctx,
-                        engine=engine,
-                    )
-                # --------------------------------------------------
-                # OVERWATCHER — STOPLOSS (BUS-owned, FIXED STAKE)
-                # --------------------------------------------------
-                elif engine == "OVERWATCHER":
-
-                    from engines.math.dynamic_stake_v7 import compute_overwatch_dynamic_stake
-
-                    raw_stake = compute_overwatch_dynamic_stake(
-                        ctx=ctx,
-                        engine=engine,
-                        plan=plan,
-                    )
-
+                raw_stake = compute_dynamic_stake(
+                    engine=engine,
+                    ctx=ctx,
+                )
                 # --------------------------------------------------
                 # LEGACY + FALLBACK — envelope-based dynamic stake
                 # --------------------------------------------------

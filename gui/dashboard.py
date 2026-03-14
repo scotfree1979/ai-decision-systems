@@ -218,6 +218,151 @@ class DashboardView(ttk.Frame):
         kpi_frame.pack(fill="x", padx=8, pady=(0, 6))
         self._build_execution_intelligence(root)
 
+        # === PATCH START ============================================================
+        # 📍 TARGET: gui/dashboard.py (inside DashboardView._build_ui)
+        # 🧩 ACTION: Add System Boot Monitor
+        # PURPOSE:
+        # - Show boot progress until BUS stop ≥ 2
+        # - Learn rolling average boot time (last 10 runs)
+        # - Display countdown + pulsing indicator
+        # ============================================================================
+
+        import json
+
+        BOOT_STATS_FILE = os.path.join(os.path.dirname(cp.autoscalp_db()), "boot_stats.json")
+
+        def _load_boot_stats():
+            try:
+                with open(BOOT_STATS_FILE,"r") as f:
+                    return json.load(f)
+            except:
+                return {"runs":[]}
+
+        def _save_boot_stats(stats):
+            try:
+                with open(BOOT_STATS_FILE,"w") as f:
+                    json.dump(stats,f)
+            except:
+                pass
+
+        def _boot_average(stats):
+            runs = stats.get("runs",[])
+            if not runs:
+                return None
+            return sum(runs)/len(runs)
+
+        # --------------------------------------------------
+        # BOOT STATUS CARD
+        # --------------------------------------------------
+
+        self.boot_frame = ttk.LabelFrame(root, text="SYSTEM BOOT STATUS")
+        self.boot_frame.pack(fill="x", padx=8, pady=(4,6))
+
+        boot_container = ttk.Frame(self.boot_frame, padding=10)
+        boot_container.pack(fill="x")
+
+        self.boot_light = tk.Label(
+            boot_container,
+            text="●",
+            fg="#f39c12",
+            font=("TkDefaultFont",18,"bold")
+        )
+        self.boot_light.pack(side="left", padx=(0,10))
+
+        self.boot_text = tk.StringVar(value="System booting…")
+        ttk.Label(
+            boot_container,
+            textvariable=self.boot_text,
+            font=("TkDefaultFont",11,"bold")
+        ).pack(side="left")
+
+        self.boot_timer = tk.StringVar(value="0s")
+        ttk.Label(
+            boot_container,
+            textvariable=self.boot_timer
+        ).pack(side="right")
+
+        # --------------------------------------------------
+        # BOOT STATE
+        # --------------------------------------------------
+
+        self._boot_start = time.time()
+        self._boot_stats = _load_boot_stats()
+        self._boot_avg = _boot_average(self._boot_stats)
+        self._boot_done = False
+
+        # --------------------------------------------------
+        # PULSE LOOP
+        # --------------------------------------------------
+
+        def _boot_pulse():
+
+            if self._boot_done:
+                return
+
+            colour = "#f39c12" if int(time.time()*2)%2 else "#f1c40f"
+            self.boot_light.config(fg=colour)
+
+            elapsed = int(time.time() - self._boot_start)
+
+            if self._boot_avg:
+                remaining = max(int(self._boot_avg) - elapsed,0)
+                self.boot_timer.set(f"{remaining}s")
+            else:
+                self.boot_timer.set(f"{elapsed}s")
+
+            self.after(500,_boot_pulse)
+
+        self.after(500,_boot_pulse)
+
+        # --------------------------------------------------
+        # BUS DETECTION LOOP
+        # --------------------------------------------------
+
+        def _boot_check_bus():
+
+            if self._boot_done:
+                return
+
+            try:
+                con = _dashboard_con()
+
+                row = con.execute("""
+                    SELECT bus_stop
+                    FROM bus_runtime_snapshot
+                    ORDER BY ts DESC
+                    LIMIT 1
+                """).fetchone()
+
+                con.close()
+
+                if row and int(row["bus_stop"]) >= 2:
+
+                    elapsed = int(time.time() - self._boot_start)
+
+                    runs = self._boot_stats.get("runs",[])
+                    runs.append(elapsed)
+                    runs = runs[-10:]
+
+                    self._boot_stats["runs"] = runs
+                    _save_boot_stats(self._boot_stats)
+
+                    self.boot_light.config(fg="#2ecc71")
+                    self.boot_text.set("System Ready")
+                    self.boot_timer.set(f"{elapsed}s")
+
+                    self._boot_done = True
+                    return
+
+            except:
+                pass
+
+            self.after(1000,_boot_check_bus)
+
+        self.after(1000,_boot_check_bus)
+
+        # === PATCH END ==============================================================
+
         # Scrollable container
         canvas = tk.Canvas(root, highlightthickness=0)
         vsb = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
@@ -2963,15 +3108,15 @@ class DashboardView(ttk.Frame):
 # Prevents layout shifting when new engines are added.
 # ==============================================================================
 
-        priority = {
-            "MSC_UNIFIED": 0,
-            "MSC_BLUEPRINT": 1,
-        }
+            priority = {
+                "MSC_UNIFIED": 0,
+                "MSC_BLUEPRINT": 1,
+            }
 
-        rows_sorted = sorted(
-            rows,
-            key=lambda r: priority.get(r["engine"], 100)
-        )
+            rows_sorted = sorted(
+                rows,
+                key=lambda r: priority.get(r["engine"], 100)
+            )
 
         for i, r in enumerate(rows_sorted[:6]):
 

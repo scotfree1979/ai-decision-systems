@@ -345,12 +345,22 @@ class BusRouteSnapshot:
         import sqlite3
 
         # ==============================================================
-        # 🔁 CANONICAL 5-MARKET BUILD (DB-Authoritative)
+        # 🔁 CANONICAL MARKET BUILD (DB-Authoritative)
         # ==============================================================
-
-        ROUTE_MARKET_COUNT = 5  # hard rule
-
-        now = datetime.now(timezone.utc)
+        #
+        # PURPOSE
+        # -------
+        # Build the list of markets for today.
+        #
+        # IMPORTANT
+        # ---------
+        # • DO NOT filter finished markets here
+        # • Route identity must include ALL markets for the day
+        # • Engine.tick() returning None is the authoritative
+        #   signal that the market has finished
+        #
+        # Finished markets remain in the route but will
+        # simply stop producing signals.
 
         con = connect_db(ro=True)
         con.row_factory = sqlite3.Row
@@ -371,10 +381,8 @@ class BusRouteSnapshot:
                     marketStartTime
                 FROM runner_counts
                 WHERE runner_count >= 6
-                  AND datetime(marketStartTime) >= datetime('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
-                LIMIT ?
-            """, (ROUTE_MARKET_COUNT,)).fetchall()
+            """).fetchall()
         finally:
             con.close()
 
