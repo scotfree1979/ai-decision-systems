@@ -2486,39 +2486,25 @@ LETTER_MAP = {
     "IP5_COLLAPSE_FADE": "K",
 }
 
-# === PATCH START ============================================================
+# === PATCH START ==============================================================
 # 📍 TARGET: engines/live/live_router.py
-# 🔎 INSERT BELOW EXISTING LETTER_MAP
-# 📆 PATCHED: 2025-12-03 — engine classifier for all order writes
-
-ENGINE_MAP = {
-    "D": "MSC_EXPLORATORY",
-    "J": "MSC_RISK",
-    "V": "MSC_INPLAY",
-}
-
-# === PATCH START ============================================================
-# 📍 TARGET: engines/live/live_router.py
-# 🔎 SEARCH: def _engine_from_source(
-# 📆 PATCHED: 2026-02-20 — Diagnostic only (never for LIVE execution)
-# ============================================================================
+# 🔎 SEARCH: ENGINE_MAP =
+# 🧩 ACTION: Remove letter-based engine detection
+# 📆 PATCHED: 2026-XX-XX
+#
+# PURPOSE
+# - Engine identity now comes directly from orders.engine
+# - Router must never derive engines from letters
+# ==============================================================================
 
 def _engine_from_source(source: str) -> str:
     """
-    DIAGNOSTIC ONLY.
-
-    LIVE execution MUST use orders.engine.
-    This function exists only for offline repair / legacy analysis.
+    Deprecated.
+    Engine identity must come from orders.engine.
     """
-    if not source:
-        return "LEGACY"
-    L = str(source).upper()[:1]
-    return ENGINE_MAP.get(L, "LEGACY")
+    return source or "UNKNOWN"
 
 # === PATCH END ==============================================================
-
-
-
 
 def _letter_from_source(src: str) -> str:
     """Resolve canonical letter from strategy/source tag."""
@@ -6810,7 +6796,7 @@ def place_parent_and_hedge(
             SELECT *
               FROM orders
              WHERE role='PARENT'
-               AND engine='MSC_INPLAY'
+               AND bet_type='INPLAY'
                AND marketId=?
                AND selectionId=?
                AND entry_status='QUEUED'

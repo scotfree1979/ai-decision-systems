@@ -7,7 +7,7 @@ from engines.micro_scalper_v7.risk_engine import RiskEngine
 from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
 from engines.micro_scalper_v7.inplay_engine import InPlayEngine
 from engines.micro_scalper_v7.unified_engine import UnifiedEngine
-from engines.micro_scalper_v7.unified_engine import BlueprintEngine
+from engines.micro_scalper_v7.msc_blueprint_engine import BlueprintEngine
 
 ENGINE_REGISTRY = {
     "MSC_EXPLORATORY": ExploratoryEngine(),

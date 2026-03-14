@@ -1296,7 +1296,7 @@ class DecisionBus:
         """
 
         plans = []
-        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0}
 
         # --------------------------------------------------
         # ENGINE DEPRECATION SWITCH
@@ -3845,90 +3845,6 @@ class DecisionBus:
                 if not raw_stake or raw_stake <= 0:
                     raw_stake = ENGINE_MIN.get(engine, 1.0)
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: market_cutoff_5min
-# 🧩 ACTION: REPLACE — engine-aware market-time cutoff adapter (v1.4)
-# 📆 PATCHED: 2026-01-23 — Engine-specific execution cutoff
-#
-# RATIONALE:
-# - INPLAY must remain unrestricted
-# - RISK (shadow bets) may operate closer to off
-# - LEGACY + EXPLORATORY must stop earlier
-#
-# ENGINE RULES:
-#   • MSC_INPLAY      → no cutoff
-#   • MSC_RISK        → block ≤ 2 minutes
-#   • LEGACY          → block ≤ 5 minutes
-#   • MSC_EXPLORATORY → block ≤ 5 minutes
-#
-# BUS is the final execution authority.
-# ======================================================================================================
-
-                # --------------------------------------------------
-                # ⏱️ MARKET START TIME CUTOFF (ENGINE-AWARE)
-                # --------------------------------------------------
-                try:
-                    from engines.config_paths import open_auto_db
-
-                    con = open_auto_db(rw=False)
-                    row = con.execute(
-                        """
-                        SELECT
-                            julianday(b.marketStartTime) - julianday('now','utc')
-                        FROM bets b
-                        WHERE b.marketId = ?
-                        LIMIT 1
-                        """,
-                        (plan.get("marketId"),),
-                    ).fetchone()
-
-                    if row and row[0] is not None:
-                        minutes_to_off = float(row[0]) * 1440.0
-                        plan["_minutes_to_off"] = round(minutes_to_off, 2)
-
-                        engine = plan.get("engine")
-
-                        # INPLAY — never blocked here
-                        if engine == "MSC_INPLAY":
-                            pass
-
-                        # RISK — allowed until 2 minutes to off
-                        elif engine == "MSC_RISK":
-                            if minutes_to_off <= 2.0:
-                                plan["_bus_block"] = "market_cutoff_risk_2min"
-                                tick_ctx["plans_route_failed"].append(
-                                    (plan, "market_cutoff_risk_2min")
-                                )
-                                _record_reason(
-                                    engine_report,
-                                    engine,
-                                    "market_cutoff_risk_2min",
-                                )
-                                continue  # 🔴 DO NOT ROUTE
-
-                        # LEGACY + EXPLORATORY — stop at 5 minutes
-                        else:
-                            if minutes_to_off <= 5.0:
-                                plan["_bus_block"] = "market_cutoff_5min"
-                                tick_ctx["plans_route_failed"].append(
-                                    (plan, "market_cutoff_5min")
-                                )
-                                _record_reason(
-                                    engine_report,
-                                    engine,
-                                    "market_cutoff_5min",
-                                )
-                                continue  # 🔴 DO NOT ROUTE
-
-                except Exception:
-                    # BUS must fail-open, never deadlock
-                    pass
-                finally:
-                    try:
-                        con.close()
-                    except Exception:
-                        pass
                 # --------------------------------------------------
                 # 🎚️ STAKE REPORTING (BUS AUTHORITY)
                 # --------------------------------------------------

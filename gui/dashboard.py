@@ -771,6 +771,21 @@ class DashboardView(ttk.Frame):
         self.exec_stack = ttk.Frame(left)
         self.exec_stack.pack(fill="both", expand=True)
 
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: 🚌 V7 BUS LIVE STATE
+# 🛠 ACTION: BUS panel redesign (status light + compact layout + daily totals)
+# 📆 PATCHED: 2026-04-07
+#
+# PURPOSE
+# -------
+# Compact BUS display:
+#  • Status light in header
+#  • Route ID + Bus Stop on one line
+#  • Remove Tick ID and Hz
+#  • Daily plan counters
+# ==============================================================================
+
         # --------------------------------------------------
         # 🚌 BUS HEADER CARD
         # --------------------------------------------------
@@ -778,29 +793,43 @@ class DashboardView(ttk.Frame):
         self.bus_header_card = ttk.Frame(self.exec_stack, padding=10, relief="ridge")
         self.bus_header_card.pack(fill="x", pady=6)
 
+        header_row = ttk.Frame(self.bus_header_card)
+        header_row.pack(fill="x")
+
         ttk.Label(
-            self.bus_header_card,
+            header_row,
             text="🚌 V7 BUS LIVE STATE",
             font=("TkDefaultFont", 11, "bold")
-        ).pack(anchor="w")
+        ).pack(side="left")
+
+        self.bus_status_light = tk.Label(
+            header_row,
+            text="●",
+            fg="red",
+            font=("TkDefaultFont", 14, "bold")
+        )
+        self.bus_status_light.pack(side="right")
 
         # --------------------------------------------------
-        # 🚌 ROUTE INFO CARD
+        # BUS INFO CARD
         # --------------------------------------------------
 
         self.bus_route_card = ttk.Frame(self.exec_stack, padding=8, relief="ridge")
         self.bus_route_card.pack(fill="x", pady=6)
 
         self.bus_vars = {
-            "route": tk.StringVar(value="Route ID: -"),
-            "stop":  tk.StringVar(value="Bus Stop: -"),
-            "tick":  tk.StringVar(value="Tick ID: -"),
-            "hz":    tk.StringVar(value="Hz: -"),
-            "fill":  tk.StringVar(value="Fill Rate: -"),
+            "route_stop": tk.StringVar(value="Route ID: -    Bus Stop: -"),
+            "plans": tk.StringVar(value="Plans Today: 0  Routed: 0  Fill: 0%"),
         }
 
-        for v in self.bus_vars.values():
-            ttk.Label(self.bus_route_card, textvariable=v).pack(anchor="w")
+        ttk.Label(self.bus_route_card, textvariable=self.bus_vars["route_stop"]).pack(anchor="w")
+        ttk.Label(self.bus_route_card, textvariable=self.bus_vars["plans"]).pack(anchor="w")
+
+        # daily counters
+        self._bus_daily_generated = 0
+        self._bus_daily_routed = 0
+
+# === PATCH END ==============================================================
 
         # ======================================================================================================
         # 📍 TARGET: gui/dashboard.py
@@ -836,7 +865,7 @@ class DashboardView(ttk.Frame):
 
         ttk.Label(
             self.pnl_today_header,
-            text="💰 TODAY — REALISED P&L",
+            text="⚡ LIVE EXPOSURE",
             font=("TkDefaultFont", 10, "bold")
         ).pack(anchor="w")
 
@@ -855,7 +884,7 @@ class DashboardView(ttk.Frame):
 
         ttk.Label(
             win_header,
-            text="🟢 TOP WINNERS",
+            text="🟢 WINNERS",
             font=("TkDefaultFont",9,"bold")
         ).pack(anchor="w")
 
@@ -864,7 +893,7 @@ class DashboardView(ttk.Frame):
 
         ttk.Label(
             loss_header,
-            text="🔴 TOP LOSERS",
+            text="🔴 LOSERS",
             font=("TkDefaultFont",9,"bold")
         ).pack(anchor="w")
 
@@ -887,7 +916,7 @@ class DashboardView(ttk.Frame):
 
         ttk.Label(
             self.live_exposure_header,
-            text="⚡ NEXT MARKETS — LIVE EXPOSURE",
+            text="💰 TODAY — REALISED P&L",
             font=("TkDefaultFont",10,"bold")
         ).pack(anchor="w")
 
@@ -906,7 +935,7 @@ class DashboardView(ttk.Frame):
 
         ttk.Label(
             live_win_header,
-            text="🟢 POTENTIAL WINNERS",
+            text="🟢 WINNERS",
             font=("TkDefaultFont",9,"bold")
         ).pack(anchor="w")
 
@@ -915,7 +944,7 @@ class DashboardView(ttk.Frame):
 
         ttk.Label(
             live_loss_header,
-            text="🔴 POTENTIAL LOSERS",
+            text="🔴 LOSERS",
             font=("TkDefaultFont",9,"bold")
         ).pack(anchor="w")
 
@@ -1134,6 +1163,56 @@ class DashboardView(ttk.Frame):
 
         self._refresh_execution_intelligence()
 
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: self._start_loops()
+# 🛠 ACTION: Add automatic settlements refresh loop
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# The dashboard periodically runs settlements so:
+# • cleared Betfair orders are fetched
+# • reconciliations are applied
+# • P&L surfaces update without manual Trading Hub intervention
+#
+# Behaviour
+# ---------
+# Runs every 120 seconds.
+# Safe to run repeatedly (settlements script is idempotent).
+# ==============================================================================
+
+    def _settlements_loop(self):
+        try:
+            import subprocess, sys, os
+
+            root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+            fetch_cmd = [
+                sys.executable,
+                "engines/live/settlements.py",
+                "fetch",
+                "--since-days", "2",
+                "--skip-meta"
+            ]
+
+            reconcile_cmd = [
+                sys.executable,
+                "engines/live/settlements.py",
+                "reconcile"
+            ]
+
+            subprocess.run(fetch_cmd, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(reconcile_cmd, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        except Exception as e:
+            print("[dashboard] settlement loop error:", e)
+
+        # run again every 2 minutes
+        self.after(120000, self._settlements_loop)
+
+# === PATCH END ==============================================================
+
     def _refresh_execution_intelligence(self):
 
         import sqlite3
@@ -1191,21 +1270,19 @@ class DashboardView(ttk.Frame):
             # ─────────────────────────────────────────
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: FROM bus_runtime_snapshot
-# 🛠 ACTION: detect new snapshot and force immediate refresh
-# 📆 PATCHED: 2026-03-05 — instant BUS telemetry update
-# PURPOSE:
-# - Remove dashboard lag when BUS starts
-# - Update UI immediately when new snapshot arrives
-# ==============================================================================
-# === PATCH START ==============================================================
-# 📍 TARGET: gui/dashboard.py
-# 🔎 SEARCH: FROM bus_runtime_snapshot
-# 🛠 ACTION: read BUS snapshot directly from memory
-# 📆 PATCHED: 2026-03-05 — dashboard uses BUS in-memory telemetry
-# PURPOSE:
-# - eliminate SQLite polling
-# - instantaneous dashboard updates
+# 🔎 SEARCH: self.bus_vars["route"].set
+# 🛠 ACTION: replace legacy BUS UI update with compact BUS telemetry
+# 📆 PATCHED: 2026-04-07
+#
+# PURPOSE
+# -------
+# Fix KeyError caused by BUS UI redesign.
+# Old keys removed:
+#   route, stop, tick, hz, fill
+#
+# New compact display:
+#   route_stop
+#   plans
 # ==============================================================================
 
             row = con.execute("""
@@ -1219,193 +1296,227 @@ class DashboardView(ttk.Frame):
 
                 row = dict(row)
 
-                self.bus_vars["route"].set(f"Route ID: {row['route_id']}")
-                self.bus_vars["stop"].set(f"Bus Stop: {row['bus_stop']}")
-                self.bus_vars["tick"].set(f"Tick ID: {row['tick_id']}")
-                self.bus_vars["hz"].set(f"Hz: {row['hz']}")
+                route = row.get("route_id", "-")
+                stop  = row.get("bus_stop", "-")
 
-# ======================================================================================================
+                # Compact route + stop line
+                self.bus_vars["route_stop"].set(
+                    f"Route ID: {route}    Bus Stop: {stop}"
+                )
+
+                # Status light
+                if isinstance(stop, int) and stop >= 2:
+                    self.bus_status_light.config(fg="#2ecc71")
+                else:
+                    self.bus_status_light.config(fg="#e74c3c")
+
+                # Daily plan accumulation
+                generated = int(row.get("plans_generated", 0))
+                routed = int(row.get("plans_routed", 0))
+
+                self._bus_daily_generated += generated
+                self._bus_daily_routed += routed
+
+                total_gen = self._bus_daily_generated
+                total_routed = self._bus_daily_routed
+
+                rate = (total_routed / total_gen * 100) if total_gen else 0
+
+                self.bus_vars["plans"].set(
+                    f"Plans: {total_gen}  Routed: {total_routed}  Fill: {rate:.1f}%"
+                )
+
+# === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
-# 🔎 ANCHOR: inside _refresh_execution_intelligence(), after bus snapshot section
-# 🧩 ACTION: Render runner intelligence from bankstate_runner_snapshot
-# 📆 PATCHED: 2026-XX-XX — Dashboard wired to BankState runner snapshot
+# 🔎 SEARCH: SELECT
+#            b.marketId,
+#            b.selectionId,
+# 🛠 ACTION: deduplicate runners per market before winner/loser calculation
+# 📆 PATCHED: 2026-04-07
 #
 # PURPOSE
 # -------
-# Replace placeholder logic with snapshot-driven runner intelligence.
-#
-# DATA SOURCE
-# -----------
-# bankstate_runner_snapshot
-#
-# FIELDS
-# ------
-# ts
-# marketId
-# selectionId
-# horse_name
-# pnl_if_win
-# engine
-#
-# PANELS
-# ------
-# 1️⃣ TODAY — REALISED P&L
-#    Top 5 winners
-#    Top 5 losers
-#
-# 2️⃣ NEXT MARKETS — LIVE EXPOSURE
-#    Highest potential win
-#    Highest potential loss
-#
-# INVARIANT
-# ---------
-# Dashboard NEVER recomputes PnL.
-# It only reads the BankState snapshot.
-# ======================================================================================================
-
-            # --------------------------------------------------
-            # RUNNER SNAPSHOT (BankState intelligence)
-            # --------------------------------------------------
+# Ensure each runner appears once per market.
+# Prevents the same horse appearing in both winner and loser columns.
+# ==============================================================================
 
             runner_rows = con.execute("""
-                SELECT
-                    marketId,
-                    selectionId,
-                    horse_name,
-                    pnl_if_win
-                FROM bankstate_runner_snapshot
-                WHERE ts = (
-                    SELECT MAX(ts)
-                    FROM bankstate_runner_snapshot
+                WITH runner_exposure AS (
+                    SELECT
+                        b.marketId,
+                        b.selectionId,
+                        bb.horse_name,
+                        bb.event_name,
+                        bb.marketStartTime,
+                        MAX(b.pnl_if_win) AS pnl_if_win
+                    FROM bankstate_runner_snapshot b
+                    LEFT JOIN betsdb.bets bb
+                        ON bb.marketId = b.marketId
+                       AND bb.selectionId = b.selectionId
+                    WHERE b.ts = (
+                        SELECT MAX(ts)
+                        FROM bankstate_runner_snapshot
+                    )
+                    GROUP BY
+                        b.marketId,
+                        b.selectionId
                 )
+                SELECT *
+                FROM runner_exposure
+                ORDER BY marketStartTime ASC
             """).fetchall()
 
-            # --------------------------------------------------
-            # Clear existing cards
-            # --------------------------------------------------
+# === PATCH END ==============================================================
+
+            # helper for truncation
+            def _short(name, max_len=18):
+                name = str(name or "")
+                if len(name) <= max_len:
+                    return name
+                return name[:max_len-3] + "..."
+
+            # clear grid
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: # clear grid
+# 🛠 ACTION: Correct exposure card distribution (winners left / losers right)
+# 📆 PATCHED: 2026-04-07
+#
+# PURPOSE
+# -------
+# Ensure:
+# • Left column shows winners (green)
+# • Right column shows losers (red)
+# • One runner per race
+# • Maximum 5 per column
+# ==============================================================================
+
+            winners = []
+            losers = []
+
+            for r in runner_rows:
+                pnl = float(r["pnl_if_win"] or 0)
+                if pnl >= 0:
+                    winners.append(r)
+                else:
+                    losers.append(r)
+
+            winners.sort(key=lambda r: float(r["pnl_if_win"] or 0), reverse=True)
+            losers.sort(key=lambda r: float(r["pnl_if_win"] or 0))
 
             for w in self.pnl_today_grid.winfo_children():
                 w.destroy()
 
+            # --- render winners (LEFT column) ---
+            for i, r in enumerate(winners[:5]):
+
+                card = ttk.Frame(self.pnl_today_grid, padding=8, relief="ridge")
+                card.grid(row=i, column=0, padx=4, pady=4, sticky="ew")
+
+                horse = _short(r["horse_name"])
+                market = f"{_short(r['event_name'],14)} {r['marketStartTime'][11:16]}"
+                pnl = float(r["pnl_if_win"])
+
+                ttk.Label(card,text=horse,font=("TkDefaultFont",9,"bold")).pack(anchor="w")
+                ttk.Label(card,text=market,font=("TkDefaultFont",8)).pack(anchor="w")
+                ttk.Label(card,text=f"£{pnl:.2f}",foreground="#2ecc71").pack(anchor="w")
+
+            # --- render losers (RIGHT column) ---
+            for i, r in enumerate(losers[:5]):
+
+                card = ttk.Frame(self.pnl_today_grid, padding=8, relief="ridge")
+                card.grid(row=i, column=1, padx=4, pady=4, sticky="ew")
+
+                horse = _short(r["horse_name"])
+                market = f"{_short(r['event_name'],14)} {r['marketStartTime'][11:16]}"
+                pnl = float(r["pnl_if_win"])
+
+                ttk.Label(card,text=horse,font=("TkDefaultFont",9,"bold")).pack(anchor="w")
+                ttk.Label(card,text=market,font=("TkDefaultFont",8)).pack(anchor="w")
+                ttk.Label(card,text=f"£{pnl:.2f}",foreground="#e74c3c").pack(anchor="w")
+
+# === PATCH END ==============================================================
+
+
+            # --------------------------------------------------
+            # SETTLED RESULTS (1 row per market)
+            # --------------------------------------------------
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: horse_name
+# 🛠 ACTION: resolve runner name via betsdb.bets
+# 📆 PATCHED: 2026-04-07
+#
+# PURPOSE
+# -------
+# bf_cleared_orders does not contain horse_name.
+# Horse names must be resolved through betsdb.bets.
+# Ensures 1 row per market with correct display name.
+# ==============================================================================
+
+            settled_rows = con.execute("""
+                SELECT
+                    o.marketId,
+                    b.horse_name,
+                    SUM(o.profit) AS pnl
+                FROM setdb.bf_cleared_orders o
+                LEFT JOIN betsdb.bets b
+                    ON b.marketId = o.marketId
+                    AND b.selectionId = o.selectionId
+                WHERE date(replace(o.settledDate,'Z','')) = date('now','utc')
+                GROUP BY o.marketId
+                ORDER BY pnl DESC
+                LIMIT 5
+            """).fetchall()
+
+# === PATCH END ==============================================================
+
+            # clear exposure grid
             for w in self.live_exposure_grid.winfo_children():
                 w.destroy()
 
-            if runner_rows:
+            for i, r in enumerate(settled_rows):
 
-                # -------------------------
-                # Sort winners / losers
-                # -------------------------
+                card = ttk.Frame(self.live_exposure_grid, padding=8, relief="ridge")
+                card.grid(row=i, column=0, padx=4, pady=4, sticky="ew")
 
-                winners = sorted(
-                    runner_rows,
-                    key=lambda r: float(r["pnl_if_win"]),
-                    reverse=True
-                )[:5]
+                pnl = float(r["pnl"] or 0)
 
-                losers = sorted(
-                    runner_rows,
-                    key=lambda r: float(r["pnl_if_win"])
-                )[:5]
+                ttk.Label(
+                    card,
+                    text=_short(r["horse_name"]),
+                    font=("TkDefaultFont",9,"bold")
+                ).pack(anchor="w")
 
-                # -------------------------
-                # WINNERS
-                # -------------------------
+                ttk.Label(
+                    card,
+                    text=f"£{pnl:.2f}",
+                    foreground="#2ecc71" if pnl > 0 else "#e74c3c"
+                ).pack(anchor="w")
 
-                for i, r in enumerate(winners):
-
-                    card = ttk.Frame(self.pnl_today_grid, padding=8, relief="ridge")
-                    card.grid(row=i, column=0, padx=4, pady=4, sticky="ew")
-
-                    ttk.Label(
-                        card,
-                        text=r["horse_name"],
-                        font=("TkDefaultFont",9,"bold")
-                    ).pack(anchor="w")
-
-                    ttk.Label(
-                        card,
-                        text=f"£{float(r['pnl_if_win']):.2f}",
-                        foreground="#2ecc71"
-                    ).pack(anchor="w")
-
-                # -------------------------
-                # LOSERS
-                # -------------------------
-
-                for i, r in enumerate(losers):
-
-                    card = ttk.Frame(self.pnl_today_grid, padding=8, relief="ridge")
-                    card.grid(row=i, column=1, padx=4, pady=4, sticky="ew")
-
-                    ttk.Label(
-                        card,
-                        text=r["horse_name"],
-                        font=("TkDefaultFont",9,"bold")
-                    ).pack(anchor="w")
-
-                    ttk.Label(
-                        card,
-                        text=f"£{float(r['pnl_if_win']):.2f}",
-                        foreground="#e74c3c"
-                    ).pack(anchor="w")
-
-                # --------------------------------------------------
-                # LIVE EXPOSURE (next markets)
-                # --------------------------------------------------
-
-                potential_win = sorted(
-                    runner_rows,
-                    key=lambda r: float(r["pnl_if_win"]),
-                    reverse=True
-                )[:5]
-
-                potential_loss = sorted(
-                    runner_rows,
-                    key=lambda r: float(r["pnl_if_win"])
-                )[:5]
-
-                for i, r in enumerate(potential_win):
-
-                    card = ttk.Frame(self.live_exposure_grid, padding=8, relief="ridge")
-                    card.grid(row=i, column=0, padx=4, pady=4, sticky="ew")
-
-                    ttk.Label(
-                        card,
-                        text=r["horse_name"],
-                        font=("TkDefaultFont",9,"bold")
-                    ).pack(anchor="w")
-
-                    ttk.Label(
-                        card,
-                        text=f"£{float(r['pnl_if_win']):.2f}",
-                        foreground="#2ecc71"
-                    ).pack(anchor="w")
-
-                for i, r in enumerate(potential_loss):
-
-                    card = ttk.Frame(self.live_exposure_grid, padding=8, relief="ridge")
-                    card.grid(row=i, column=1, padx=4, pady=4, sticky="ew")
-
-                    ttk.Label(
-                        card,
-                        text=r["horse_name"],
-                        font=("TkDefaultFont",9,"bold")
-                    ).pack(anchor="w")
-
-                    ttk.Label(
-                        card,
-                        text=f"£{float(r['pnl_if_win']):.2f}",
-                        foreground="#e74c3c"
-                    ).pack(anchor="w")
+# === PATCH END ==============================================================
 
                 # --------------------------------------------------
                 # BUS tick synchronisation
                 # --------------------------------------------------
-                tick = row["tick_id"]
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: tick = row["tick_id"]
+# 🛠 ACTION: remove recursive refresh trigger (causes UI flicker)
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# Prevent multiple refresh loops stacking.
+# Dashboard refresh must be driven by a single scheduler only.
+# ==============================================================================
 
-                if tick != getattr(self, "_last_bus_tick", None):
-                    self._last_bus_tick = tick
-                    self.after(10, self._refresh_execution_intelligence)
+                # BUS tick stored only for state awareness
+                tick = row["tick_id"]
+                self._last_bus_tick = tick
+
+# === PATCH END ==============================================================
 
 
 # === PATCH START ==============================================================
@@ -1420,9 +1531,26 @@ class DashboardView(ttk.Frame):
 
                 rate = (routed / generated * 100.0) if generated else 0.0
 
-                self.bus_vars["fill"].set(
-                    f"Plans: {generated}  Routed: {routed}  Fill: {rate:.1f}%"
-                )
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: self.bus_vars["fill"].set(
+# 🛠 ACTION: remove legacy BUS fill update (replaced by compact BUS plans line)
+# 📆 PATCHED: 2026-04-07
+#
+# PURPOSE
+# -------
+# BUS UI redesign removed "fill" variable.
+# Legacy update causes KeyError.
+#
+# New UI uses:
+#   bus_vars["route_stop"]
+#   bus_vars["plans"]
+# ==============================================================================
+
+                # Legacy fill update removed
+                # (handled by compact BUS telemetry logic)
+
+# === PATCH END ==============================================================
 
             # ─────────────────────────────────────────
             # INPLAY SNAPSHOT (Unified Authority)
@@ -1935,7 +2063,7 @@ class DashboardView(ttk.Frame):
         except Exception:
             pass
 
-        self.after(500, self._refresh_execution_intelligence)
+        self.after(1200, self._refresh_execution_intelligence)
 
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
@@ -2387,23 +2515,124 @@ class DashboardView(ttk.Frame):
 
             report = None
 
-            try:
-                import json
-                report = json.loads(unified_row["report_json"])
-            except Exception:
-                report = None
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: report = json.loads(unified_row["report_json"])
+# 🛠 ACTION: Replace report_json telemetry with snapshot-driven signals
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# Bind Unified Engine Stats tiles directly to runtime snapshot tables.
+# Removes dependency on report_json.
+# Ensures dashboard is a pure snapshot viewer.
+# ==============================================================================
 
-
-
-            # configure responsive grid
-            for c in range(3):
-                self.bank_cards.columnconfigure(c, weight=1, uniform="col")
-
-            for r in range(2):
-                self.bank_cards.rowconfigure(r, weight=0)
+            # snapshot values
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: # snapshot values
+# 🛠 ACTION: derive unified telemetry from runtime snapshots
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# Ensure dashboard telemetry works even when Unified/BUS engines
+# are not running. Values are derived directly from snapshot tables.
+# ==============================================================================
 
             # --------------------------------------------------
-            # TIMING
+            # TIMING (markets today)
+            # --------------------------------------------------
+
+            timing_markets = con.execute("""
+                SELECT COUNT(DISTINCT marketId)
+                FROM betsdb.bets
+                WHERE date(marketStartTime) = date('now','utc')
+            """).fetchone()[0] or 0
+
+            # --------------------------------------------------
+            # VOLATILITY (recent px movement)
+            # --------------------------------------------------
+
+            volatility_moves = con.execute("""
+                SELECT COUNT(DISTINCT selectionId)
+                FROM bus_route_runtime_snapshot
+                WHERE ts >= datetime('now','-5 minute')
+            """).fetchone()[0] or 0
+
+            # --------------------------------------------------
+            # DRIFT (tracked runners)
+            # --------------------------------------------------
+
+            drift_runners = con.execute("""
+                SELECT COUNT(DISTINCT selectionId)
+                FROM bus_route_runtime_snapshot
+            """).fetchone()[0] or 0
+
+            # --------------------------------------------------
+            # SIGNAL INTEL / CANDIDATES
+            # --------------------------------------------------
+
+            candidates = con.execute("""
+                SELECT COUNT(*)
+                FROM market_monitor_snapshot
+                WHERE ts >= datetime('now','-5 minute')
+            """).fetchone()[0] or 0
+
+            # --------------------------------------------------
+            # INPLAY STATE
+            # --------------------------------------------------
+
+            inplay_active = con.execute("""
+                SELECT COUNT(DISTINCT marketId)
+                FROM betsdb.bets
+                WHERE datetime(replace(marketStartTime,'T',' '))
+                BETWEEN datetime('now','utc','-15 minute')
+                    AND datetime('now','utc')
+            """).fetchone()[0] or 0
+
+# === PATCH END ==============================================================
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: # snapshot values
+# 🛠 ACTION: Ensure pnl_rows defined before layout render
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# pnl_rows must exist before the Unified layout block uses it.
+# This prevents:
+#   UnboundLocalError: pnl_rows referenced before assignment
+#
+# SOURCE
+# ------
+# Engine field lives in orders table, not bets.
+# ==============================================================================
+
+            pnl_rows = con.execute("""
+                SELECT
+                    o.engine,
+                    SUM(c.profit) AS pnl
+                FROM orders o
+                LEFT JOIN setdb.bf_cleared_orders c
+                    ON c.marketId = o.marketId
+                   AND c.selectionId = o.selectionId
+                WHERE date(replace(c.settledDate,'Z','')) = date('now','utc')
+                  AND o.role = 'PARENT'
+                GROUP BY o.engine
+                ORDER BY pnl DESC
+            """).fetchall()
+
+# === PATCH END ==============================================================
+
+            # derive PRE / INPLAY / DONE
+            pre_markets = max(timing_markets - inplay_active, 0)
+            done_markets = 0  # can be expanded later with completion snapshot
+
+            # --------------------------------------------------
+            # TIMING TILE
             # --------------------------------------------------
 
             timing_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
@@ -2415,103 +2644,267 @@ class DashboardView(ttk.Frame):
                 font=("TkDefaultFont",10,"bold")
             ).pack(anchor="w")
 
-            markets = report.get("timing", {}).get("markets", []) if report else []
             ttk.Label(
                 timing_card,
-                text=f"Markets tracked: {len(markets)}"
+                text=f"Markets tracked: {timing_markets}"
             ).pack(anchor="w")
 
             # --------------------------------------------------
-            # VOLATILITY
+            # VOLATILITY TILE
             # --------------------------------------------------
 
-            vol = report.get("volatility", {}) if report else {}
-
-            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=1, column=1, padx=8, pady=8, sticky="ew")
-
-            ttk.Label(card, text="🌊 VOLATILITY",
-                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
+            vol_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            vol_card.grid(row=1, column=1, padx=8, pady=8, sticky="ew")
 
             ttk.Label(
-                card,
-                text=f"Runners moved: {vol.get('runners_moved_last_window',0)}"
+                vol_card,
+                text="🌊 VOLATILITY",
+                font=("TkDefaultFont",10,"bold")
             ).pack(anchor="w")
 
             ttk.Label(
-                card,
-                text=f"Energy: {vol.get('structural_energy','LOW')}"
+                vol_card,
+                text=f"Runners moved: {volatility_moves}"
             ).pack(anchor="w")
 
             # --------------------------------------------------
-            # DRIFT
+            # DRIFT TILE
             # --------------------------------------------------
 
-            drift_rows = report.get("drift", {}).get("runners", []) if report else []
+            drift_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            drift_card.grid(row=2, column=1, padx=8, pady=8, sticky="ew")
 
-            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=2, column=1, padx=8, pady=8, sticky="ew")
+            ttk.Label(
+                drift_card,
+                text="📉 DRIFT",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
 
-            ttk.Label(card, text="📉 DRIFT",
-                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
-
-            ttk.Label(card, text=f"Runners tracked: {len(drift_rows)}").pack(anchor="w")
-
-            # --------------------------------------------------
-            # STRUCTURE
-            # --------------------------------------------------
-
-            sweet_rows = report.get("sweet_spot", {}).get("runners", []) if report else []
-
-            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=2, column=0, padx=8, pady=8, sticky="ew")
-
-            ttk.Label(card, text="🧠 STRUCTURE",
-                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
-
-            ttk.Label(card, text=f"Sweet spot runners: {len(sweet_rows)}").pack(anchor="w")
+            ttk.Label(
+                drift_card,
+                text=f"Runners tracked: {drift_runners}"
+            ).pack(anchor="w")
 
             # --------------------------------------------------
-            # SIGNAL INTELLIGENCE
+            # CANDIDATES TILE
             # --------------------------------------------------
 
-            layer2 = report.get("layer2", {}) if report else {}
+            cand_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            cand_card.grid(row=2, column=2, padx=8, pady=8, sticky="ew")
 
-            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=2, column=2, padx=8, pady=8, sticky="ew")
+            ttk.Label(
+                cand_card,
+                text="📊 SIGNAL INTEL",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
 
-            ttk.Label(card, text="📊 SIGNAL INTEL",
-                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
-
-            candidates = layer2.get("candidates", [])
-            ttk.Label(card, text=f"Candidates: {len(candidates)}").pack(anchor="w")
+            ttk.Label(
+                cand_card,
+                text=f"Candidates: {candidates}"
+            ).pack(anchor="w")
 
             # --------------------------------------------------
-            # P&L PER ENGINE
+            # INPLAY TILE
             # --------------------------------------------------
 
-            pnl_rows = con.execute("""
-                SELECT engine, used
-                FROM bankstate_engine_snapshot
-                WHERE ts = (
-                    SELECT MAX(ts)
-                    FROM bankstate_engine_snapshot
-                    WHERE date(ts)=date('now','utc')
-                )
-            """).fetchall()
+            inplay_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            inplay_card.grid(row=2, column=0, padx=8, pady=8, sticky="ew")
 
-            card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
+            ttk.Label(
+                inplay_card,
+                text="🔥 INPLAY",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
 
-            ttk.Label(card, text="💰 P&L PER ENGINE",
-                      font=("TkDefaultFont",10,"bold")).pack(anchor="w")
+            ttk.Label(inplay_card, text=f"PRE     : {pre_markets}").pack(anchor="w")
+            ttk.Label(inplay_card, text=f"INPLAY  : {inplay_active}").pack(anchor="w")
+            ttk.Label(inplay_card, text=f"DONE    : {done_markets}").pack(anchor="w")
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py
+# 🔎 SEARCH: configure responsive grid
+# 🛠 ACTION: Replace 3x2 Unified tiles with P&L + 6 signal layout
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# Layout change:
+#
+# BEFORE
+#   3 x 2 tile grid
+#
+# AFTER
+#   LEFT  : P&L PER ENGINE (full height)
+#   RIGHT : 6 signal tiles
+#           VOLATILITY
+#           TIMING
+#           DRIFT
+#           SIGNAL INTEL
+#           INPLAY
+#           CANDIDATES
+#
+# NOTE
+# ----
+# The sixth tile is now CANDIDATES.
+#
+# REPLACE FROM:
+#     # configure responsive grid
+#
+# UNTIL JUST BEFORE:
+#     # === PATCH END ==============================================================
+# ==============================================================================
+
+            # --------------------------------------------------
+            # LAYOUT GRID
+            # --------------------------------------------------
+
+            # column 0 → P&L block
+            # column 1-2 → signal tiles
+
+            self.bank_cards.columnconfigure(0, weight=2)
+            self.bank_cards.columnconfigure(1, weight=1)
+            self.bank_cards.columnconfigure(2, weight=1)
+
+            for r in range(3):
+                self.bank_cards.rowconfigure(r, weight=1)
+
+            # --------------------------------------------------
+            # P&L PER ENGINE (LEFT SIDE FULL HEIGHT)
+            # --------------------------------------------------
+
+            pnl_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            pnl_card.grid(row=1, column=0, rowspan=3, padx=8, pady=8, sticky="nsew")
+
+            ttk.Label(
+                pnl_card,
+                text="💰 P&L PER ENGINE",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
 
             for r in pnl_rows:
+
+                pnl = float(r["pnl"] or 0)
+
+                colour = "#2ecc71" if pnl > 0 else "#e74c3c"
+
                 ttk.Label(
-                    card,
-                    text=f"{r['engine']}   £{float(r['used'] or 0):.2f}"
+                    pnl_card,
+                    text=r["engine"],
+                    font=("TkDefaultFont",9,"bold")
                 ).pack(anchor="w")
 
+                ttk.Label(
+                    pnl_card,
+                    text=f"£{pnl:.2f}",
+                    foreground=colour
+                ).pack(anchor="w", pady=(0,6))
+
+            # --------------------------------------------------
+            # VOLATILITY TILE
+            # --------------------------------------------------
+
+            vol_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            vol_card.grid(row=1, column=1, padx=8, pady=8, sticky="ew")
+
+            ttk.Label(
+                vol_card,
+                text="🌊 VOLATILITY",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            ttk.Label(
+                vol_card,
+                text=f"Runners moved: {volatility_moves}"
+            ).pack(anchor="w")
+
+            # --------------------------------------------------
+            # TIMING TILE
+            # --------------------------------------------------
+
+            timing_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            timing_card.grid(row=1, column=2, padx=8, pady=8, sticky="ew")
+
+            ttk.Label(
+                timing_card,
+                text="⏱ TIMING",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            ttk.Label(
+                timing_card,
+                text=f"Markets tracked: {timing_markets}"
+            ).pack(anchor="w")
+
+            # --------------------------------------------------
+            # DRIFT TILE
+            # --------------------------------------------------
+
+            drift_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            drift_card.grid(row=2, column=1, padx=8, pady=8, sticky="ew")
+
+            ttk.Label(
+                drift_card,
+                text="📉 DRIFT",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            ttk.Label(
+                drift_card,
+                text=f"Runners tracked: {drift_runners}"
+            ).pack(anchor="w")
+
+            # --------------------------------------------------
+            # SIGNAL INTEL TILE
+            # --------------------------------------------------
+
+            signal_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            signal_card.grid(row=2, column=2, padx=8, pady=8, sticky="ew")
+
+            ttk.Label(
+                signal_card,
+                text="📊 SIGNAL INTEL",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            ttk.Label(
+                signal_card,
+                text=f"Candidates: {candidates}"
+            ).pack(anchor="w")
+
+            # --------------------------------------------------
+            # INPLAY TILE
+            # --------------------------------------------------
+
+            inplay_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            inplay_card.grid(row=3, column=1, padx=8, pady=8, sticky="ew")
+
+            ttk.Label(
+                inplay_card,
+                text="🔥 INPLAY",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            ttk.Label(inplay_card, text=f"PRE     : {pre_markets}").pack(anchor="w")
+            ttk.Label(inplay_card, text=f"INPLAY  : {inplay_active}").pack(anchor="w")
+            ttk.Label(inplay_card, text=f"DONE    : {done_markets}").pack(anchor="w")
+
+            # --------------------------------------------------
+            # CANDIDATES TILE (6TH TILE)
+            # --------------------------------------------------
+
+            cand_card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
+            cand_card.grid(row=3, column=2, padx=8, pady=8, sticky="ew")
+
+            ttk.Label(
+                cand_card,
+                text="🎯 CANDIDATES",
+                font=("TkDefaultFont",10,"bold")
+            ).pack(anchor="w")
+
+            ttk.Label(
+                cand_card,
+                text=f"Active candidates: {candidates}"
+            ).pack(anchor="w")
 
         if not rows:
             ttk.Label(
@@ -2541,7 +2934,7 @@ class DashboardView(ttk.Frame):
         # ===
 
         engine_header = ttk.Frame(self.bank_cards, padding=8, relief="ridge")
-        engine_header.grid(row=3, column=0, columnspan=3, padx=8, pady=(4,6), sticky="ew")
+        engine_header.grid(row=4, column=0, columnspan=3, padx=8, pady=(4,6), sticky="ew")
 
         ttk.Label(
             engine_header,
@@ -2552,6 +2945,37 @@ class DashboardView(ttk.Frame):
         # === PATCH END ===
 
         for i, r in enumerate(rows[:6]):
+
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+# 🔎 SEARCH: for i, r in enumerate(rows[:6]):
+# 🛠 ACTION: enforce stable engine ordering (UNIFIED → BLUEPRINT → others)
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE
+# -------
+# Ensure Engine Pot cards always render in deterministic order:
+#
+# 1. MSC_UNIFIED
+# 2. MSC_BLUEPRINT
+# 3. Any additional engines (future-proof)
+#
+# Prevents layout shifting when new engines are added.
+# ==============================================================================
+
+        priority = {
+            "MSC_UNIFIED": 0,
+            "MSC_BLUEPRINT": 1,
+        }
+
+        rows_sorted = sorted(
+            rows,
+            key=lambda r: priority.get(r["engine"], 100)
+        )
+
+        for i, r in enumerate(rows_sorted[:6]):
+
+# === PATCH END ==============================================================
 
             engine = r["engine"]
             pot = float(r["pot"] or 0)
@@ -2570,7 +2994,7 @@ class DashboardView(ttk.Frame):
                 icon = ""
 
             card = ttk.Frame(self.bank_cards, padding=12, relief="ridge")
-            card.grid(row=(i // 3) + 4, column=i % 3, padx=8, pady=8, sticky="nsew")
+            card.grid(row=(i // 3) + 5, column=i % 3, padx=8, pady=8, sticky="nsew")
 
             ttk.Label(
                 card,
@@ -2601,6 +3025,7 @@ class DashboardView(ttk.Frame):
 
     def _start_loops(self):
         self.after(200, self._refresh_kpis)
+        self.after(5000, self._settlements_loop)
 
 # === PATCH START ===
 # 📍 TARGET: gui/dashboard.py
