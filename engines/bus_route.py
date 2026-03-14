@@ -27,8 +27,8 @@ _session.mount("http://", _adapter)
 # BUS ROUTE CONFIG (LOCKED)
 # ============================================================
 
-PLANS_PER_TICK = 85
-CYCLE_SIZE = 850          # parents per full cycle
+PLANS_PER_TICK = 170
+CYCLE_SIZE = 1700          # parents per full cycle
 TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
@@ -38,7 +38,8 @@ ROUTE_SPLIT = {
     "MSC_INPLAY": 0,
     "MSC_EXPLORATORY": 0,
     "OVERWATCHER": 0,
-    "MSC_UNIFIED": 85, 
+    "MSC_UNIFIED": 85,
+    "MSC_BLUEPRINT": 85, 
 }
 
 def _order_runner_pool_by_market_time(pairs):
@@ -531,6 +532,41 @@ class BusRouteSnapshot:
                 # BUILD FULL STATIC CTX (ONCE PER ROUTE)
                 # --------------------------------------------------
                 ctx, _ = build_context_for_runner(mid, sid, source="LIVE")
+
+                meta_json = ctx.get("meta_json")
+
+                surface = "flat_unknown_other"
+
+                try:
+                    if meta_json:
+                        meta = json.loads(meta_json)
+
+                        race_type = meta.get("race_type")
+                        distance  = meta.get("distance")
+                        handicap  = meta.get("handicap")
+
+                        if race_type == "jumps":
+                            base = "jumps"
+                        else:
+                            base = "flat"
+
+                        if distance is None:
+                           dist = "unknown"
+                        elif float(distance) <= 1600:
+                            dist = "sprint"
+                        elif float(distance) <= 2400:
+                            dist = "middle"
+                        else:
+                            dist = "stayer"
+
+                        cat = "handicap" if handicap else "other"
+
+                        surface = f"{base}_{dist}_{cat}"
+
+                except Exception:
+                    pass
+
+                ctx["blueprint_surface"] = surface
 
                 # Inject MarketMonitor band (authoritative)
                 st = get_market_state(mid) or {}

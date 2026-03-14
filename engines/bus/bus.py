@@ -229,8 +229,8 @@ class CadenceController:
         self.window_seconds   = 60
         self.tick_seconds     = 3
         self.ticks_per_window = 10
-        self.plans_per_window = 1200
-        self.plans_per_tick   = 120
+        self.plans_per_window = 2400
+        self.plans_per_tick   = 240
 
         # State
         self.window_start_ts = time.time()
@@ -1093,6 +1093,80 @@ class DecisionBus:
 
         except Exception as e:
             _record_reason(engine_report, "MSC_UNIFIED", f"tick_error:{e}")
+
+        return plans
+
+    # ==================================================
+    # 🟪 LANE 8 — MSC_BLUEPRINT (SIGNAL ENGINE)
+    # ==================================================
+    def _lane8_msc_blueprint(self, base_ctx, engine_report):
+        """
+        Unified signal lane.
+        Tick-level engine.
+        Phase 0: report-only (no plan emission).
+        """
+
+        plans = []
+
+        unified = self.engines.get("MSC_BLUEPRINT")
+        if not unified:
+            return plans
+
+        try:
+            ctx_unified = dict(base_ctx)
+            ctx_unified["_route_ctx_map"] = self._route_ctx_map
+            ctx_unified["_route_snapshot"] = self._route_snapshot   # <-- ADD THIS
+
+            result = unified.tick(ctx_unified)
+
+            engine_report["MSC_BLUEPRINT"]["evaluated"] = True
+
+            # --------------------------------------------------
+            # WHY RECORDING (STRUCTURED)
+            # --------------------------------------------------
+            why = result.get("why")
+            if why:
+                _record_reason(engine_report, "MSC_BLUEPRINT", why)
+
+            # --------------------------------------------------
+            # SIGNAL COUNT RECORDING (Y TABLE)
+            # --------------------------------------------------
+            signals = result.get("signals") or {}
+
+            for key, value in signals.items():
+                if value:
+                    _record_reason(
+                        engine_report,
+                        "MSC_BLUEPRINT",
+                        f"signal_{key}"
+                    )
+
+            # --------------------------------------------------
+            # BATCH SUPPORT (REQUIRED)
+            # --------------------------------------------------
+
+            if result.get("batch") and isinstance(result.get("plans"), list):
+
+                for p in result["plans"]:
+                    plan = dict(p)
+                    plan["engine"] = "MSC_BLUEPRINT"
+
+                    plans.append(("MSC_BLUEPRINT", plan, base_ctx))
+                    engine_report["MSC_BLUEPRINT"]["fired"] += 1
+
+            elif result.get("enter"):
+
+                result["engine"] = "MSC_BLUEPRINT"
+                plans.append(("MSC_BLUEPRINT", result, base_ctx))
+                engine_report["MSC_BLUEPRINT"]["fired"] += 1
+
+            # --------------------------------------------------
+            # PLAN (PHASE 0 = NONE)
+            # --------------------------------------------------
+
+
+        except Exception as e:
+            _record_reason(engine_report, "MSC_BLUEPRINT", f"tick_error:{e}")
 
         return plans
 
@@ -3281,7 +3355,14 @@ class DecisionBus:
             generated_plans.extend(lane7_plans)
             lane_counts[7] += len(lane7_plans)
 
+        # ==================================================
+        # 🟪 LANE 8 — MSC_BLUEPRINT (ENGINE-STYLE)
+        # ==================================================
+        lane8_plans = self._lane8_msc_blueprint(base_ctx, engine_report)
 
+        if lane8_plans:
+            generated_plans.extend(lane8_plans)
+            lane_counts[8] += len(lane8_plans)
 
         # --------------------------------------------------
         # STOPLOSS VISIBILITY — DIAGNOSTIC ONLY
@@ -3382,6 +3463,8 @@ class DecisionBus:
             "MSC_INPLAY": set(),        # (mid, sid)
             "MSC_EXPLORATORY": set(),   # (mid, sid)
             "OVERWATCHER": set(),       # (mid, sid)
+            "MSC_UNIFIED": set(),       # (mid, sid)
+            "MSC_BLUEPRINT": set(),     # (mid, sid)
         }
 
         slotted_plans = []
@@ -4243,6 +4326,7 @@ class DecisionBus:
             print(f"  Lane 5 (OVERWATCHER)    : {lane_counts[5]}")
             print(f"  Lane 6 (DB CORRECTNESS) : {lane_counts[6]}")
             print(f"  Lane 7 (MSC_UNIFIED)    : {lane_counts[7]}")
+            print(f"  Lane 8 (MSC_BLUEPRINT)  : {lane_counts[8]}")
 
             if "dup_blocked_by_engine" in tick_ctx:
                 print("\nDUPLICATES BLOCKED")

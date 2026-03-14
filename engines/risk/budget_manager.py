@@ -36,6 +36,7 @@ _alloc_lock = threading.Lock()
 # ----------------------------------------------------------------------
 ENGINES = [
     "MSC_UNIFIED",
+    "MSC_BLUEPRINT",
     "LEGACY",
     "MSC_EXPLORATORY",
     "MSC_RISK",
@@ -46,7 +47,8 @@ ENGINES = [
 
 # Baseline allocations (start-of-day percentages)
 BASELINE_PCT = {
-    "MSC_UNIFIED":     0.92,  # New Primary engine (new dominant allocation)     
+    "MSC_UNIFIED":     0.46,  # New Primary engine (new dominant allocation)
+    "MSC_BLUEPRINT":   0.46,  # 1 0f 4 New Split test engine (new dominant allocation)      
     "MSC_RISK":        0.00,  # Primary engine (dominant allocation)
     "LEGACY":          0.00,  # Anchors only
     "MSC_EXPLORATORY": 0.00,  # Reduced exploratory bleed
@@ -59,6 +61,7 @@ BASELINE_PCT = {
 # Hard floors (minimum operational runway)
 FLOOR_PCT = {
     "MSC_UNIFIED":     0.30,
+    "MSC_BLUEPRINT":     0.30,
     "MSC_RISK":        0.00,
     "LEGACY":          0.00,
     "MSC_EXPLORATORY": 0.00,
