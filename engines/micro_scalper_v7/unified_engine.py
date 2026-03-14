@@ -1198,10 +1198,16 @@ class UnifiedEngine:
 
             key = (str(r["marketId"]), str(r["selectionId"]))
 
+            px = r["px"]
+
+            # Ignore snapshot rows from finished markets
+            if px is None:
+                continue
+
             world[key] = {
                 "marketId": str(r["marketId"]),
                 "selectionId": str(r["selectionId"]),
-                "px": r["px"],
+                "px": px,
                 "back": r["back"],
                 "lay": r["lay"],
                 "band": r["band"],
@@ -1274,15 +1280,67 @@ class UnifiedEngine:
 # Unified report can run independently from snapshots.
 # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report
+# 🔎 SEARCH: route_ctx = ctx.get("_route_ctx_map")
+# 🧩 ACTION: REPLACE — BUS world request + snapshot fallback
+# 📆 PATCHED: 2026-03-14 — unified standalone world recovery
+#
+# PURPOSE
+# -------
+# Unified must always see the runner world.
+#
+# WORLD PRIORITY
+# --------------
+# 1️⃣ BUS injected ctx_map
+# 2️⃣ Existing bus_route snapshot
+# 3️⃣ Trigger bus_route rebuild → read snapshot
+#
+# IMPORTANT
+# ---------
+# Unified NEVER builds the world.
+# Only bus_route is allowed to build snapshots.
+# ======================================================================================================
+
         route_ctx = ctx.get("_route_ctx_map")
 
+        # --------------------------------------------------
+        # 1️⃣ LIVE MODE — BUS world
+        # --------------------------------------------------
+
         if isinstance(route_ctx, dict) and route_ctx:
+
             self._route_ctx_map = route_ctx
+
         else:
+
+            # --------------------------------------------------
+            # 2️⃣ Snapshot world
+            # --------------------------------------------------
+
             try:
-                self._route_ctx_map = self._read_route_world()
+                world = self._read_route_world()
+
+                if world:
+                    self._route_ctx_map = world
+                else:
+                    raise RuntimeError("snapshot empty")
+
             except Exception:
-                self._route_ctx_map = {}
+
+                # --------------------------------------------------
+                # 3️⃣ Force bus_route rebuild
+                # --------------------------------------------------
+
+                try:
+                    print("[UNIFIED] requesting bus_route snapshot rebuild")
+
+                    build_bus_route_tick()
+
+                    self._route_ctx_map = self._read_route_world()
+
+                except Exception:
+                    self._route_ctx_map = {}
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -1327,7 +1385,7 @@ class UnifiedEngine:
             # ─────────────────────────────────────────
             # LAYER 1 — STRUCTURAL VISIBILITY
             # ─────────────────────────────────────────
-            "timing": self._build_timing_surface(),
+            "timing": timing_surface,
             "drift": self._build_drift_surface(),
             "rank": self._build_rank_surface(),
             "sweet_spot": self._build_sweet_spot_surface(),
@@ -1528,7 +1586,8 @@ class UnifiedEngine:
             rows = con.execute("""
                 SELECT DISTINCT marketId, event_name, marketStartTime
                 FROM bets
-                WHERE substr(marketStartTime,1,10)=date('now','utc')
+                WHERE datetime(marketStartTime) >= datetime('now','utc')
+                  AND date(marketStartTime) = date('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
 
             """).fetchall()
@@ -2597,7 +2656,7 @@ class UnifiedEngine:
         LONG_BUCKET_EXTRA = 1   # ← toggle here
 
 
-        core = candidates[:BASE_EXPLORATORY]
+  
 
         # --------------------------------------------------
         # Core top candidates
@@ -2698,6 +2757,51 @@ class UnifiedEngine:
         rank_map  = {(r["marketId"], r["selectionId"]): r for r in rank}
 
         candidates = []
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: candidates = []
+# 🧩 ACTION: ADD — Layer2 diagnostic print
+# 📆 PATCHED: 2026-03-14 — Unified signal pipeline diagnostics
+#
+# PURPOSE
+# -------
+# Diagnose why Layer2 candidates are empty when running standalone or live.
+#
+# This prints the sizes of all upstream signal surfaces so we can identify
+# where the signal pipeline breaks:
+#
+#   WORLD → DRIFT → RANK → SWEET → LAYER2
+#
+# EXPECTED BEHAVIOUR
+# ------------------
+# If BUS + MarketMonitor are running we should see:
+#
+#   WORLD > 0
+#   DRIFT > 0
+#   RANK > 0
+#   SWEET > 0
+#   CANDIDATES > 0
+#
+# If any layer is zero we immediately know where the break occurs.
+# ======================================================================================================
+
+        try:
+            world_size = len(getattr(self, "_route_ctx_map", {}))
+            drift_size = len(drift)
+            rank_size  = len(rank)
+            sweet_size = len(sweet)
+
+            print(
+                "[UNIFIED DEBUG] "
+                f"WORLD={world_size} "
+                f"DRIFT={drift_size} "
+                f"RANK={rank_size} "
+                f"SWEET={sweet_size}"
+            )
+
+        except Exception:
+            pass
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_layer2_surface
