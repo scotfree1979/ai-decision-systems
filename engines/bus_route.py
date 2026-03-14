@@ -146,12 +146,10 @@ def _filter_valid_markets(
     try:
         rows = con.execute(
             """
-            SELECT
-                marketId,
-                marketStartTime
+            SELECT DISTINCT marketId
             FROM bets
-            WHERE date(marketStartTime) = date('now','utc')
-              AND julianday(marketStartTime) >= julianday('now','utc') - (15.0 / 1440.0)
+            WHERE
+                datetime(marketStartTime) >= datetime('now','utc','-120 minutes')
             ORDER BY datetime(marketStartTime) ASC
             """
         ).fetchall()
@@ -237,43 +235,19 @@ def _rotate_from_market(pairs, anchor_mid):
 # - CTX/PX completeness guaranteed
 # ======================================================================================================
 
-def _build_runner_pool():
+def _build_runner_pool(markets):
     """
-    Canonical runner pool.
-
-    INVARIANT:
-    runner_pool contains ALL runners for all markets remaining today,
-    ordered by marketStartTime, with runners contiguous per market.
+    Canonical runner pool built from supplied markets.
     """
-
-    from engines.config_paths import connect_db
-    import sqlite3
-
-    con = connect_db(ro=True)
-    con.row_factory = sqlite3.Row
-
-    try:
-        rows = con.execute(
-            """
-            SELECT DISTINCT marketId
-            FROM bets
-            WHERE date(marketStartTime) = date('now','utc')
-    
-            ORDER BY datetime(marketStartTime) ASC
-            """
-        ).fetchall()
-    finally:
-        con.close()
 
     pairs = []
 
-    for r in rows:
-        mid = str(r["marketId"])
+    for mid in markets:
         st = get_market_state(mid) or {}
         runners = st.get("runners") or {}
 
         for sid in runners.keys():
-            pairs.append((mid, str(sid)))
+            pairs.append((str(mid), str(sid)))
 
     return _order_runner_pool_by_market_time(pairs)
 
@@ -362,6 +336,24 @@ class BusRouteSnapshot:
         # Finished markets remain in the route but will
         # simply stop producing signals.
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def build_route(
+# 🧩 ACTION: REPLACE WORLD MARKET BUILD
+# 📆 PATCHED: 2026-03-14 — Introduce WORLD BUILD (all remaining markets today)
+#
+# PURPOSE
+# -------
+# Build the full trading universe for the day.
+#
+# RULE
+# ----
+# WORLD markets = all markets today where
+# marketStartTime >= now
+#
+# ROOT markets will be derived separately.
+# ======================================================================================================
+
         con = connect_db(ro=True)
         con.row_factory = sqlite3.Row
 
@@ -381,22 +373,76 @@ class BusRouteSnapshot:
                     marketStartTime
                 FROM runner_counts
                 WHERE runner_count >= 6
+                  AND datetime(marketStartTime) >= datetime('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
             """).fetchall()
         finally:
             con.close()
 
+        self._world_markets = [r["marketId"] for r in rows]
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 ANCHOR: immediately after world market build
+# 🧩 ACTION: ADD ROOT BUILD (next 5 markets)
+# 📆 PATCHED: 2026-03-14 — Cadence root window
+#
+# PURPOSE
+# -------
+# BUS cadence operates on the next 5 markets only.
+# Engines still see the full world.
+# ======================================================================================================
+
+        ROOT_MARKET_COUNT = 5
+
+        self._root_markets = self._world_markets[:ROOT_MARKET_COUNT]
+
         if not rows:
             self.runner_pool = []
             return
 
-        selected_mids = [str(r["marketId"]) for r in rows]
+    
 
         # --------------------------------------------------
         # Build ordered runner pool
         # --------------------------------------------------
 
-        self.runner_pool = _build_runner_pool()
+        self.runner_pool = _build_runner_pool(self._world_markets)
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: self.runner_pool = _build_runner_pool()
+# 🧩 ACTION: INSERT BELOW
+# 📆 PATCHED: 2026-03-14 — Route anchor rotation (start snapshot from NOW)
+#
+# PURPOSE
+# -------
+# Ensure route identity begins from the market closest to the current time.
+#
+# WHY
+# ---
+# Without this rotation the route starts from the first race of the day,
+# which causes the initial snapshot to evaluate already-finished markets.
+#
+# DESIGN
+# ------
+# • 120-minute rule remains unchanged
+# • Market ordering remains chronological
+# • Only the starting index changes
+#
+# RESULT
+# ------
+# Route snapshot always begins from the live part of the day.
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # Rotate runner pool to anchor market (closest to NOW)
+        # --------------------------------------------------
+
+        anchor_mid = _get_current_anchor_market()
+
+        if anchor_mid:
+            self.runner_pool = _rotate_from_market(self.runner_pool, anchor_mid)
 
         # --------------------------------------------------
         # EXECUTION WINDOW — FIRST 5 MARKETS ONLY
@@ -451,7 +497,14 @@ class BusRouteSnapshot:
         # FULL RUNNER POOL
         # --------------------------------------------------
 
-        self.runner_pool = list(set(root_pairs) | helper_pairs)
+        # Preserve deterministic ordering
+        ordered = list(root_pairs)
+
+        for p in helper_pairs:
+            if p not in ordered:
+                ordered.append(p)
+
+        self.runner_pool = ordered
 
         # --------------------------------------------------
         # BUS STOPS BUILT ONLY FROM ROOT
@@ -1498,7 +1551,25 @@ def build_bus_route_tick(rotation: RunnerRotation):
         or os.getenv("BETFAIR_SESSION_TOKEN")
     )
 
-    pool = _build_runner_pool()
+    # --------------------------------------------------
+    # WORLD RUNNER POOL (authoritative)
+    # --------------------------------------------------
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute("""
+            SELECT DISTINCT marketId
+            FROM bets
+            WHERE datetime(marketStartTime) >= datetime('now','utc')
+            ORDER BY datetime(marketStartTime) ASC
+        """).fetchall()
+    finally:
+        con.close()
+
+    world_markets = [str(r["marketId"]) for r in rows]
+
+    pool = _build_runner_pool(world_markets)
+
     if not pool:
         return []
 

@@ -744,7 +744,13 @@ class DecisionBus:
         snapshot = self._route_snapshot
 
         runner_pool = set(snapshot.get_all_runners() or [])
-        mids = sorted({mid for (mid, _sid) in runner_pool})
+        mids = []
+        seen = set()
+
+        for mid, _sid in snapshot.get_all_runners() or []:
+            if mid not in seen:
+               mids.append(mid)
+               seen.add(mid)
 
         bus_stops = snapshot.bus_stops or {}
         stop_sizes = [len(v) for v in bus_stops.values()] if bus_stops else []
@@ -3780,16 +3786,7 @@ class DecisionBus:
                     engine=engine,
                     ctx=ctx,
                 )
-                # --------------------------------------------------
-                # LEGACY + FALLBACK — envelope-based dynamic stake
-                # --------------------------------------------------
-                else:
-                    from engines.math.dynamic_stake_v7 import compute_dynamic_stake
 
-                    raw_stake = compute_dynamic_stake(
-                        engine=engine,
-                        ctx=ctx,
-                    )
 
 
                 # --------------------------------------------------
@@ -4335,10 +4332,15 @@ class DecisionBus:
 
             print("ENGINE SUMMARY")
             print("────────────────────────────────────────────────────────")
+
             for eng, r in engine_report.items():
+
+                fired = r.get("fired", 0)
                 reasons = r.get("reasons", {})
-                if r["fired"] > 0:
-                    print(f"{eng:<16}: FIRED ({r['fired']} plans)")
+
+                if fired > 0:
+                     print(f"{eng:<16}: FIRED ({fired} plans)")
+
                 elif reasons:
                     rs = ", ".join(f"{k}={v}" for k, v in reasons.items())
                     print(f"{eng:<16}: NO-FIRE [{rs}]")
