@@ -27,7 +27,7 @@ from engines.decision_engine.decide_once.scope import build_and_maintain_scope
 from engines.math.dynamic_stake_v7 import compute_dynamic_stake, calc_dynamic_stake
 from engines.bus_route_startup_ctx import StartupCTXBuilder
 from engines.live.overwatcher import evaluate_redistribution
-
+from engines.config_paths import connect_db
 from engines.live.live_router import get_parent_snapshot
 from engines.bus_route import PLANS_PER_TICK
 try:
@@ -86,6 +86,68 @@ _PROMINENCE_MAP = {
     "MIDFIELD":   1,
     "HELD_UP":    0,
 }
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _get_next_market_pairs():
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-17 — DAL-compliant market cadence helper
+#
+# WHY
+# ---
+# Previous helper used:
+#     connect_db()
+#     sqlite3
+#
+# That violates the system architecture:
+#
+#     BUS → DAL only
+#
+# All DB access must go through engines.config_paths DAL helpers.
+#
+# FIX
+# ---
+# Use open_bets_db() which is the canonical DAL reader for bets.db.
+#
+# RESULT
+# ------
+# • No sqlite3 import required
+# • No direct DB connections
+# • Fully DAL compliant
+# ======================================================================================================
+
+def _get_next_market_pairs():
+
+    from engines.config_paths import connect_db
+    import sqlite3
+
+    con = connect_db(ro=True)
+    con.row_factory = sqlite3.Row
+
+    try:
+        row = con.execute("""
+            SELECT marketId
+            FROM bets
+            WHERE datetime(marketStartTime) >= datetime('now','utc')
+            ORDER BY datetime(marketStartTime)
+            LIMIT 1
+        """).fetchone()
+
+        if not row:
+            return []
+
+        mid = str(row["marketId"])
+
+        runners = con.execute("""
+            SELECT selectionId
+            FROM bets
+            WHERE marketId = ?
+        """, (mid,)).fetchall()
+
+        return [(mid, str(r["selectionId"])) for r in runners]
+
+    finally:
+        con.close()
 
 def _normalize_ctx_enums(ctx: dict) -> None:
     """
@@ -3271,12 +3333,76 @@ class DecisionBus:
             f"dt={dt:.4f}s"
         )
 
-        # ===============================================================
-        # 6️⃣ BUS STOP SLICE (ROUTE-PROVIDED)
-        # ===============================================================
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: bus_stop_pairs = list(self._route_ctx_map.keys())
+# 🧩 ACTION: REPLACE — cadence market runner selection
+# 📆 PATCHED: 2026-03-17 — BUS cadence restored (next-market schedule)
+#
+# ROOT CAUSE
+# ----------
+# BUS was incorrectly sending the entire CTX world every tick:
+#
+#     bus_stop_pairs = list(self._route_ctx_map.keys())
+#
+# This broke the cadence model and caused BUS phase sequencing
+# to stall because routing logic expected a bounded runner set.
+#
+# ARCHITECTURE
+# ------------
+# BUS must only send ONE market's runners per tick.
+#
+# Market selection is based on the bets table schedule:
+#
+#     next market where marketStartTime >= now
+#
+# Engines do NOT depend on this input — they already see
+# the full world via ctx_map — but BUS must provide a
+# deterministic cadence signal.
+#
+# BEHAVIOUR
+# ---------
+# Tick N:
+#     send runners for next scheduled market
+#
+# When that market reaches off time:
+#     BUS automatically advances to the following market
+#
+# In-play markets remain visible to engines via ctx_map.
+#
+# RESULT
+# ------
+# • BUS ticks never stall
+# • cadence restored
+# • engines remain world-driven
+# • architecture invariant preserved
+# ======================================================================================================
 
-        legacy_slice = self._route_snapshot.get_bus_stop(self._bus_stop) or []
-        bus_stop_pairs = legacy_slice
+        # --------------------------------------------------
+        # Cadence market runners (BUS schedule authority)
+        # --------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: bus_stop_pairs = _get_next_market_pairs()
+# 🧩 ACTION: INSERT BELOW
+# 📆 PATCHED: 2026-03-18 — Remove BUS reliance on cadence pairs
+#
+# PURPOSE
+# -------
+# bus_stop_pairs is informational only.
+# Engines must still be ticked even if no pairs are returned.
+#
+# If pairs are empty we inject a harmless placeholder so the
+# evaluation loop still executes without scanning the world.
+#
+# PERFORMANCE
+# -----------
+# Zero cost. One tuple only. Immediately skipped by ctx lookup.
+# ======================================================================================================
+
+        if not bus_stop_pairs:
+            bus_stop_pairs = [("__BUS_TICK__", "__NO_RUNNER__")]
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py

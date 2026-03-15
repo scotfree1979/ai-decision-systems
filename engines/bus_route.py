@@ -444,75 +444,19 @@ class BusRouteSnapshot:
         if anchor_mid:
             self.runner_pool = _rotate_from_market(self.runner_pool, anchor_mid)
 
-        # --------------------------------------------------
-        # EXECUTION WINDOW — FIRST 5 MARKETS ONLY
-        # --------------------------------------------------
+        # ==========================================================
+        # WORLD RUNNER POOL (ALL MARKETS)
+        # ==========================================================
 
-        window_mids = []
-        window_pairs = []
+        # runner_pool already contains every runner from every market
+        # Nothing should ever be removed from it.
 
-        session_token = (
-            os.getenv("SESSION_TOKEN")
-            or os.getenv("BETFAIR_SESSION_TOKEN")
+
+        print(
+            f"[BUS][WORLD] markets={len(self._world_markets)} "
+            f"runners={len(self.runner_pool)}"
+            f"ctx={len(self.ctx_map)}"
         )
-
-        legacy_parents = get_legacy_parent_odds_snapshot(
-            session_token=session_token
-        )
-
-        legacy_parent_by_runner = {
-            (str(p["marketId"]), str(p["selectionId"])): p
-            for p in legacy_parents
-        }
-
-        for mid, sid in self.runner_pool:
-
-            if mid not in window_mids:
-                if len(window_mids) >= 5:
-                    break
-                window_mids.append(mid)
-
-            window_pairs.append((mid, sid))
-
-        # --------------------------------------------------
-        # EXECUTION WINDOW (ROOT)
-        # --------------------------------------------------
-
-        root_pairs = window_pairs
-
-        # --------------------------------------------------
-        # HELPER RUNNERS (already traded)
-        # --------------------------------------------------
-
-        helper_pairs = set()
-
-        for mid, sid, *_ in get_risk_legacy_parent_pairs():
-            helper_pairs.add((str(mid), str(sid)))
-
-        helper_pairs |= get_exploratory_active_parent_pairs()
-        helper_pairs |= get_inplay_parent_runner_pairs()
-        helper_pairs |= set(get_stoploss_parent_pairs())
-
-        # --------------------------------------------------
-        # FULL RUNNER POOL
-        # --------------------------------------------------
-
-        # Preserve deterministic ordering
-        ordered = list(root_pairs)
-
-        for p in helper_pairs:
-            if p not in ordered:
-                ordered.append(p)
-
-        self.runner_pool = ordered
-
-        # --------------------------------------------------
-        # BUS STOPS BUILT ONLY FROM ROOT
-        # --------------------------------------------------
-
-        self._root_pairs = root_pairs
-
-        print(f"[BUS][WINDOW] markets_in_route={len(window_mids)} runners={len(self.runner_pool)}")
 
         # --------------------------------------------------
         # BUILD / REUSE CTX (AUTHORITATIVE, STATIC HERE)
@@ -739,11 +683,6 @@ class BusRouteSnapshot:
     # ============================================================================
 
     def refresh_ctx_dynamic_fields(self):
-        """
-        Refresh dynamic price fields for all runners in route snapshot.
-
-        MARKET-BATCHED.
-        """
 
         import time
         import os
@@ -755,36 +694,40 @@ class BusRouteSnapshot:
             or os.getenv("BETFAIR_SESSION_TOKEN")
         )
 
+        # --------------------------------------------------
+        # REFRESH SET = runners with active PX
+        # --------------------------------------------------
+
+        active_pairs = [
+            (mid, sid)
+            for (mid, sid), ctx in self.ctx_map.items()
+            if ctx.get("px") is not None
+        ]
+
+        if not active_pairs:
+            return 0.0
+
         odds_map = get_runner_odds_map(
-            list(self.ctx_map.keys()),
+            active_pairs,
             session_token=session_token,
         )
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus_route.py
-# 🔎 SEARCH: def refresh_ctx_dynamic_fields(self):
-# 📆 PATCHED: 2026-04-XX — Preserve PX on missing odds
-#
-# PURPOSE:
-# - Prevent PX wipe on transient fetch miss
-# - Maintain stable execution identity
-# ======================================================================================================
+        # --------------------------------------------------
+        # APPLY ODDS REFRESH TO CTX
+        # --------------------------------------------------
 
         for (mid, sid), ctx in self.ctx_map.items():
+
             odds = odds_map.get((mid, sid))
             if not odds:
-                continue  # 🔒 DO NOT WIPE PX
+                continue
 
-            ctx["px"]   = odds["px"]
+            ctx["px"] = odds["px"]
             ctx["odds"] = odds["px"]
             ctx["back"] = odds.get("back")
-            ctx["lay"]  = odds.get("lay")
-
-        _write_bus_route_snapshot(self.ctx_map)
+            ctx["lay"] = odds.get("lay")
 
         return time.time() - t0
-
-    # === PATCH END ==============================================================
 
     # ======================================================================
     # ROUTE LIFECYCLE — INTERNAL SNAPSHOT CONTROL
@@ -958,38 +901,48 @@ class BusRouteSnapshot:
 # ======================================================================================================
 
     def partition_into_bus_stops(self):
-
         """
-        Build BUS stops ONLY from the execution window (root_pairs).
+        Cadence-only bus stops.
 
-        runner_pool contains:
-            root runners + traded runners
-
-        BUT bus stops must rotate ONLY over root_pairs.
+        Uses runners from the NEXT market only.
+        Keeps tick workload extremely small.
         """
 
-        pairs = getattr(self, "_root_pairs", None)
+        # find next market
+        next_mid = None
 
-        if not pairs:
+        for mid in self._world_markets:
+            next_mid = mid
+            break
+
+        if not next_mid:
             self.bus_stops = {}
             return
 
-        n = len(pairs)
-        self.bus_stops = {}
+        # collect runners for next market
+        market_pairs = [
+            (mid, sid)
+            for (mid, sid) in self.runner_pool
+            if mid == next_mid
+        ]
 
-        # distribute root runners evenly across ticks
-        per_stop = max(1, (n + TICKS_PER_CYCLE - 1) // TICKS_PER_CYCLE)
+        if not market_pairs:
+            self.bus_stops = {}
+            return
+
+        n = len(market_pairs)
+
+        self.bus_stops = {}
 
         for tick in range(1, TICKS_PER_CYCLE + 1):
 
             runners = []
 
-            for i in range(per_stop):
-                idx = ((tick - 1) * per_stop + i) % n
-                runners.append(pairs[idx])
+            for i in range(2):  # keep bus stop tiny
+                idx = ((tick - 1) * 2 + i) % n
+                runners.append(market_pairs[idx])
 
             self.bus_stops[tick] = runners
-    # === PATCH END ==============================================================
 
 
     def get_bus_stop(self, tick):
