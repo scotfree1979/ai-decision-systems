@@ -118,10 +118,11 @@ _PROMINENCE_MAP = {
 
 def _get_next_market_pairs():
 
-    from engines.config_paths import connect_db
+    from engines.config_paths import open_bets_db
+
     import sqlite3
 
-    con = connect_db(ro=True)
+    con = open_bets_db(rw=False)
     con.row_factory = sqlite3.Row
 
     try:
@@ -388,11 +389,11 @@ def _is_inplay_time_window(market_id: str) -> bool:
     if INPLAY_PRE_OFF_MINUTES is None and INPLAY_POST_OFF_MINUTES is None:
         return True
 
-    from engines.config_paths import connect_db
+    from engines.config_paths import open_bets_db
     from datetime import datetime, timezone
     import sqlite3
 
-    con = connect_db(ro=True)
+    con = open_bets_db(rw=False)
     con.row_factory = sqlite3.Row
 
     try:
@@ -1107,9 +1108,10 @@ class DecisionBus:
             return plans
 
         try:
-            ctx_unified = dict(base_ctx)
-            ctx_unified["_route_ctx_map"] = self._route_ctx_map
-            ctx_unified["_route_snapshot"] = self._route_snapshot   # <-- ADD THIS
+            ctx_unified = {
+            "_route_ctx_map": self._route_ctx_map,
+            "_route_snapshot": self._route_snapshot,
+            }
 
             result = unified.tick(ctx_unified)
 
@@ -1151,13 +1153,13 @@ class DecisionBus:
                     plan = dict(p)
                     plan["engine"] = "MSC_UNIFIED"
 
-                    plans.append(("MSC_UNIFIED", plan, base_ctx))
+                    plans.append(("MSC_UNIFIED", plan, ctx_unified))
                     engine_report["MSC_UNIFIED"]["fired"] = engine_report["MSC_UNIFIED"].get("fired", 0) + 1
 
             elif result.get("enter"):
 
                 result["engine"] = "MSC_UNIFIED"
-                plans.append(("MSC_UNIFIED", result, base_ctx))
+                plans.append(("MSC_UNIFIED", result, ctx_unified))
                 engine_report["MSC_UNIFIED"]["fired"] = engine_report["MSC_UNIFIED"].get("fired", 0) + 1
 
             # --------------------------------------------------
@@ -1187,10 +1189,11 @@ class DecisionBus:
             return plans
 
         try:
-            ctx_unified = dict(base_ctx)
-            ctx_unified["_route_ctx_map"] = self._route_ctx_map
-            ctx_unified["_route_snapshot"] = self._route_snapshot   # <-- ADD THIS
-
+            ctx_unified = {
+            "_route_ctx_map": self._route_ctx_map,
+            "_route_snapshot": self._route_snapshot,
+            }
+ 
             result = unified.tick(ctx_unified)
 
             engine_report["MSC_BLUEPRINT"]["evaluated"] = True
@@ -1236,13 +1239,13 @@ class DecisionBus:
                     plan = dict(p)
                     plan["engine"] = "MSC_BLUEPRINT"
 
-                    plans.append(("MSC_BLUEPRINT", plan, base_ctx))
+                    plans.append(("MSC_BLUEPRINT", plan, ctx_unified))
                     engine_report["MSC_BLUEPRINT"]["fired"] += 1
 
             elif result.get("enter"):
 
                 result["engine"] = "MSC_BLUEPRINT"
-                plans.append(("MSC_BLUEPRINT", result, base_ctx))
+                plans.append(("MSC_BLUEPRINT", result, ctx_unified))
                 engine_report["MSC_BLUEPRINT"]["fired"] += 1
 
             # --------------------------------------------------
@@ -1387,26 +1390,36 @@ class DecisionBus:
         # ENGINE DEPRECATION SWITCH
         # --------------------------------------------------
 
+        skip_legacy = False
+        skip_risk = False
+        skip_inplay = False
+        skip_exploratory = False
+        skip_overwatcher = False
+
         if "LEGACY" in self._deprecated_engines:
             engine_report["LEGACY"]["evaluated"] = True
             _record_reason(engine_report, "LEGACY", "deprecated_lane")
+            skip_legacy = True
 
         if "MSC_RISK" in self._deprecated_engines:
             engine_report["MSC_RISK"]["evaluated"] = True
             _record_reason(engine_report, "MSC_RISK", "deprecated_lane")
+            skip_risk = True
 
         if "MSC_INPLAY" in self._deprecated_engines:
             engine_report["MSC_INPLAY"]["evaluated"] = True
             _record_reason(engine_report, "MSC_INPLAY", "deprecated_lane")
+            skip_inplay = True
 
         if "MSC_EXPLORATORY" in self._deprecated_engines:
             engine_report["MSC_EXPLORATORY"]["evaluated"] = True
             _record_reason(engine_report, "MSC_EXPLORATORY", "deprecated_lane")
+            skip_exploratory = True
 
         if "OVERWATCHER" in self._deprecated_engines:
             engine_report["OVERWATCHER"]["evaluated"] = True
             _record_reason(engine_report, "OVERWATCHER", "deprecated_lane")
-   
+            skip_overwatcher = True   
 
 
         # --------------------------------------------------
@@ -2181,13 +2194,14 @@ class DecisionBus:
         if "MSC_EXPLORATORY" in self._deprecated_engines:
             _record_reason(engine_report, "MSC_EXPLORATORY", "deprecated_lane")
             return plans, lane_counts
+        else:
 
-        from engines.bus_route import get_exploratory_active_parent_pairs
+            from engines.bus_route import get_exploratory_active_parent_pairs
 
-        exclusions = get_exploratory_active_parent_pairs()
-        exp = self.engines.get("MSC_EXPLORATORY")
+            exclusions = get_exploratory_active_parent_pairs()
+            exp = self.engines.get("MSC_EXPLORATORY")
 
-        if exp:
+            if exp:
             # 1️⃣ Collect candidates
             # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -2205,25 +2219,25 @@ class DecisionBus:
 # critical execution loops.
 # ======================================================================================================
 
-            for (mid, sid), ctx in self._route_ctx_map.items():
-                if (mid, sid) in exclusions or ctx.get("px") is None:
-                    continue
+                for (mid, sid), ctx in self._route_ctx_map.items():
+                    if (mid, sid) in exclusions or ctx.get("px") is None:
+                        continue
 
-                ctx_l = dict(ctx)
-                _normalize_ctx_enums(ctx_l)
+                    ctx_l = dict(ctx)
+                    _normalize_ctx_enums(ctx_l)
 
-                if not self._engine_band_allowed("MSC_EXPLORATORY", ctx):
-                    _record_reason(engine_report, "MSC_EXPLORATORY", "inactive_band")
-                    continue
+                    if not self._engine_band_allowed("MSC_EXPLORATORY", ctx):
+                        _record_reason(engine_report, "MSC_EXPLORATORY", "inactive_band")
+                        continue
 
 
-                try:
-                    exp.tick(ctx_l)
-                except Exception:
-                    _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
+                    try:
+                        exp.tick(ctx_l)
+                    except Exception:
+                        _record_reason(engine_report, "MSC_EXPLORATORY", "tick_error")
 
-            # 2️⃣ Emit ranked top-N
-            ranked_plans = exp.flush_ranked()
+                # 2️⃣ Emit ranked top-N
+                ranked_plans = exp.flush_ranked()
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -2934,9 +2948,20 @@ class DecisionBus:
             # 🔴 FORCE WORLD BUILD
             self._route_snapshot.build_route()
             self._route_snapshot.partition_into_bus_stops()
+ 
+
+            # 🔴 BUILD FULL CTX WORLD
+            while not self._startup_ctx_builder.done:
+                self._startup_ctx_builder.step(max_builds=500)
+
+            # refresh dynamic fields once ctx exists
             self._route_snapshot.refresh_ctx_dynamic_fields()
 
             self._route_ctx_map = self._route_snapshot.get_ctx_map()
+
+            print(f"[BUS][ROUTE] initial route built | ctx={len(self._route_ctx_map)}")
+
+        
         # ===============================================================
         # 0️⃣ BUS IDENTITY
         # ===============================================================
@@ -2979,13 +3004,6 @@ class DecisionBus:
             # 🔁 Repartition bus stops
             # --------------------------------------------------
             self._route_snapshot.partition_into_bus_stops()
-
-            # --------------------------------------------------
-            # 🔁 REINITIALISE CTX BUILDER (CRITICAL FIX)
-            # --------------------------------------------------
-            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
-
-            # Force bounded hydration pass immediately
      
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -3180,44 +3198,6 @@ class DecisionBus:
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: inside tick(), immediately after snapshot initialisation block
-# 🧩 ACTION: ADD — initial route build binding (correct location)
-# 📆 PATCHED: 2026-02-12 — Ensure snapshot exists before build
-#
-# PURPOSE:
-# - Guarantee first route is built once snapshot exists
-# - Prevent NoneType build_route crash
-# - Maintain prebuild-at-7 logic unchanged
-#
-# INVARIANT:
-# - Snapshot must exist before build_route is called
-# - Build occurs exactly once at first tick
-# ======================================================================================================
-
-        # --------------------------------------------------
-        # 🔑 INITIAL ROUTE BUILD (FIRST USE ONLY)
-        # --------------------------------------------------
-        if not hasattr(self, "_route_initialised"):
-            self._route_snapshot.build_route()
-            self._route_snapshot.partition_into_bus_stops()
-            t0 = time.time()
-            self._route_snapshot.refresh_ctx_dynamic_fields()
-            dt = time.time() - t0
-            self._print_window_snapshot("INITIAL BUILD")
-            self._ctx_refresh_times.append(dt)
-
-            self._route_initialised = True
-            print("[BUS][ROUTE] initial route built")
-
-
-        # --------------------------------------------------
-        # ROUTE BUILD — ONLY AT ROUTE BOUNDARY
-        # --------------------------------------------------
-
-
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: CTX BATCH BUILDER — PROGRESSIVE WARM-UP
 # 🧩 ACTION: DELETE progressive CTX build inside tick()
 # 📆 PATCHED: 2026-03-05 — Enforce CTX reuse invariant
@@ -3274,7 +3254,8 @@ class DecisionBus:
 
         # 🔑 local alias for hot loops
         route = self._route_ctx_map
-        bus_stop_pairs = self._route_snapshot.get_bus_stop(self._bus_stop) or []
+        # WORLD DRIVEN EXECUTION
+        bus_stop_pairs = list(self._route_ctx_map.keys())
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------
@@ -3907,6 +3888,8 @@ class DecisionBus:
                 # BUS no longer calls engine-specific stake functions.
 
                 from engines.math.dynamic_stake_v7 import compute_dynamic_stake
+
+                ctx["bet_type"] = plan.get("bet_type")
 
                 raw_stake = compute_dynamic_stake(
                     engine=engine,
