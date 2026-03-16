@@ -3994,9 +3994,40 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
         # --------------------------------------------------
         # ROUTER SNAPSHOT — parent execution state
         # --------------------------------------------------
+# === PATCH START ==============================================================
+# 📍 TARGET: engines/live/live_router.py:_orders_update_parent_matched
+# 🔎 SEARCH: _ROUTER_PARENT_SURFACE[key] =
+# 📆 PATCHED: 2026-04-XX — Unified anchor injection
+#
+# PURPOSE
+# -------
+# Populate BUS runner ctx fields required by UnifiedEngine risk harvesting.
+#
+# Unified expects the following fields inside the runner context:
+#
+#   anchor_parent_id
+#   anchor_entry_odds
+#   legacy_entry_side
+#   anchor_engine
+#   anchor_entry_stake
+#
+# These values become the anchor for RISK hedging.
+#
+# CONTRACT
+# --------
+# This patch only writes runtime metadata.  
+# It does NOT modify lifecycle logic or database state.
+#
+# ARCHITECTURE
+# ------------
+# Parent MATCHED → Router writes anchor → BUS world contains anchor
+# → Unified reads anchor next tick → Risk engine activates.
+# ==============================================================================
+
         try:
             key = (str(parent["marketId"]), str(parent["selectionId"]))
 
+            # Extend router parent surface with unified anchor fields
             _ROUTER_PARENT_SURFACE[key] = {
                 "parent_id": parent_id,
                 "entry_odds": float(parent["entry_odds"]),
@@ -4004,9 +4035,19 @@ def _orders_update_parent_matched(cor: str, bet_id: str | None = None):
                 "side": parent_side,
                 "engine": parent["engine"],
                 "customerOrderRef": str(cor),
+
+                # ---- Unified anchor fields ----
+                "anchor_parent_id": parent_id,
+                "anchor_entry_odds": float(parent["entry_odds"]),
+                "legacy_entry_side": parent_side,
+                "anchor_engine": parent["engine"],
+                "anchor_entry_stake": float(parent["entry_stake"]),
             }
+
         except Exception:
             pass
+
+# === PATCH END ================================================================
 
     except Exception as e:
         _log_event(
