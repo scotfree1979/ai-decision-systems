@@ -24,34 +24,6 @@ DEFAULT_POLICY = {
 # ------------------------------------------------------------------
 _STATE: Dict[str, dict] = {}
 
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/market_monitor/monitor.py
-# 🔎 SEARCH: _STATE: Dict[str, dict] = {}
-# 📆 PATCHED: 2026-03-06
-# PURPOSE:
-# Persist runner monitoring snapshot for dashboard
-# ==============================================================================
-
-def _ensure_monitor_snapshot_table():
-    con = _adb()
-    try:
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS market_monitor_snapshot (
-            ts REAL,
-            marketId TEXT,
-            selectionId TEXT,
-            horse_name TEXT,
-            px REAL,
-            band TEXT,
-            rank INTEGER,
-            is_fav INTEGER,
-            PRIMARY KEY (marketId, selectionId)
-        )
-        """)
-    finally:
-        con.close()
-
-# === PATCH END ================================================================
 
 # band / fav / price memory
 _STATE.setdefault("runner_band", {})       # {mid: {sid: (band, ts)}}
@@ -198,6 +170,17 @@ def _snapshot_db():
 
     con = open_auto_db(rw=True)
 
+# ======================================================================================================
+# 📍 TARGET: engines/market_monitor/monitor.py:_snapshot_db
+# 🔎 SEARCH: CREATE TABLE IF NOT EXISTS market_runner_snapshot
+# 🧩 ACTION: EXTEND schema for context engine fields
+# 📆 PATCHED: 2026-03-16 — Context enrichment columns
+#
+# PURPOSE
+# -------
+# Add context fields used by MSC_CONTEXT engine.
+# ======================================================================================================
+
     con.execute("""
     CREATE TABLE IF NOT EXISTS market_runner_snapshot (
         ts REAL,
@@ -208,9 +191,17 @@ def _snapshot_db():
         ltp REAL,
         band TEXT,
         is_fav INTEGER,
+
+        fav_gap_bucket TEXT,
+        field_bucket TEXT,
+        fav_strength TEXT,
+        snapshot_phase TEXT,
+
         PRIMARY KEY (marketId, selectionId)
     )
     """)
+
+# ======================================================================================================
 
     return con
 
@@ -240,15 +231,24 @@ def _write_snapshot_batch(rows):
         for row in rows:
             con.execute("""
             INSERT INTO market_runner_snapshot
-            (ts, marketId, selectionId, horse_name, px, ltp, band, is_fav)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (
+                ts, marketId, selectionId, horse_name,
+                px, ltp, band, is_fav,
+                fav_gap_bucket, field_bucket,
+                fav_strength, snapshot_phase
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(marketId, selectionId)
             DO UPDATE SET
                 ts = excluded.ts,
                 px = excluded.px,
                 ltp = excluded.ltp,
                 band = excluded.band,
-                is_fav = excluded.is_fav
+                is_fav = excluded.is_fav,
+                fav_gap_bucket = excluded.fav_gap_bucket,
+                field_bucket = excluded.field_bucket,
+                fav_strength = excluded.fav_strength,
+                snapshot_phase = excluded.snapshot_phase
             """, row)
 
 # === PATCH END ================================================================
@@ -404,6 +404,71 @@ def _classify_price(px):
         return "EXTENDED"
     return "IGNORED"
 
+# ======================================================================================================
+# 📍 TARGET: engines/market_monitor/monitor.py
+# 🔎 SEARCH: def _classify_price(px):
+# 🧩 ACTION: ADD context classification helpers
+# 📆 PATCHED: 2026-03-16 — Context engine enrichment for MarketMonitor snapshots
+#
+# PURPOSE
+# -------
+# Persist additional market structure context so MSC_CONTEXT can learn automatically.
+#
+# Adds:
+#   • favourite gap classification
+#   • field size classification
+#   • favourite strength classification
+#   • snapshot phase (80m / 20m / 5m / off)
+#
+# These are written into market_monitor_snapshot rows.
+# ======================================================================================================
+
+def _field_bucket(field_size: int | None) -> str:
+    if field_size is None:
+        return "unknown"
+    if field_size <= 7:
+        return "small_field"
+    if field_size <= 11:
+        return "medium_field"
+    return "large_field"
+
+
+def _fav_strength(px: float | None) -> str:
+    if px is None:
+        return "unknown"
+    if px <= 2:
+        return "dominant_fav"
+    if px <= 3.5:
+        return "normal_fav"
+    if px <= 6:
+        return "open_market"
+    return "chaotic"
+
+
+def _fav_gap_bucket(fav: float | None, second: float | None) -> str:
+    if fav is None or second is None:
+        return "unknown"
+    gap = second - fav
+    if gap <= 0.5:
+        return "tight_gap"
+    if gap <= 1.5:
+        return "moderate_gap"
+    return "wide_gap"
+
+
+def _snapshot_phase(minutes_to_off: float | None) -> str:
+    if minutes_to_off is None:
+        return "UNKNOWN"
+    if minutes_to_off >= 70:
+        return "PHASE_80"
+    if minutes_to_off >= 15:
+        return "PHASE_20"
+    if minutes_to_off >= 3:
+        return "PHASE_5"
+    return "PHASE_OFF"
+
+# ======================================================================================================
+
 # === PATCH BLOCK: movement detection + signal accessor
 # 📍 FILE: engines/market_monitor/monitor.py
 # 🔎 ANCHOR: def refresh(mids
@@ -537,6 +602,29 @@ def refresh(mids: list[str] | None = None, *, max_runners: int = 50) -> None:
         _STATE[mid] = data
         _update_rank_state(mid, data["runners"])
 
+        # --------------------------------------------------
+        # Market-level context metrics
+        # --------------------------------------------------
+
+        field_size = len(data["runners"])
+        field_bucket = _field_bucket(field_size)
+
+        prices = sorted(
+            [r["px"] for r in data["runners"].values() if r["px"] is not None]
+        )
+
+        fav_px = prices[0] if prices else None
+        second_px = prices[1] if len(prices) > 1 else None
+
+        fav_gap_bucket = _fav_gap_bucket(fav_px, second_px)
+        fav_strength = _fav_strength(fav_px)
+
+        snapshot_phase = "PHASE_OFF"
+
+        # --------------------------------------------------
+        # Runner-level snapshot rows
+        # --------------------------------------------------
+
         for sid, info in data["runners"].items():
 
             band = info.get("band", "UNKNOWN")
@@ -552,28 +640,25 @@ def refresh(mids: list[str] | None = None, *, max_runners: int = 50) -> None:
             )
 
             snapshot_rows.append((
-                time.time(),
+                now,
                 mid,
                 sid,
                 info.get("horse_name") or sid,
                 px,
                 px,
                 band,
-                1 if fav else 0
+                1 if fav else 0,
+                fav_gap_bucket,
+                field_bucket,
+                fav_strength,
+                snapshot_phase
             ))
 
+# ======================================================================================================
+
     # write snapshots once per refresh
+ 
     _write_snapshot_batch(snapshot_rows)
-
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/market_monitor/monitor.py:refresh
-# 🔎 SEARCH: for mid, data in markets.items():
-# 📆 PATCHED: 2026-03-06
-# PURPOSE:
-# Persist snapshot used by dashboard panels
-# ==============================================================================
-
-    _ensure_monitor_snapshot_table()
 
 # === PATCH START ==============================================================
 # 📍 TARGET: engines/market_monitor/monitor.py:refresh
