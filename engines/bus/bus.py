@@ -2959,6 +2959,53 @@ class DecisionBus:
 
             self._route_ctx_map = self._route_snapshot.get_ctx_map()
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus.tick
+# 🔎 SEARCH: self._route_ctx_map = self._route_snapshot.get_ctx_map()
+# 🧩 ACTION: ADD — WORLD PX SANITISER (authoritative)
+# 📆 PATCHED: 2026-03-17 — remove px=None runners from BUS world
+#
+# PURPOSE
+# -------
+# Engines must never evaluate runners where px is None.
+#
+# If px is None it means:
+# - runner not priced
+# - market finished
+# - exchange returned no ladder
+#
+# Therefore runner must be removed from the evaluation world.
+#
+# DESIGN
+# ------
+# BUS owns the world surface.
+# Engines must only receive runners with valid px.
+#
+# RESULT
+# ------
+# Prevents engine crashes:
+#     NoneType has no attribute 'get'
+#
+# And guarantees invariant:
+#
+#     WORLD = runners where px != None
+# ======================================================================================================
+
+            clean_world = {}
+
+            for key, ctx in self._route_ctx_map.items():
+
+                px = ctx.get("px")
+
+                if px is None:
+                    continue
+
+                clean_world[key] = ctx
+
+            self._route_ctx_map = clean_world
+
+# ======================================================================================================
+
             print(f"[BUS][ROUTE] initial route built | ctx={len(self._route_ctx_map)}")
 
         

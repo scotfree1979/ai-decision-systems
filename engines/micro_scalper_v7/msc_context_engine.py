@@ -755,6 +755,25 @@ class ContextEngine:
 
         for (mid, sid), rctx in route.items():
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+# 🔎 SEARCH: for (mid, sid), rctx in route.items():
+# 🧩 ACTION: ADD — PX guard
+# 📆 PATCHED: 2026-03-17 — prevent evaluation of px=None runners
+#
+# PURPOSE
+# -------
+# Even though BUS sanitises the world, engines must defensively
+# ignore runners without prices.
+#
+# This prevents any downstream None comparisons.
+# ======================================================================================================
+
+            if rctx.get("px") is None:
+                continue
+
+# ======================================================================================================
+
             market = market_map.get(mid)
 
 # ======================================================================================================
@@ -1315,27 +1334,47 @@ class ContextEngine:
         # SLOT ALLOCATION (UNIFIED CAPACITY CONTROL)
         # --------------------------------------------------
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+# 🔎 SEARCH: # SLOT ALLOCATION (UNIFIED CAPACITY CONTROL)
+# 🧩 ACTION: REPLACE — stoploss-first slot allocation
+# 📆 PATCHED: 2026-03-17 — protect STOPLOSS from slot starvation
+#
+# PURPOSE
+# -------
+# STOPLOSS must NEVER be starved by exploratory / risk / inplay plans.
+#
+# Allocation order:
+#
+#   1️⃣ STOPLOSS  (uncapped, always executed)
+#   2️⃣ EXPLORATORY (budgeted)
+#   3️⃣ RISK        (budgeted)
+#   4️⃣ INPLAY      (budgeted)
+#
+# This guarantees risk harvesting and stop protection always run.
+# ======================================================================================================
+
+        stoploss = [p for p in plans if p.get("bet_type") == "STOPLOSS"]
         exploratory = [p for p in plans if p.get("bet_type") == "EXPLORATORY"]
         risk        = [p for p in plans if p.get("bet_type") == "RISK"]
         inplay      = [p for p in plans if p.get("bet_type") == "INPLAY"]
 
-        # deterministic caps
+        # --------------------------------------------------
+        # HARD SLOT BUDGETS
+        # --------------------------------------------------
+        EXPLORATORY_BUDGET = 6
+        RISK_BUDGET        = 50
+        INPLAY_BUDGET      = 29
+
+        exploratory = exploratory[:EXPLORATORY_BUDGET]
+        risk        = risk[:RISK_BUDGET]
+        inplay      = inplay[:INPLAY_BUDGET]
+
+        # --------------------------------------------------
+        # STOPLOSS ALWAYS EXECUTES
+        # --------------------------------------------------
+        plans = stoploss + exploratory + risk + inplay
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: exploratory = exploratory[:5]
-# 🧩 ACTION: REPLACE safe slicing
-# ======================================================================================================
-
-        if len(exploratory) > 6:
-            exploratory = exploratory[:6]
-
-        if len(risk) > 50:
-            risk = risk[:50]
-
-        if len(inplay) > 29:
-            inplay = inplay[:29]
-
-        plans = exploratory + risk + inplay
 
         # ------------------------------------------------------------------
         # RETURN CONTRACT
@@ -2037,10 +2076,48 @@ class ContextEngine:
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_timing_surface
-# 🔎 SEARCH: markets.append({
-# 🧩 ADD: cleanup structural memory for completed markets
+# 🔎 SEARCH: if phase == "COMPLETE":
+# 🧩 ACTION: EXTEND completion rule with PX detection
+# 📆 PATCHED: 2026-03-17 — PX-based market termination guard
+#
+# PURPOSE
+# -------
+# Markets sometimes remain visible in the BUS world after the exchange
+# stops publishing prices. This results in runners where px=None.
+#
+# When enough runners lose PX the market must be treated as COMPLETE
+# so engines stop evaluating it.
+#
+# RULE
+# ----
+# If ≥4 runners in the same market have px=None → treat market as COMPLETE.
+#
+# This is a guard BEFORE engines evaluate the runner world.
+#
+# IMPORTANT
+# ---------
+# This patch does NOT modify collapse detection logic.
+# It only augments the cleanup condition.
 # ======================================================================================================
 
+            # --------------------------------------------------
+            # PX-based completion detection
+            # --------------------------------------------------
+            px_none_count = 0
+
+            for (m, sid), ctx in getattr(self, "_route_ctx_map", {}).items():
+                if m != mid:
+                    continue
+
+                if ctx.get("px") is None:
+                    px_none_count += 1
+
+            if px_none_count >= 4:
+                phase = "COMPLETE"
+
+            # --------------------------------------------------
+            # Cleanup structural memory when market completes
+            # --------------------------------------------------
             if phase == "COMPLETE":
 
                 for key in list(self._runner_structure.keys()):
@@ -2049,19 +2126,20 @@ class ContextEngine:
                         self._runner_breakouts.pop(key, None)
                         self._fav_history.pop(key, None)
 
-                # --- NEW: clear PX memory ---
+                # --- clear PX memory ---
                 if hasattr(self, "_runner_px_memory"):
                     for key in list(self._runner_px_memory.keys()):
                         if key[0] == mid:
                             self._runner_px_memory.pop(key, None)
 
-                # --- NEW: clear structural candidates ---
+                # --- clear structural candidates ---
                 if hasattr(self, "_structural_candidates"):
                     for key in list(self._structural_candidates.keys()):
                         if key[0] == mid:
                             self._structural_candidates.pop(key, None)
 
         return {"markets": markets}
+# ======================================================================================================
 
     # --------------------------------------------------------------------------------------------------
     # RAW VOLATILITY PER-TICK EXPOSURE (MONITOR-AUTHORITATIVE)
