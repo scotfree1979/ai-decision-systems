@@ -776,6 +776,9 @@ class ContextEngine:
 
             market = market_map.get(mid)
 
+            if not market:
+                continue
+
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: market = market_map.get(mid)
@@ -794,8 +797,7 @@ class ContextEngine:
             if market.get("phase") == "COMPLETE":
                 continue
 
-            if not market:
-                continue
+
 
             tto = market.get("tto_seconds")
 
@@ -1165,6 +1167,8 @@ class ContextEngine:
             market = market_map.get(mid)
             if not market:
                 continue
+
+            phase = market.get("phase")
 
             tto = market.get("tto_seconds")
 
@@ -3780,7 +3784,7 @@ if __name__ == "__main__":
 
     print("\n[UNIFIED] Standalone mode starting...\n")
 
-    engine = UnifiedEngine()
+    engine = ContextEngine()
 
     while True:
         try:

@@ -685,6 +685,9 @@ class BlueprintEngine:
 
             market = market_map.get(mid)
 
+            if not market:
+                continue
+
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: market = market_map.get(mid)
@@ -701,9 +704,6 @@ class BlueprintEngine:
 # ======================================================================================================
 
             if market.get("phase") == "COMPLETE":
-                continue
-
-            if not market:
                 continue
 
             tto = market.get("tto_seconds")
@@ -1074,6 +1074,8 @@ class BlueprintEngine:
             market = market_map.get(mid)
             if not market:
                 continue
+
+            phase = market.get("phase")
 
             tto = market.get("tto_seconds")
 
