@@ -509,7 +509,35 @@ class BusRouteSnapshot:
 
                 ctx = ctx_map[key]
 
-                parent = legacy_parent_by_runner.get((str(mid), str(sid)))
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: parent = legacy_parent_by_runner.get((str(mid), str(sid)))
+# 🧩 ACTION: REPLACE — use router parent snapshot (authoritative)
+# 📆 PATCHED: 2026-03-17 — remove undefined legacy_parent_by_runner
+#
+# ROOT CAUSE
+# ----------
+# legacy_parent_by_runner was referenced but never defined anywhere
+# in the system. This causes:
+#
+#     NameError: legacy_parent_by_runner is not defined
+#
+# ARCHITECTURE
+# ------------
+# Parent anchors must come from the router execution snapshot:
+#
+#     get_parent_snapshot(mid, sid)
+#
+# This is the canonical execution truth surface used by BUS.
+#
+# RESULT
+# ------
+# Route snapshot builds correctly and parent anchors bind properly.
+# ======================================================================================================
+
+                from engines.live.live_router import get_parent_snapshot
+
+                parent = get_parent_snapshot(mid, sid)
 
                 if parent:
 
