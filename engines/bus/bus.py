@@ -3302,7 +3302,7 @@ class DecisionBus:
         # 🔑 local alias for hot loops
         route = self._route_ctx_map
         # WORLD DRIVEN EXECUTION
-        bus_stop_pairs = list(self._route_ctx_map.keys())
+        bus_stop_pairs = self._route_snapshot.get_all_runners() or []
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------
@@ -4861,7 +4861,9 @@ def _write_unified_runtime_snapshot():
             FROM router_runtime_snapshot
             WHERE ts = (
                 SELECT MAX(ts) FROM router_runtime_snapshot
+                WHERE date(ts) = date('now','utc')
             )
+            AND date(ts) = date('now','utc')
             GROUP BY role
         """).fetchall()
 

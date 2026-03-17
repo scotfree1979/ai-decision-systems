@@ -26,6 +26,27 @@ from engines.bus_route import build_bus_route_tick
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+# 🔎 SEARCH: from engines.bus_route import build_bus_route_tick
+# 🧩 ACTION: ADD — global capital policy helper
+# 📆 PATCHED: 2026-03-17 — engine-level capital gating + pot splitting
+#
+# PURPOSE
+# -------
+# Apply global capital policy:
+#   • Engine-level gate (total capital)
+#   • Internal pot splitting (exploratory / risk / inplay)
+#   • Per-pot emission threshold
+#
+# DESIGN
+# ------
+# Standalone helper (no BankState dependency)
+# Shared across all engines (Unified, Blueprint, Context)
+# ======================================================================================================
+
+from engines.capital_policy import split_pots, can_emit, engine_can_run
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: import time
 # 🧩 ACTION: ADD — session token bootstrap (standalone compatibility)
 # 📆 PATCHED: 2026-03-14 — unified standalone execution support
@@ -453,6 +474,51 @@ class BlueprintEngine:
         # ------------------------------------------------------------------
 
         report = self._build_v7_report(ctx=ctx, tick_delta=tick_delta)
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+# 🔎 SEARCH: report = self._build_v7_report
+# 🧩 ACTION: ADD — capital extraction + engine gating + pot split
+# 📆 PATCHED: 2026-03-17 — unified capital control layer
+#
+# PURPOSE
+# -------
+# Enforce:
+#   1️⃣ Engine-level capital gate
+#   2️⃣ Internal pot allocation
+#
+# This prevents:
+#   • Engines emitting plans when no usable capital exists
+#   • Sub-engines (exploratory/risk/inplay) leaking plans when their pot is empty
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # CAPITAL POLICY (GLOBAL)
+        # --------------------------------------------------
+
+        cap = report.get("capital", {})
+        total_capital = cap.get("headroom") or 0.0
+
+        # 1️⃣ Engine-level gate
+        if not engine_can_run(total_capital):
+            return {
+                "enter": False,
+                "engine": "MSC_UNIFIED",
+                "lane": self.LANE_ID,
+                "why": "no_capital",
+                "signals": self._build_signal_summary(report),
+                "report": report,
+            }
+
+        # 2️⃣ Internal pot split
+        pots = split_pots(total_capital)
+
+        # Optional debug (safe, low frequency)
+        # print(f"[UNIFIED POT] total={total_capital:.2f} "
+        #       f"E={pots['EXPLORATORY']:.2f} "
+        #       f"R={pots['RISK']:.2f} "
+        #       f"I={pots['INPLAY']:.2f}")
+
         ctx["_engine_ctx_name"] = "CTX_BLUEPRINT"
         route = getattr(self, "_route_ctx_map", {})
 
@@ -522,6 +588,20 @@ class BlueprintEngine:
         # --------------------------------------------------
         # 2️⃣ PRE-OFF EXPLORATORY (TOP 5 ALWAYS TRADE)
         # --------------------------------------------------
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+# 🔎 SEARCH: for c in candidates:
+# 🧩 ACTION: ADD — exploratory capital gate
+# 📆 PATCHED: 2026-03-17
+#
+# PURPOSE
+# -------
+# Prevent exploratory plan generation when sub-pot is not usable.
+# ======================================================================================================
+
+        if not can_emit(pots.get("EXPLORATORY", 0.0)):
+            candidates = []
 
         for c in candidates:
 
@@ -655,7 +735,19 @@ class BlueprintEngine:
 #
 # Risk cannot trigger without an anchor parent.
 # ======================================================================================================
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+# 🔎 SEARCH: for (mid, sid), rctx in route.items():
+# 🧩 ACTION: ADD — risk capital gate
+# 📆 PATCHED: 2026-03-17
+#
+# PURPOSE
+# -------
+# Prevent risk harvesting when risk pot is not usable.
+# ======================================================================================================
 
+        if not can_emit(pots.get("RISK", 0.0)):
+            route = {}  # disables loop safely
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
@@ -850,115 +942,126 @@ class BlueprintEngine:
             elif direction == "BACK->LAY":
                 mem["armed_back"][key] = True
 
+# ======================================================================================================
+# 📍 TARGET: <engine_file>:tick
+# 🔎 SEARCH: # 2️⃣ STRUCTURAL LADDER TRIGGER (ANYTIME)
+# 🧩 ACTION: FIX — proper INPLAY gating (no mutation, no dead flag)
+# 📆 PATCHED: 2026-03-17 — enforce INPLAY capital gate correctly
+# ======================================================================================================
 
         # --------------------------------------------------
-        # 2️⃣ STRUCTURAL LADDER TRIGGER (ANYTIME)
+        # INPLAY CAPITAL GATE
         # --------------------------------------------------
 
+        if can_emit(pots.get("INPLAY", 0.0)):
 
+            # --------------------------------------------------
+            # 2️⃣ STRUCTURAL LADDER TRIGGER (ANYTIME)
+            # --------------------------------------------------
 
-        for c in candidates:
+            for c in candidates:
 
-            mid = c["marketId"]
-            sid = c["selectionId"]
-            px  = c.get("px")
+                mid = c["marketId"]
+                sid = c["selectionId"]
+                px  = c.get("px")
 
-            if px is None:
-                continue
+                if px is None:
+                    continue
 
-            key = (mid, sid)
+                key = (mid, sid)
 
-            px = float(px)
+                try:
+                    px = float(px)
+                except Exception:
+                    continue
 
-            fired = self._structural_fired.get(key)
+                fired = self._structural_fired.get(key)
 
-            # ---- SWEET SPOT COLLAPSE ----
-            if mem["armed_lay"].get(key) and px >= 7 and fired is None:
+                # ---- SWEET SPOT COLLAPSE ----
+                if mem["armed_lay"].get(key) and px >= 7 and fired is None:
 
-                ladder = [7, 8, 9, 10, 11, 12]
+                    ladder = [7, 8, 9, 10, 11, 12]
 
-                for lvl in ladder:
-                    if lvl >= px:
-                        emit_plan({
-                            "enter": True,
-                            "engine": "MSC_BLUEPRINT",
-                            "bet_type": "INPLAY",
-                            "role": "PARENT",
-                            "marketId": mid,
-                            "selectionId": sid,
-                            "direction": "LAY->BACK",
-                            "px": lvl,
-                            "why": "unified_structural_ladder",
-                        })
+                    for lvl in ladder:
+                        if lvl >= px:
+                            emit_plan({
+                                "enter": True,
+                                "engine": "MSC_BLUEPRINT",
+                                "bet_type": "INPLAY",
+                                "role": "PARENT",
+                                "marketId": mid,
+                                "selectionId": sid,
+                                "direction": "LAY->BACK",
+                                "px": lvl,
+                                "why": "unified_structural_ladder",
+                            })
 
-                self._structural_fired[key] = "SWEET"
+                    self._structural_fired[key] = "SWEET"
 
+                elif 15 <= px <= 20 and fired is None:
 
-            # ---- 15-20 COLLAPSE BAND ----
-            elif 15 <= px <= 20 and fired is None:
+                    emit_plan({
+                        "enter": True,
+                        "engine": "MSC_BLUEPRINT",
+                        "bet_type": "INPLAY",
+                        "role": "PARENT",
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "direction": "LAY->BACK",
+                        "px": px,
+                        "why": "unified_structural_15_20",
+                    })
 
-                emit_plan({
-                    "enter": True,
-                    "engine": "MSC_BLUEPRINT",
-                    "bet_type": "INPLAY",
-                    "role": "PARENT",
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "direction": "LAY->BACK",
-                    "px": px,
-                    "why": "unified_structural_15_20",
-                })
+                    self._structural_fired[key] = "HIGH"
 
-                self._structural_fired[key] = "HIGH"
+                elif mem["armed_back"].get(key) and px <= 5:
 
+                    ladder = [5, 4, 3]
 
-            # ---- REBOUND BACKS (5 / 4 / 3) ----
-            elif mem["armed_back"].get(key) and px <= 5:
-
-                ladder = [5, 4, 3]
-
-                for lvl in ladder:
-                    if lvl <= px:
-                        emit_plan({
-                            "enter": True,
-                            "engine": "MSC_BLUEPRINT",
-                            "bet_type": "INPLAY",
-                            "role": "PARENT",
-                            "marketId": mid,
-                            "selectionId": sid,
-                            "direction": "BACK->LAY",
-                            "px": lvl,
-                            "why": "unified_structural_rebound",
-                        })
+                    for lvl in ladder:
+                        if lvl <= px:
+                            emit_plan({
+                                "enter": True,
+                                "engine": "MSC_BLUEPRINT",
+                                "bet_type": "INPLAY",
+                                "role": "PARENT",
+                                "marketId": mid,
+                                "selectionId": sid,
+                                "direction": "BACK->LAY",
+                                "px": lvl,
+                                "why": "unified_structural_rebound",
+                            })
 
         # --------------------------------------------------
         # 4️⃣ SECONDARY HARVEST (LOSERS 15-20)
         # --------------------------------------------------
 
-        for c in candidates:
+        if can_emit(pots.get("INPLAY", 0.0)):
 
-            mid = c["marketId"]
-            sid = c["selectionId"]
-            px  = c.get("px")
+            for c in candidates:
 
-            if px is None:
-                continue
+                mid = c["marketId"]
+                sid = c["selectionId"]
+                px  = c.get("px")
 
-            px = float(px)
+                if px is None:
+                    continue
 
-            if 15 <= px <= 20:
+                px = float(px)
 
-                emit_plan({
-                    "enter": True,
-                    "engine": "MSC_BLUEPRINT",
-                    "bet_type": "INPLAY",
-                    "role": "PARENT",
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "direction": "LAY->BACK",
-                    "px": px,
-                    "why": "unified_inplay_secondary_harvest",
-                })        
+                if 15 <= px <= 20:
+
+                    emit_plan({
+                        "enter": True,
+                        "engine": "MSC_BLUEPRINT",
+                        "bet_type": "INPLAY",
+                        "role": "PARENT",
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "direction": "LAY->BACK",
+                        "px": px,
+                        "why": "blueprint_inplay_secondary_harvest",
+                    })      
         
         # ------------------------------------------------------------------
         # 4️⃣ IN-PLAY DETECTION (STRICT RULE)
@@ -981,49 +1084,49 @@ class BlueprintEngine:
         # 5️⃣ IN-PLAY LADDER (LOSERS + CONTENDERS)
         # ------------------------------------------------------------------
 
-        for c in candidates:
+        if can_emit(pots.get("INPLAY", 0.0)):
 
-            mid = c["marketId"]
-            sid = c["selectionId"]
-            px  = c.get("px")
+            for c in candidates:
 
-            if mid not in self._inplay_markets:
-                continue
+                mid = c["marketId"]
+                sid = c["selectionId"]
+                px  = c.get("px")
 
-            if not px:
-                continue
+                if mid not in self._inplay_markets:
+                    continue
 
-            px = float(px)
+                if not px:
+                    continue
 
-            # Lay losers drifting past sweet spot
-            if px >= 7:
+                px = float(px)
 
-                emit_plan({
-                    "enter": True,
-                    "engine": "MSC_BLUEPRINT",
-                    "bet_type": "INPLAY",
-                    "role": "PARENT",
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "direction": "LAY->BACK",
-                    "px": px,
-                    "why": "unified_inplay_lay",
-                })
+                if px >= 7:
 
-            # Back collapsing contenders
-            elif px <= 5:
+                    emit_plan({
+                        "enter": True,
+                        "engine": "MSC_BLUEPRINT",
+                        "bet_type": "INPLAY",
+                        "role": "PARENT",
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "direction": "LAY->BACK",
+                        "px": px,
+                        "why": "blueprint_inplay_lay",
+                    })
 
-                emit_plan({
-                    "enter": True,
-                    "engine": "MSC_BLUEPRINT",
-                    "bet_type": "INPLAY",
-                    "role": "PARENT",
-                    "marketId": mid,
-                    "selectionId": sid,
-                    "direction": "BACK->LAY",
-                    "px": px,
-                    "why": "unified_inplay_back",
-                })
+                elif px <= 5:
+
+                    emit_plan({
+                        "enter": True,
+                        "engine": "MSC_BLUEPRINT",
+                        "bet_type": "INPLAY",
+                        "role": "PARENT",
+                        "marketId": mid,
+                        "selectionId": sid,
+                        "direction": "BACK->LAY",
+                        "px": px,
+                        "why": "blueprint_inplay_back",
+                    })
 
         # --------------------------------------------------
         # STRUCTURAL BREAKDOWN ENGINE (ANYTIME)
