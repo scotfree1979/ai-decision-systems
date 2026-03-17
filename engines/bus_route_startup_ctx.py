@@ -42,7 +42,7 @@ class StartupCTXBuilder:
                 """
                 SELECT DISTINCT marketId, marketStartTime
                 FROM bets
-                WHERE date(marketStartTime) = date('now','utc')
+                WHERE datetime(marketStartTime) >= datetime('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
                 """
             ).fetchall()
@@ -60,9 +60,6 @@ class StartupCTXBuilder:
                 )
             except Exception:
                 continue
-
-            if off >= now:
-                ordered.append(str(r["marketId"]))
 
         return ordered
 

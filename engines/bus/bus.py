@@ -1110,32 +1110,29 @@ class DecisionBus:
         try:
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: def _lane7_msc_unified(self, base_ctx, engine_report):
-# 🧩 ACTION: REPLACE ctx_unified construction — activate _valid_px filter
-# 📆 PATCHED: 2026-03-17 — enforce PX validity at BUS dispatch (Unified)
+# 🔎 SEARCH: if v.get("_valid_px")
+# 🧩 ACTION: REPLACE (non-blocking PX filter)
+# 📆 PATCHED: 2026-03-17 — skip px=None at execution, not map-level
 #
-# PURPOSE
-# -------
-# Activate previously introduced _valid_px flag.
+# ROOT CAUSE
+# ----------
+# Filtering at map-level can produce empty ctx_map for engines.
+# This does NOT block tick, but makes system appear dead.
 #
-# Prevent Unified from receiving runners where:
-#     px is None
+# FIX
+# ---
+# Pass full world to engine.
+# Let execution skip px=None.
 #
-# This preserves:
-#     • full BUS world
-#     • non-destructive cleaning
-#     • engine safety
-#
-# INVARIANT
-# ---------
-# Engines NEVER see px=None
+# RESULT
+# ------
+# • No empty world
+# • No NoneType compare errors
+# • Tick always progresses
 # ======================================================================================================
 
             ctx_unified = {
-                "_route_ctx_map": {
-                    k: v for k, v in self._route_ctx_map.items()
-                    if v.get("_valid_px")
-                },
+                "_route_ctx_map": self._route_ctx_map,
                 "_route_snapshot": self._route_snapshot,
             }
 
@@ -1217,24 +1214,29 @@ class DecisionBus:
         try:
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: def _lane8_msc_blueprint(self, base_ctx, engine_report):
-# 🧩 ACTION: REPLACE ctx_unified construction — activate _valid_px filter
-# 📆 PATCHED: 2026-03-17 — enforce PX validity at BUS dispatch (Blueprint)
+# 🔎 SEARCH: if v.get("_valid_px")
+# 🧩 ACTION: REPLACE (non-blocking PX filter)
+# 📆 PATCHED: 2026-03-17 — skip px=None at execution, not map-level
 #
-# PURPOSE
-# -------
-# Ensure Blueprint receives identical filtered world as Unified.
+# ROOT CAUSE
+# ----------
+# Filtering at map-level can produce empty ctx_map for engines.
+# This does NOT block tick, but makes system appear dead.
 #
-# INVARIANT
-# ---------
-# Blueprint must never process px=None runners
+# FIX
+# ---
+# Pass full world to engine.
+# Let execution skip px=None.
+#
+# RESULT
+# ------
+# • No empty world
+# • No NoneType compare errors
+# • Tick always progresses
 # ======================================================================================================
 
             ctx_unified = {
-                "_route_ctx_map": {
-                    k: v for k, v in self._route_ctx_map.items()
-                    if v.get("_valid_px")
-                },
+                "_route_ctx_map": self._route_ctx_map,
                 "_route_snapshot": self._route_snapshot,
             }
  
@@ -1556,27 +1558,52 @@ class DecisionBus:
             f"structural_missing={total - ready}"
         )
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🟦 LANE 1 — LEGACY (BUS STOP ONLY)
+# 🧩 ACTION: HARD SKIP deprecated LEGACY lane
+# 📆 PATCHED: 2026-03-17 — enforce true deprecation (no execution)
+#
+# ROOT CAUSE
+# ----------
+# Deprecated lanes were still executing loops and calling strategies.
+#
+# FIX
+# ---
+# Immediately skip entire lane if deprecated.
+#
+# RESULT
+# ------
+# • No LEGACY execution
+# • No plans generated
+# • Only diagnostic reason recorded
+# ======================================================================================================
+
         # --------------------------------------------------
         # 🟦 LANE 1 — LEGACY (BUS STOP ONLY)
         # --------------------------------------------------
-        engine_report["LEGACY"]["evaluated"] = True
+        if "LEGACY" in self._deprecated_engines:
+            engine_report["LEGACY"]["evaluated"] = True
+            _record_reason(engine_report, "LEGACY", "deprecated_lane")
+        else:
+            engine_report["LEGACY"]["evaluated"] = True
 
-
-        for mid, sid in bus_stop_pairs:
+            for mid, sid in bus_stop_pairs:
       
-            ctx = self._route_ctx_map.get((mid, sid))
-            if not ctx:
-                continue
+                ctx = self._route_ctx_map.get((mid, sid))
 
-            if not self._engine_band_allowed("LEGACY", ctx):
-                _record_reason(engine_report, "LEGACY", "inactive_band")
-                continue
-
-            if not self._ensure_px_from_route(ctx):
-                self._force_px_refresh(mid, sid, ctx)
-                if ctx.get("px") is None:
-                    _record_reason(engine_report, "LEGACY", "missing_px_after_refresh")
+                if not ctx:
                     continue
+
+                if not self._engine_band_allowed("LEGACY", ctx):
+                    _record_reason(engine_report, "LEGACY", "inactive_band")
+                    continue
+
+                if not self._ensure_px_from_route(ctx):
+                    self._force_px_refresh(mid, sid, ctx)
+                    if ctx.get("px") is None:
+                        _record_reason(engine_report, "LEGACY", "missing_px_after_refresh")
+                        continue
 
 
             # --------------------------------------------------
@@ -1891,7 +1918,17 @@ class DecisionBus:
         # --------------------------------------------------
         # 🟨 LANE 2 — MSC_RISK (BETFAIR-TRUTH DRIVEN)
         # --------------------------------------------------
-        engine_report["MSC_RISK"]["evaluated"] = True
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🟨 LANE 2 — MSC_RISK
+# 🧩 ACTION: HARD SKIP deprecated MSC_RISK
+# ======================================================================================================
+
+        if "MSC_RISK" in self._deprecated_engines:
+            engine_report["MSC_RISK"]["evaluated"] = True
+            _record_reason(engine_report, "MSC_RISK", "deprecated_lane")
+        else:
+            engine_report["MSC_RISK"]["evaluated"] = True
 
 
 
@@ -1991,7 +2028,11 @@ class DecisionBus:
         # --------------------------------------------------
         # 🟥 LANE 3 — MSC_INPLAY (BUS-AUTHORISED, DB-FIRST)
         # --------------------------------------------------
-        engine_report["MSC_INPLAY"]["evaluated"] = True
+        if "MSC_INPLAY" in self._deprecated_engines:
+            engine_report["MSC_INPLAY"]["evaluated"] = True
+            _record_reason(engine_report, "MSC_INPLAY", "deprecated_lane")
+        else:
+            engine_report["MSC_INPLAY"]["evaluated"] = True
 
  
 
@@ -2312,7 +2353,11 @@ class DecisionBus:
 # - Diagnostic only
 # ==============================================================================
 
-        engine_report["OVERWATCHER"]["evaluated"] = True
+        if "OVERWATCHER" in self._deprecated_engines:
+            engine_report["OVERWATCHER"]["evaluated"] = True
+            _record_reason(engine_report, "OVERWATCHER", "deprecated_lane")
+        else:
+            engine_report["OVERWATCHER"]["evaluated"] = True
 
 
 
@@ -3004,51 +3049,6 @@ class DecisionBus:
 
             self._route_ctx_map = self._route_snapshot.ctx_map
 
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py:DecisionBus.tick
-# 🔎 SEARCH: self._route_ctx_map = self._route_snapshot.get_ctx_map()
-# 🧩 ACTION: ADD — WORLD PX SANITISER (authoritative)
-# 📆 PATCHED: 2026-03-17 — remove px=None runners from BUS world
-#
-# PURPOSE
-# -------
-# Engines must never evaluate runners where px is None.
-#
-# If px is None it means:
-# - runner not priced
-# - market finished
-# - exchange returned no ladder
-#
-# Therefore runner must be removed from the evaluation world.
-#
-# DESIGN
-# ------
-# BUS owns the world surface.
-# Engines must only receive runners with valid px.
-#
-# RESULT
-# ------
-# Prevents engine crashes:
-#     NoneType has no attribute 'get'
-#
-# And guarantees invariant:
-#
-#     WORLD = runners where px != None
-# ======================================================================================================
-
-            # --------------------------------------------------
-            # WORLD CLEAN (PX SANITISER — NON-DESTRUCTIVE)
-            # --------------------------------------------------
-
-            for ctx in self._route_ctx_map.values():
-
-                px = ctx.get("px")
-
-                if px is None:
-                    ctx["_valid_px"] = False
-                else:
-                    ctx["_valid_px"] = True
-
 
 # ======================================================================================================
 
@@ -3284,13 +3284,6 @@ class DecisionBus:
 
         risk_confidence = {}
 
-        # --------------------------------------------------
-        # INIT SNAPSHOT + STARTUP CTX BUILDER (ONCE)
-        # --------------------------------------------------
-        if self._route_snapshot is None:
-            self._route_snapshot = BusRouteSnapshot()
-            self._startup_ctx_builder = StartupCTXBuilder(self._route_snapshot)
-
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: CTX BATCH BUILDER — PROGRESSIVE WARM-UP
@@ -3350,11 +3343,7 @@ class DecisionBus:
         # 🔑 local alias for hot loops
         route = self._route_ctx_map
         # WORLD DRIVEN EXECUTION
-        bus_stop_pairs = [
-            (mid, sid)
-            for (mid, sid), ctx in self._route_ctx_map.items()
-            if ctx.get("px") is not None
-        ]
+        bus_stop_pairs = list(self._route_ctx_map.keys())
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------
@@ -3516,10 +3505,10 @@ class DecisionBus:
         for p in bus_stop_pairs:
             if isinstance(p, (tuple, list)) and len(p) == 2:
                 clean_pairs.append((str(p[0]), str(p[1])))
-            else:
-                print(f"[BUS][PAIR_SANITISE] dropped invalid pair: {p}")
 
-        bus_stop_pairs = clean_pairs
+        # 🔑 CRITICAL: NEVER allow empty — ensures tick always progresses
+        if clean_pairs:
+            bus_stop_pairs = clean_pairs
 
         # --------------------------------------------------
         # Dashboard runner surface snapshot
