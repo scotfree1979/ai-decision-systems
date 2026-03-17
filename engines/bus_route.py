@@ -891,8 +891,8 @@ class BusRouteSnapshot:
 
                 # Dynamic fields — BUS owns refresh later
                 # Preserve snapshot px if exists, else initialise as None
-                ctx.setdefault("px", ctx.get("odds"))
-                ctx.setdefault("odds", None)
+                ctx["px"] = None
+                ctx["odds"] = None
                 ctx.setdefault("back", None)
                 ctx.setdefault("lay",  None)
 
