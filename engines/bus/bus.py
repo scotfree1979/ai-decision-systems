@@ -2995,8 +2995,9 @@ class DecisionBus:
  
 
             # 🔴 BUILD FULL CTX WORLD
-            while not self._startup_ctx_builder.done:
-                self._startup_ctx_builder.step(max_builds=500)
+            # 🔁 NON-BLOCKING CTX BUILD
+            if hasattr(self, "_startup_ctx_builder") and not self._startup_ctx_builder.done:
+                self._startup_ctx_builder.step(max_builds=50)
 
             # refresh dynamic fields once ctx exists
             self._route_snapshot.refresh_ctx_dynamic_fields()
@@ -3073,7 +3074,9 @@ class DecisionBus:
 # ------
 # Does not affect execution flow.
 # ======================================================================================================
-
+        # 🔁 CONTINUOUS CTX BUILD (NON-BLOCKING)
+        if hasattr(self, "_startup_ctx_builder") and not self._startup_ctx_builder.done:
+            self._startup_ctx_builder.step(max_builds=50)
         # --------------------------------------------------
         # Snapshot telemetry scheduler
         # --------------------------------------------------
