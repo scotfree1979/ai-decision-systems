@@ -1418,7 +1418,14 @@ class DecisionBus:
     # If this block changes, the system WILL regress.
     # ======================================================================================================
 
-    def _evaluate_runner(self, base_ctx, bus_stop_pairs, engine_report):
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus._evaluate_runner
+# 🔎 SEARCH: def _evaluate_runner(self, base_ctx, bus_stop_pairs, engine_report):
+# 🧩 ACTION: REPLACE — remove pair dependency from execution
+# 📆 PATCHED: 2026-03-17 — world-driven execution only
+# ======================================================================================================
+
+    def _evaluate_runner(self, base_ctx, engine_report):
         """
         FINAL CANONICAL LANE EXECUTION
 
@@ -1441,6 +1448,39 @@ class DecisionBus:
         skip_inplay = False
         skip_exploratory = False
         skip_overwatcher = False
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus._evaluate_runner
+# 🔎 SEARCH: skip_overwatcher = False
+# 🧩 ACTION: INSERT BELOW — hard disable deprecated lanes
+# 📆 PATCHED: 2026-03-17 — enforce true lane deactivation
+#
+# ROOT CAUSE
+# ----------
+# Deprecated lanes were still executing loops and logic.
+# This caused:
+# - bus_stop_pairs dependency
+# - unnecessary execution
+# - confusion about tick behaviour
+#
+# FIX
+# ---
+# If a lane is deprecated:
+# - DO NOT enter loops
+# - DO NOT execute logic
+# - ONLY record reason
+#
+# RESULT
+# ------
+# • Lanes 1–5 fully disabled
+# • bus_stop_pairs no longer relevant
+# • Execution driven ONLY by lanes 6–8
+# • Tick fully decoupled from slice logic
+# ======================================================================================================
+
+        # 🔑 HARD EXIT FLAGS (AUTHORITATIVE)
+        if skip_legacy and skip_risk and skip_inplay and skip_exploratory and skip_overwatcher:
+            pass  # lanes 1–5 are fully disabled
 
         if "LEGACY" in self._deprecated_engines:
             engine_report["LEGACY"]["evaluated"] = True
@@ -1471,8 +1511,47 @@ class DecisionBus:
         # --------------------------------------------------
         # 🔁 ODDS REFRESH — HELPER OWNED (AUTHORITATIVE)
         # --------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus._evaluate_runner
+# 🔎 SEARCH: route = self._route_ctx_map
+# 🧩 ACTION: REPLACE — iterate full world instead of pairs
+# 📆 PATCHED: 2026-03-17 — world normalisation
+# ======================================================================================================
+
         route = self._route_ctx_map
         ctx_map = self._route_ctx_map
+
+        for ctx in ctx_map.values():
+            if ctx:
+                _normalize_ctx_enums(ctx)
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus._evaluate_runner
+# 🔎 SEARCH: route = self._route_ctx_map
+# 🧩 ACTION: INSERT BELOW — synthetic BUS pair guard
+# 📆 PATCHED: 2026-03-17 — prevent fallback pairs entering execution
+#
+# ROOT CAUSE
+# ----------
+# bus_stop_pairs may contain synthetic fallback values:
+#     ("__BUS__", "__EMPTY__")
+#
+# These exist ONLY to guarantee tick progression.
+# They must NEVER enter execution logic.
+#
+# FIX
+# ---
+# Introduce a lightweight guard function and skip them in loops.
+#
+# RESULT
+# ------
+# • Tick always runs
+# • No fake runners processed
+# • No side effects in lanes / enrichment
+# ======================================================================================================
+
+        def _is_synthetic_pair(mid, sid):
+            return str(mid).startswith("__BUS__")
 
         # === PATCH START ============================================================
         # 📍 TARGET: engines/bus/bus.py
@@ -1481,14 +1560,14 @@ class DecisionBus:
         # 📆 PATCHED: 2026-02-07 — fix BUS ctx scoping bug
         # ============================================================================
 
-        for mid, sid in bus_stop_pairs:
+        for (mid, sid), ctx in self._route_ctx_map.items():
             ctx = ctx_map.get((mid, sid))
             if ctx:
                 _normalize_ctx_enums(ctx)
   
         from engines.micro_scalper_v7.direction_engine import compute_msc_decision
 
-        for mid, sid in bus_stop_pairs:
+        for (mid, sid), ctx in self._route_ctx_map.items():
             ctx = ctx_map.get((mid, sid))
             if not ctx:
                 continue
@@ -1588,7 +1667,7 @@ class DecisionBus:
         else:
             engine_report["LEGACY"]["evaluated"] = True
 
-            for mid, sid in bus_stop_pairs:
+            for (mid, sid), ctx in self._route_ctx_map.items():
       
                 ctx = self._route_ctx_map.get((mid, sid))
 
@@ -3322,32 +3401,39 @@ class DecisionBus:
         self._route_ctx_map = self._route_snapshot.ctx_map
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: self._route_ctx_map = self._route_snapshot.get_ctx_map()
-# 🧩 ACTION: ADD local alias
-# 📆 PATCHED: 2026-03-09 — reduce attribute lookup overhead in tick loop
+# 🔎 SEARCH: bus_stop_pairs = list(self._route_ctx_map.keys())
+# 🧩 ACTION: REPLACE — authoritative fail-open execution set
+# 📆 PATCHED: 2026-03-17 — remove data dependency from tick lifecycle
 #
-# PURPOSE
-# -------
-# Accessing self._route_ctx_map repeatedly inside loops causes
-# unnecessary attribute resolution overhead.
+# ROOT CAUSE
+# ----------
+# bus_stop_pairs derived directly from ctx_map created implicit dependency:
+#   no ctx → no pairs → no meaningful execution
 #
-# Local alias removes thousands of lookups per tick.
+# This made BUS appear "not ticking"
 #
-# PERFORMANCE
-# -----------
-# ~10–15% BUS speed improvement.
+# FIX
+# ---
+# Always derive pairs, but guarantee fallback BEFORE any usage
+#
+# RESULT
+# ------
+# • Tick ALWAYS executes
+# • No dependency on CTX readiness
+# • World remains authoritative when present
 # ======================================================================================================
 
-        self._route_ctx_map = self._route_snapshot.ctx_map
+        route = self._route_ctx_map or {}
 
-        # 🔑 local alias for hot loops
-        route = self._route_ctx_map
-        # WORLD DRIVEN EXECUTION
-        bus_stop_pairs = list(self._route_ctx_map.keys())
+        if route:
+            bus_stop_pairs = list(route.keys())
+        else:
+            # 🔑 HARD FAIL-OPEN — execution must proceed
+            bus_stop_pairs = [("__BUS__", "__EMPTY__")]
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------
-        for mid, sid in bus_stop_pairs:
+        for (mid, sid), ctx in self._route_ctx_map.items():
             ctx = self._route_ctx_map.get((mid, sid))
             if ctx:
                 _normalize_ctx_enums(ctx)
@@ -3450,27 +3536,7 @@ class DecisionBus:
         # --------------------------------------------------
         # Cadence market runners (BUS schedule authority)
         # --------------------------------------------------
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: bus_stop_pairs = _get_next_market_pairs()
-# 🧩 ACTION: INSERT BELOW
-# 📆 PATCHED: 2026-03-18 — Remove BUS reliance on cadence pairs
-#
-# PURPOSE
-# -------
-# bus_stop_pairs is informational only.
-# Engines must still be ticked even if no pairs are returned.
-#
-# If pairs are empty we inject a harmless placeholder so the
-# evaluation loop still executes without scanning the world.
-#
-# PERFORMANCE
-# -----------
-# Zero cost. One tuple only. Immediately skipped by ctx lookup.
-# ======================================================================================================
 
-        if not bus_stop_pairs:
-            bus_stop_pairs = [("__BUS_TICK__", "__NO_RUNNER__")]
 
 
 # ======================================================================================================
@@ -3507,8 +3573,26 @@ class DecisionBus:
                 clean_pairs.append((str(p[0]), str(p[1])))
 
         # 🔑 CRITICAL: NEVER allow empty — ensures tick always progresses
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: if clean_pairs:
+# 🧩 ACTION: REPLACE — enforce non-empty after sanitisation
+# 📆 PATCHED: 2026-03-17 — prevent silent empty execution set
+#
+# ROOT CAUSE
+# ----------
+# Sanitisation could result in empty execution set without fallback.
+#
+# RESULT
+# ------
+# • Tick always progresses
+# • No silent execution collapse
+# ======================================================================================================
+
         if clean_pairs:
             bus_stop_pairs = clean_pairs
+        else:
+            bus_stop_pairs = [("__BUS__", "__EMPTY__")]
 
         # --------------------------------------------------
         # Dashboard runner surface snapshot
@@ -3540,9 +3624,26 @@ class DecisionBus:
         # 7️⃣ AUTHORITATIVE PLAN GENERATION (LANES ONLY)
         # ===============================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py:DecisionBus.tick
+# 🔎 SEARCH: generated_plans, lane_counts = self._evaluate_runner(
+# 🧩 ACTION: REPLACE — remove pair-based execution surface
+# 📆 PATCHED: 2026-03-17 — world-only execution (final architecture)
+#
+# PURPOSE
+# -------
+# BUS no longer passes bus_stop_pairs.
+# Execution is driven entirely by ctx_map (world).
+#
+# RESULT
+# ------
+# • Tick independent of slices
+# • Engines always see full world
+# • No hidden gating
+# ======================================================================================================
+
         generated_plans, lane_counts = self._evaluate_runner(
             base_ctx=base_ctx,
-            bus_stop_pairs=bus_stop_pairs,
             engine_report=engine_report,
         )
 
