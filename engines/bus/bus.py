@@ -3001,7 +3001,7 @@ class DecisionBus:
             # refresh dynamic fields once ctx exists
             self._route_snapshot.refresh_ctx_dynamic_fields()
 
-            self._route_ctx_map = self._route_snapshot.get_ctx_map()
+            self._route_ctx_map = self._route_snapshot.ctx_map
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py:DecisionBus.tick
@@ -3323,7 +3323,7 @@ class DecisionBus:
         # --------------------------------------------------
         # BIND CTX MAP (AUTHORITATIVE SNAPSHOT)
         # --------------------------------------------------
-        self._route_ctx_map = self._route_snapshot.get_ctx_map()
+        self._route_ctx_map = self._route_snapshot.ctx_map
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: self._route_ctx_map = self._route_snapshot.get_ctx_map()
@@ -3342,7 +3342,7 @@ class DecisionBus:
 # ~10–15% BUS speed improvement.
 # ======================================================================================================
 
-        self._route_ctx_map = self._route_snapshot.get_ctx_map()
+        self._route_ctx_map = self._route_snapshot.ctx_map
 
         # 🔑 local alias for hot loops
         route = self._route_ctx_map
