@@ -454,7 +454,7 @@ class BusRouteSnapshot:
 
         print(
             f"[BUS][WORLD] markets={len(self._world_markets)} "
-            f"runners={len(self.runner_pool)}"
+            f" runners={len(self.runner_pool)} "
             f"ctx={len(self.ctx_map)}"
         )
 
@@ -630,7 +630,36 @@ class BusRouteSnapshot:
                 # --------------------------------------------------
                 # LEGACY parent binding (STATIC FOR ROUTE)
                 # --------------------------------------------------
-                parent = legacy_parent_by_runner.get((str(mid), str(sid)))
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: parent = legacy_parent_by_runner.get((str(mid), str(sid)))
+# 🧩 ACTION: REPLACE — use router parent snapshot (authoritative)
+# 📆 PATCHED: 2026-03-17 — remove undefined legacy_parent_by_runner from CTX build path
+#
+# ROOT CAUSE
+# ----------
+# legacy_parent_by_runner does not exist anywhere in the codebase.
+#
+# During CTX creation this produced:
+#
+#     'NoneType' object has no attribute 'get'
+#
+# because parent became None and parent.get(...) was executed.
+#
+# FIX
+# ---
+# Use the router execution surface instead:
+#
+#     get_parent_snapshot(mid, sid)
+#
+# which is the authoritative parent binding used everywhere else.
+# ======================================================================================================
+
+                from engines.live.live_router import get_parent_snapshot
+
+                parent = get_parent_snapshot(mid, sid)
+
+# ======================================================================================================
 
                 if parent:
 
