@@ -1108,9 +1108,35 @@ class DecisionBus:
             return plans
 
         try:
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _lane7_msc_unified(self, base_ctx, engine_report):
+# 🧩 ACTION: REPLACE ctx_unified construction — activate _valid_px filter
+# 📆 PATCHED: 2026-03-17 — enforce PX validity at BUS dispatch (Unified)
+#
+# PURPOSE
+# -------
+# Activate previously introduced _valid_px flag.
+#
+# Prevent Unified from receiving runners where:
+#     px is None
+#
+# This preserves:
+#     • full BUS world
+#     • non-destructive cleaning
+#     • engine safety
+#
+# INVARIANT
+# ---------
+# Engines NEVER see px=None
+# ======================================================================================================
+
             ctx_unified = {
-            "_route_ctx_map": self._route_ctx_map,
-            "_route_snapshot": self._route_snapshot,
+                "_route_ctx_map": {
+                    k: v for k, v in self._route_ctx_map.items()
+                    if v.get("_valid_px")
+                },
+                "_route_snapshot": self._route_snapshot,
             }
 
             result = unified.tick(ctx_unified)
@@ -1189,9 +1215,27 @@ class DecisionBus:
             return plans
 
         try:
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _lane8_msc_blueprint(self, base_ctx, engine_report):
+# 🧩 ACTION: REPLACE ctx_unified construction — activate _valid_px filter
+# 📆 PATCHED: 2026-03-17 — enforce PX validity at BUS dispatch (Blueprint)
+#
+# PURPOSE
+# -------
+# Ensure Blueprint receives identical filtered world as Unified.
+#
+# INVARIANT
+# ---------
+# Blueprint must never process px=None runners
+# ======================================================================================================
+
             ctx_unified = {
-            "_route_ctx_map": self._route_ctx_map,
-            "_route_snapshot": self._route_snapshot,
+                "_route_ctx_map": {
+                    k: v for k, v in self._route_ctx_map.items()
+                    if v.get("_valid_px")
+                },
+                "_route_snapshot": self._route_snapshot,
             }
  
             result = unified.tick(ctx_unified)
@@ -2991,18 +3035,19 @@ class DecisionBus:
 #     WORLD = runners where px != None
 # ======================================================================================================
 
-            clean_world = {}
+            # --------------------------------------------------
+            # WORLD CLEAN (PX SANITISER — NON-DESTRUCTIVE)
+            # --------------------------------------------------
 
-            for key, ctx in self._route_ctx_map.items():
+            for ctx in self._route_ctx_map.values():
 
                 px = ctx.get("px")
 
                 if px is None:
-                    continue
+                    ctx["_valid_px"] = False
+                else:
+                    ctx["_valid_px"] = True
 
-                clean_world[key] = ctx
-
-            self._route_ctx_map = clean_world
 
 # ======================================================================================================
 
