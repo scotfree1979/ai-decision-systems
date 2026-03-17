@@ -3347,7 +3347,11 @@ class DecisionBus:
         # 🔑 local alias for hot loops
         route = self._route_ctx_map
         # WORLD DRIVEN EXECUTION
-        bus_stop_pairs = self._route_snapshot.get_all_runners() or []
+        bus_stop_pairs = [
+            (mid, sid)
+            for (mid, sid), ctx in self._route_ctx_map.items()
+            if ctx.get("px") is not None
+        ]
         # --------------------------------------------------
         # NORMALISE ENUMS (BUS AUTHORITY)
         # --------------------------------------------------

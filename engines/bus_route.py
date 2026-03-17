@@ -1006,7 +1006,7 @@ class BusRouteSnapshot:
         return self.bus_stops.get(tick, [])
 
     def get_all_runners(self):
-        return self.runner_pool
+        return list(self.ctx_map.keys())
 
     def run_live2(self, hz: float = 1.0):
         interval = max(0.05, 1.0 / max(0.1, hz))
