@@ -2357,7 +2357,7 @@ class DecisionBus:
 
         if "MSC_EXPLORATORY" in self._deprecated_engines:
             _record_reason(engine_report, "MSC_EXPLORATORY", "deprecated_lane")
-            return plans, lane_counts
+       
         else:
 
             from engines.bus_route import get_exploratory_active_parent_pairs
