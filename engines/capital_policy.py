@@ -1,19 +1,22 @@
 # ======================================================================================================
 # 📍 TARGET: engines/capital_policy.py
-# 🧩 ACTION: CREATE FILE
-# 📆 PURPOSE: Global engine capital gating + internal pot splitting
+# 🧩 ACTION: FULL REWRITE (FINAL — SNAPSHOT CONNECTED)
+# 📆 PATCHED: 2026-03-17
 #
-# DESIGN
-# ------
-# - No BankState dependency (avoids circular imports)
-# - Pure functions only
-# - Used by all engines (Unified, Blueprint, Context)
+# PURPOSE
+# -------
+# Single source of truth for engine capital.
 #
-# RULES
-# -----
-# 1. Engine-level gate (total capital)
-# 2. Internal split into sub-pots
-# 3. Per-pot emission threshold
+# THIS FILE DOES:
+#   1. Read BankState snapshot
+#   2. Extract engine_available
+#   3. Split into sub-pots
+#   4. Provide emission checks
+#
+# ENGINES MUST:
+#   - Call this helper only
+#   - NEVER access DB
+#
 # ======================================================================================================
 
 MIN_THRESHOLD = 10.0
@@ -25,19 +28,74 @@ DEFAULT_SPLIT = {
 }
 
 
-def split_pots(total: float, split: dict = None) -> dict:
-    """
-    Split total capital into sub-pots.
+# ------------------------------------------------------------------
+# SNAPSHOT READ (THE MISSING PIECE)
+# ------------------------------------------------------------------
 
-    Args:
-        total: total available capital
-        split: optional override ratios
+def get_engine_available(engine_name: str) -> float:
+    """
+    Read engine_available directly from BankState snapshot.
+
+    SOURCE:
+        bankstate_engine_snapshot.available
+    """
+
+    try:
+        from engines.config_paths import open_auto_db
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        row = con.execute("""
+            SELECT available
+            FROM bankstate_engine_snapshot
+            WHERE engine = ?
+            ORDER BY ts DESC
+            LIMIT 1
+        """, (engine_name,)).fetchone()
+
+        con.close()
+
+        if row and row["available"] is not None:
+            return float(row["available"])
+
+    except Exception:
+        pass
+
+    return 0.0
+
+
+# ------------------------------------------------------------------
+# CORE — ENGINE ENTRYPOINT
+# ------------------------------------------------------------------
+
+def get_engine_pots(engine_name: str, split: dict = None) -> dict:
+    """
+    MAIN ENTRYPOINT FOR ENGINES
+
+    Engines call THIS — nothing else.
 
     Returns:
-        dict of pot allocations
+        {
+            "EXPLORATORY": float,
+            "RISK": float,
+            "INPLAY": float
+        }
     """
 
-    if not total or total <= 0:
+    engine_available = get_engine_available(engine_name)
+
+    return split_pots(engine_available, split)
+
+
+# ------------------------------------------------------------------
+# SPLIT LOGIC
+# ------------------------------------------------------------------
+
+def split_pots(engine_available: float, split: dict = None) -> dict:
+
+    if engine_available is None or engine_available <= 0:
         return {
             "EXPLORATORY": 0.0,
             "RISK":        0.0,
@@ -45,22 +103,33 @@ def split_pots(total: float, split: dict = None) -> dict:
         }
 
     ratios = split or DEFAULT_SPLIT
+    available = float(engine_available)
 
     return {
-        k: total * ratios.get(k, 0.0)
-        for k in ("EXPLORATORY", "RISK", "INPLAY")
+        "EXPLORATORY": available * float(ratios.get("EXPLORATORY", 0.0)),
+        "RISK":        available * float(ratios.get("RISK", 0.0)),
+        "INPLAY":      available * float(ratios.get("INPLAY", 0.0)),
     }
 
 
+# ------------------------------------------------------------------
+# EMISSION CHECK
+# ------------------------------------------------------------------
+
 def can_emit(pot: float) -> bool:
-    """
-    Determines if a sub-engine is allowed to emit plans.
-    """
-    return pot is not None and pot >= MIN_THRESHOLD
+
+    if pot is None:
+        return False
+
+    try:
+        return float(pot) >= MIN_THRESHOLD
+    except Exception:
+        return False
 
 
-def engine_can_run(total: float) -> bool:
-    """
-    Coarse engine-level gate.
-    """
-    return total is not None and total >= MIN_THRESHOLD
+# ------------------------------------------------------------------
+# ENGINE GATE (DISABLED)
+# ------------------------------------------------------------------
+
+def engine_can_run(*_, **__) -> bool:
+    return True

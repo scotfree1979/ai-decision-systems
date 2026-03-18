@@ -43,7 +43,7 @@ from engines.bus_route import build_bus_route_tick
 # Shared across all engines (Unified, Blueprint, Context)
 # ======================================================================================================
 
-from engines.capital_policy import split_pots, can_emit, engine_can_run
+from engines.capital_policy import get_engine_pots, can_emit
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -495,29 +495,50 @@ class BlueprintEngine:
         # --------------------------------------------------
         # CAPITAL POLICY (GLOBAL)
         # --------------------------------------------------
+        # ======================================================================================================
+        # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
+        # 🔎 SEARCH: cap = report.get("capital", {})
+        # 🧩 ACTION: REPLACE — canonical engine pot + V7 capital report
+        # 📆 PATCHED: 2026-03-17 — correct BankState wiring + debug visibility
+        #
+        # PURPOSE
+        # -------
+        # • Use ENGINE-SCOPED capital (not global headroom)
+        # • Ensure naming aligns with BankState + dashboard
+        # • NEVER block evaluation
+        # • Provide explicit V7 debug output
+        #
+        # CONTRACT
+        # --------
+        # - engine_pot = capital available to THIS engine only
+        # - pots = internal split (exploratory / risk / inplay)
+        # - can_emit() controls plan emission ONLY
+        # - evaluation always continues
+        # ======================================================================================================
 
-        cap = report.get("capital", {})
-        total_capital = cap.get("headroom") or 0.0
+        pots = get_engine_pots("MSC_BLUEPRINT")
 
-        # 1️⃣ Engine-level gate
-        if not engine_can_run(total_capital):
-            return {
-                "enter": False,
-                "engine": "MSC_UNIFIED",
-                "lane": self.LANE_ID,
-                "why": "no_capital",
-                "signals": self._build_signal_summary(report),
-                "report": report,
-            }
-
-        # 2️⃣ Internal pot split
+        # --------------------------------------------------
+        # 🔁 INTERNAL POT SPLIT (ALWAYS EXECUTE)
+        # --------------------------------------------------
         pots = split_pots(total_capital)
 
-        # Optional debug (safe, low frequency)
-        # print(f"[UNIFIED POT] total={total_capital:.2f} "
-        #       f"E={pots['EXPLORATORY']:.2f} "
-        #       f"R={pots['RISK']:.2f} "
-        #       f"I={pots['INPLAY']:.2f}")
+        # --------------------------------------------------
+        # 📊 V7 CAPITAL REPORT (AUTHORITATIVE DEBUG)
+        # --------------------------------------------------
+        try:
+            print("════════════════════════════════════════")
+            print("[BLUEPRINT][CAPITAL V7]")
+            print(f"  exploratory_pot: {pots.get('EXPLORATORY', 0.0):.2f}")
+            print(f"  risk_pot       : {pots.get('RISK', 0.0):.2f}")
+            print(f"  inplay_pot     : {pots.get('INPLAY', 0.0):.2f}")
+            print("════════════════════════════════════════")
+        except Exception:
+            pass
+
+        # --------------------------------------------------
+        # 🚫 NO GLOBAL BLOCKING
+        # --------------------------------------------------
 
         ctx["_engine_ctx_name"] = "CTX_BLUEPRINT"
         route = getattr(self, "_route_ctx_map", {})
@@ -746,8 +767,7 @@ class BlueprintEngine:
 # Prevent risk harvesting when risk pot is not usable.
 # ======================================================================================================
 
-        if not can_emit(pots.get("RISK", 0.0)):
-            route = {}  # disables loop safely
+        risk_enabled = can_emit(pots.get("RISK", 0.0))
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: for (mid, sid), rctx in getattr(self, "_route_ctx_map", {}).items():
@@ -755,6 +775,9 @@ class BlueprintEngine:
 # ======================================================================================================
 
         for (mid, sid), rctx in route.items():
+
+            if not risk_enabled:
+                continue
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
