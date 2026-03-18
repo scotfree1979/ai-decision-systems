@@ -3170,7 +3170,7 @@ class DecisionBus:
         # ===============================================================
         # ROUTE BOUNDARY — REBUILD IDENTITY, PRESERVE CTX
         # ===============================================================
-        if self._bus_stop > 10:
+        if self._bus_stop > 10000:
             self._bus_stop = 1
             self._route_id += 1
 

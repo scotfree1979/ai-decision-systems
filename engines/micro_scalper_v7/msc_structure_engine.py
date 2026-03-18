@@ -1,6 +1,6 @@
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
-# 2nd clone of unified
+# 4nd clone of context
 # 🧩 ACTION: CREATE FILE
 # 📆 PHASE 0 — Unified Engine Skeleton (No Logic, No Plans)
 #
@@ -81,7 +81,7 @@ if __name__ == "__main__":
         SESSION_TOKEN = input("🔐 Enter Betfair session token: ").strip()
         os.environ["SESSION_TOKEN"] = SESSION_TOKEN
 
-class ContextEngine:
+class StructureEngine:
     """
     Unified Engine — Phase 0 (Signal Surface Only)
 
@@ -101,8 +101,8 @@ class ContextEngine:
     - No window gating
     """
 
-    ENGINE_NAME = "MSC_CONTEXT"
-    LANE_ID = 7
+    ENGINE_NAME = "MSC_STRUCTURE"
+    LANE_ID = 9
 
     # --------------------------------------------------------------------------------------------------
     # INITIALISATION
@@ -644,14 +644,14 @@ class ContextEngine:
         # - evaluation always continues
         # ======================================================================================================
 
-        pots = get_engine_pots("MSC_CONTEXT")
+        pots = get_engine_pots("MSC_STRUCTURE")
 
         # --------------------------------------------------
         # 📊 V7 CAPITAL REPORT (AUTHORITATIVE DEBUG)
         # --------------------------------------------------
         try:
             print("════════════════════════════════════════")
-            print("[CONTEXT][CAPITAL V7]")
+            print("[STRUCTURE][CAPITAL V7]")
             print(f"  exploratory_pot: {pots.get('EXPLORATORY', 0.0):.2f}")
             print(f"  risk_pot       : {pots.get('RISK', 0.0):.2f}")
             print(f"  inplay_pot     : {pots.get('INPLAY', 0.0):.2f}")
@@ -705,6 +705,150 @@ class ContextEngine:
         # ------------------------------------------------------------------
 
         candidates = self._select_exploratory_candidates(report)
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_structure_engine.py
+# 🔎 SEARCH: candidates = self._select_exploratory_candidates(report)
+# 🧩 ACTION: ADD — SAFE STRUCTURE FILTER (no DB in loop, O(1) lookup)
+# 📆 PATCHED: 2026-03-18 — Trade ONLY profitable context structures (safe version)
+#
+# PURPOSE
+# -------
+# Filter exploratory candidates so Structure engine ONLY trades
+# historically profitable market structures.
+#
+# DESIGN (SAFE)
+# -------------
+# ✔ Single DB read (batched)
+# ✔ O(1) lookup per candidate
+# ✔ No DB calls inside loop
+# ✔ No mutation of existing structures
+#
+# CONTRACT
+# --------
+# Context  = discovery (no filter)
+# Structure = exploitation (filtered)
+#
+# FAIL-SAFE
+# ---------
+# If no profitable structures exist → DO NOT filter (engine continues trading)
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # LOAD PROFITABLE STRUCTURES (ONCE)
+        # --------------------------------------------------
+
+        profitable_structures = self._discover_context_strategies()
+
+        # --------------------------------------------------
+        # ACTIVE RUNNER FILTER (O(1) scope reduction)
+        # --------------------------------------------------
+        active_keys = {
+            (str(c["marketId"]), str(c["selectionId"]))
+            for c in candidates
+        }
+
+        if profitable_structures:
+
+            # --------------------------------------------------
+            # Build fast lookup set
+            # --------------------------------------------------
+
+            profitable_set = {
+                (
+                    s["band"],
+                    s["fav_gap_bucket"],
+                    s["field_bucket"],
+                    s["fav_strength"],
+                )
+                for s in profitable_structures
+            }
+
+            # --------------------------------------------------
+            # LOAD ALL RUNNER STRUCTURES (ONE QUERY)
+            # --------------------------------------------------
+
+            from engines.config_paths import open_auto_db
+            import sqlite3
+
+            con = open_auto_db(rw=False)
+            con.row_factory = sqlite3.Row
+
+            try:
+# ======================================================================================================
+# 📍 TARGET: msc_structure_engine.py (tick → structure filter)
+# 🧩 ACTION: REPLACE QUERY — latest snapshot only
+# 📆 PATCHED: 2026-03-18 — FIX stale structure bug (execution path only)
+# ======================================================================================================
+
+                rows = con.execute("""
+                    SELECT s.*
+                    FROM market_runner_snapshot s
+                    JOIN (
+                        SELECT marketId, selectionId, MAX(ts) ts
+                        FROM market_runner_snapshot
+                        GROUP BY marketId, selectionId
+                    ) latest
+                    ON s.marketId = latest.marketId
+                    AND s.selectionId = latest.selectionId
+                    AND s.ts = latest.ts
+                """).fetchall()
+            finally:
+                con.close()
+
+            # --------------------------------------------------
+            # Build runner → structure map (ACTIVE ONLY)
+            # --------------------------------------------------
+
+            runner_struct_map = {}
+
+            for r in rows:
+
+                key = (str(r["marketId"]), str(r["selectionId"]))
+
+                if key not in active_keys:
+                    continue
+
+                runner_struct_map[key] = (
+                    r["band"],
+                    r["fav_gap_bucket"],
+                    r["field_bucket"],
+                    r["fav_strength"],
+                )
+
+            # --------------------------------------------------
+            # FILTER CANDIDATES (O(1))
+            # --------------------------------------------------
+
+            filtered = []
+
+            for c in candidates:
+
+                key = (str(c["marketId"]), str(c["selectionId"]))
+
+                struct = runner_struct_map.get(key)
+
+                if struct and struct in profitable_set:
+                    filtered.append(c)
+
+            # --------------------------------------------------
+            # SAFE APPLY (NEVER KILL ENGINE)
+            # --------------------------------------------------
+
+            if filtered:
+                candidates = filtered
+            # else: keep original candidates (fail-safe)
+
+            try:
+                print(
+                    f"[STRUCTURE] in={len(candidates)} "
+                    f"filtered={len(filtered)} "
+                    f"structures={len(profitable_structures)}"
+                )
+            except Exception:
+                pass
+
+# ======================================================================================================
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
@@ -808,7 +952,7 @@ class ContextEngine:
 
             emit_plan({
                 "enter": True,
-                "engine": "MSC_CONTEXT",
+                "engine": "MSC_STRUCTURE",
                 "bet_type": "EXPLORATORY",
                 "role": "PARENT",
                 "marketId": mid,
@@ -979,7 +1123,7 @@ class ContextEngine:
 
                 emit_plan({
                     "enter": True,
-                    "engine": "MSC_CONTEXT",
+                    "engine": "MSC_STRUCTURE",
                     "bet_type": "RISK",
                     "role": "CHILD",
                     "marketId": mid,
@@ -997,7 +1141,7 @@ class ContextEngine:
 
                 emit_plan({
                     "enter": True,
-                    "engine": "MSC_CONTEXT",
+                    "engine": "MSC_STRUCTURE",
                     "bet_type": "RISK",
                     "role": "CHILD",
                     "marketId": mid,
@@ -1133,7 +1277,7 @@ class ContextEngine:
                         if lvl >= px:
                             emit_plan({
                                 "enter": True,
-                                "engine": "MSC_CONTEXT",
+                                "engine": "MSC_STRUCTURE",
                                 "bet_type": "INPLAY",
                                 "role": "PARENT",
                                 "marketId": mid,
@@ -1149,7 +1293,7 @@ class ContextEngine:
 
                     emit_plan({
                         "enter": True,
-                        "engine": "MSC_CONTEXT",
+                        "engine": "MSC_STRUCTURE",
                         "bet_type": "INPLAY",
                         "role": "PARENT",
                         "marketId": mid,
@@ -1169,7 +1313,7 @@ class ContextEngine:
                         if lvl <= px:
                             emit_plan({
                                 "enter": True,
-                                "engine": "MSC_CONTEXT",
+                                "engine": "MSC_STRUCTURE",
                                 "bet_type": "INPLAY",
                                 "role": "PARENT",
                                 "marketId": mid,
@@ -1200,7 +1344,7 @@ class ContextEngine:
 
                     emit_plan({
                         "enter": True,
-                        "engine": "MSC_CONTEXT",
+                        "engine": "MSC_STRUCTURE",
                         "bet_type": "INPLAY",
                         "role": "PARENT",
                         "marketId": mid,
@@ -1251,7 +1395,7 @@ class ContextEngine:
 
                     emit_plan({
                         "enter": True,
-                        "engine": "MSC_CONTEXT",
+                        "engine": "MSC_STRUCTURE",
                         "bet_type": "INPLAY",
                         "role": "PARENT",
                         "marketId": mid,
@@ -1265,7 +1409,7 @@ class ContextEngine:
 
                     emit_plan({
                         "enter": True,
-                        "engine": "MSC_CONTEXT",
+                        "engine": "MSC_STRUCTURE",
                         "bet_type": "INPLAY",
                         "role": "PARENT",
                         "marketId": mid,
@@ -1414,7 +1558,7 @@ class ContextEngine:
 
                 emit_plan({
                     "enter": True,
-                    "engine": "MSC_CONTEXT",
+                    "engine": "MSC_STRUCTURE",
                     "bet_type": "INPLAY",
                     "role": "PARENT",
                     "marketId": mid,
@@ -1440,7 +1584,7 @@ class ContextEngine:
                         if lvl >= px:
                             emit_plan({
                                 "enter": True,
-                                "engine": "MSC_CONTEXT",
+                                "engine": "MSC_STRUCTURE",
                                 "bet_type": "INPLAY",
                                 "role": "PARENT",
                                 "marketId": mid,
@@ -1457,7 +1601,7 @@ class ContextEngine:
 
                     emit_plan({
                         "enter": True,
-                        "engine": "MSC_CONTEXT",
+                        "engine": "MSC_STRUCTURE",
                         "bet_type": "INPLAY",
                         "role": "PARENT",
                         "marketId": mid,
@@ -1481,7 +1625,7 @@ class ContextEngine:
                     if lvl <= px:
                         emit_plan({
                             "enter": True,
-                            "engine": "MSC_CONTEXT",
+                            "engine": "MSC_STRUCTURE",
                             "bet_type": "INPLAY",
                             "role": "PARENT",
                             "marketId": mid,
@@ -1544,7 +1688,7 @@ class ContextEngine:
         if not plans:
             return {
                 "enter": False,
-                "engine": "MSC_CONTEXT",
+                "engine": "MSC_STRUCTURE",
                 "lane": self.LANE_ID,
                 "why": "no_signal",
                 "signals": self._build_signal_summary(report),
@@ -1553,7 +1697,7 @@ class ContextEngine:
 
         return {
             "enter": True,
-            "engine": "MSC_CONTEXT",
+            "engine": "MSC_STRUCTURE",
             "lane": self.LANE_ID,
             "batch": True,
             "plans": plans,
@@ -1857,9 +2001,29 @@ class ContextEngine:
                 try:
                     print("[UNIFIED] requesting bus_route snapshot rebuild")
 
-                    build_bus_route_tick()
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:_build_v7_report
+# 🔎 SEARCH: build_bus_route_tick()
+# 🧩 ACTION: REPLACE — deterministic world rebuild
+# 📆 PATCHED: 2026-03-18 — prevent empty snapshot race condition
+#
+# PURPOSE
+# -------
+# build_bus_route_tick() does NOT guarantee snapshot timing.
+#
+# FIX
+# ---
+# Use BusRouteSnapshot directly for deterministic world build.
+# ======================================================================================================
 
-                    self._route_ctx_map = self._read_route_world()
+                    from engines.bus_route import BusRouteSnapshot
+
+                    snap = BusRouteSnapshot()
+                    snap.build_route()
+                    snap.partition_into_bus_stops()
+                    snap.refresh_ctx_dynamic_fields()
+
+                    self._route_ctx_map = snap.get_ctx_map()
 
                 except Exception:
                     self._route_ctx_map = {}
@@ -3893,7 +4057,7 @@ def _unified_report_loop(interval_s: int = 5):
 
     from engines.bus.bus import BUS
 
-    engine = BUS.engines.get("MSC_CONTEXT")
+    engine = BUS.engines.get("MSC_STRUCTURE")
 
     report = engine._build_v7_report(
         ctx={
@@ -3941,7 +4105,7 @@ if __name__ == "__main__":
 
     print("\n[UNIFIED] Standalone mode starting...\n")
 
-    engine = ContextEngine()
+    engine = StructureEngine()
 
     while True:
         try:
