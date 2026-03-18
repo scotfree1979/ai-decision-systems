@@ -4080,6 +4080,77 @@ class DecisionBus:
 
                 ctx["bet_type"] = plan.get("bet_type")
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: raw_stake = compute_dynamic_stake(
+# 🧩 ACTION: INSERT ABOVE — Dynamic Stake Context Projection (30-point model)
+# 📆 PATCHED: 2026-03-18 — Snapshot + Router → Stake inputs (BUS authority)
+#
+# PURPOSE:
+# - Convert snapshot + lifecycle into deterministic inputs
+# - NO engine changes
+# - NO schema changes
+# - Pure projection layer
+#
+# SOURCE OF TRUTH:
+# - px / rank → MarketMonitor / RouteSnapshot
+# - lifecycle → orders_by_runner (router truth)
+# ======================================================================================================
+
+                # --------------------------------------------------
+                # 🔑 DYNAMIC STAKE CONTEXT PROJECTION
+                # --------------------------------------------------
+
+                # --- PRICE HISTORY (lightweight state carry) ---
+                ctx["px_prev"] = ctx.get("_prev_px", ctx.get("px"))
+                ctx["_prev_px"] = ctx.get("px")
+
+                # --- RANK HISTORY ---
+                ctx["rank_prev"] = ctx.get("_prev_rank", ctx.get("rank"))
+                ctx["_prev_rank"] = ctx.get("rank")
+
+                # --- TREND DIRECTION (normalised) ---
+                d = ctx.get("direction")
+                if d == "LAY->BACK":
+                    ctx["trend_direction"] = "DRIFT"
+                elif d == "BACK->LAY":
+                    ctx["trend_direction"] = "STEAM"
+                else:
+                    ctx["trend_direction"] = None
+
+                # --- TRADE CONFIRMATION (router lifecycle truth) ---
+                orders = ctx.get("orders_by_runner", [])
+
+                closed_aligned = 0
+                closed_opposing = 0
+
+                for o in orders:
+                    if (
+                        o.get("role") == "CHILD"
+                        and str(o.get("exit_status")).upper() == "MATCHED"
+                    ):
+                        side = str(o.get("side")).upper()
+
+                        # DRIFT = LAY→BACK → child BACK
+                        if ctx["trend_direction"] == "DRIFT" and side == "BACK":
+                            closed_aligned += 1
+
+                        # STEAM = BACK→LAY → child LAY
+                        elif ctx["trend_direction"] == "STEAM" and side == "LAY":
+                            closed_aligned += 1
+
+                        else:
+                            closed_opposing += 1
+
+                ctx["closed_aligned"] = closed_aligned
+                ctx["closed_opposing"] = closed_opposing
+
+                # --- CLOSURE SPEED (simple proxy for now) ---
+                ctx["closure_speed"] = 1.0 if closed_aligned > 0 else 999.0
+
+                # --- TREND START (anchor-relative, fallback safe) ---
+                ctx["trend_start_px"] = ctx.get("anchor_entry_odds") or ctx.get("px")
+
                 raw_stake = compute_dynamic_stake(
                     engine=engine,
                     ctx=ctx,

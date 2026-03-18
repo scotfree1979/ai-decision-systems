@@ -471,33 +471,34 @@ def compute_risk_dynamic_stake(*, ctx: dict, engine="MSC_RISK") -> float:
 # - monotonic, deterministic, snap-clamped
 # ======================================================================================================
 
+
 # ======================================================================================================
 # 📍 TARGET: engines/math/dynamic_stake_v7.py
 # 🔎 SEARCH: def compute_dynamic_stake(
 # 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-XX-XX — Bet-Type Driven Stake Dispatch (MSC_UNIFIED compatible)
+# 📆 PATCHED: 2026-03-18 — HYBRID 30-POINT SCORING + EXISTING DISPATCH (FINAL)
 #
 # PURPOSE:
-# - Unified engine now emits bet_type
-# - Stake logic branches by bet_type first
-# - Engine fallback preserved for legacy engines
-# - No routing change
-# - No BankState change
+# - Preserve ALL existing bet_type + engine routing (NO BREAKAGE)
+# - Inject 30-point scoring ONLY into default / legacy path
+# - Use ONLY ctx fields already passed from snapshots (no new wiring)
+# - Deterministic, envelope-based, no BankState usage
+#
+# INPUT CONTRACT (must already exist in ctx via unified):
+#   px, px_prev
+#   rank, rank_prev
+#   trend_direction
+#   closed_aligned, closed_opposing
+#   closure_speed
+#   trend_start_px
+#
+# INVARIANTS:
+# - score ∈ [1, 30]
+# - stake ∈ [ENGINE_MIN, ENGINE_MAX]
+# - No architecture changes
 # ======================================================================================================
 
 def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
-    """
-    Bet-Type aware Dynamic Stake v7.
-
-    Priority:
-        1️⃣ bet_type (if present)
-        2️⃣ engine (fallback for legacy engines)
-
-    Guarantees:
-        - Always respects ENGINE_MIN / ENGINE_MAX
-        - Deterministic
-        - No bank % logic
-    """
 
     from engines.daily_config import ENGINE_MIN, ENGINE_MAX
 
@@ -505,7 +506,7 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
     eng = (engine or "").upper()
 
     # --------------------------------------------------
-    # 1️⃣ BET-TYPE DISPATCH (MSC_UNIFIED)
+    # 1️⃣ BET-TYPE DISPATCH (UNCHANGED)
     # --------------------------------------------------
 
     if bet_type == "RISK":
@@ -518,16 +519,14 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         return compute_inplay_dynamic_stake(ctx=ctx, engine="MSC_INPLAY")
 
     if bet_type == "STOPLOSS":
-        # stoploss uses parent stake directly
         parent_stake = float(ctx.get("anchor_entry_stake") or 0.0)
         return round(max(parent_stake, ENGINE_MIN.get("OVERWATCHER", 2.0)), 2)
 
     if bet_type == "CORRECTION":
-        # treat correction same as INPLAY sizing unless separated later
         return compute_inplay_dynamic_stake(ctx=ctx, engine="MSC_INPLAY")
 
     # --------------------------------------------------
-    # 2️⃣ ENGINE FALLBACK (LEGACY / NON-UNIFIED)
+    # 2️⃣ ENGINE FALLBACK (UNCHANGED)
     # --------------------------------------------------
 
     if eng == "MSC_RISK":
@@ -543,97 +542,120 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         return compute_overwatch_dynamic_stake(ctx=ctx)
 
     # --------------------------------------------------
-    # 3️⃣ LEGACY / DEFAULT ENVELOPE
+    # 3️⃣ HYBRID 30-POINT MODEL (NEW DEFAULT PATH)
     # --------------------------------------------------
 
-    min_stake = float(ENGINE_MIN.get(eng, 2.0))
-    max_stake = float(ENGINE_MAX.get(eng, min_stake))
+    lo = float(ENGINE_MIN.get(eng, 2.0))
+    hi = float(ENGINE_MAX.get(eng, lo))
 
-    confidence = 1.0
-    stake = min_stake + confidence * (max_stake - min_stake)
+    # --- Extract (fail-safe, no assumptions) ---
+    px              = float(ctx.get("px") or 0.0)
+    px_prev         = float(ctx.get("px_prev") or px)
+    rank            = int(ctx.get("rank") or 0)
+    rank_prev       = int(ctx.get("rank_prev") or rank)
 
-    stake = max(min_stake, min(stake, max_stake))
+    trend_direction = ctx.get("trend_direction")
+
+    closed_aligned  = int(ctx.get("closed_aligned") or 0)
+    closed_opposing = int(ctx.get("closed_opposing") or 0)
+    closure_speed   = float(ctx.get("closure_speed") or 999.0)
+
+    ref_px          = float(ctx.get("trend_start_px") or px)
+
+    if px <= 0:
+        return round(lo, 2)
+
+    # --------------------------------------------------
+    # MARKET TREND (0–10)
+    # --------------------------------------------------
+    trend_score = 0
+
+    if px != px_prev:
+        trend_score += 2
+
+    if rank and rank_prev and rank < rank_prev:
+        trend_score += 2
+
+    if (trend_direction == "DRIFT" and px >= px_prev) or \
+       (trend_direction == "STEAM" and px <= px_prev):
+        trend_score += 2
+
+    if abs(rank - rank_prev) <= 1:
+        trend_score += 2
+
+    if trend_direction:
+        trend_score += 2
+
+    trend_score = min(trend_score, 10)
+
+    # --------------------------------------------------
+    # TRADE CONFIRMATION (0–10)
+    # --------------------------------------------------
+    conf_score = 0
+
+    if closed_aligned >= 1:
+        conf_score += 2
+
+    if closed_aligned >= 3:
+        conf_score += 2
+
+    if closure_speed < 2.0:
+        conf_score += 2
+
+    if closed_opposing == 0:
+        conf_score += 2
+
+    if closed_aligned > closed_opposing:
+        conf_score += 2
+
+    conf_score = min(conf_score, 10)
+
+    # --------------------------------------------------
+    # RISK / POSITION (0–10)
+    # --------------------------------------------------
+    risk_score = 0
+
+    distance = abs(px - ref_px)
+
+    if distance < 0.5:
+        risk_score += 5
+    elif distance < 1.5:
+        risk_score += 4
+    elif distance < 3.0:
+        risk_score += 3
+    elif distance < 5.0:
+        risk_score += 2
+    else:
+        risk_score += 1
+
+    if 2.0 <= px <= 6.0:
+        risk_score += 5
+    elif 1.5 <= px < 2.0 or 6.0 < px <= 10.0:
+        risk_score += 4
+    elif 10.0 < px <= 15.0:
+        risk_score += 3
+    else:
+        risk_score += 1
+
+    risk_score = min(risk_score, 10)
+
+    # --------------------------------------------------
+    # FINAL SCORE (1–30)
+    # --------------------------------------------------
+    score = trend_score + conf_score + risk_score
+    score = max(1, min(score, 30))
+
+    # --------------------------------------------------
+    # SCORE → STAKE (30-STEP LINEAR)
+    # --------------------------------------------------
+    step = (hi - lo) / 29.0 if hi > lo else 0.0
+    stake = lo + (score - 1) * step
+
+    # HARD CLAMP
+    stake = max(lo, min(stake, hi))
 
     return round(stake, 2)
-
 # ======================================================================================================
-
-    # --------------------------------------------------
-    # 2️⃣ LEGACY — borrow confidence from RISK
-    # --------------------------------------------------
-    if eng == "LEGACY":
-
-        from tools.betfair_match_surface import get_direction_confidence
-
-        mid = ctx.get("marketId")
-        sid = ctx.get("selectionId")
-
-        if not mid or not sid:
-            return round(min_stake, 2)
-
-        # 0.0 → 1.0 directional proof from matched hedge cycles
-        confidence = float(get_direction_confidence(mid, sid))
-
-        # Hard clamp
-        confidence = max(0.0, min(confidence, 1.0))
-
-        # Linear interpolation across full engine envelope
-        stake = min_stake + confidence * (max_stake - min_stake)
-
-        return round(stake, 2)
-
-
-    # --------------------------------------------------
-    # 3️⃣ Default confidence score (dimensionless)
-    # --------------------------------------------------
-    confidence = 1.0
-
-    # Letter-based conviction (primary signal)
-    letter = (ctx.get("letter") or ctx.get("source") or "")[:1].upper()
-    confidence *= float(LETTER_MULT.get(letter, 1.0))
-
-    # Optional: time / phase signals (kept gentle by design)
-    mto = ctx.get("minutes_to_off")
-    if isinstance(mto, (int, float)):
-        if mto > 60:
-            confidence *= 1.05
-        elif mto < 10:
-            confidence *= 0.95
-
-    ocp = ctx.get("oc_phase")
-    if isinstance(ocp, int):
-        if ocp < 3:
-            confidence *= 1.05
-        elif ocp > 6:
-            confidence *= 0.95
-
-    # Normalise confidence into sane band
-    confidence = max(0.0, min(confidence, 1.25))
-
-    # --------------------------------------------------
-    # 4️⃣ Linear interpolation inside envelope
-    # --------------------------------------------------
-    stake = min_stake + confidence * (max_stake - min_stake)
-
-    # --------------------------------------------------
-    # 5️⃣ HARD SNAP (final authority)
-    # --------------------------------------------------
-    if stake < min_stake:
-        stake = min_stake
-    elif stake > max_stake:
-        stake = max_stake
-
-    # FINAL FORM ADJUSTMENT
-    try:
-        stake *= get_form_adjustment(
-            marketId=ctx["marketId"],
-            selectionId=ctx["selectionId"],
-        )
-    except Exception:
-        pass
-
-    return round(float(stake), 2)
-
 
 # === PATCH END ================================================================
 def advance_progressive_stage(*, marketId: str, selectionId: str):
@@ -805,26 +827,30 @@ def calc_dynamic_stake(letter: str, phase: str = "PRE", bank: float | None = Non
 # 📍 TARGET: engines/math/dynamic_stake_v7.py
 # 🔎 SEARCH: def calc_greenup_stake(
 # 🧩 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-03-22 — Canonical green-up sizing (pure, invariant-only)
+# 📆 PATCHED: 2026-03-18 — GreenUp v2 (tick-aware, parent/child aligned, invariant-safe)
 #
 # PURPOSE:
-# - Compute CHILD hedge stake such that:
-#       WIN_PNL == LOSE_PNL
-# - Profit derives ONLY from price movement (ticks)
-# - Direction is handled by CALLER (side selection), not math
+# - Compute CHILD hedge stake using:
+#       parent_stake
+#       entry_odds (anchor)
+#       current_odds (child)
+#       tick movement (optional, for validation / spacing)
 #
-# MATHEMATICAL INVARIANT (FINAL):
-#   child_stake = (parent_stake * parent_odds) / child_odds
+# - Maintain invariant:
+#       WIN_PNL ≈ LOSE_PNL
 #
-# ASSUMPTIONS (NOW GUARANTEED UPSTREAM):
-# - parent_stake >= ENGINE_MIN (≥ £3)
-# - hedge_odds > 0
-# - parent_odds > 0
+# - Allow ladder-based progression (multiple hedge levels)
 #
-# NOTES:
-# - No Betfair minimum enforcement here
-# - No defensive fallbacks
-# - Rounding is applied LAST
+# INPUT CONTRACT (ctx must already contain):
+#   entry_odds            → parent matched price
+#   parent_stake          → parent stake
+#   hedge_odds            → current px (child)
+#   ticks_moved           → optional (for ladder spacing only)
+#
+# INVARIANTS:
+# - No budget logic
+# - No min/max enforcement
+# - Pure price math
 # ======================================================================================================
 
 def calc_greenup_stake(
@@ -832,28 +858,44 @@ def calc_greenup_stake(
     entry_odds: float,
     parent_stake: float,
     hedge_odds: float,
+    ticks_moved: float | None = None,
 ) -> float:
     """
-    Canonical green-up calculation.
+    Tick-aware green-up calculation.
 
-    Guarantees:
-      • WIN PnL == LOSE PnL
-      • Profit scales with tick distance
-      • Works identically for:
-            - LAY → BACK
-            - BACK → LAY
+    Core invariant:
+        child_stake = (parent_stake * entry_odds) / hedge_odds
+
+    ticks_moved is NOT used to change math,
+    only to validate spacing / progression externally.
     """
 
-    # All validation is upstream — math only lives here
+    # --- hard inputs ---
     entry_odds   = float(entry_odds)
     hedge_odds   = float(hedge_odds)
     parent_stake = float(parent_stake)
 
-    stake = (parent_stake * entry_odds) / hedge_odds
+    if entry_odds <= 0 or hedge_odds <= 0 or parent_stake <= 0:
+        return 0.0
 
-    return round(stake, 2)
+    # --------------------------------------------------
+    # 1️⃣ CORE GREEN-UP MATH (LOCKED INVARIANT)
+    # --------------------------------------------------
+    child_stake = (parent_stake * entry_odds) / hedge_odds
 
-# === PATCH END ==============================================================
+    # --------------------------------------------------
+    # 2️⃣ OPTIONAL: TICK-BASED VALIDATION (NO MATH CHANGE)
+    # --------------------------------------------------
+    # ticks_moved can be used upstream to decide:
+    #   - whether to place hedge
+    #   - how many ladder steps to allow
+    #
+    # But NEVER changes the hedge formula itself
+    # --------------------------------------------------
+
+    return round(child_stake, 2)
+
+# ======================================================================================================
 
 
 
