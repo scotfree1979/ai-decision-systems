@@ -519,11 +519,6 @@ class BlueprintEngine:
         pots = get_engine_pots("MSC_BLUEPRINT")
 
         # --------------------------------------------------
-        # 🔁 INTERNAL POT SPLIT (ALWAYS EXECUTE)
-        # --------------------------------------------------
-        pots = split_pots(total_capital)
-
-        # --------------------------------------------------
         # 📊 V7 CAPITAL REPORT (AUTHORITATIVE DEBUG)
         # --------------------------------------------------
         try:
