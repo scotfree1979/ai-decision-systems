@@ -1579,30 +1579,40 @@ class DecisionBus:
                     ctx["msc_direction"] = d
             except Exception:
                 pass
-        # === PATCH END ==============================================================
 
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: bus_pairs = [
+        # 🧩 ACTION: REPLACE — remove synthetic pair + simplify diagnostics
+        # 📆 PATCHED: 2026-03-18 — eliminate fake BUS pairs (diagnostic only)
+        #
+        # WHY:
+        # - bus_pairs is NOT used by execution (lanes 6–8)
+        # - synthetic ("__BUS__", "__EMPTY__") introduces fake markets
+        # - diagnostics must reflect REAL world only
+        #
+        # RESULT:
+        # - no fake markets
+        # - no undefined variable
+        # - no behavioural impact
+        # ======================================================================================================
 
-        # --------------------------------------------------
-        # 📊 BUS STOP CTX HEALTH (LOW-NOISE)
-        # --------------------------------------------------
-        bus_pairs = bus_stop_pairs
+        bus_pairs = [
+            (mid, sid)
+            for (mid, sid), ctx in self._route_ctx_map.items()
+            if ctx and ctx.get("px") is not None
+        ]
 
         if bus_pairs:
             mids = {mid for (mid, _sid) in bus_pairs}
             total_pairs = len(bus_pairs)
 
-            # CTX presence
             ctx_present = sum(
                 1 for (mid, sid) in bus_pairs
                 if (mid, sid) in self._route_ctx_map
             )
 
-            # CTX with execution price (odds refreshed)
-            ctx_with_px = sum(
-                1 for (mid, sid) in bus_pairs
-                if (mid, sid) in self._route_ctx_map
-                and self._route_ctx_map[(mid, sid)].get("px") is not None
-            )
+            ctx_with_px = total_pairs  # already filtered
 
             print(
                 f"[BUS][CTX] "
@@ -1614,7 +1624,6 @@ class DecisionBus:
                 f"ctx_present={ctx_present} "
                 f"ctx_with_px={ctx_with_px}"
             )
-
         # --------------------------------------------------
         # 🧠 CTX STRUCTURAL DIAGNOSTIC (V7)
         # --------------------------------------------------
@@ -2420,78 +2429,74 @@ class DecisionBus:
         # --------------------------------------------------
         # 🟥 LANE 5 — OVERWATCHER (ROUTE-FED, PURE EVALUATOR)
         # --------------------------------------------------
-# === PATCH START ==============================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 SEARCH: # 🟥 LANE 5 — OVERWATCHER
-# 🛠 ACTION: Add explicit NO-FIRE reason recording
-# 📆 PATCHED: 2026-04-XX — Overwatch visibility instrumentation
-#
-# PURPOSE:
-# - Overwatch must report why it did not emit
-# - No behavioural change
-# - Diagnostic only
-# ==============================================================================
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: overwatcher = self.engines.get("OVERWATCHER")
+        # 🧩 ACTION: FIX — enforce true deprecation (no execution)
+        # 📆 PATCHED: 2026-03-18 — disable Lane 5 execution completely
+        #
+        # WHY:
+        # - Overwatcher is marked deprecated but still executing
+        # - Causes unintended logic execution
+        # - Violates lane isolation (only lanes 6–8 should run)
+        #
+        # RESULT:
+        # - Lane 5 fully disabled
+        # - No hidden execution
+        # - Matches system design
+        # ======================================================================================================
 
         if "OVERWATCHER" in self._deprecated_engines:
             engine_report["OVERWATCHER"]["evaluated"] = True
             _record_reason(engine_report, "OVERWATCHER", "deprecated_lane")
+
         else:
             engine_report["OVERWATCHER"]["evaluated"] = True
 
+            overwatcher = self.engines.get("OVERWATCHER")
 
+            if overwatcher:
 
-        overwatcher = self.engines.get("OVERWATCHER")
+                for (mid, sid), ctx in self._route_ctx_map.items():
 
-        if overwatcher:
+                    if not ctx:
+                        _record_reason(engine_report, "OVERWATCHER", "missing_ctx")
+                        continue
 
-            for (mid, sid), ctx in self._route_ctx_map.items():
+                    current_px = ctx.get("px")
+                    anchor_px  = ctx.get("anchor_entry_odds")
+                    anchor_id  = ctx.get("anchor_parent_id")
+                    anchor_stk = ctx.get("anchor_entry_stake")
 
-                if not ctx:
-                    _record_reason(engine_report, "OVERWATCHER", "missing_ctx")
-                    continue
+                    if current_px is None:
+                        _record_reason(engine_report, "OVERWATCHER", "missing_px")
+                        continue
 
-                current_px = ctx.get("px")
-                anchor_px  = ctx.get("anchor_entry_odds")
-                anchor_id  = ctx.get("anchor_parent_id")
-                anchor_stk = ctx.get("anchor_entry_stake")
+                    if not anchor_id or anchor_px is None:
+                        _record_reason(engine_report, "OVERWATCHER", "no_active_parent")
+                        continue
 
-                if current_px is None:
-                    _record_reason(engine_report, "OVERWATCHER", "missing_px")
-                    continue
+                    plan = overwatcher.maybe_emit_stoploss_plan(
+                        parent_row={
+                            "id": anchor_id,
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "side": ctx.get("side"),
+                            "entry_odds": anchor_px,
+                            "entry_stake": anchor_stk,
+                            "opened_at": ctx.get("opened_at"),
+                        },
+                        current_px=float(current_px),
+                    )
 
-                if not anchor_id or anchor_px is None:
-                    _record_reason(engine_report, "OVERWATCHER", "no_active_parent")
-                    continue
+                    if plan:
+                        plan["engine"] = "OVERWATCHER"
+                        plans.append(("OVERWATCHER", plan, ctx))
+                        engine_report["OVERWATCHER"]["fired"] += 1
+                        lane_counts[5] += 1
+                    else:
+                        _record_reason(engine_report, "OVERWATCHER", "no_stoploss_hit")
 
-                # --------------------------------------------------
-                # STOPLOSS EVALUATION
-                # --------------------------------------------------
-                plan = overwatcher.maybe_emit_stoploss_plan(
-                    parent_row={
-                        "id": anchor_id,
-                        "marketId": mid,
-                        "selectionId": sid,
-                        "side": ctx.get("side"),
-                        "entry_odds": anchor_px,
-                        "entry_stake": anchor_stk,
-                        "opened_at": ctx.get("opened_at"),
-                    },
-                    current_px=float(current_px),
-                )
-
-                if plan:
-                    plan["engine"] = "OVERWATCHER"
-                    plans.append(("OVERWATCHER", plan, ctx))
-                    engine_report["OVERWATCHER"]["fired"] += 1
-                    lane_counts[5] += 1
-                else:
-                    _record_reason(engine_report, "OVERWATCHER", "no_stoploss_hit")
-
-# === PATCH END ==============================================================
-
-                    # --------------------------------------------------
-                    # PURE PROGRESSIVE LOCK EVALUATION
-                    # --------------------------------------------------
                     runner_pnl = ctx.get("pnl_if_win")
                     if runner_pnl is None:
                         continue
@@ -3707,8 +3712,45 @@ class DecisionBus:
         # ==================================================
         # OVERWATCHER — REDISTRIBUTION (ANALYSIS ONLY)
         # ==================================================
-        for (mid, sid) in bus_stop_pairs:
-            ctx = self._route_ctx_map.get((mid, sid))
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: for (mid, sid) in bus_stop_pairs:
+        # 🧩 ACTION: REPLACE — remove deprecated bus_stop_pairs dependency
+        # 📆 PATCHED: 2026-03-18 — world-driven redistribution loop
+        #
+        # WHY:
+        # - bus_stop_pairs is deprecated
+        # - only lanes 6–8 run (world-driven)
+        # - ctx_map is the authoritative execution surface
+        #
+        # RESULT:
+        # - no synthetic pairs
+        # - no legacy dependency
+        # - cleaner execution
+        # ======================================================================================================
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+            if not ctx:
+                continue
+
+            _normalize_ctx_enums(ctx)
+
+            try:
+                redist = evaluate_redistribution(ctx)
+                if redist:
+                    ctx["redistribution"] = redist
+                    tick_ctx["enrichment_ran"] = True
+
+                    print(
+                        f"[BUS][REDIST] mid={redist.get('marketId')} "
+                        f"oc={redist.get('oc_phase')} "
+                        f"disp={redist.get('dispersion'):.2f} "
+                        f"urgency={redist.get('urgency')}"
+                    )
+            except Exception as e:
+                tick_ctx["errors"].append(("redistribution", str(e)))
+
+
             if not ctx:
                 continue
 
