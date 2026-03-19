@@ -6817,13 +6817,34 @@ def place_parent_and_hedge(
     # ==================================================
     # MSC_INPLAY SEQUENTIAL PROMOTION GATE (ROUTER AUTH)
     # ==================================================
-    # Treat Unified INPLAY plans the same as MSC_INPLAY
+    # ======================================================================================================
+# 📍 TARGET: engines/live/live_router.py
+# 🔎 SEARCH: is_inplay_engine = (
+# 🧩 ACTION: REPLACE — make INPLAY engine-agnostic
+# 📆 PATCHED: 2026-03-18 — enable INPLAY for ALL engines
+#
+# PURPOSE
+# -------
+# Remove hard dependency on MSC_INPLAY / MSC_UNIFIED.
+#
+# INPLAY must be driven by:
+#     bet_type == "INPLAY"
+#
+# NOT by engine name.
+#
+# RESULT
+# ------
+# Blueprint / Context / Structure / Meta
+# can now execute INPLAY plans correctly.
+#
+# INVARIANT
+# ---------
+# Router never decides strategy.
+# It only executes what engines emit.
+# ======================================================================================================
+
     is_inplay_engine = (
-        engine == "MSC_INPLAY"
-        or (
-            engine == "MSC_UNIFIED"
-            and (_plan or {}).get("bet_type") == "INPLAY"
-        )
+        (_plan or {}).get("bet_type") == "INPLAY"
     )
 
     if is_inplay_engine:
