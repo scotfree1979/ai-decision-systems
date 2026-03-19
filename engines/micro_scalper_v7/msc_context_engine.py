@@ -152,6 +152,28 @@ class ContextEngine:
         self._structural_fired = {}
 
 # ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:__init__
+# 🔎 SEARCH: self._structural_fired =
+# 🧩 ACTION: ADD — local context learning store
+# 📆 PATCHED: 2026-03-18 — self-contained context intelligence (no DB dependency)
+#
+# PURPOSE
+# -------
+# Maintain in-memory learning of:
+#   structure → pnl → avg → decisions
+#
+# DESIGN
+# ------
+# key = (band, gap, field, fav)
+# value = aggregated stats
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # 🧠 CONTEXT LEARNING STORE (CORE MEMORY)
+        # --------------------------------------------------
+        self._context_store = {}
+
+# ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:__init__
 # 🔎 SEARCH: self._fav_history =
 # 🧩 ADD: ensure opportunity schema exists
@@ -222,6 +244,49 @@ class ContextEngine:
                 buckets["long"].append(key)
 
         return buckets
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — context key extractor
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Extract structure fingerprint from latest snapshot
+# ======================================================================================================
+
+    def _get_context_key(self, mid, sid):
+
+        from engines.config_paths import open_auto_db
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        try:
+            row = con.execute("""
+                SELECT
+                    band,
+                    fav_gap_bucket,
+                    field_bucket,
+                    fav_strength
+                FROM market_runner_snapshot
+                WHERE marketId=? AND selectionId=?
+                ORDER BY ts DESC
+                LIMIT 1
+            """, (mid, sid)).fetchone()
+        finally:
+            con.close()
+
+        if not row:
+            return None
+
+        return (
+            row["band"],
+            row["fav_gap_bucket"],
+            row["field_bucket"],
+            row["fav_strength"],
+        )
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
@@ -391,86 +456,70 @@ class ContextEngine:
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
-# 🧩 ACTION: ADD — Auto-learning context scoring model
-# 📆 PATCHED: 2026-03-16
+# 🔎 SEARCH: def _context_learned_score
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-18 — remove settlements dependency, use local memory
 #
 # PURPOSE
 # -------
-# Learn profitable context patterns automatically from historical settlements.
-#
-# DATA SOURCES
-# ------------
-# market_runner_snapshot
-# settlements
-#
-# METHOD
-# ------
-# PnL aggregated by:
-#
-#   band
-#   fav_gap_bucket
-#   field_bucket
-#   fav_strength
-#
-# Score returned = avg_pnl per context bucket.
-#
-# RESULT
-# ------
-# Context engine learns which race structures are profitable.
+# Score using ONLY in-memory context store
 # ======================================================================================================
 
     def _context_learned_score(self, mid: str, sid: str) -> float:
 
-        from engines.config_paths import open_auto_db
-        import sqlite3
+        key = self._get_context_key(mid, sid)
 
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-
-        try:
-
-            row = con.execute("""
-                SELECT
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength
-                FROM market_runner_snapshot s
-                WHERE s.marketId=? AND s.selectionId=?
-                ORDER BY s.ts DESC
-                LIMIT 1
-            """, (mid, sid)).fetchone()
-
-            if not row:
-                return 0.0
-
-            stats = con.execute("""
-                SELECT
-                    AVG(t.profit) as avg_pnl,
-                    COUNT(*) as samples
-                FROM settlements t
-                JOIN market_runner_snapshot s
-                    ON s.marketId=t.marketId
-                   AND s.selectionId=t.selectionId
-                WHERE
-                    s.band=? AND
-                    s.fav_gap_bucket=? AND
-                    s.field_bucket=? AND
-                    s.fav_strength=?
-            """, (
-                row["band"],
-                row["fav_gap_bucket"],
-                row["field_bucket"],
-                row["fav_strength"],
-            )).fetchone()
-
-        finally:
-            con.close()
-
-        if not stats or stats["samples"] < 20:
+        if not key:
             return 0.0
 
-        return float(stats["avg_pnl"])
+        data = self._context_store.get(key)
+
+        if not data or data["trades"] < 10:
+            return 0.0
+
+        return data["avg"]
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — context learning updater
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Update structure → pnl mapping when outcome known
+#
+# CONTRACT
+# --------
+# Called externally OR wired later to settlement hook
+# ======================================================================================================
+
+    def update_context_outcome(self, mid, sid, pnl, source_engine):
+
+        key = self._get_context_key(mid, sid)
+
+        if not key:
+            return
+
+        bucket = self._context_store.setdefault(key, {
+            "trades": 0,
+            "pnl": 0.0,
+            "avg": 0.0,
+            "by_engine": {}
+        })
+
+        bucket["trades"] += 1
+        bucket["pnl"] += pnl
+        bucket["avg"] = bucket["pnl"] / bucket["trades"]
+
+        eng = bucket["by_engine"].setdefault(source_engine, {
+            "trades": 0,
+            "pnl": 0.0,
+            "avg": 0.0
+        })
+
+        eng["trades"] += 1
+        eng["pnl"] += pnl
+        eng["avg"] = eng["pnl"] / eng["trades"]
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
@@ -823,6 +872,18 @@ class ContextEngine:
                 "signal_source": "unified_v1",
 
                 "why": "unified_top5_candidate",
+# ======================================================================================================
+# 📍 TARGET: emit_plan({...})
+# 🧩 ACTION: ADD — context fingerprint
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Ensure every trade carries structure identity
+# ======================================================================================================
+
+                "context_key": self._get_context_key(mid, sid),
+                "source_engine": self.ENGINE_NAME,
             })
 
 # ======================================================================================================

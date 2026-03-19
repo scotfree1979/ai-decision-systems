@@ -1340,181 +1340,181 @@ class DecisionBus:
 # - Restore BUS callable contract
 # ======================================================================================================
 
-        # ==================================================
-        # 🟪 LANE 9 — MSC_CONTEXT (ENGINE-STYLE)
-        # ==================================================
-        def _lane9_msc_context(self, base_ctx, engine_report):
+    # ==================================================
+    # 🟪 LANE 9 — MSC_CONTEXT (ENGINE-STYLE)
+    # ==================================================
+    def _lane9_msc_context(self, base_ctx, engine_report):
 
-            plans = []
+        plans = []
 
-            engine = self.engines.get("MSC_CONTEXT")
-            if not engine:
+        engine = self.engines.get("MSC_CONTEXT")
+        if not engine:
+            return plans
+
+        try:
+
+            ctx_engine = {
+                "_route_ctx_map": self._route_ctx_map,
+                "_route_snapshot": self._route_snapshot,
+            }
+
+            result = engine.tick(ctx_engine)
+
+            engine_report["MSC_CONTEXT"]["evaluated"] = True
+
+            if not result:
+                _record_reason(engine_report, "MSC_CONTEXT", "no_result")
                 return plans
 
-            try:
+            if result is None:
+                _record_reason(engine_report, "MSC_CONTEXT", "market_finished")
+                return plans
 
-                ctx_engine = {
-                    "_route_ctx_map": self._route_ctx_map,
-                    "_route_snapshot": self._route_snapshot,
-                }
+            why = result.get("why")
+            if why:
+                _record_reason(engine_report, "MSC_CONTEXT", why)
 
-                result = engine.tick(ctx_engine)
+            signals = result.get("signals") or {}
+            for k, v in signals.items():
+                if v:
+                    _record_reason(engine_report, "MSC_CONTEXT", f"signal_{k}")
 
-                engine_report["MSC_CONTEXT"]["evaluated"] = True
+            if result.get("batch") and isinstance(result.get("plans"), list):
 
-                if not result:
-                    _record_reason(engine_report, "MSC_CONTEXT", "no_result")
-                    return plans
-
-                if result is None:
-                    _record_reason(engine_report, "MSC_CONTEXT", "market_finished")
-                    return plans
-
-                why = result.get("why")
-                if why:
-                    _record_reason(engine_report, "MSC_CONTEXT", why)
-
-                signals = result.get("signals") or {}
-                for k, v in signals.items():
-                    if v:
-                        _record_reason(engine_report, "MSC_CONTEXT", f"signal_{k}")
-
-                if result.get("batch") and isinstance(result.get("plans"), list):
-
-                    for p in result["plans"]:
-                        plan = dict(p)
-                        plan["engine"] = "MSC_CONTEXT"
-                        plans.append(("MSC_CONTEXT", plan, ctx_engine))
-                        engine_report["MSC_CONTEXT"]["fired"] += 1
-
-                elif result.get("enter"):
-
-                    result["engine"] = "MSC_CONTEXT"
-                    plans.append(("MSC_CONTEXT", result, ctx_engine))
+                for p in result["plans"]:
+                    plan = dict(p)
+                    plan["engine"] = "MSC_CONTEXT"
+                    plans.append(("MSC_CONTEXT", plan, ctx_engine))
                     engine_report["MSC_CONTEXT"]["fired"] += 1
 
-            except Exception as e:
-                _record_reason(engine_report, "MSC_CONTEXT", f"tick_error:{e}")
+            elif result.get("enter"):
 
+                result["engine"] = "MSC_CONTEXT"
+                plans.append(("MSC_CONTEXT", result, ctx_engine))
+                engine_report["MSC_CONTEXT"]["fired"] += 1
+
+        except Exception as e:
+            _record_reason(engine_report, "MSC_CONTEXT", f"tick_error:{e}")
+
+        return plans
+
+
+    # ==================================================
+    # 🟪 LANE 10 — MSC_STRUCTURE (ENGINE-STYLE)
+    # ==================================================
+    def _lane10_msc_structure(self, base_ctx, engine_report):
+
+        plans = []
+
+        engine = self.engines.get("MSC_STRUCTURE")
+        if not engine:
             return plans
 
+        try:
 
-        # ==================================================
-        # 🟪 LANE 10 — MSC_STRUCTURE (ENGINE-STYLE)
-        # ==================================================
-        def _lane10_msc_structure(self, base_ctx, engine_report):
+            ctx_engine = {
+                "_route_ctx_map": self._route_ctx_map,
+                "_route_snapshot": self._route_snapshot,
+            }
 
-            plans = []
+            result = engine.tick(ctx_engine)
 
-            engine = self.engines.get("MSC_STRUCTURE")
-            if not engine:
+            engine_report["MSC_STRUCTURE"]["evaluated"] = True
+
+            if not result:
+                _record_reason(engine_report, "MSC_STRUCTURE", "no_result")
                 return plans
 
-            try:
+            if result is None:
+                _record_reason(engine_report, "MSC_STRUCTURE", "market_finished")
+                return plans
 
-                ctx_engine = {
-                    "_route_ctx_map": self._route_ctx_map,
-                    "_route_snapshot": self._route_snapshot,
-                }
+            why = result.get("why")
+            if why:
+                _record_reason(engine_report, "MSC_STRUCTURE", why)
 
-                result = engine.tick(ctx_engine)
+            signals = result.get("signals") or {}
+            for k, v in signals.items():
+                if v:
+                    _record_reason(engine_report, "MSC_STRUCTURE", f"signal_{k}")
 
-                engine_report["MSC_STRUCTURE"]["evaluated"] = True
+            if result.get("batch") and isinstance(result.get("plans"), list):
 
-                if not result:
-                    _record_reason(engine_report, "MSC_STRUCTURE", "no_result")
-                    return plans
-
-                if result is None:
-                    _record_reason(engine_report, "MSC_STRUCTURE", "market_finished")
-                    return plans
-
-                why = result.get("why")
-                if why:
-                    _record_reason(engine_report, "MSC_STRUCTURE", why)
-
-                signals = result.get("signals") or {}
-                for k, v in signals.items():
-                    if v:
-                        _record_reason(engine_report, "MSC_STRUCTURE", f"signal_{k}")
-
-                if result.get("batch") and isinstance(result.get("plans"), list):
-
-                    for p in result["plans"]:
-                        plan = dict(p)
-                        plan["engine"] = "MSC_STRUCTURE"
-                        plans.append(("MSC_STRUCTURE", plan, ctx_engine))
-                        engine_report["MSC_STRUCTURE"]["fired"] += 1
-
-                elif result.get("enter"):
-
-                    result["engine"] = "MSC_STRUCTURE"
-                    plans.append(("MSC_STRUCTURE", result, ctx_engine))
+                for p in result["plans"]:
+                    plan = dict(p)
+                    plan["engine"] = "MSC_STRUCTURE"
+                    plans.append(("MSC_STRUCTURE", plan, ctx_engine))
                     engine_report["MSC_STRUCTURE"]["fired"] += 1
 
-            except Exception as e:
-                _record_reason(engine_report, "MSC_STRUCTURE", f"tick_error:{e}")
+            elif result.get("enter"):
 
+                result["engine"] = "MSC_STRUCTURE"
+                plans.append(("MSC_STRUCTURE", result, ctx_engine))
+                engine_report["MSC_STRUCTURE"]["fired"] += 1
+
+        except Exception as e:
+            _record_reason(engine_report, "MSC_STRUCTURE", f"tick_error:{e}")
+
+        return plans
+
+
+    # ==================================================
+    # 🟪 LANE 11 — MSC_META (ENGINE-STYLE)
+    # ==================================================
+    def _lane11_msc_meta(self, base_ctx, engine_report):
+
+        plans = []
+
+        engine = self.engines.get("MSC_META")
+        if not engine:
             return plans
 
+        try:
 
-        # ==================================================
-        # 🟪 LANE 11 — MSC_META (ENGINE-STYLE)
-        # ==================================================
-        def _lane11_msc_meta(self, base_ctx, engine_report):
+            ctx_engine = {
+                "_route_ctx_map": self._route_ctx_map,
+                "_route_snapshot": self._route_snapshot,
+            }
 
-            plans = []
+            result = engine.tick(ctx_engine)
 
-            engine = self.engines.get("MSC_META")
-            if not engine:
+            engine_report["MSC_META"]["evaluated"] = True
+
+            if not result:
+                _record_reason(engine_report, "MSC_META", "no_result")
                 return plans
 
-            try:
+            if result is None:
+                _record_reason(engine_report, "MSC_META", "market_finished")
+                return plans
 
-                ctx_engine = {
-                    "_route_ctx_map": self._route_ctx_map,
-                    "_route_snapshot": self._route_snapshot,
-                }
+            why = result.get("why")
+            if why:
+                _record_reason(engine_report, "MSC_META", why)
 
-                result = engine.tick(ctx_engine)
+            signals = result.get("signals") or {}
+            for k, v in signals.items():
+                if v:
+                    _record_reason(engine_report, "MSC_META", f"signal_{k}")
 
-                engine_report["MSC_META"]["evaluated"] = True
+            if result.get("batch") and isinstance(result.get("plans"), list):
 
-                if not result:
-                    _record_reason(engine_report, "MSC_META", "no_result")
-                    return plans
-
-                if result is None:
-                    _record_reason(engine_report, "MSC_META", "market_finished")
-                    return plans
-
-                why = result.get("why")
-                if why:
-                    _record_reason(engine_report, "MSC_META", why)
-
-                signals = result.get("signals") or {}
-                for k, v in signals.items():
-                    if v:
-                        _record_reason(engine_report, "MSC_META", f"signal_{k}")
-
-                if result.get("batch") and isinstance(result.get("plans"), list):
-
-                    for p in result["plans"]:
-                        plan = dict(p)
-                        plan["engine"] = "MSC_META"
-                        plans.append(("MSC_META", plan, ctx_engine))
-                        engine_report["MSC_META"]["fired"] += 1
-
-                elif result.get("enter"):
-
-                    result["engine"] = "MSC_META"
-                    plans.append(("MSC_META", result, ctx_engine))
+                for p in result["plans"]:
+                    plan = dict(p)
+                    plan["engine"] = "MSC_META"
+                    plans.append(("MSC_META", plan, ctx_engine))
                     engine_report["MSC_META"]["fired"] += 1
 
-            except Exception as e:
-                _record_reason(engine_report, "MSC_META", f"tick_error:{e}")
+            elif result.get("enter"):
 
-            return plans
+                result["engine"] = "MSC_META"
+                plans.append(("MSC_META", result, ctx_engine))
+                engine_report["MSC_META"]["fired"] += 1
+
+        except Exception as e:
+            _record_reason(engine_report, "MSC_META", f"tick_error:{e}")
+
+        return plans
 
 # ======================================================================================================
 # END PATCH

@@ -1012,6 +1012,18 @@ class StructureEngine:
                 "signal_source": "unified_v1",
 
                 "why": "unified_top5_candidate",
+# ======================================================================================================
+# 📍 TARGET: emit_plan({...})
+# 🧩 ACTION: ADD — context fingerprint
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Ensure every trade carries structure identity
+# ======================================================================================================
+
+                "context_key": self._get_context_key(mid, sid),
+                "source_engine": self.ENGINE_NAME,
             })
 
 # ======================================================================================================

@@ -1846,7 +1846,56 @@ def reconcile_orders() -> Tuple[int, int]:
                             f"betId={betId}: {e}"
                         )
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/settlements.py:reconcile_orders
+# 🔎 SEARCH: Emit Betfair-truth settlement event
+# 🧩 ACTION: ADD — ContextEngine learning hook (FINAL — GUARDED)
+# 📆 PATCHED: 2026-03-19
+#
+# PURPOSE
+# -------
+# Learn from REAL settled outcomes only.
+#
+# INVARIANT
+# ---------
+# Runs ONLY when o.total_changes > 0
+# (i.e. real settlement mutation occurred)
+# ======================================================================================================
 
+                try:
+                    from engines.bus.bus import BUS
+
+                    ctx_engine = BUS.engines.get("MSC_CONTEXT")
+
+                    if ctx_engine:
+
+                        mid = str(row["marketId"])
+                        sid = str(row["selectionId"])
+                        pnl = float(profit or 0.0)
+
+                        src_row = o.execute("""
+                            SELECT engine
+                              FROM orders
+                             WHERE bf_bet_id = ?
+                               AND role = 'PARENT'
+                             LIMIT 1
+                        """, (betId,)).fetchone()
+
+                        source_engine = (
+                            src_row["engine"]
+                            if src_row and src_row["engine"]
+                            else "UNKNOWN"
+                        )
+
+                        ctx_engine.update_context_outcome(
+                            mid=mid,
+                            sid=sid,
+                            pnl=pnl,
+                            source_engine=source_engine
+                        )
+
+                except Exception as e:
+                    print(f"[ContextHook][ERR] betId={betId} err={e}")
 
             # Compute runner-day rollups
             s.execute("""
