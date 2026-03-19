@@ -9,6 +9,9 @@ from engines.micro_scalper_v7.exploratory_engine import ExploratoryEngine
 from engines.micro_scalper_v7.inplay_engine import InPlayEngine
 from engines.micro_scalper_v7.risk_engine import RiskEngine
 from engines.mastery.mastery_policy import plan_for_strategy
+from engines.micro_scalper_v7.msc_meta_engine import MetaEngine
+from engines.micro_scalper_v7.msc_context_engine import ContextEngine
+from engines.micro_scalper_v7.msc_structure_engine import StructureEngine
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: from engines.mastery.context_builder import build_context
@@ -40,6 +43,11 @@ except Exception:
         "MSC_EXPLORATORY": 0,
         "OVERWATCHER": 0,
         "MSC_UNIFIED": 0,
+        "MSC_BLUEPRINT": 0,
+        "MSC_CONTEXT": 0,
+        "MSC_STRUCTURE": 0,
+        "MSC_META": 0,
+
     }
 
 # BUS authority: legacy letter → concrete strategy name
@@ -775,6 +783,18 @@ class DecisionBus:
         if engine == "MSC_UNIFIED":
             return band in ("ACTIVE", "PASSIVE", "EXTENDED")
 
+        if engine == "MSC_BLUEPRINT":
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")
+
+        if engine == "MSC_CONTEXT":
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")
+
+        if engine == "MSC_STRUCTURE":
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")
+
+        if engine == "MSC_META":
+            return band in ("ACTIVE", "PASSIVE", "EXTENDED")
+
         
         if engine == "MSC_INPLAY":
             return band in ("ACTIVE", "PASSIVE", "EXTENDED")   # ACTIVE + PASSIVE + EXTENDED
@@ -1304,7 +1324,201 @@ class DecisionBus:
 
         return plans
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def _lane9_msc_context
+# 🧩 ACTION: REPLACE ENTIRE BLOCK (fix indentation — class-level methods)
+# 📆 PATCHED: 2026-03-18 — Fix nested lane methods (9/10/11 not executing)
+#
+# WHY:
+# - Methods were nested inside Lane 8
+# - Not visible to DecisionBus → not callable
+# - Caused silent no-fire for Context/Structure/Meta
+#
+# FIX:
+# - Move to class level (8-space indent)
+# - Restore BUS callable contract
+# ======================================================================================================
 
+        # ==================================================
+        # 🟪 LANE 9 — MSC_CONTEXT (ENGINE-STYLE)
+        # ==================================================
+        def _lane9_msc_context(self, base_ctx, engine_report):
+
+            plans = []
+
+            engine = self.engines.get("MSC_CONTEXT")
+            if not engine:
+                return plans
+
+            try:
+
+                ctx_engine = {
+                    "_route_ctx_map": self._route_ctx_map,
+                    "_route_snapshot": self._route_snapshot,
+                }
+
+                result = engine.tick(ctx_engine)
+
+                engine_report["MSC_CONTEXT"]["evaluated"] = True
+
+                if not result:
+                    _record_reason(engine_report, "MSC_CONTEXT", "no_result")
+                    return plans
+
+                if result is None:
+                    _record_reason(engine_report, "MSC_CONTEXT", "market_finished")
+                    return plans
+
+                why = result.get("why")
+                if why:
+                    _record_reason(engine_report, "MSC_CONTEXT", why)
+
+                signals = result.get("signals") or {}
+                for k, v in signals.items():
+                    if v:
+                        _record_reason(engine_report, "MSC_CONTEXT", f"signal_{k}")
+
+                if result.get("batch") and isinstance(result.get("plans"), list):
+
+                    for p in result["plans"]:
+                        plan = dict(p)
+                        plan["engine"] = "MSC_CONTEXT"
+                        plans.append(("MSC_CONTEXT", plan, ctx_engine))
+                        engine_report["MSC_CONTEXT"]["fired"] += 1
+
+                elif result.get("enter"):
+
+                    result["engine"] = "MSC_CONTEXT"
+                    plans.append(("MSC_CONTEXT", result, ctx_engine))
+                    engine_report["MSC_CONTEXT"]["fired"] += 1
+
+            except Exception as e:
+                _record_reason(engine_report, "MSC_CONTEXT", f"tick_error:{e}")
+
+            return plans
+
+
+        # ==================================================
+        # 🟪 LANE 10 — MSC_STRUCTURE (ENGINE-STYLE)
+        # ==================================================
+        def _lane10_msc_structure(self, base_ctx, engine_report):
+
+            plans = []
+
+            engine = self.engines.get("MSC_STRUCTURE")
+            if not engine:
+                return plans
+
+            try:
+
+                ctx_engine = {
+                    "_route_ctx_map": self._route_ctx_map,
+                    "_route_snapshot": self._route_snapshot,
+                }
+
+                result = engine.tick(ctx_engine)
+
+                engine_report["MSC_STRUCTURE"]["evaluated"] = True
+
+                if not result:
+                    _record_reason(engine_report, "MSC_STRUCTURE", "no_result")
+                    return plans
+
+                if result is None:
+                    _record_reason(engine_report, "MSC_STRUCTURE", "market_finished")
+                    return plans
+
+                why = result.get("why")
+                if why:
+                    _record_reason(engine_report, "MSC_STRUCTURE", why)
+
+                signals = result.get("signals") or {}
+                for k, v in signals.items():
+                    if v:
+                        _record_reason(engine_report, "MSC_STRUCTURE", f"signal_{k}")
+
+                if result.get("batch") and isinstance(result.get("plans"), list):
+
+                    for p in result["plans"]:
+                        plan = dict(p)
+                        plan["engine"] = "MSC_STRUCTURE"
+                        plans.append(("MSC_STRUCTURE", plan, ctx_engine))
+                        engine_report["MSC_STRUCTURE"]["fired"] += 1
+
+                elif result.get("enter"):
+
+                    result["engine"] = "MSC_STRUCTURE"
+                    plans.append(("MSC_STRUCTURE", result, ctx_engine))
+                    engine_report["MSC_STRUCTURE"]["fired"] += 1
+
+            except Exception as e:
+                _record_reason(engine_report, "MSC_STRUCTURE", f"tick_error:{e}")
+
+            return plans
+
+
+        # ==================================================
+        # 🟪 LANE 11 — MSC_META (ENGINE-STYLE)
+        # ==================================================
+        def _lane11_msc_meta(self, base_ctx, engine_report):
+
+            plans = []
+
+            engine = self.engines.get("MSC_META")
+            if not engine:
+                return plans
+
+            try:
+
+                ctx_engine = {
+                    "_route_ctx_map": self._route_ctx_map,
+                    "_route_snapshot": self._route_snapshot,
+                }
+
+                result = engine.tick(ctx_engine)
+
+                engine_report["MSC_META"]["evaluated"] = True
+
+                if not result:
+                    _record_reason(engine_report, "MSC_META", "no_result")
+                    return plans
+
+                if result is None:
+                    _record_reason(engine_report, "MSC_META", "market_finished")
+                    return plans
+
+                why = result.get("why")
+                if why:
+                    _record_reason(engine_report, "MSC_META", why)
+
+                signals = result.get("signals") or {}
+                for k, v in signals.items():
+                    if v:
+                        _record_reason(engine_report, "MSC_META", f"signal_{k}")
+
+                if result.get("batch") and isinstance(result.get("plans"), list):
+
+                    for p in result["plans"]:
+                        plan = dict(p)
+                        plan["engine"] = "MSC_META"
+                        plans.append(("MSC_META", plan, ctx_engine))
+                        engine_report["MSC_META"]["fired"] += 1
+
+                elif result.get("enter"):
+
+                    result["engine"] = "MSC_META"
+                    plans.append(("MSC_META", result, ctx_engine))
+                    engine_report["MSC_META"]["fired"] += 1
+
+            except Exception as e:
+                _record_reason(engine_report, "MSC_META", f"tick_error:{e}")
+
+            return plans
+
+# ======================================================================================================
+# END PATCH
+# ======================================================================================================
 # ======================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🧩 ACTION: ADD method to DecisionBus
@@ -1437,7 +1651,7 @@ class DecisionBus:
         """
 
         plans = []
-        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0}
+        lane_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0}
 
         # --------------------------------------------------
         # ENGINE DEPRECATION SWITCH
@@ -3690,6 +3904,33 @@ class DecisionBus:
             generated_plans.extend(lane8_plans)
             lane_counts[8] += len(lane8_plans)
 
+        # ==================================================
+        # 🟪 LANE 9 — MSC_CONTEXT (ENGINE-STYLE)
+        # ==================================================
+        lane9_plans = self._lane9_msc_context(base_ctx, engine_report)
+
+        if lane9_plans:
+            generated_plans.extend(lane9_plans)
+            lane_counts[9] += len(lane9_plans)
+
+        # ==================================================
+        # 🟪 LANE 10 — MSC_STRUCTURE (ENGINE-STYLE)
+        # ==================================================
+        lane10_plans = self._lane10_msc_structure(base_ctx, engine_report)
+
+        if lane10_plans:
+            generated_plans.extend(lane10_plans)
+            lane_counts[10] += len(lane10_plans)
+
+        # ==================================================
+        # 🟪 LANE 11 — MSC_META(ENGINE-STYLE)
+        # ==================================================
+        lane11_plans = self._lane11_msc_meta(base_ctx, engine_report)
+
+        if lane11_plans:
+            generated_plans.extend(lane11_plans)
+            lane_counts[11] += len(lane11_plans)
+
         # --------------------------------------------------
         # STOPLOSS VISIBILITY — DIAGNOSTIC ONLY
         # --------------------------------------------------
@@ -3828,6 +4069,10 @@ class DecisionBus:
             "OVERWATCHER": set(),       # (mid, sid)
             "MSC_UNIFIED": set(),       # (mid, sid)
             "MSC_BLUEPRINT": set(),     # (mid, sid)
+            "MSC_CONTEXT": set(),       # (mid, sid)
+            "MSC_STRUCTURE": set(),     # (mid, sid)
+            "MSC_META": set(),       # (mid, sid)
+
         }
 
         slotted_plans = []
@@ -4092,6 +4337,22 @@ class DecisionBus:
                     elif engine == "MSC_UNIFIED":
                         # unified should normally set this itself
                         bet_type = plan.get("why") or "UNIFIED"
+
+                    elif engine == "MSC_BLUEPRINT":
+                        # unified should normally set this itself
+                        bet_type = plan.get("why") or "BLUEPRINT"
+
+                    elif engine == "MSC_CONTEXT":
+                        # unified should normally set this itself
+                        bet_type = plan.get("why") or "CONTEXT"
+
+                    elif engine == "MSC_STRUCTURE":
+                        # unified should normally set this itself
+                        bet_type = plan.get("why") or "STRUCTURE"
+
+                    elif engine == "MSC_META":
+                        # unified should normally set this itself
+                        bet_type = plan.get("why") or "META"
 
                     else:
                         bet_type = "LEGACY"
@@ -4596,14 +4857,17 @@ class DecisionBus:
             print(f"  not_delegated   : {plans_not_delegated}")
 
             print("\nPLANS BY LANE")
-            print(f"  Lane 1 (LEGACY)         : {lane_counts[1]}")
-            print(f"  Lane 2 (MSC_RISK)       : {lane_counts[2]}")
-            print(f"  Lane 3 (MSC_INPLAY)     : {lane_counts[3]}")
-            print(f"  Lane 4 (MSC_EXPLORATORY): {lane_counts[4]}")
-            print(f"  Lane 5 (OVERWATCHER)    : {lane_counts[5]}")
-            print(f"  Lane 6 (DB CORRECTNESS) : {lane_counts[6]}")
-            print(f"  Lane 7 (MSC_UNIFIED)    : {lane_counts[7]}")
-            print(f"  Lane 8 (MSC_BLUEPRINT)  : {lane_counts[8]}")
+            print(f"  Lane 1  (LEGACY)         : {lane_counts[1]}")
+            print(f"  Lane 2  (MSC_RISK)       : {lane_counts[2]}")
+            print(f"  Lane 3  (MSC_INPLAY)     : {lane_counts[3]}")
+            print(f"  Lane 4  (MSC_EXPLORATORY): {lane_counts[4]}")
+            print(f"  Lane 5  (OVERWATCHER)    : {lane_counts[5]}")
+            print(f"  Lane 6  (DB CORRECTNESS) : {lane_counts[6]}")
+            print(f"  Lane 7  (MSC_UNIFIED)    : {lane_counts[7]}")
+            print(f"  Lane 8  (MSC_BLUEPRINT)  : {lane_counts[8]}")
+            print(f"  Lane 9  (MSC_CONTEXT)    : {lane_counts[9]}")
+            print(f"  Lane 10 (MSC_STRUCTURE)  : {lane_counts[10]}")
+            print(f"  Lane 11 (MSC_META)       : {lane_counts[11]}")
 
             if "dup_blocked_by_engine" in tick_ctx:
                 print("\nDUPLICATES BLOCKED")

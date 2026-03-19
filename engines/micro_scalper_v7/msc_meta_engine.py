@@ -796,22 +796,6 @@ class MetaEngine:
 
         report = self._build_v7_report(ctx=ctx, tick_delta=tick_delta)
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
-# 🔎 SEARCH: report = self._build_v7_report
-# 🧩 ACTION: ADD — capital extraction + engine gating + pot split
-# 📆 PATCHED: 2026-03-17 — unified capital control layer
-#
-# PURPOSE
-# -------
-# Enforce:
-#   1️⃣ Engine-level capital gate
-#   2️⃣ Internal pot allocation
-#
-# This prevents:
-#   • Engines emitting plans when no usable capital exists
-#   • Sub-engines (exploratory/risk/inplay) leaking plans when their pot is empty
-# ======================================================================================================
 
         # --------------------------------------------------
         # CAPITAL POLICY (GLOBAL)
@@ -1058,7 +1042,36 @@ class MetaEngine:
 
                 struct = runner_struct_map.get(key)
 
+                # ======================================================================================================
+                # 📍 STRUCTURE PRIORITY BOOST (NON-SCORE SYSTEM)
+                # 📆 PATCHED: 2026-03-18
+                #
+                # PURPOSE
+                # -------
+                # Promote stronger profitable structures without changing global scoring.
+                # ======================================================================================================
+
                 if struct and struct in profitable_set:
+
+                    for s in profitable_structures:
+                        if (
+                            s["band"],
+                            s["fav_gap_bucket"],
+                            s["field_bucket"],
+                            s["fav_strength"],
+                        ) == struct:
+
+                            avg_pnl = s.get("avg_pnl", 0)
+
+                            if avg_pnl > 0.5:
+                                c["_structure_priority"] = 3
+                            elif avg_pnl > 0.2:
+                                c["_structure_priority"] = 2
+                            else:
+                                c["_structure_priority"] = 1
+
+                            break
+
                     filtered.append(c)
 
             # --------------------------------------------------
@@ -1067,7 +1080,22 @@ class MetaEngine:
 
             if filtered:
                 candidates = filtered
-            # else: keep original candidates (fail-safe)
+                # ======================================================================================================
+# 📍 STRUCTURE SORT OVERRIDE
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Ensure best structures dominate candidate selection.
+# ======================================================================================================
+
+                candidates.sort(
+                    key=lambda x: (
+                        x.get("_structure_priority", 0),
+                        x.get("score", 0)
+                    ),
+                    reverse=True
+                )
 
             try:
                 print(
@@ -1123,9 +1151,25 @@ class MetaEngine:
         for c in candidates:
 
             mid = c["marketId"]
+
+            market = market_map.get(mid)
+            if not market:
+                continue
+
+            tto = market.get("tto_seconds")
+
+            # --------------------------------------------------
+            # EXPLORATORY WINDOW (>20min ONLY)
+            # --------------------------------------------------
+            if tto is None or tto <= 1200:
+                continue
+
             sid = c["selectionId"]
             px  = c.get("px")
 
+            # --------------------------------------------------
+            # PX GUARD (MANDATORY)
+            # --------------------------------------------------
             if px is None:
                 continue
 
@@ -1133,7 +1177,6 @@ class MetaEngine:
                 px = float(px)
             except Exception:
                 continue
-
             # --------------------------------------------------
             # Direction comes from signal layer
             # --------------------------------------------------
@@ -1321,6 +1364,16 @@ class MetaEngine:
 
             tto = market.get("tto_seconds")
 
+            # ======================================================================================================
+            # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+            # 🔎 SEARCH: tto = market.get("tto_seconds")
+            # 🧩 ACTION: REPLACE — risk window enforcement (20min → 5min only)
+            # 📆 PATCHED: 2026-03-18 — isolate risk harvesting phase
+            # ======================================================================================================
+
+            if tto is None or not (300 <= tto <= 1200):
+                continue
+
             # --------------------------------------------------
             # RISK WINDOW
             # 60min → 2min
@@ -1486,6 +1539,18 @@ class MetaEngine:
                 sid = c["selectionId"]
                 px  = c.get("px")
 
+                market = market_map.get(mid)
+                if not market:
+                    continue
+
+                tto = market.get("tto_seconds")
+
+                # --------------------------------------------------
+                # INPLAY WINDOW (≤5min only)
+                # --------------------------------------------------
+                if tto is None or tto > 300:
+                    continue
+
                 if px is None:
                     continue
 
@@ -1565,6 +1630,18 @@ class MetaEngine:
                 sid = c["selectionId"]
                 px  = c.get("px")
 
+                market = market_map.get(mid)
+                if not market:
+                    continue
+
+                tto = market.get("tto_seconds")
+
+                # --------------------------------------------------
+                # INPLAY WINDOW (≤5min only)
+                # --------------------------------------------------
+                if tto is None or tto > 300:
+                    continue
+
                 if px is None:
                     continue
 
@@ -1598,7 +1675,14 @@ class MetaEngine:
             if tto is None:
                 continue
 
-            if tto <= 0 and moved >= 3:
+        # ======================================================================================================
+        # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+        # 🔎 SEARCH: if tto <= 0 and moved >= 3:
+        # 🧩 ACTION: REPLACE — deterministic inplay activation (≤5min)
+        # 📆 PATCHED: 2026-03-18 — remove volatility dependency
+        # ======================================================================================================
+
+            if tto is not None and tto <= 300:
                 self._inplay_markets.add(mid)
 
         # ------------------------------------------------------------------
@@ -3067,7 +3151,7 @@ class MetaEngine:
 
                 stop_plans.append({
                     "enter": True,
-                    "engine": ctx.get("anchor_engine"),
+                    "engine": "MSC_META",
                     "bet_type": "STOPLOSS",
                     "role": "PARENT",
                     "exit_kind": "STOPLOSS",
@@ -3080,6 +3164,7 @@ class MetaEngine:
                     ),
                     "px": px,
                     "size": parent.entry_stake,
+                    "is_sterile": True,
                     "why": "unified_global_stoploss",
                 })
 
@@ -3719,6 +3804,51 @@ class MetaEngine:
 # ======================================================================================================
         
         candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        # ======================================================================================================
+        # 📍 EXPLORATORY ANTI-STARVATION (ISOLATED TO EXPLORATORY ONLY)
+        # 📆 PATCHED: 2026-03-18
+        #
+        # PURPOSE
+        # -------
+        # Prevent ≤20min markets from dominating exploratory selection.
+        #
+        # IMPORTANT
+        # ---------
+        # This ONLY affects exploratory candidate selection.
+        # It does NOT affect scoring, risk, or in-play logic.
+        #
+        # DESIGN
+        # ------
+        # Apply temporary score penalty ONLY for sorting.
+        # ======================================================================================================
+
+        adjusted = []
+
+        for c in candidates:
+
+            score = c.get("score", 0)
+
+            mid = c["marketId"]
+            market = next(
+                (m for m in report.get("timing", {}).get("markets", [])
+                 if m.get("marketId") == mid),
+                None
+            )
+
+            if market:
+                tto = market.get("tto_seconds")
+
+                # penalty ONLY for exploratory selection
+                if tto is not None and tto <= 1200:
+                    score -= 5   # ← penalty strength
+
+            adjusted.append((score, c))
+
+        adjusted.sort(key=lambda x: x[0], reverse=True)
+
+        candidates = [c for _, c in adjusted]
+
         BASE_EXPLORATORY = 5
         LONG_BUCKET_EXTRA = 1   # ← toggle here
 
@@ -4019,8 +4149,97 @@ class MetaEngine:
             # Context score overlay
             # --------------------------------------------------
 
-            context_boost = self._context_learned_score(mid, sid)
+            # ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:_build_layer2_surface
+# 🔎 SEARCH: context_boost = self._context_learned_score
+# 🧩 ACTION: REPLACE — scaled context influence
+# 📆 PATCHED: 2026-03-18 — make context actually affect ranking
+#
+# PURPOSE
+# -------
+# Convert raw pnl into meaningful ranking influence.
+#
+# DESIGN
+# ------
+# - Negative pnl → penalise heavily
+# - Positive pnl → boost strongly
+# - Scale into comparable range with Layer2 scores (0–10)
+# ======================================================================================================
+
+            raw_ctx = self._context_learned_score(mid, sid)
+
+            # HARD CONTEXT FILTER
+            if raw_ctx < -0.1:
+                continue
+
+            if raw_ctx > 0.3:
+                score += 3
+
+            context_boost = 0.0
+
+            if raw_ctx > 0:
+                # amplify winners
+                context_boost = min(raw_ctx * 20.0, 5.0)
+
+            elif raw_ctx < 0:
+                # punish losers HARD (this is key)
+                context_boost = max(raw_ctx * 25.0, -6.0)
+
             score += context_boost
+
+            # ======================================================================================================
+            # 📍 META STRATEGY MODE (FINAL CORRECT WIRING)
+            # 📆 PATCHED: 2026-03-18
+            #
+            # FIX
+            # ---
+            # _structure_priority exists ONLY on candidates (c), not ctx (rctx)
+            # So we must read it safely from ctx OR default to 0
+            #
+            # DESIGN
+            # ------
+            # Since layer2 builds candidates BEFORE structure filter,
+            # we fallback to ctx-safe default.
+            # ======================================================================================================
+
+            strategy_mode = "CONTEXT"
+
+            struct_priority = 0
+            if "_structure_priority" in rctx:
+                struct_priority = rctx["_structure_priority"]
+
+            # STRUCTURE dominates if strong
+            if struct_priority >= 2:
+                strategy_mode = "STRUCTURE"
+
+            # BLUEPRINT next
+            elif bp_score >= 2:
+                strategy_mode = "BLUEPRINT"
+
+            # --------------------------------------------------
+            # APPLY MODE WEIGHTING
+            # --------------------------------------------------
+
+            if strategy_mode == "STRUCTURE":
+                score += struct_priority * 4
+
+            elif strategy_mode == "BLUEPRINT":
+                score += bp_score * 3
+
+            else:
+                score += context_boost
+
+            try:
+                print(
+                    "[META MODE]",
+                    f"{mid}:{sid}",
+                    f"mode={strategy_mode}",
+                    f"struct={struct_priority}",
+                    f"bp={bp_score:.2f}",
+                    f"ctx={raw_ctx:.2f}"
+                )
+            except Exception:
+                pass
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py

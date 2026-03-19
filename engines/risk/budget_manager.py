@@ -37,6 +37,9 @@ _alloc_lock = threading.Lock()
 ENGINES = [
     "MSC_UNIFIED",
     "MSC_BLUEPRINT",
+    "MSC_CONTEXT",
+    "MSC_STRUCTURE",
+    "MSC_META",
     "LEGACY",
     "MSC_EXPLORATORY",
     "MSC_RISK",
@@ -47,22 +50,27 @@ ENGINES = [
 
 # Baseline allocations (start-of-day percentages)
 BASELINE_PCT = {
-    "MSC_UNIFIED":     0.46,  # New Primary engine (new dominant allocation)
-    "MSC_BLUEPRINT":   0.46,  # 1 0f 4 New Split test engine (new dominant allocation)      
+    "MSC_UNIFIED":     0.19,  # New Primary engine (new dominant allocation)
+    "MSC_BLUEPRINT":   0.19,  # 1 0f 4 New Split test engine (new dominant allocation)
+    "MSC_CONTEXT":     0.19,  # 2 0f 4 New Split test engine (new dominant allocation)
+    "MSC_STRUCTURE":   0.19,  # 3 0f 4 New Split test engine (new dominant allocation)
+    "MSC_META":        0.19,  # 4 0f 4 New Split test engine (new dominant allocation)
     "MSC_RISK":        0.00,  # Primary engine (dominant allocation)
     "LEGACY":          0.00,  # Anchors only
     "MSC_EXPLORATORY": 0.00,  # Reduced exploratory bleed
     "MSC_INPLAY":      0.00,  # In-play ladder capital
     "OVERWATCHER":     0.00,  # Protective hedge
-    "SAFETY_NET":      0.08,  # System safety buffer
+    "SAFETY_NET":      0.05,  # System safety buffer
 }
 
 
 # Hard floors (minimum operational runway)
 FLOOR_PCT = {
-    "MSC_UNIFIED":     0.30,
-    "MSC_BLUEPRINT":     0.30,
-    "MSC_RISK":        0.00,
+    "MSC_UNIFIED":     0.05,
+    "MSC_BLUEPRINT":   0.05,  
+    "MSC_CONTEXT":     0.05,  
+    "MSC_STRUCTURE":   0.05,  
+    "MSC_META":        0.05,
     "LEGACY":          0.00,
     "MSC_EXPLORATORY": 0.00,
     "MSC_INPLAY":      0.00,
@@ -70,7 +78,63 @@ FLOOR_PCT = {
     "SAFETY_NET":      0.00,
 }
 
+# ======================================================================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🔎 SEARCH: BASELINE_PCT =
+# 🧩 ACTION: INSERT ABOVE
+# 📆 PATCHED: 2026-03-18 — Allocation Profiles (discrete strategy layer)
+#
+# PURPOSE:
+# - Define fixed allocation structures
+# - Enable daily profile selection
+# - Replace dynamic % calculation
+# ======================================================================================================
 
+# --------------------------------------------------
+# 🎯 ALLOCATION PROFILES (TOTAL ≈ 95%)
+# --------------------------------------------------
+ALLOCATION_PROFILES = {
+
+    "P1_EXPLORATION": {
+        "MSC_UNIFIED":   0.20,
+        "MSC_BLUEPRINT": 0.20,
+        "MSC_CONTEXT":   0.20,
+        "MSC_STRUCTURE": 0.15,
+        "MSC_META":      0.15,
+    },
+
+    "P2_BALANCED": {
+        "MSC_UNIFIED":   0.19,
+        "MSC_BLUEPRINT": 0.19,
+        "MSC_CONTEXT":   0.19,
+        "MSC_STRUCTURE": 0.19,
+        "MSC_META":      0.18,
+    },
+
+    "P3_STRUCTURE_TILT": {
+        "MSC_UNIFIED":   0.15,
+        "MSC_BLUEPRINT": 0.15,
+        "MSC_CONTEXT":   0.15,
+        "MSC_STRUCTURE": 0.25,
+        "MSC_META":      0.25,
+    },
+
+    "P4_META_DOMINANT": {
+        "MSC_UNIFIED":   0.10,
+        "MSC_BLUEPRINT": 0.10,
+        "MSC_CONTEXT":   0.15,
+        "MSC_STRUCTURE": 0.30,
+        "MSC_META":      0.30,
+    },
+
+    "P5_EXPLOIT": {
+        "MSC_UNIFIED":   0.05,
+        "MSC_BLUEPRINT": 0.05,
+        "MSC_CONTEXT":   0.10,
+        "MSC_STRUCTURE": 0.40,
+        "MSC_META":      0.35,
+    },
+}
 
 # Dynamic pool (total = 10% of daily allocation)
 DYNAMIC_POOL = 0.00
@@ -86,6 +150,42 @@ _profit_tracker = {
     eng: {"pnl": 0.0, "count": 0}
     for eng in ENGINES
 }
+
+# ======================================================================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🧩 ACTION: ADD — load allocations from DB (authoritative)
+# 📆 PATCHED: 2026-03-18 — remove baseline dependency
+# ======================================================================================================
+
+def _load_allocations_from_db():
+
+    from engines.config_paths import open_auto_db
+
+    try:
+        con = open_auto_db(rw=False)
+        rows = con.execute("""
+            SELECT engine, pct
+            FROM budget_allocations
+            WHERE day = date('now','utc')
+        """).fetchall()
+        con.close()
+
+        if not rows:
+            return False
+
+        alloc = {r[0]: float(r[1]) for r in rows}
+
+        with _alloc_lock:
+            global _current_allocations
+            _current_allocations = alloc
+
+        print("[BUDGET] loaded allocations from DB")
+
+        return True
+
+    except Exception as e:
+        print(f"[BUDGET] load failed: {e}")
+        return False
 
 def _collect_pnl_today():
     """
@@ -211,6 +311,47 @@ def _collect_pnl_today():
         out[r["engine"]] = float(r["pnl"] or 0.0)
 
     return out
+
+# ======================================================================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🔎 SEARCH: def allocate_with_performance
+# 🧩 ACTION: INSERT ABOVE
+# 📆 PATCHED: 2026-03-18 — Profile selection engine
+#
+# PURPOSE:
+# - Choose allocation structure based on performance
+# - Deterministic, stable
+# ======================================================================================================
+
+def _select_allocation_profile(perf: Dict[str, float]) -> str:
+
+    total_pnl = sum(perf.values())
+
+    structure = perf.get("MSC_STRUCTURE", 0.0)
+    meta = perf.get("MSC_META", 0.0)
+
+    # --------------------------------------------------
+    # LOSS → reset
+    # --------------------------------------------------
+    if total_pnl < 0:
+        return "P1_EXPLORATION"
+
+    # --------------------------------------------------
+    # STRUCTURE DOMINANT
+    # --------------------------------------------------
+    if structure > max(perf.values()):
+        return "P3_STRUCTURE_TILT"
+
+    # --------------------------------------------------
+    # STRUCTURE + META DOMINANT
+    # --------------------------------------------------
+    if (structure + meta) > (0.6 * total_pnl):
+        return "P5_EXPLOIT"
+
+    # --------------------------------------------------
+    # DEFAULT
+    # --------------------------------------------------
+    return "P2_BALANCED"
 
 # ============================================================
 #  REBALANCING ENGINE (midnight or on-demand)
@@ -379,7 +520,56 @@ def _rebalance_allocations():
     # === PATCH END =======================================
 
 
-    final_pct = allocate_with_performance(perf, avg_ticks, live_bank)
+    # --------------------------------------------------
+    # PROFILE-BASED ALLOCATION (NEW)
+    # --------------------------------------------------
+    profile_id = _select_allocation_profile(perf)
+
+    profile = ALLOCATION_PROFILES.get(profile_id, {})
+
+    final_pct = {}
+
+    for eng in ENGINES:
+        final_pct[eng] = float(profile.get(eng, 0.0))
+
+    # Normalise to 95% (leave safety buffer)
+    TARGET_TOTAL = 0.95
+
+    active_engines = [
+        "MSC_UNIFIED",
+        "MSC_BLUEPRINT",
+        "MSC_CONTEXT",
+        "MSC_STRUCTURE",
+        "MSC_META",
+    ]
+
+    total_active = sum(final_pct[e] for e in active_engines) or 1.0
+    scale = TARGET_TOTAL / total_active
+
+    for e in active_engines:
+        final_pct[e] *= scale
+
+    # SAFETY stays fixed
+    final_pct["SAFETY_NET"] = 0.05
+
+        # ======================================================================================================
+        # 📍 TARGET: engines/risk/budget_manager.py:_rebalance_allocations
+        # 🔎 ANCHOR: after final_pct constructed
+        # 🧩 ACTION: SET runtime allocations (authoritative)
+        # 📆 PATCHED: 2026-03-18 — Fix allocations not propagating to runtime
+        #
+        # WHY:
+        # - get_allocations() reads _current_allocations
+        # - rebalance was NOT updating it
+        # - system stuck on BASELINE
+        #
+        # RESULT:
+        # - runtime allocations now match rebalance output
+        # ======================================================================================================
+
+    with _alloc_lock:
+        _current_allocations = final_pct.copy()
+
 
     # === PATCH START =====================================================
     # 📍 TARGET: engines/risk/budget_manager.py:_rebalance_allocations
@@ -400,6 +590,7 @@ def _rebalance_allocations():
                 day TEXT NOT NULL,
                 engine TEXT NOT NULL,
                 pct REAL NOT NULL,
+                profile_id TEXT
                 bank REAL NOT NULL,
                 pot REAL NOT NULL,
                 created_at TEXT NOT NULL,
@@ -412,18 +603,36 @@ def _rebalance_allocations():
         for engine, pct in final_pct.items():
             pot = float(live_bank) * float(pct)
 
+            # ======================================================================================================
+            # 📍 TARGET: engines/risk/budget_manager.py
+            # 🔎 SEARCH: INSERT INTO budget_allocations
+            # 🧩 ACTION: REPLACE
+            # 📆 PATCHED: 2026-03-18 — Persist profile_id with allocations
+            #
+            # PURPOSE:
+            # - Track which profile was used each day
+            # - Enables audit + evolution
+            # ======================================================================================================
+
             cur.execute("""
                 INSERT INTO budget_allocations (
-                    day, engine, pct, bank, pot, created_at
+                    day, engine, pct, bank, pot, profile_id, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, datetime('now','utc'))
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now','utc'))
                 ON CONFLICT(day, engine) DO UPDATE SET
                     pct = excluded.pct,
                     bank = excluded.bank,
                     pot = excluded.pot,
+                    profile_id = excluded.profile_id,
                     created_at = excluded.created_at
-            """, (day, engine, float(pct), float(live_bank), float(pot)))
-
+            """, (
+                day,
+                engine,
+                float(pct),
+                float(live_bank),
+                float(pot),
+                profile_id,
+            ))
         con.commit()
         con.close()
 
@@ -454,10 +663,14 @@ def midnight_rebalance_if_needed():
 # ============================================================
 
 def get_allocations() -> Dict[str, float]:
-    """
-    Return current engine percentages.
-    """
+
     with _alloc_lock:
+
+        # If empty → lazy load
+        if not _current_allocations:
+            if not _load_allocations_from_db():
+                return {}
+
         return _current_allocations.copy()
 
 
@@ -630,6 +843,13 @@ def init_budget_manager():
     Ensures daily rebalance executes once per calendar day.
     """
     midnight_rebalance_if_needed()
+
+    # 1️⃣ Try load existing allocations
+    loaded = _load_allocations_from_db()
+
+    # 2️⃣ If none exist → run rebalance
+    if not loaded:
+        _rebalance_allocations()
 
 
 # CLI =========================================================

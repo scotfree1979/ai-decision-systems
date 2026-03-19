@@ -475,23 +475,6 @@ class BlueprintEngine:
 
         report = self._build_v7_report(ctx=ctx, tick_delta=tick_delta)
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
-# 🔎 SEARCH: report = self._build_v7_report
-# 🧩 ACTION: ADD — capital extraction + engine gating + pot split
-# 📆 PATCHED: 2026-03-17 — unified capital control layer
-#
-# PURPOSE
-# -------
-# Enforce:
-#   1️⃣ Engine-level capital gate
-#   2️⃣ Internal pot allocation
-#
-# This prevents:
-#   • Engines emitting plans when no usable capital exists
-#   • Sub-engines (exploratory/risk/inplay) leaking plans when their pot is empty
-# ======================================================================================================
-
         # --------------------------------------------------
         # CAPITAL POLICY (GLOBAL)
         # --------------------------------------------------
@@ -622,9 +605,25 @@ class BlueprintEngine:
         for c in candidates:
 
             mid = c["marketId"]
+
+            market = market_map.get(mid)
+            if not market:
+                continue
+
+            tto = market.get("tto_seconds")
+
+            # --------------------------------------------------
+            # EXPLORATORY WINDOW (>20min ONLY)
+            # --------------------------------------------------
+            if tto is None or tto <= 1200:
+                continue
+
             sid = c["selectionId"]
             px  = c.get("px")
 
+            # --------------------------------------------------
+            # PX GUARD (MANDATORY)
+            # --------------------------------------------------
             if px is None:
                 continue
 
@@ -818,6 +817,16 @@ class BlueprintEngine:
 
             tto = market.get("tto_seconds")
 
+            # ======================================================================================================
+            # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+            # 🔎 SEARCH: tto = market.get("tto_seconds")
+            # 🧩 ACTION: REPLACE — risk window enforcement (20min → 5min only)
+            # 📆 PATCHED: 2026-03-18 — isolate risk harvesting phase
+            # ======================================================================================================
+
+            if tto is None or not (300 <= tto <= 1200):
+                continue
+
             # --------------------------------------------------
             # RISK WINDOW
             # 60min → 2min
@@ -983,6 +992,18 @@ class BlueprintEngine:
                 sid = c["selectionId"]
                 px  = c.get("px")
 
+                market = market_map.get(mid)
+                if not market:
+                    continue
+
+                tto = market.get("tto_seconds")
+
+                # --------------------------------------------------
+                # INPLAY WINDOW (≤5min only)
+                # --------------------------------------------------
+                if tto is None or tto > 300:
+                    continue
+
                 if px is None:
                     continue
 
@@ -1062,6 +1083,18 @@ class BlueprintEngine:
                 sid = c["selectionId"]
                 px  = c.get("px")
 
+                market = market_map.get(mid)
+                if not market:
+                    continue
+
+                tto = market.get("tto_seconds")
+
+                # --------------------------------------------------
+                # INPLAY WINDOW (≤5min only)
+                # --------------------------------------------------
+                if tto is None or tto > 300:
+                    continue
+
                 if px is None:
                     continue
 
@@ -1095,7 +1128,14 @@ class BlueprintEngine:
             if tto is None:
                 continue
 
-            if tto <= 0 and moved >= 3:
+        # ======================================================================================================
+        # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
+        # 🔎 SEARCH: if tto <= 0 and moved >= 3:
+        # 🧩 ACTION: REPLACE — deterministic inplay activation (≤5min)
+        # 📆 PATCHED: 2026-03-18 — remove volatility dependency
+        # ======================================================================================================
+
+            if tto is not None and tto <= 300:
                 self._inplay_markets.add(mid)
 
         # ------------------------------------------------------------------
@@ -2517,7 +2557,7 @@ class BlueprintEngine:
 
                 stop_plans.append({
                     "enter": True,
-                    "engine": ctx.get("anchor_engine"),
+                    "engine": "MSC_BLUEPRINT",
                     "bet_type": "STOPLOSS",
                     "role": "PARENT",
                     "exit_kind": "STOPLOSS",
@@ -2530,6 +2570,7 @@ class BlueprintEngine:
                     ),
                     "px": px,
                     "size": parent.entry_stake,
+                    "is_sterile": True,
                     "why": "unified_global_stoploss",
                 })
 
@@ -3169,6 +3210,51 @@ class BlueprintEngine:
 # ======================================================================================================
         
         candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        # ======================================================================================================
+        # 📍 EXPLORATORY ANTI-STARVATION (ISOLATED TO EXPLORATORY ONLY)
+        # 📆 PATCHED: 2026-03-18
+        #
+        # PURPOSE
+        # -------
+        # Prevent ≤20min markets from dominating exploratory selection.
+        #
+        # IMPORTANT
+        # ---------
+        # This ONLY affects exploratory candidate selection.
+        # It does NOT affect scoring, risk, or in-play logic.
+        #
+        # DESIGN
+        # ------
+        # Apply temporary score penalty ONLY for sorting.
+        # ======================================================================================================
+
+        adjusted = []
+
+        for c in candidates:
+
+            score = c.get("score", 0)
+
+            mid = c["marketId"]
+            market = next(
+                (m for m in report.get("timing", {}).get("markets", [])
+                 if m.get("marketId") == mid),
+                None
+            )
+
+            if market:
+                tto = market.get("tto_seconds")
+
+                # penalty ONLY for exploratory selection
+                if tto is not None and tto <= 1200:
+                    score -= 5   # ← penalty strength
+
+            adjusted.append((score, c))
+
+        adjusted.sort(key=lambda x: x[0], reverse=True)
+
+        candidates = [c for _, c in adjusted]
+
         BASE_EXPLORATORY = 5
         LONG_BUCKET_EXTRA = 1   # ← toggle here
 

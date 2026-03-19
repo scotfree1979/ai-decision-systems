@@ -27,8 +27,8 @@ _session.mount("http://", _adapter)
 # BUS ROUTE CONFIG (LOCKED)
 # ============================================================
 
-PLANS_PER_TICK = 170
-CYCLE_SIZE = 1700          # parents per full cycle
+PLANS_PER_TICK = 425
+CYCLE_SIZE = 4250          # parents per full cycle
 TICKS_PER_CYCLE = 10
 
 # Per-tick allocation
@@ -39,7 +39,10 @@ ROUTE_SPLIT = {
     "MSC_EXPLORATORY": 0,
     "OVERWATCHER": 0,
     "MSC_UNIFIED": 85,
-    "MSC_BLUEPRINT": 85, 
+    "MSC_BLUEPRINT": 85,
+    "MSC_CONTEXT": 85,
+    "MSC_STRUCTURE": 85,
+    "MSC_META": 85, 
 }
 
 def _order_runner_pool_by_market_time(pairs):
