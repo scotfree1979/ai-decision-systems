@@ -2173,42 +2173,13 @@ class StructureEngine:
             # LAYER 2 — TRADE SIGNAL INTELLIGENCE
             # ─────────────────────────────────────────
             "layer2": self._build_layer2_surface(timing_surface),
-        }
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:_build_v7_report
-# 🔎 SEARCH: "layer2": self._build_layer2_surface
-# 🧩 ACTION: ADD context surface
-# 📆 PATCHED: 2026-03-16
-#
-# PURPOSE
-# -------
-# Expose context discovery output directly in the engine report.
-#
-# This allows the system to monitor which race structures
-# are appearing most frequently and becoming profitable.
-#
-# This data feeds the future Context Strategy Engine.
-# ======================================================================================================
-
+            # 🆕 META LAYER
             "context": {
                 "structures": self._build_context_report()
             },
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:_build_v7_report
-# 🔎 SEARCH: "context":
-# 🧩 ACTION: ADD strategy discovery surface
-# 📆 PATCHED: 2026-03-16
-#
-# PURPOSE
-# -------
-# Expose discovered profitable context strategies.
-#
-# These strategies are the blueprint for the next engine generation.
-# ======================================================================================================
-
             "context_strategies": self._discover_context_strategies(),
+        }
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report
 # 🔎 SEARCH: INSERT INTO unified_runtime_snapshot (
