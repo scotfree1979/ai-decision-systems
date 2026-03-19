@@ -4728,6 +4728,123 @@ class DecisionBus:
 
             self._cadence.enqueue(final_plans)
 
+            # ======================================================================================================
+            # 📍 TARGET: engines/bus/bus.py
+            # 🔎 ANCHOR: before self._cadence.enqueue(final_plans)
+            # 🧩 ACTION: ADD — Execution Control Layer (EIG + Exposure Cap + Bias)
+            # 📆 PATCHED: 2026-03-18 — Throughput + risk control layer
+            #
+            # PURPOSE
+            # -------
+            # 1. Prevent duplicate execution at same px (EIG)
+            # 2. Cap exposure per runner
+            # 3. Bias plans toward exposure reduction
+            #
+            # SAFETY
+            # ------
+            # - Never blocks STOPLOSS or CHILD plans
+            # - No engine logic touched
+            # - Pure execution filtering
+            # ======================================================================================================
+
+            if not hasattr(self, "_execution_guard"):
+                self._execution_guard = {}
+
+            EIG_WINDOW = 5
+            MAX_RUNNER_EXPOSURE = 80.0
+
+            current_tick = self.tick_id
+
+            # --------------------------------------------------
+            # BUILD RUNNER EXPOSURE MAP (LIVE STATE)
+            # --------------------------------------------------
+            runner_exposure = {}
+
+            for (mid, sid), ctx_live in self._route_ctx_map.items():
+
+                total = 0.0
+
+                for o in ctx_live.get("orders_by_runner", []):
+
+                    if (
+                        o.get("role") == "PARENT"
+                        and str(o.get("entry_status")).upper() == "MATCHED"
+                    ):
+                        side = str(o.get("side")).upper()
+                        stake = float(o.get("entry_stake") or 0.0)
+                        odds  = float(o.get("entry_odds") or 0.0)
+
+                        if side == "LAY":
+                            total += stake * (odds - 1.0)
+                        else:
+                            total += stake
+
+                runner_exposure[(mid, sid)] = total
+
+            # --------------------------------------------------
+            # FILTER + SCORE PLANS
+            # --------------------------------------------------
+            filtered = []
+
+            for eng, plan, ctx in final_plans:
+
+                bet_type = plan.get("bet_type")
+                role     = plan.get("role")
+
+                mid = plan.get("marketId")
+                sid = plan.get("selectionId")
+                px  = float(plan.get("px") or 0.0)
+
+                # --------------------------------------------------
+                # SAFETY PASS-THROUGH
+                # --------------------------------------------------
+                if bet_type == "STOPLOSS" or role == "CHILD":
+                    filtered.append((eng, plan, ctx))
+                    continue
+
+                # --------------------------------------------------
+                # 1️⃣ EXECUTION IDENTITY GATE (EIG)
+                # --------------------------------------------------
+                key = (eng, mid, sid, px)
+                last_tick = self._execution_guard.get(key)
+
+                if last_tick is not None and (current_tick - last_tick) <= EIG_WINDOW:
+                    continue
+
+                self._execution_guard[key] = current_tick
+
+                # --------------------------------------------------
+                # 2️⃣ EXPOSURE CAP
+                # --------------------------------------------------
+                current_exp = runner_exposure.get((mid, sid), 0.0)
+                incoming_exp = float(plan.get("required_exposure") or 0.0)
+
+                if (current_exp + incoming_exp) > MAX_RUNNER_EXPOSURE:
+                    continue
+
+                # --------------------------------------------------
+                # 3️⃣ EXPOSURE REDUCTION BIAS (SCORING ONLY)
+                # --------------------------------------------------
+                side = str(plan.get("side") or "").upper()
+
+                score = 0
+
+                if current_exp > 0:
+                    if side == "BACK":
+                        score += 5   # reduce LAY exposure
+                elif current_exp < 0:
+                    if side == "LAY":
+                        score += 5   # reduce BACK exposure
+
+                filtered.append((score, eng, plan, ctx))
+
+            # --------------------------------------------------
+            # SORT BY EXPOSURE IMPROVEMENT
+            # --------------------------------------------------
+            filtered.sort(key=lambda x: x[0], reverse=True)
+
+            final_plans = [(eng, plan, ctx) for (_s, eng, plan, ctx) in filtered]
+
             admitted = self._cadence.admit_for_tick()
 
             for eng, p, ctx in admitted:
