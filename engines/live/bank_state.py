@@ -735,7 +735,8 @@ def _reconcile_market_exposure_live():
 
         if total > 0:
 
-            now = datetime.utcnow()
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
 
             current_index = 0
 

@@ -251,7 +251,16 @@ def _get_market_cadence():
 
     total = len(markets)
 
-    now = datetime.datetime.utcnow()
+# === PATCH START ============================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🧩 FIX: timezone-safe datetime comparison
+# ============================================================================
+
+    from datetime import timezone
+
+    now = datetime.datetime.now(timezone.utc)
+
+# === PATCH END ==============================================================
 
     current_index = 0
 
@@ -627,7 +636,16 @@ def _rebalance_allocations():
     # --------------------------------------------------
     # CURRENT MARKET INDEX (DB ONLY — NO SCOPE)
     # --------------------------------------------------
-    now = datetime.datetime.utcnow()
+# === PATCH START ============================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🧩 FIX: timezone-safe datetime comparison
+# ============================================================================
+
+    from datetime import timezone
+
+    now = datetime.datetime.now(timezone.utc)
+
+# === PATCH END ==============================================================
 
     current_index = 0
 
