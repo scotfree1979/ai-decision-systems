@@ -3548,7 +3548,7 @@ def start_live_loop(*args, **kwargs):
         # 2️⃣ Now BankState can safely initialise STATIC pots using correct allocations
         from engines.live import bank_state
         bank_state.init_bank_state()
-        bank_state.start_bankstate_reporter(60)      
+        bank_state.start_bankstate_reporter(2)      
         try:
             pots  = bank_state.get_engine_pots()
             used  = bank_state.get_engine_used_map()
@@ -3736,13 +3736,6 @@ def start_live_loop(*args, **kwargs):
 
     start_inplay_authority_report_loop()
 
-
-    # --------------------------------------------------------------
-    # 6G) LIVE ROUTER BUDGET ALLOCATIONS
-    # --------------------------------------------------------------
-    from engines.live import bank_state
-
-    bank_state.init_from_budget_allocations()
 
     # ------------------------------------------------------------------
     # 6H) AFTER BankState.init_bank_state()

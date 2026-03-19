@@ -614,8 +614,7 @@ def _rebalance_allocations():
 
     # ⛔ Do NOT rebalance until we actually have a session token
     if not get_session_token():
-        print("[BUDGET] defer: no session token yet — skipping rebalance")
-        return
+        print("[BUDGET] no session token — running DRY rebalance (allocations only)")
 
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     

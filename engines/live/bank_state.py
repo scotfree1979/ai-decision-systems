@@ -107,9 +107,29 @@ def init_bank_state():
         con.close()
 
 # === PATCH END ==============================================================
-        init_from_budget_allocations()
-        rebuild_live_exposure_from_db()   # ← ADD THIS
-        _restore_risk_bank_from_market_exposure()
+        from engines.risk import budget_manager as _bm
+
+        allocs = _bm.get_allocations()
+
+        if allocs:
+            from engines.daily_config import fetch_available_budget
+
+            bank = float(fetch_available_budget())
+
+            global _ENGINE_POTS, _ENGINE_AVAILABLE
+
+            _ENGINE_POTS.clear()
+            _ENGINE_AVAILABLE.clear()
+
+            for engine, pct in allocs.items():
+                pot = bank * float(pct)
+                _ENGINE_POTS[engine] = pot
+                _ENGINE_AVAILABLE[engine] = pot
+
+            print(f"[BANKSTATE] pots loaded from BudgetManager → {len(_ENGINE_POTS)} engines")
+
+        else:
+            print("[BANKSTATE] ERROR: no allocations available")
         if _is_simulation():
             print("[BankState] initialised from budget_allocations")
     except Exception as e:
@@ -1341,7 +1361,23 @@ def _open_auto_strict():
 # INITIALISATION (ONCE PER UTC DAY)
 # -------------------------------------------------------------------
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py
+# 🔎 SEARCH: def init_from_budget_allocations
+# 🧩 ACTION: FORCE REBALANCE IF EMPTY (no fallback allowed)
+# 📆 PATCHED: 2026-03-19 — self-healing allocation bootstrap
+#
+# PURPOSE:
+# - If allocations missing → trigger rebalance
+# - Guarantee ENGINE_POTS always initialised
+#
+# INVARIANT:
+# - No fallback to previous day
+# - Always derive from BudgetManager logic
+# ======================================================================================================
+
 def init_from_budget_allocations(day: str | None = None):
+
     global _ENGINE_POTS, _ENGINE_AVAILABLE
 
     if not day:
@@ -1353,12 +1389,36 @@ def init_from_budget_allocations(day: str | None = None):
 
     rows = cur.execute("""
         SELECT engine, pot
-          FROM budget_allocations
-         WHERE day = ?
+        FROM budget_allocations
+        WHERE day = ?
     """, (day,)).fetchall()
+
+    # --------------------------------------------------
+    # 🚨 SELF-HEAL: NO ALLOCATIONS → FORCE REBALANCE
+    # --------------------------------------------------
+    if not rows:
+        try:
+            from engines.risk.budget_manager import _rebalance_allocations
+
+            print("[BANKSTATE] no allocations found → forcing rebalance")
+
+            _rebalance_allocations()
+
+            # reload after rebalance
+            rows = cur.execute("""
+                SELECT engine, pot
+                FROM budget_allocations
+                WHERE day = ?
+            """, (day,)).fetchall()
+
+        except Exception as e:
+            print(f"[BANKSTATE] rebalance failed: {e}")
 
     con.close()
 
+    # --------------------------------------------------
+    # APPLY (only if now valid)
+    # --------------------------------------------------
     _ENGINE_POTS.clear()
     _ENGINE_AVAILABLE.clear()
 
@@ -1366,12 +1426,8 @@ def init_from_budget_allocations(day: str | None = None):
         pot = float(pot)
         _ENGINE_POTS[engine] = pot
         _ENGINE_AVAILABLE[engine] = pot
-   
-    if _is_simulation():
-        print(f"[BANKSTATE] pots loaded from budget_allocations ({day})")
 
-
-
+    print(f"[BANKSTATE] pots initialised → {len(_ENGINE_POTS)} engines")
 # -------------------------------------------------------------------
 # READ API (USED BY ROUTER)
 # -------------------------------------------------------------------
