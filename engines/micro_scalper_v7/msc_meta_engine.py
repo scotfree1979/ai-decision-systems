@@ -726,13 +726,14 @@ class MetaEngine:
 
     def _discover_context_strategies(self):
 
-        from engines.config_paths import open_auto_db
+        from engines.live.settlements import settlements_db_path, connect_db, autoscalp_gui_db_path
         import sqlite3
 
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
+        with connect_db(settlements_db_path()) as con:
 
-        try:
+            con.row_factory = sqlite3.Row
+
+            con.execute(f"ATTACH DATABASE '{autoscalp_gui_db_path()}' AS auto_db")
 
             rows = con.execute("""
                 SELECT
@@ -742,8 +743,8 @@ class MetaEngine:
                     s.fav_strength,
                     COUNT(*) as trades,
                     AVG(t.profit) as avg_pnl
-                FROM settlements t
-                JOIN market_runner_snapshot s
+                FROM bf_cleared_orders t
+                JOIN auto_db.market_runner_snapshot s
                     ON s.marketId = t.marketId
                    AND s.selectionId = t.selectionId
                 GROUP BY
@@ -756,13 +757,9 @@ class MetaEngine:
                 LIMIT 10
             """).fetchall()
 
-        finally:
-            con.close()
-
         strategies = []
 
         for r in rows:
-
             strategies.append({
                 "band": r["band"],
                 "fav_gap_bucket": r["fav_gap_bucket"],
@@ -946,188 +943,6 @@ class MetaEngine:
 # FAIL-SAFE
 # ---------
 # If no profitable structures exist → DO NOT filter (engine continues trading)
-# ======================================================================================================
-
-        # --------------------------------------------------
-        # LOAD PROFITABLE STRUCTURES (ONCE)
-        # --------------------------------------------------
-
-        profitable_structures = self._discover_context_strategies()
-
-        # --------------------------------------------------
-        # ACTIVE RUNNER FILTER (O(1) scope reduction)
-        # --------------------------------------------------
-        active_keys = {
-            (str(c["marketId"]), str(c["selectionId"]))
-            for c in candidates
-        }
-
-        if profitable_structures:
-
-            # --------------------------------------------------
-            # Build fast lookup set
-            # --------------------------------------------------
-
-            profitable_set = {
-                (
-                    s["band"],
-                    s["fav_gap_bucket"],
-                    s["field_bucket"],
-                    s["fav_strength"],
-                )
-                for s in profitable_structures
-            }
-
-            # --------------------------------------------------
-            # LOAD ALL RUNNER STRUCTURES (ONE QUERY)
-            # --------------------------------------------------
-
-            from engines.config_paths import open_auto_db
-            import sqlite3
-
-            con = open_auto_db(rw=False)
-            con.row_factory = sqlite3.Row
-
-            try:
-# ======================================================================================================
-# 📍 TARGET: msc_structure_engine.py (tick → structure filter)
-# 🧩 ACTION: REPLACE QUERY — latest snapshot only
-# 📆 PATCHED: 2026-03-18 — FIX stale structure bug (execution path only)
-# ======================================================================================================
-
-                rows = con.execute("""
-                    SELECT s.*
-                    FROM market_runner_snapshot s
-                    JOIN (
-                        SELECT marketId, selectionId, MAX(ts) ts
-                        FROM market_runner_snapshot
-                        GROUP BY marketId, selectionId
-                    ) latest
-                    ON s.marketId = latest.marketId
-                    AND s.selectionId = latest.selectionId
-                    AND s.ts = latest.ts
-                """).fetchall()
-            finally:
-                con.close()
-
-            # --------------------------------------------------
-            # Build runner → structure map (ACTIVE ONLY)
-            # --------------------------------------------------
-
-            runner_struct_map = {}
-
-            for r in rows:
-
-                key = (str(r["marketId"]), str(r["selectionId"]))
-
-                if key not in active_keys:
-                    continue
-
-                runner_struct_map[key] = (
-                    r["band"],
-                    r["fav_gap_bucket"],
-                    r["field_bucket"],
-                    r["fav_strength"],
-                )
-
-            # --------------------------------------------------
-            # FILTER CANDIDATES (O(1))
-            # --------------------------------------------------
-
-            filtered = []
-
-            for c in candidates:
-
-                key = (str(c["marketId"]), str(c["selectionId"]))
-
-                struct = runner_struct_map.get(key)
-
-                # ======================================================================================================
-                # 📍 STRUCTURE PRIORITY BOOST (NON-SCORE SYSTEM)
-                # 📆 PATCHED: 2026-03-18
-                #
-                # PURPOSE
-                # -------
-                # Promote stronger profitable structures without changing global scoring.
-                # ======================================================================================================
-
-                if struct and struct in profitable_set:
-
-                    for s in profitable_structures:
-                        if (
-                            s["band"],
-                            s["fav_gap_bucket"],
-                            s["field_bucket"],
-                            s["fav_strength"],
-                        ) == struct:
-
-                            avg_pnl = s.get("avg_pnl", 0)
-
-                            if avg_pnl > 0.5:
-                                c["_structure_priority"] = 3
-                            elif avg_pnl > 0.2:
-                                c["_structure_priority"] = 2
-                            else:
-                                c["_structure_priority"] = 1
-
-                            break
-
-                    filtered.append(c)
-
-            # --------------------------------------------------
-            # SAFE APPLY (NEVER KILL ENGINE)
-            # --------------------------------------------------
-
-            if filtered:
-                candidates = filtered
-                # ======================================================================================================
-# 📍 STRUCTURE SORT OVERRIDE
-# 📆 PATCHED: 2026-03-18
-#
-# PURPOSE
-# -------
-# Ensure best structures dominate candidate selection.
-# ======================================================================================================
-
-                candidates.sort(
-                    key=lambda x: (
-                        x.get("_structure_priority", 0),
-                        x.get("score", 0)
-                    ),
-                    reverse=True
-                )
-
-            try:
-                print(
-                    f"[META] in={len(candidates)} "
-                    f"filtered={len(filtered)} "
-                    f"structures={len(profitable_structures)}"
-                )
-            except Exception:
-                pass
-
-# ======================================================================================================
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:tick
-# 🔎 SEARCH: # 2️⃣ PRE-OFF EXPLORATORY (TOP RANKED)
-# 🧩 ACTION: REPLACE ENTIRE EXPLORATORY LOOP
-# 📆 PATCHED: 2026-03-16 — Top 5 candidates always emit exploratory plans
-#
-# PURPOSE
-# -------
-# Remove time gating and allow the highest scoring candidates to always
-# generate exploratory parent plans.
-#
-# DESIGN
-# ------
-# Layer2 produces ranked candidates.
-# Unified emits the top 5 directly.
-#
-# DIRECTION
-# ---------
-# Direction must come from the signal layer (candidate / ctx),
-# never be hard-coded.
 # ======================================================================================================
 
         # --------------------------------------------------
@@ -2522,10 +2337,10 @@ class MetaEngine:
 
             # 🆕 META LAYER
             "context": {
-                "structures": self._build_context_report()
+                "structures": self._discover_context_strategies(),
             },
 
-            "context_strategies": self._discover_context_strategies(),
+            "context_strategies": [],
         }
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report

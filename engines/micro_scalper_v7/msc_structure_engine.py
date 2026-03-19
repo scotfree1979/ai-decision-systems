@@ -496,13 +496,14 @@ class StructureEngine:
 
     def _discover_context_strategies(self):
 
-        from engines.config_paths import open_auto_db
+        from engines.live.settlements import settlements_db_path, connect_db, autoscalp_gui_db_path
         import sqlite3
 
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
+        with connect_db(settlements_db_path()) as con:
 
-        try:
+            con.row_factory = sqlite3.Row
+
+            con.execute(f"ATTACH DATABASE '{autoscalp_gui_db_path()}' AS auto_db")
 
             rows = con.execute("""
                 SELECT
@@ -512,8 +513,8 @@ class StructureEngine:
                     s.fav_strength,
                     COUNT(*) as trades,
                     AVG(t.profit) as avg_pnl
-                FROM settlements t
-                JOIN market_runner_snapshot s
+                FROM bf_cleared_orders t
+                JOIN auto_db.market_runner_snapshot s
                     ON s.marketId = t.marketId
                    AND s.selectionId = t.selectionId
                 GROUP BY
@@ -526,13 +527,9 @@ class StructureEngine:
                 LIMIT 10
             """).fetchall()
 
-        finally:
-            con.close()
-
         strategies = []
 
         for r in rows:
-
             strategies.append({
                 "band": r["band"],
                 "fav_gap_bucket": r["fav_gap_bucket"],
@@ -721,7 +718,7 @@ class StructureEngine:
         # LOAD PROFITABLE STRUCTURES (ONCE)
         # --------------------------------------------------
 
-        profitable_structures = self._discover_context_strategies()
+        profitable_structures = report.get("context", {}).get("structures", [])
 
         # --------------------------------------------------
         # ACTIVE RUNNER FILTER (O(1) scope reduction)
@@ -2187,10 +2184,10 @@ class StructureEngine:
             "layer2": self._build_layer2_surface(timing_surface),
             # 🆕 META LAYER
             "context": {
-                "structures": self._build_context_report()
+                "structures": self._discover_context_strategies()
             },
 
-            "context_strategies": self._discover_context_strategies(),
+            "context_strategies": [],
         }
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report

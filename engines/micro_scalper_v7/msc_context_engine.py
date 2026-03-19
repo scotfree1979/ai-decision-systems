@@ -183,6 +183,7 @@ class ContextEngine:
             ensure_opp_schema()
         except Exception:
             pass
+
     # --------------------------------------------------------------------------------------------------
     # PUBLIC ENTRYPOINT
     # --------------------------------------------------------------------------------------------------
@@ -317,44 +318,48 @@ class ContextEngine:
 
     def _build_context_report(self):
 
-        from engines.config_paths import open_auto_db
+        from engines.live.settlements import settlements_db_path, connect_db, autoscalp_gui_db_path
         import sqlite3
 
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
+        with connect_db(settlements_db_path()) as con:
 
-        try:
+            con.row_factory = sqlite3.Row
+
+            # attach snapshot DB (structure source)
+            con.execute(f"ATTACH DATABASE '{autoscalp_gui_db_path()}' AS auto_db")
 
             rows = con.execute("""
                 SELECT
-                    band,
-                    fav_gap_bucket,
-                    field_bucket,
-                    fav_strength,
-                    COUNT(*) as samples
-                FROM market_runner_snapshot
-                WHERE band IS NOT NULL
+                    s.band,
+                    s.fav_gap_bucket,
+                    s.field_bucket,
+                    s.fav_strength,
+                    COUNT(*) as trades,
+                    AVG(t.profit) as avg_pnl,
+                    SUM(t.profit) as total_pnl
+                FROM bf_cleared_orders t
+                JOIN auto_db.market_runner_snapshot s
+                    ON s.marketId = t.marketId
+                   AND s.selectionId = t.selectionId
                 GROUP BY
-                    band,
-                    fav_gap_bucket,
-                    field_bucket,
-                    fav_strength
-                ORDER BY samples DESC
+                    s.band,
+                    s.fav_gap_bucket,
+                    s.field_bucket,
+                    s.fav_strength
+                ORDER BY trades DESC
             """).fetchall()
-
-        finally:
-            con.close()
 
         report = []
 
         for r in rows:
-
             report.append({
                 "band": r["band"],
                 "fav_gap_bucket": r["fav_gap_bucket"],
                 "field_bucket": r["field_bucket"],
                 "fav_strength": r["fav_strength"],
-                "samples": r["samples"],
+                "trades": r["trades"],
+                "avg_pnl": r["avg_pnl"],
+                "total_pnl": r["total_pnl"],
             })
 
         return report
@@ -545,53 +550,29 @@ class ContextEngine:
 
     def _discover_context_strategies(self):
 
-        from engines.config_paths import open_auto_db
-        import sqlite3
-
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-
-        try:
-
-            rows = con.execute("""
-                SELECT
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength,
-                    COUNT(*) as trades,
-                    AVG(t.profit) as avg_pnl
-                FROM settlements t
-                JOIN market_runner_snapshot s
-                    ON s.marketId = t.marketId
-                   AND s.selectionId = t.selectionId
-                GROUP BY
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength
-                HAVING trades >= 50
-                ORDER BY avg_pnl DESC
-                LIMIT 10
-            """).fetchall()
-
-        finally:
-            con.close()
-
         strategies = []
 
-        for r in rows:
+        store = getattr(self, "_context_store", {})
+
+        for key, data in store.items():
+
+            if data["trades"] < 50:
+                continue
+
+            band, gap, field, fav = key
 
             strategies.append({
-                "band": r["band"],
-                "fav_gap_bucket": r["fav_gap_bucket"],
-                "field_bucket": r["field_bucket"],
-                "fav_strength": r["fav_strength"],
-                "trades": r["trades"],
-                "avg_pnl": round(r["avg_pnl"], 4),
+                "band": band,
+                "fav_gap_bucket": gap,
+                "field_bucket": field,
+                "fav_strength": fav,
+                "trades": data["trades"],
+                "avg_pnl": round(data["avg"], 4),
             })
 
-        return strategies
+        strategies.sort(key=lambda x: x["avg_pnl"], reverse=True)
+
+        return strategies[:10]
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: def tick(self, ctx:
@@ -2027,7 +2008,8 @@ class ContextEngine:
             "layer2": self._build_layer2_surface(timing_surface),
             # 🆕 META LAYER
             "context": {
-                "structures": self._build_context_report()
+                "structures": self._build_context_report(),
+                "learned": getattr(self, "_context_store", {})  # 🔥 THIS IS THE REAL DATA
             },
 
             "context_strategies": self._discover_context_strategies(),
