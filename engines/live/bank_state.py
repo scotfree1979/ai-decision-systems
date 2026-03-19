@@ -23,7 +23,13 @@ _ENGINE_FLOOR_CACHE: Dict[str, float] = {}
 _ENGINE_UNMATCHED_CACHE: Dict[str, float] = {}
 
 # === PATCH END ==============================================================
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py — global state
+# 🧩 ACTION: ADD rebalance checkpoint tracker
+# 📆 PATCHED: 2026-03-19 — BankState drives BudgetManager
+# ======================================================================================================
 
+_LAST_REBALANCE_INDEX = -1
 # ======================================================================================================
 # 📍 TARGET: engines/live/bank_state.py
 # 🧩 ACTION: LOCK ledger schema (mirror only)
@@ -702,7 +708,79 @@ def _compute_market_over_reserve_today():
 
 def _reconcile_market_exposure_live():
 
-    global _ENGINE_USED, _OPEN_EXPOSURE
+# ======================================================================================================
+# 📍 TARGET: engines/live/bank_state.py:_reconcile_market_exposure_live
+# 🧩 ACTION: FULL BudgetManager orchestration (BankState = driver)
+# 📆 PATCHED: 2026-03-19
+#
+# PURPOSE:
+# - BankState controls WHEN rebalance happens
+# - Uses full-day schedule (bets DB)
+# - Triggers only on progression checkpoints
+#
+# INVARIANT:
+# - Rebalance runs ONCE per checkpoint
+# - No spam
+# - No scope dependency
+# ======================================================================================================
+
+    global _LAST_REBALANCE_INDEX
+
+    try:
+        from engines.risk.budget_manager import _rebalance_allocations
+        from engines.risk.budget_manager import _build_market_schedule
+
+        markets = _build_market_schedule()
+        total = len(markets)
+
+        if total > 0:
+
+            now = datetime.utcnow()
+
+            current_index = 0
+
+            for i, (_, ts) in enumerate(markets):
+                try:
+                    off = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+
+                if off >= now:
+                    current_index = i
+                    break
+
+            # --------------------------------------------------
+            # REBALANCE CHECKPOINTS (20% chunks)
+            # --------------------------------------------------
+            checkpoints = [
+                int(total * 0.2),
+                int(total * 0.4),
+                int(total * 0.6),
+                int(total * 0.8),
+            ]
+
+            # find highest checkpoint passed
+            triggered_index = -1
+            for cp in checkpoints:
+                if current_index >= cp:
+                    triggered_index = cp
+
+            # --------------------------------------------------
+            # TRIGGER REBALANCE ONLY ON NEW CHECKPOINT
+            # --------------------------------------------------
+            if triggered_index != -1 and triggered_index != _LAST_REBALANCE_INDEX:
+
+                print(f"[BANKSTATE] triggering rebalance at index={current_index}")
+
+                _rebalance_allocations()
+
+                # reload pots after rebalance
+                init_from_budget_allocations()
+
+                _LAST_REBALANCE_INDEX = triggered_index
+
+    except Exception as e:
+        print(f"[BANKSTATE] rebalance orchestration failed: {e}")
 
     # 1️⃣ Get authoritative floor (matched only)
     floor_rows = _compute_market_floor_from_betfair_surface()

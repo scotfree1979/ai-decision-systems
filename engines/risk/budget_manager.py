@@ -20,7 +20,8 @@ from typing import Dict, Tuple
 from engines.config_paths import auto_conn as _auto_conn
 from engines.config_paths import open_bets_db as _bets
 from engines.mastery import event_sink
-
+from datetime import datetime
+import datetime
 _last_rebalance_day = None
 _alloc_lock = threading.Lock()
 
@@ -151,6 +152,132 @@ _profit_tracker = {
     for eng in ENGINES
 }
 
+# ======================================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🧩 ADD: Time-of-day allocation controller
+# ======================================================================
+
+def _get_time_phase_profile() -> str:
+    """
+    Determines base allocation profile from market timing.
+    Uses GLOBAL market context (earliest active market).
+    """
+
+    try:
+        from engines.decision_engine.decide_once.scope import scope_snapshot
+
+        sc = scope_snapshot()
+
+        # Collect all TTO values
+        ttos = []
+
+        for row in sc.get("pre_near", []):
+            ttos.append(float(row[1]))
+
+        for row in sc.get("pre_far", []):
+            ttos.append(float(row[1]))
+
+        for row in sc.get("in_play", []):
+            ttos.append(float(row[1]))
+
+        if not ttos:
+            return "P1_EXPLORATION"  # default overnight
+
+        nearest_tto = min(ttos)
+
+        # --------------------------------------------------
+        # PHASE LOGIC
+        # --------------------------------------------------
+
+        if nearest_tto > 60:
+            return "P1_EXPLORATION"   # early day
+
+        if 20 < nearest_tto <= 60:
+            return "P2_BALANCED"
+
+        if 5 < nearest_tto <= 20:
+            return "P3_STRUCTURE_TILT"
+
+        if 0 < nearest_tto <= 5:
+            return "P4_META_DOMINANT"
+
+        if nearest_tto <= 0:
+            return "P5_EXPLOIT"
+
+    except Exception:
+        return "P1_EXPLORATION"
+
+# ======================================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🧩 ADD: Market Cadence Engine (schedule-driven)
+# ======================================================================
+
+def _build_market_schedule():
+
+    try:
+        from engines.config_paths import connect_db
+
+        con = connect_db(ro=True)
+        rows = con.execute("""
+            SELECT DISTINCT marketId, marketStartTime
+            FROM bets
+            WHERE date(marketStartTime) = date('now','utc')
+            ORDER BY marketStartTime ASC
+        """).fetchall()
+        con.close()
+
+        markets = [
+            (str(r[0]), str(r[1]))
+            for r in rows
+        ]
+
+        return markets
+
+    except Exception:
+        return []
+
+# ======================================================================================================
+# 📍 TARGET: engines/risk/budget_manager.py
+# 🔎 SEARCH: def _get_market_cadence():
+# 🧩 ACTION: FULL REPLACE (clean, no scope, correct)
+# ======================================================================================================
+
+def _get_market_cadence():
+
+    markets = _build_market_schedule()
+
+    if not markets:
+        return "P1_EXPLORATION"
+
+    total = len(markets)
+
+    now = datetime.datetime.utcnow()
+
+    current_index = 0
+
+    for i, (_, ts) in enumerate(markets):
+        try:
+            off = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        if off >= now:
+            current_index = i
+            break
+
+    chunk_size = max(1, total // 5)
+    chunk = current_index // chunk_size
+
+    if chunk == 0:
+        return "P1_EXPLORATION"
+    if chunk == 1:
+        return "P2_BALANCED"
+    if chunk == 2:
+        return "P3_STRUCTURE_TILT"
+    if chunk == 3:
+        return "P4_META_DOMINANT"
+
+    return "P5_EXPLOIT"
 # ======================================================================================================
 # 📍 TARGET: engines/risk/budget_manager.py
 # 🧩 ACTION: ADD — load allocations from DB (authoritative)
@@ -482,7 +609,39 @@ def _rebalance_allocations():
         return
 
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    if _last_rebalance_day == today:
+    
+    # --------------------------------------------------
+    # REBALANCE EVERY N MARKETS
+    # --------------------------------------------------
+
+    markets = _build_market_schedule()
+    total = len(markets)
+
+    rebalance_points = [
+        int(total * 0.2),
+        int(total * 0.4),
+        int(total * 0.6),
+        int(total * 0.8),
+    ]
+
+    # --------------------------------------------------
+    # CURRENT MARKET INDEX (DB ONLY — NO SCOPE)
+    # --------------------------------------------------
+    now = datetime.datetime.utcnow()
+
+    current_index = 0
+
+    for i, (_, ts) in enumerate(markets):
+        try:
+            off = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        if off >= now:
+            current_index = i
+            break
+
+    if not any(current_index >= p for p in rebalance_points):
         return
 
     _last_rebalance_day = today
@@ -523,7 +682,13 @@ def _rebalance_allocations():
     # --------------------------------------------------
     # PROFILE-BASED ALLOCATION (NEW)
     # --------------------------------------------------
-    profile_id = _select_allocation_profile(perf)
+    cadence_profile = _get_market_cadence()
+
+    # Only override with performance AFTER learning phase
+    if current_index > (len(markets) * 0.3) and sum(perf.values()) > 0:
+        profile_id = _select_allocation_profile(perf)
+    else:
+        profile_id = cadence_profile
 
     profile = ALLOCATION_PROFILES.get(profile_id, {})
 
