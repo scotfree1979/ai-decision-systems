@@ -42,6 +42,16 @@ from engines.mastery.train_mastery_v7 import (
     on_settlement_event as v7_on_settlement_event
 )
 
+# ======================================================================================================
+# 📍 TARGET: engines/live/settlements.py
+# 🔎 SEARCH: def reconcile_orders()
+# 🧩 ACTION: ADD — push settlement into context engine
+# 📆 PATCHED: 2026-03-19 — real-time context learning
+# ======================================================================================================
+
+from engines.micro_scalper_v7.msc_context_engine import _CONTEXT_ENGINES
+
+
 # ============================================================
 # LIVE SETTLEMENT GUARDS
 # ============================================================
@@ -1802,6 +1812,71 @@ def reconcile_orders() -> Tuple[int, int]:
                     settled,
                     betId
                 ))
+
+# ======================================================================================================
+# 📍 TARGET: engines/live/settlements.py:reconcile_orders
+# 🔎 ANCHOR: immediately AFTER orders UPDATE block (before "if o.total_changes:")
+# 🧩 ACTION: ADD — deterministic context learning hook (no DB dependency)
+# 📆 PATCHED: 2026-03-19 — settlement → context live learning (correct placement)
+#
+# PURPOSE
+# -------
+# Ensure EVERY cleared Betfair order updates the Context engine.
+#
+# DESIGN
+# ------
+# ✔ Runs once per settlement row (deterministic)
+# ✔ NOT dependent on o.total_changes
+# ✔ Uses snapshot to derive structure key
+# ✔ Updates live in-memory context store
+#
+# ARCHITECTURE
+# ------------
+# settlements → context → structure/meta → next tick decisions
+#
+# CRITICAL
+# --------
+# Must NOT sit inside `if o.total_changes`
+# ======================================================================================================
+
+                # --------------------------------------------------
+                # 🔑 CONTEXT LEARNING HOOK (LIVE, DETERMINISTIC)
+                # --------------------------------------------------
+                try:
+                    from engines.config_paths import open_auto_db
+                    import sqlite3
+
+                    con2 = open_auto_db(rw=False)
+                    con2.row_factory = sqlite3.Row
+
+                    snap = con2.execute("""
+                        SELECT band, fav_gap_bucket, field_bucket, fav_strength
+                        FROM market_runner_snapshot
+                        WHERE marketId=? AND selectionId=?
+                        ORDER BY ts DESC
+                        LIMIT 1
+                    """, (row["marketId"], row["selectionId"])).fetchone()
+
+                    con2.close()
+
+                    if snap:
+
+                        key = (
+                            snap["band"],
+                            snap["fav_gap_bucket"],
+                            snap["field_bucket"],
+                            snap["fav_strength"],
+                        )
+
+                        pnl = float(profit or 0.0)
+
+                        from engines.micro_scalper_v7.msc_context_engine import _CONTEXT_ENGINES
+
+                        for ctx_engine in _CONTEXT_ENGINES:
+                            ctx_engine._apply_settlement(key, pnl)
+
+                except Exception as e:
+                    print(f"[CTX-HOOK] warn: {e}")
 
                 # Only act if something actually changed
                 if o.total_changes:

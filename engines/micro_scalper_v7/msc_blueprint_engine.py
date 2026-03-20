@@ -3462,8 +3462,14 @@ class BlueprintEngine:
 
             live_move = r.get("drift_direction")
 
-            rctx = self._route_ctx_map.get((mid, sid), {})
-            surface_key = rctx.get("blueprint_surface")
+            candidate = next(
+                (c for c in report.get("layer2", {}).get("candidates", [])
+                 if c["marketId"] == mid and c["selectionId"] == sid),
+                {}
+            )
+
+            surface_key = candidate.get("blueprint_surface") or \
+                          self._route_ctx_map.get((mid, sid), {}).get("blueprint_surface")
 
             bp_score = score_blueprint_alignment(
                 surface_key,

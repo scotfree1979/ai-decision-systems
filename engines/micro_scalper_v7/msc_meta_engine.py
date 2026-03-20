@@ -1,19 +1,18 @@
 # ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
-# 5th clone of structure
-# 🧩 ACTION: CREATE FILE
-# 📆 PHASE 0 — Unified Engine Skeleton (No Logic, No Plans)
+# 📍 TARGET: FILE SYSTEM
+# 🧩 ACTION: RENAME FILE
+# 📆 PATCHED: 2026-03-19
 #
-# PURPOSE:
-# - Self-contained engine
-# - PX-driven (no OC series)
-# - No window dependency
-# - No route slicing dependency
-# - No execution mutation
-# - Returns enter=False
-# - Emits structured signal container
-# ======================================================================================================
-
+# FROM:
+#   msc_context_engine.py
+#
+# TO:
+#   msc_meta_engine.py
+#
+# PURPOSE
+# -------
+# Prevent engine mis-registration + import confusion
+# =======================================================================================================
 from typing import Dict, Any
 import time
 
@@ -320,6 +319,7 @@ class MetaEngine:
 # ======================================================================================================
 
         self._structural_fired = {}
+    
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:__init__
@@ -455,6 +455,105 @@ class MetaEngine:
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — DB → memory loader
+# ======================================================================================================
+
+    def _load_context_from_db(self):
+
+        rows = self._build_context_report()
+
+        store = {}
+
+        for r in rows:
+
+            key = (
+                r["band"],
+                r["fav_gap_bucket"],
+                r["field_bucket"],
+                r["fav_strength"],
+            )
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:_load_context_from_db
+# 🔎 SEARCH: "avg": r["avg_pnl"],
+# 🧩 ACTION: REPLACE — fix key mismatch (avg → avg_pnl)
+# 📆 PATCHED: 2026-03-19 — ensure context model reads correct field
+#
+# ROOT CAUSE
+# ----------
+# Store uses "avg" but downstream expects "avg_pnl"
+#
+# RESULT
+# ------
+# Context scoring silently broken (always 0)
+#
+# FIX
+# ---
+# Standardise on "avg_pnl"
+# ======================================================================================================
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py:_load_context_from_db
+# 🔎 SEARCH: "trades": r["trades"],
+# 🧩 ACTION: REPLACE — safe fallback for missing fields
+# 📆 PATCHED: 2026-03-19 — prevent crash on snapshot-only datasets
+# ======================================================================================================
+
+            store[key] = {
+                "trades": r.get("trades", r.get("samples", 0)),
+                "pnl": r.get("total_pnl", 0.0),
+                "avg_pnl": r.get("avg_pnl", 0.0),
+                "by_engine": {}
+            }
+
+        return store
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — context key extractor
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Extract structure fingerprint from latest snapshot
+# ======================================================================================================
+
+    def _get_context_key(self, mid, sid):
+
+        from engines.config_paths import open_auto_db
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        try:
+            row = con.execute("""
+                SELECT
+                    band,
+                    fav_gap_bucket,
+                    field_bucket,
+                    fav_strength
+                FROM market_runner_snapshot
+                WHERE marketId=? AND selectionId=?
+                ORDER BY ts DESC
+                LIMIT 1
+            """, (mid, sid)).fetchone()
+        finally:
+            con.close()
+
+        if not row:
+            return None
+
+        return (
+            row["band"],
+            row["fav_gap_bucket"],
+            row["field_bucket"],
+            row["fav_strength"],
+        )
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
 # 🔎 SEARCH: class ContextEngine:
 # 🧩 ACTION: ADD — Context discovery report (same probe used in terminal)
 # 📆 PATCHED: 2026-03-16
@@ -524,252 +623,8 @@ class MetaEngine:
 
         return report
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
-# 🔎 SEARCH: class ContextEngine:
-# 🧩 ACTION: ADD — Context scoring model
-# 📆 PATCHED: 2026-03-16
-#
-# PURPOSE
-# -------
-# Score candidates based on market structure context.
-#
-# CONTEXT FEATURES
-# ----------------
-# band
-# fav_gap_bucket
-# field_bucket
-# fav_strength
-#
-# The score acts as a modifier on Layer2 candidate scores.
-#
-# NOTE
-# ----
-# This engine currently observes only (no capital allocation yet).
-# ======================================================================================================
 
-    def _context_score(self, mid: str, sid: str) -> float:
 
-        from engines.config_paths import open_auto_db
-        import sqlite3
-
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-
-        try:
-
-            row = con.execute("""
-                SELECT
-                    band,
-                    fav_gap_bucket,
-                    field_bucket,
-                    fav_strength
-                FROM market_runner_snapshot
-                WHERE marketId=? AND selectionId=?
-                ORDER BY ts DESC
-                LIMIT 1
-            """, (mid, sid)).fetchone()
-
-        finally:
-            con.close()
-
-        if not row:
-            return 0.0
-
-        score = 0.0
-
-        band = row["band"]
-        gap  = row["fav_gap_bucket"]
-        field = row["field_bucket"]
-        fav = row["fav_strength"]
-
-        # --------------------------------------------------
-        # Band weighting
-        # --------------------------------------------------
-
-        if band == "ACTIVE":
-            score += 2
-        elif band == "PASSIVE":
-            score += 1
-
-        # --------------------------------------------------
-        # Favourite gap
-        # --------------------------------------------------
-
-        if gap == "tight_gap":
-            score += 1.5
-        elif gap == "moderate_gap":
-            score += 1
-
-        # --------------------------------------------------
-        # Field size
-        # --------------------------------------------------
-
-        if field == "small_field":
-            score += 1
-
-        # --------------------------------------------------
-        # Favourite strength
-        # --------------------------------------------------
-
-        if fav == "dominant_fav":
-            score += 1.5
-        elif fav == "normal_fav":
-            score += 1
-
-        return score
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
-# 🧩 ACTION: ADD — Auto-learning context scoring model
-# 📆 PATCHED: 2026-03-16
-#
-# PURPOSE
-# -------
-# Learn profitable context patterns automatically from historical settlements.
-#
-# DATA SOURCES
-# ------------
-# market_runner_snapshot
-# settlements
-#
-# METHOD
-# ------
-# PnL aggregated by:
-#
-#   band
-#   fav_gap_bucket
-#   field_bucket
-#   fav_strength
-#
-# Score returned = avg_pnl per context bucket.
-#
-# RESULT
-# ------
-# Context engine learns which race structures are profitable.
-# ======================================================================================================
-
-    def _context_learned_score(self, mid: str, sid: str) -> float:
-
-        from engines.config_paths import open_auto_db
-        import sqlite3
-
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-
-        try:
-
-            row = con.execute("""
-                SELECT
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength
-                FROM market_runner_snapshot s
-                WHERE s.marketId=? AND s.selectionId=?
-                ORDER BY s.ts DESC
-                LIMIT 1
-            """, (mid, sid)).fetchone()
-
-            if not row:
-                return 0.0
-
-            stats = con.execute("""
-                SELECT
-                    AVG(t.profit) as avg_pnl,
-                    COUNT(*) as samples
-                FROM settlements t
-                JOIN market_runner_snapshot s
-                    ON s.marketId=t.marketId
-                   AND s.selectionId=t.selectionId
-                WHERE
-                    s.band=? AND
-                    s.fav_gap_bucket=? AND
-                    s.field_bucket=? AND
-                    s.fav_strength=?
-            """, (
-                row["band"],
-                row["fav_gap_bucket"],
-                row["field_bucket"],
-                row["fav_strength"],
-            )).fetchone()
-
-        finally:
-            con.close()
-
-        if not stats or stats["samples"] < 20:
-            return 0.0
-
-        return float(stats["avg_pnl"])
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
-# 🧩 ACTION: ADD — Strategy discovery surface
-# 📆 PATCHED: 2026-03-16
-#
-# PURPOSE
-# -------
-# Detect profitable race structures that consistently generate PnL.
-#
-# These discovered structures become candidates for future engines.
-#
-# OUTPUT
-# ------
-# Ranked list of profitable market structures.
-#
-# Example discovered strategy:
-#
-# ACTIVE + tight_gap + small_field → avg_pnl = +0.84
-#
-# This feeds the future Strategy Engine builder.
-# ======================================================================================================
-
-    def _discover_context_strategies(self):
-
-        from engines.live.settlements import settlements_db_path, connect_db, autoscalp_gui_db_path
-        import sqlite3
-
-        with connect_db(settlements_db_path()) as con:
-
-            con.row_factory = sqlite3.Row
-
-            con.execute(f"ATTACH DATABASE '{autoscalp_gui_db_path()}' AS auto_db")
-
-            rows = con.execute("""
-                SELECT
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength,
-                    COUNT(*) as trades,
-                    AVG(t.profit) as avg_pnl
-                FROM bf_cleared_orders t
-                JOIN auto_db.market_runner_snapshot s
-                    ON s.marketId = t.marketId
-                   AND s.selectionId = t.selectionId
-                GROUP BY
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength
-                HAVING trades >= 50
-                ORDER BY avg_pnl DESC
-                LIMIT 10
-            """).fetchall()
-
-        strategies = []
-
-        for r in rows:
-            strategies.append({
-                "band": r["band"],
-                "fav_gap_bucket": r["fav_gap_bucket"],
-                "field_bucket": r["field_bucket"],
-                "fav_strength": r["fav_strength"],
-                "trades": r["trades"],
-                "avg_pnl": round(r["avg_pnl"], 4),
-            })
-
-        return strategies
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
 # 🔎 SEARCH: def tick(self, ctx:
@@ -917,34 +772,6 @@ class MetaEngine:
 
         candidates = self._select_exploratory_candidates(report)
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_structure_engine.py
-# 🔎 SEARCH: candidates = self._select_exploratory_candidates(report)
-# 🧩 ACTION: ADD — SAFE STRUCTURE FILTER (no DB in loop, O(1) lookup)
-# 📆 PATCHED: 2026-03-18 — Trade ONLY profitable context structures (safe version)
-#
-# PURPOSE
-# -------
-# Filter exploratory candidates so Structure engine ONLY trades
-# historically profitable market structures.
-#
-# DESIGN (SAFE)
-# -------------
-# ✔ Single DB read (batched)
-# ✔ O(1) lookup per candidate
-# ✔ No DB calls inside loop
-# ✔ No mutation of existing structures
-#
-# CONTRACT
-# --------
-# Context  = discovery (no filter)
-# Structure = exploitation (filtered)
-#
-# FAIL-SAFE
-# ---------
-# If no profitable structures exist → DO NOT filter (engine continues trading)
-# ======================================================================================================
-
         # --------------------------------------------------
         # 2️⃣ PRE-OFF EXPLORATORY (TOP 5 ALWAYS TRADE)
         # --------------------------------------------------
@@ -1065,7 +892,13 @@ class MetaEngine:
 # Ensure every trade carries structure identity
 # ======================================================================================================
 
-                "context_key": self._get_context_key(mid, sid),
+# ======================================================================================================
+# 📍 TARGET: unified_engine.py:tick → emit_plan
+# 🔎 SEARCH: "context_key": self._get_context_key(mid, sid),
+# 🧩 ACTION: REPLACE — safe optional context key
+# ======================================================================================================
+
+                "context_key": getattr(self, "_get_context_key", lambda a, b: None)(mid, sid),
                 "source_engine": self.ENGINE_NAME,
             })
 
@@ -2311,12 +2144,13 @@ class MetaEngine:
 # Embed context + strategy surfaces INSIDE report dict.
 # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: _build_v7_report
+# 🧩 ACTION: FIX — build report before layer2
+# ======================================================================================================
+
         report = {
             "world": self._build_world_surface(),
-
-            # ─────────────────────────────────────────
-            # LAYER 1
-            # ─────────────────────────────────────────
             "timing": timing_surface,
             "drift": self._build_drift_surface(),
             "rank": self._build_rank_surface(),
@@ -2328,20 +2162,34 @@ class MetaEngine:
             "stop": self._build_stop_surface(system_snapshot),
             "classification": self._build_classification_surface(),
             "temporal": self._build_temporal_surface(),
-
-            # ─────────────────────────────────────────
-            # LAYER 2
-            # ─────────────────────────────────────────
             "blueprint": self._build_blueprint_surface(timing_surface),
-            "layer2": self._build_layer2_surface(timing_surface),
-
-            # 🆕 META LAYER
-            "context": {
-                "structures": self._discover_context_strategies(),
-            },
-
+            "context": ctx.get("context", {}),
             "context_strategies": [],
         }
+
+        # ✅ NOW SAFE
+        report["layer2"] = self._build_layer2_surface(timing_surface, report)
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py:_build_v7_report
+# 🔎 SEARCH: "blueprint": self._build_blueprint_surface(timing_surface),
+# 🧩 ACTION: DELETE DUPLICATE BLOCK BELOW
+# 📆 PATCHED: 2026-03-19 — remove invalid second report construction
+#
+# ROOT CAUSE
+# ----------
+# Duplicate report block reintroduces:
+#   - report-before-definition bug
+#   - syntax break
+#
+# FIX
+# ---
+# Keep ONLY the first (correct) report block
+# ======================================================================================================
+
+# ❌ DELETE EVERYTHING FROM:
+            #"blueprint": self._build_blueprint_surface(timing_surface),
+
+# ❌ DOWN TO THE END OF THAT SECOND report dict
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_build_v7_report
 # 🔎 SEARCH: INSERT INTO unified_runtime_snapshot (
@@ -3767,7 +3615,14 @@ class MetaEngine:
 # Pass report into the function so timing surfaces can be read.
 # ======================================================================================================
 
-    def _build_layer2_surface(self, timing_surface) -> Dict[str, Any]:
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py
+# 🔎 SEARCH: def _build_layer2_surface(self, timing_surface)
+# 🧩 ACTION: REPLACE — accept report param
+# 📆 PATCHED: 2026-03-19 — fix report scope
+# ======================================================================================================
+
+    def _build_layer2_surface(self, timing_surface, report) -> Dict[str, Any]:
 
         drift = self._build_drift_surface().get("runners", [])
         sweet = self._build_sweet_spot_surface().get("runners", [])
@@ -3883,8 +3738,35 @@ class MetaEngine:
 
             live_move = r.get("drift_direction")
 
-            rctx = self._route_ctx_map.get((mid, sid), {})
-            surface_key = rctx.get("blueprint_surface")
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py:_build_layer2_surface
+# 🔎 SEARCH: candidate = next(
+# 🧩 ACTION: REPLACE — remove circular dependency
+# 📆 PATCHED: 2026-03-19 — prevent self-referencing layer2 build
+#
+# ROOT CAUSE
+# ----------
+# layer2 reading its own candidates during build
+#
+# RESULT
+# ------
+# unstable / recursive / inconsistent scoring
+#
+# FIX
+# ---
+# remove lookup, use empty placeholder
+# ======================================================================================================
+
+            candidate = {}
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py
+# 🔎 SEARCH: surface_key = rctx.get("blueprint_surface")
+# 🧩 ACTION: REPLACE — correct ctx lookup
+# 📆 PATCHED: 2026-03-19 — fix NameError (rctx undefined)
+# ======================================================================================================
+
+            ctx_row = self._route_ctx_map.get((mid, sid), {})
+            surface_key = ctx_row.get("blueprint_surface")
 
             bp_score = score_blueprint_alignment(
                 surface_key,
@@ -4029,39 +3911,44 @@ class MetaEngine:
             # we fallback to ctx-safe default.
             # ======================================================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py
+# 🔎 SEARCH: strategy_mode = "CONTEXT"
+# 🧩 ACTION: REPLACE BLOCK — correct dominance logic
+# 📆 PATCHED: 2026-03-19 — final META decision model
+#
+# PURPOSE
+# -------
+# META must choose strongest signal:
+#   STRUCTURE > BLUEPRINT > CONTEXT
+# ======================================================================================================
+
+            struct_score = candidate.get("_structure_score", 0)
+
             strategy_mode = "CONTEXT"
 
-            struct_priority = 0
-            if "_structure_priority" in rctx:
-                struct_priority = rctx["_structure_priority"]
-
-            # STRUCTURE dominates if strong
-            if struct_priority >= 2:
+            if struct_score > 0:
                 strategy_mode = "STRUCTURE"
 
-            # BLUEPRINT next
-            elif bp_score >= 2:
+            elif bp_score > 0:
                 strategy_mode = "BLUEPRINT"
 
-            # --------------------------------------------------
-            # APPLY MODE WEIGHTING
-            # --------------------------------------------------
+            struct_priority = 0
 
-            if strategy_mode == "STRUCTURE":
-                score += struct_priority * 4
-
-            elif strategy_mode == "BLUEPRINT":
-                score += bp_score * 3
-
-            else:
-                score += context_boost
 
             try:
                 print(
                     "[META MODE]",
                     f"{mid}:{sid}",
                     f"mode={strategy_mode}",
-                    f"struct={struct_priority}",
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_meta_engine.py:_build_layer2_surface
+# 🔎 SEARCH: f"struct={struct_priority}",
+# 🧩 ACTION: REPLACE — use struct_score
+# 📆 PATCHED: 2026-03-19 — fix debug output accuracy
+# ======================================================================================================
+
+                    f"struct={struct_score}",
                     f"bp={bp_score:.2f}",
                     f"ctx={raw_ctx:.2f}"
                 )

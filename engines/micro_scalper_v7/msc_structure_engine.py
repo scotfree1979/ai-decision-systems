@@ -225,6 +225,79 @@ class StructureEngine:
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — DB → memory loader
+# ======================================================================================================
+
+    def _load_context_from_db(self):
+
+        rows = self._build_context_report()
+
+        store = {}
+
+        for r in rows:
+
+            key = (
+                r["band"],
+                r["fav_gap_bucket"],
+                r["field_bucket"],
+                r["fav_strength"],
+            )
+
+            store[key] = {
+                "trades": r["trades"],
+                "pnl": r["total_pnl"],
+                "avg": r["avg_pnl"],
+                "by_engine": {}
+            }
+
+        return store
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — context key extractor
+# 📆 PATCHED: 2026-03-18
+#
+# PURPOSE
+# -------
+# Extract structure fingerprint from latest snapshot
+# ======================================================================================================
+
+    def _get_context_key(self, mid, sid):
+
+        from engines.config_paths import open_auto_db
+        import sqlite3
+
+        con = open_auto_db(rw=False)
+        con.row_factory = sqlite3.Row
+
+        try:
+            row = con.execute("""
+                SELECT
+                    band,
+                    fav_gap_bucket,
+                    field_bucket,
+                    fav_strength
+                FROM market_runner_snapshot
+                WHERE marketId=? AND selectionId=?
+                ORDER BY ts DESC
+                LIMIT 1
+            """, (mid, sid)).fetchone()
+        finally:
+            con.close()
+
+        if not row:
+            return None
+
+        return (
+            row["band"],
+            row["fav_gap_bucket"],
+            row["field_bucket"],
+            row["fav_strength"],
+        )
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
 # 🔎 SEARCH: class ContextEngine:
 # 🧩 ACTION: ADD — Context discovery report (same probe used in terminal)
 # 📆 PATCHED: 2026-03-16
@@ -421,56 +494,17 @@ class StructureEngine:
 
     def _context_learned_score(self, mid: str, sid: str) -> float:
 
-        from engines.config_paths import open_auto_db
-        import sqlite3
+        key = self._get_context_key(mid, sid)
 
-        con = open_auto_db(rw=False)
-        con.row_factory = sqlite3.Row
-
-        try:
-
-            row = con.execute("""
-                SELECT
-                    s.band,
-                    s.fav_gap_bucket,
-                    s.field_bucket,
-                    s.fav_strength
-                FROM market_runner_snapshot s
-                WHERE s.marketId=? AND s.selectionId=?
-                ORDER BY s.ts DESC
-                LIMIT 1
-            """, (mid, sid)).fetchone()
-
-            if not row:
-                return 0.0
-
-            stats = con.execute("""
-                SELECT
-                    AVG(t.profit) as avg_pnl,
-                    COUNT(*) as samples
-                FROM settlements t
-                JOIN market_runner_snapshot s
-                    ON s.marketId=t.marketId
-                   AND s.selectionId=t.selectionId
-                WHERE
-                    s.band=? AND
-                    s.fav_gap_bucket=? AND
-                    s.field_bucket=? AND
-                    s.fav_strength=?
-            """, (
-                row["band"],
-                row["fav_gap_bucket"],
-                row["field_bucket"],
-                row["fav_strength"],
-            )).fetchone()
-
-        finally:
-            con.close()
-
-        if not stats or stats["samples"] < 20:
+        if not key:
             return 0.0
 
-        return float(stats["avg_pnl"])
+        data = self._context_store.get(key)
+
+        if not data or data["trades"] < 10:
+            return 0.0
+
+        return data["avg"]
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
@@ -680,190 +714,90 @@ class StructureEngine:
         if not hasattr(self, "_inplay_markets"):
             self._inplay_markets = set()
 
+
         # ------------------------------------------------------------------
         # 2️⃣ PRE-OFF EXPLORATORY (TOP RANKED)
         # ------------------------------------------------------------------
 
         candidates = self._select_exploratory_candidates(report)
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/msc_structure_engine.py
-# 🔎 SEARCH: candidates = self._select_exploratory_candidates(report)
-# 🧩 ACTION: ADD — SAFE STRUCTURE FILTER (no DB in loop, O(1) lookup)
-# 📆 PATCHED: 2026-03-18 — Trade ONLY profitable context structures (safe version)
-#
-# PURPOSE
-# -------
-# Filter exploratory candidates so Structure engine ONLY trades
-# historically profitable market structures.
-#
-# DESIGN (SAFE)
-# -------------
-# ✔ Single DB read (batched)
-# ✔ O(1) lookup per candidate
-# ✔ No DB calls inside loop
-# ✔ No mutation of existing structures
-#
-# CONTRACT
-# --------
-# Context  = discovery (no filter)
-# Structure = exploitation (filtered)
-#
-# FAIL-SAFE
-# ---------
-# If no profitable structures exist → DO NOT filter (engine continues trading)
-# ======================================================================================================
-
         # --------------------------------------------------
-        # LOAD PROFITABLE STRUCTURES (ONCE)
+        # STRUCTURE BOOST (NO DB — USE CONTEXT ONLY)
         # --------------------------------------------------
 
         profitable_structures = report.get("context", {}).get("structures", [])
 
-        # --------------------------------------------------
-        # ACTIVE RUNNER FILTER (O(1) scope reduction)
-        # --------------------------------------------------
-        active_keys = {
-            (str(c["marketId"]), str(c["selectionId"]))
-            for c in candidates
-        }
-
         if profitable_structures:
 
-            # --------------------------------------------------
-            # Build fast lookup set
-            # --------------------------------------------------
-
-            profitable_set = {
+            structure_map = {
                 (
                     s["band"],
                     s["fav_gap_bucket"],
                     s["field_bucket"],
                     s["fav_strength"],
-                )
+                ): s
                 for s in profitable_structures
             }
-
-            # --------------------------------------------------
-            # LOAD ALL RUNNER STRUCTURES (ONE QUERY)
-            # --------------------------------------------------
-
-            from engines.config_paths import open_auto_db
-            import sqlite3
-
-            con = open_auto_db(rw=False)
-            con.row_factory = sqlite3.Row
-
-            try:
-# ======================================================================================================
-# 📍 TARGET: msc_structure_engine.py (tick → structure filter)
-# 🧩 ACTION: REPLACE QUERY — latest snapshot only
-# 📆 PATCHED: 2026-03-18 — FIX stale structure bug (execution path only)
-# ======================================================================================================
-
-                rows = con.execute("""
-                    SELECT s.*
-                    FROM market_runner_snapshot s
-                    JOIN (
-                        SELECT marketId, selectionId, MAX(ts) ts
-                        FROM market_runner_snapshot
-                        GROUP BY marketId, selectionId
-                    ) latest
-                    ON s.marketId = latest.marketId
-                    AND s.selectionId = latest.selectionId
-                    AND s.ts = latest.ts
-                """).fetchall()
-            finally:
-                con.close()
-
-            # --------------------------------------------------
-            # Build runner → structure map (ACTIVE ONLY)
-            # --------------------------------------------------
-
-            runner_struct_map = {}
-
-            for r in rows:
-
-                key = (str(r["marketId"]), str(r["selectionId"]))
-
-                if key not in active_keys:
-                    continue
-
-                runner_struct_map[key] = (
-                    r["band"],
-                    r["fav_gap_bucket"],
-                    r["field_bucket"],
-                    r["fav_strength"],
-                )
-
-            # --------------------------------------------------
-            # FILTER CANDIDATES (O(1))
-            # --------------------------------------------------
 
             filtered = []
 
             for c in candidates:
 
-                key = (str(c["marketId"]), str(c["selectionId"]))
+                mid = c["marketId"]
+                sid = c["selectionId"]
 
-                struct = runner_struct_map.get(key)
+                struct = self._get_context_key(mid, sid)
 
-                # ======================================================================================================
-                # 📍 STRUCTURE PRIORITY BOOST (NON-SCORE SYSTEM)
-                # 📆 PATCHED: 2026-03-18
-                #
-                # PURPOSE
-                # -------
-                # Promote stronger profitable structures without changing global scoring.
-                # ======================================================================================================
-
-                if struct and struct in profitable_set:
-
-                    for s in profitable_structures:
-                        if (
-                            s["band"],
-                            s["fav_gap_bucket"],
-                            s["field_bucket"],
-                            s["fav_strength"],
-                        ) == struct:
-
-                            avg_pnl = s.get("avg_pnl", 0)
-
-                            if avg_pnl > 0.5:
-                                c["_structure_priority"] = 3
-                            elif avg_pnl > 0.2:
-                                c["_structure_priority"] = 2
-                            else:
-                                c["_structure_priority"] = 1
-
-                            break
-
+                if not struct:
                     filtered.append(c)
+                    continue
+
+                data = structure_map.get(struct)
+
+                if not data:
+                    filtered.append(c)
+                    continue
+
+                avg_pnl = data.get("avg_pnl", 0)
+
+                # --------------------------------------------------
+                # STRUCTURE IMPACT (DOMINANT)
+                # --------------------------------------------------
+
+                if avg_pnl < -0.2:
+                    continue  # hard kill
+
+                # scale pnl into score space
+                structure_score = avg_pnl * 10  # ← THIS IS KEY
+
+                # clamp (prevent explosions)
+                structure_score = max(min(structure_score, 6), -4)
+
+                # attach to candidate
+                c["_structure_score"] = structure_score
+
+                # --------------------------------------------------
+                # HARD FILTER (ONLY VERY BAD STRUCTURES)
+                # --------------------------------------------------
+
+
+                filtered.append(c)
 
             # --------------------------------------------------
             # SAFE APPLY (NEVER KILL ENGINE)
             # --------------------------------------------------
 
             if filtered:
-                candidates = filtered
 
-                # ======================================================================================================
-# 📍 STRUCTURE SORT OVERRIDE
-# 📆 PATCHED: 2026-03-18
-#
-# PURPOSE
-# -------
-# Ensure best structures dominate candidate selection.
-# ======================================================================================================
+                candidates = filtered
 
                 candidates.sort(
                     key=lambda x: (
-                        x.get("_structure_priority", 0),
+                        x.get("_structure_score", 0),
                         x.get("score", 0)
                     ),
                     reverse=True
                 )
-            # else: keep original candidates (fail-safe)
 
             try:
                 print(
@@ -2183,9 +2117,7 @@ class StructureEngine:
             # ─────────────────────────────────────────
             "layer2": self._build_layer2_surface(timing_surface),
             # 🆕 META LAYER
-            "context": {
-                "structures": self._discover_context_strategies()
-            },
+            "context": ctx.get("context", {}),
 
             "context_strategies": [],
         }

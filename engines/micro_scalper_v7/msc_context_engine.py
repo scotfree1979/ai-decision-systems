@@ -81,6 +81,9 @@ if __name__ == "__main__":
         SESSION_TOKEN = input("🔐 Enter Betfair session token: ").strip()
         os.environ["SESSION_TOKEN"] = SESSION_TOKEN
 
+# 🔑 GLOBAL REGISTRY (live engines)
+_CONTEXT_ENGINES = []
+
 class ContextEngine:
     """
     Unified Engine — Phase 0 (Signal Surface Only)
@@ -109,6 +112,7 @@ class ContextEngine:
     # --------------------------------------------------------------------------------------------------
 
     def __init__(self):
+        _CONTEXT_ENGINES.append(self)
         self._boot_ts = time.time()
         self._last_tick_ts = None
         # canonical runner world container
@@ -121,6 +125,7 @@ class ContextEngine:
 
         # Phase clock cache
         self._daily_markets = {}         # {marketId: {...}}
+
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
@@ -153,25 +158,20 @@ class ContextEngine:
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py:__init__
-# 🔎 SEARCH: self._structural_fired =
-# 🧩 ACTION: ADD — local context learning store
-# 📆 PATCHED: 2026-03-18 — self-contained context intelligence (no DB dependency)
+# 🧩 ACTION: ADD — bootstrap context store from DB (single source of truth)
+# 📆 PATCHED: 2026-03-18 — load historical into memory once
 #
 # PURPOSE
 # -------
-# Maintain in-memory learning of:
-#   structure → pnl → avg → decisions
+# Load historical context (DB) into memory at startup.
+# After this, memory becomes the ONLY source of truth.
 #
-# DESIGN
-# ------
-# key = (band, gap, field, fav)
-# value = aggregated stats
+# IMPORTANT
+# ---------
+# No further DB reads for context after init.
 # ======================================================================================================
 
-        # --------------------------------------------------
-        # 🧠 CONTEXT LEARNING STORE (CORE MEMORY)
-        # --------------------------------------------------
-        self._context_store = {}
+        self._context_store = self._load_context_from_db()
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:__init__
@@ -245,6 +245,58 @@ class ContextEngine:
                 buckets["long"].append(key)
 
         return buckets
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🔎 SEARCH: def _context_learned_score
+# 🧩 ACTION: ADD BELOW — live settlement updater
+# 📆 PATCHED: 2026-03-19 — real-time learning
+# ======================================================================================================
+
+    def _apply_settlement(self, key, pnl: float):
+
+        if not key:
+            return
+
+        rec = self._context_store.setdefault(key, {
+            "trades": 0,
+            "pnl": 0.0,
+            "avg_pnl": 0.0,
+            "by_engine": {}
+        })
+
+        rec["trades"] += 1
+        rec["pnl"] += pnl
+        rec["avg_pnl"] = rec["pnl"] / rec["trades"]
+
+# ======================================================================================================
+# 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
+# 🧩 ACTION: ADD — DB → memory loader
+# ======================================================================================================
+
+    def _load_context_from_db(self):
+
+        rows = self._build_context_report()
+
+        store = {}
+
+        for r in rows:
+
+            key = (
+                r["band"],
+                r["fav_gap_bucket"],
+                r["field_bucket"],
+                r["fav_strength"],
+            )
+
+            store[key] = {
+                "trades": r["trades"],
+                "pnl": r["total_pnl"],
+                "avg": r["avg_pnl"],
+                "by_engine": {}
+            }
+
+        return store
 
 # ======================================================================================================
 # 📍 TARGET: engines/micro_scalper_v7/msc_context_engine.py
@@ -341,6 +393,11 @@ class ContextEngine:
                 JOIN auto_db.market_runner_snapshot s
                     ON s.marketId = t.marketId
                    AND s.selectionId = t.selectionId
+                WHERE
+                    s.band IS NOT NULL
+                    AND s.fav_gap_bucket IS NOT NULL
+                    AND s.field_bucket IS NOT NULL
+                    AND s.fav_strength IS NOT NULL
                 GROUP BY
                     s.band,
                     s.fav_gap_bucket,
@@ -2007,9 +2064,20 @@ class ContextEngine:
             # ─────────────────────────────────────────
             "layer2": self._build_layer2_surface(timing_surface),
             # 🆕 META LAYER
+
             "context": {
-                "structures": self._build_context_report(),
-                "learned": getattr(self, "_context_store", {})  # 🔥 THIS IS THE REAL DATA
+                "structures": [
+                    {
+                        "band": k[0],
+                        "fav_gap_bucket": k[1],
+                        "field_bucket": k[2],
+                        "fav_strength": k[3],
+                        "trades": v["trades"],
+                        "avg_pnl": v["avg"],
+                        "total_pnl": v["pnl"],
+                    }
+                    for k, v in self._context_store.items()
+                ]
             },
 
             "context_strategies": self._discover_context_strategies(),
