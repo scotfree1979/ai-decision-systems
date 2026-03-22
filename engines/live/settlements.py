@@ -1843,7 +1843,7 @@ def reconcile_orders() -> Tuple[int, int]:
                 # 🔑 CONTEXT LEARNING HOOK (LIVE, DETERMINISTIC)
                 # --------------------------------------------------
                 try:
-                    from engines.config_paths import open_auto_db
+                  
                     import sqlite3
 
                     con2 = open_auto_db(rw=False)

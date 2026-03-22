@@ -105,85 +105,46 @@ def _order_runner_pool_by_market_time(pairs):
 
     return ordered_pairs
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def _filter_valid_markets(
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-20 — REMOVE SLIDING WINDOW (FULL WORLD PER TICK)
+#
+# WHY:
+# - Bible requires FULL-DAY WORLD every tick
+# - Sliding window (next 5 markets) violates doctrine
+# - Causes missing plans + incomplete evaluation
+#
+# CHANGE:
+# - Remove ALL windowing logic
+# - Return ALL markets from DB (no slicing, no limits)
+#
+# RESULT:
+# - BusRoute now sends FULL WORLD every tick
+# - Only PX gating remains downstream
+# ======================================================================================================
 
 def _filter_valid_markets(
-    runner_pairs: list[tuple[str, str]],
-    *,
-    min_runners_per_market: int = 6,   # kept for signature compatibility (NOT USED here)
-    min_markets: int = 5,              # window size (authoritative)
+    rows,
+    *args,
+    **kwargs,
 ):
     """
-    RECONCILIATION-ONLY MARKET COMPLETER
+    FULL WORLD PASS-THROUGH
 
-    CONTRACT (LOCKED):
-    - Operates on marketIds ONLY
-    - NEVER removes existing markets
-    - NEVER decides eligibility
-    - NEVER returns empty if markets exist today
-    - ONLY ensures the required marketIds are present
+    Previous behaviour:
+    - Applied sliding window (next N markets)
+    - Dropped markets outside window ❌
 
-    runner_pairs may be incomplete.
-    This function makes it complete.
+    New behaviour:
+    - Return ALL markets
+    - No filtering
+    - No slicing
     """
 
-    from engines.config_paths import connect_db
-    from datetime import datetime, timezone
-    import sqlite3
-    from collections import defaultdict
-
-    # --------------------------------------------
-    # 1) Extract marketIds already present
-    # --------------------------------------------
-    existing_by_market = defaultdict(list)
-    for mid, sid in runner_pairs:
-        existing_by_market[str(mid)].append((mid, sid))
-
-    existing_mids = set(existing_by_market.keys())
-
-    # --------------------------------------------
-    # 2) Load authoritative market window (DB-first)
-    #    TODAY, ordered by marketStartTime
-    # --------------------------------------------
-    con = connect_db(ro=True)
-    con.row_factory = sqlite3.Row
-    try:
-        rows = con.execute(
-            """
-            SELECT DISTINCT marketId
-            FROM bets
-            WHERE
-                datetime(marketStartTime) >= datetime('now','utc','-120 minutes')
-            ORDER BY datetime(marketStartTime) ASC
-            """
-        ).fetchall()
-    finally:
-        con.close()
-
-    if not rows:
-        # No markets today → return whatever we already have
-        return list(runner_pairs)
-
-    # --------------------------------------------
-    # 3) Determine sliding window (first N markets)
-    #    NOTE: disappearance happens only AFTER grace,
-    #    but that logic already lives in scope/schedule.
-    # --------------------------------------------
-    required_mids = [str(r["marketId"]) for r in rows[:min_markets]]
-
-    # --------------------------------------------
-    # 4) Reconcile: add missing marketIds
-    # --------------------------------------------
-    out = list(runner_pairs)
-
-    for mid in required_mids:
-        if mid in existing_mids:
-            continue
-
-        # Add a placeholder entry for this marketId.
-        # selectionId is intentionally None.
-        out.append((mid, None))
-
-    return out
+    # ✅ FULL WORLD — NO FILTERING
+    return rows
 
 def _get_current_anchor_market():
     from engines.config_paths import connect_db
@@ -376,7 +337,6 @@ class BusRouteSnapshot:
                     marketStartTime
                 FROM runner_counts
                 WHERE runner_count >= 6
-                  AND datetime(marketStartTime) >= datetime('now','utc')
                 ORDER BY datetime(marketStartTime) ASC
             """).fetchall()
         finally:
@@ -396,9 +356,7 @@ class BusRouteSnapshot:
 # Engines still see the full world.
 # ======================================================================================================
 
-        ROOT_MARKET_COUNT = 5
 
-        self._root_markets = self._world_markets[:ROOT_MARKET_COUNT]
 
         if not rows:
             self.runner_pool = []
@@ -947,62 +905,35 @@ class BusRouteSnapshot:
 # ======================================================================================================
 # 📍 TARGET: engines/bus_route.py
 # 🔎 SEARCH: def partition_into_bus_stops(self):
-# 🛠 ACTION: REPLACE ENTIRE FUNCTION
-# 📆 PATCHED: 2026-04-25 — Restore identity-based route rotation (band-agnostic)
+# 🧩 ACTION: REPLACE ENTIRE FUNCTION
+# 📆 PATCHED: 2026-03-20 — REMOVE BUS STOP PARTITIONING (FULL WORLD PER TICK)
 #
-# PURPOSE:
-# - Route scheduling must NOT depend on band
-# - Route = identity surface only
-# - Band gating belongs inside BUS lanes
+# WHY:
+# - Bus stops restrict evaluation to subset of runners ❌
+# - Bible requires FULL WORLD every tick
+# - Engines must receive ALL runners, not sliced subsets
 #
-# INVARIANT:
-# - All runners in runner_pool are scheduled
-# - bus_stops never empty if runner_pool non-empty
+# RESULT:
+# - Every tick returns full runner_pool
+# - No artificial throttling
 # ======================================================================================================
 
     def partition_into_bus_stops(self):
         """
-        Cadence-only bus stops.
+        FULL WORLD — NO PARTITIONING
 
-        Uses runners from the NEXT market only.
-        Keeps tick workload extremely small.
+        Every tick receives ALL runners.
         """
 
-        # find next market
-        next_mid = None
-
-        for mid in self._world_markets:
-            next_mid = mid
-            break
-
-        if not next_mid:
+        if not self.runner_pool:
             self.bus_stops = {}
             return
 
-        # collect runners for next market
-        market_pairs = [
-            (mid, sid)
-            for (mid, sid) in self.runner_pool
-            if mid == next_mid
-        ]
-
-        if not market_pairs:
-            self.bus_stops = {}
-            return
-
-        n = len(market_pairs)
-
-        self.bus_stops = {}
-
-        for tick in range(1, TICKS_PER_CYCLE + 1):
-
-            runners = []
-
-            for i in range(2):  # keep bus stop tiny
-                idx = ((tick - 1) * 2 + i) % n
-                runners.append(market_pairs[idx])
-
-            self.bus_stops[tick] = runners
+        # Every tick gets FULL runner pool
+        self.bus_stops = {
+            tick: list(self.runner_pool)
+            for tick in range(1, TICKS_PER_CYCLE + 1)
+        }
 
 
     def get_bus_stop(self, tick):
@@ -1553,59 +1484,47 @@ def get_stoploss_parent_surfaces():
 
     return out
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def build_bus_route_tick(
+# 🧩 ACTION: CLEAN FINAL VERSION
+# 📆 PATCHED: 2026-03-20 — REMOVE DEAD CODE + FIX EXECUTION
+# ======================================================================================================
 
-def build_bus_route_tick(rotation: RunnerRotation):
+def build_bus_route_tick(snapshot: BusRouteSnapshot, rotation: RunnerRotation):
     """
-    Returns exactly 30 parent-plan *requests*.
-    No CTX building. No execution.
+    Uses full snapshot runner pool.
+    Distributes runners across active engines.
     """
-    session_token = (
-        os.getenv("SESSION_TOKEN")
-        or os.getenv("BETFAIR_SESSION_TOKEN")
-    )
 
-    # --------------------------------------------------
-    # WORLD RUNNER POOL (authoritative)
-    # --------------------------------------------------
-    con = connect_db(ro=True)
-    con.row_factory = sqlite3.Row
-    try:
-        rows = con.execute("""
-            SELECT DISTINCT marketId
-            FROM bets
-            WHERE datetime(marketStartTime) >= datetime('now','utc')
-            ORDER BY datetime(marketStartTime) ASC
-        """).fetchall()
-    finally:
-        con.close()
-
-    world_markets = [str(r["marketId"]) for r in rows]
-
-    pool = _build_runner_pool(world_markets)
+    pool = snapshot.runner_pool
 
     if not pool:
         return []
 
     plans = []
 
-    # LEGACY — 2 runners → 16 plans downstream
-    for mid, sid in rotation.next("LEGACY", pool, ROUTE_SPLIT["LEGACY"]):
-        plans.append(("LEGACY", mid, sid))
+    for engine, count in ROUTE_SPLIT.items():
+        if count <= 0:
+            continue
 
-
-    risk_pool = [r for r in pool if r in legacy_runner_set]
-
-    for mid, sid in rotation.next("RISK", risk_pool, ROUTE_SPLIT["RISK"]):
-        plans.append(("RISK", mid, sid))
+        for mid, sid in rotation.next(engine, pool, count):
+            plans.append((engine, mid, sid))
 
     return plans[:PLANS_PER_TICK]
 
-def build_full_cycle():
+# ======================================================================================================
+# 📍 TARGET: engines/bus_route.py
+# 🔎 SEARCH: def build_full_cycle(
+# 🧩 ACTION: MODIFY CALL
+# ======================================================================================================
+
+def build_full_cycle(snapshot: BusRouteSnapshot):
     rotation = RunnerRotation()
     out = []
 
     for _ in range(TICKS_PER_CYCLE):
-        out.extend(build_bus_route_tick(rotation))
+        out.extend(build_bus_route_tick(snapshot, rotation))
 
     return out[:CYCLE_SIZE]
 

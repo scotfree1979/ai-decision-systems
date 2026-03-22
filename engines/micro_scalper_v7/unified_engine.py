@@ -2836,136 +2836,70 @@ class UnifiedEngine:
 
         self._update_runner_structure()
 
-        pools = self._build_candidate_pools(report)
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
-# 🔎 SEARCH: pools = self._build_candidate_pools(report)
-# 🧩 ACTION: ADD — restore candidate source
-# PURPOSE:
-# Layer2 surface is the canonical candidate generator.
-# Unified selection operates on those candidates.
-# ======================================================================================================
-
+        # --------------------------------------------------
+        # Source candidates (unchanged)
+        # --------------------------------------------------
         candidates = report.get("layer2", {}).get("candidates", [])
+        if not candidates:
+            return []
 
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py
-# 🔎 SEARCH: def _select_exploratory_candidates
-# 🧩 ACTION: PRIORITISE BUS buckets
-# 📆 PATCHED: 2026-03-12 — Unified candidate priority by route buckets
-#
-# PURPOSE:
-# - Always trade closest markets first
-# - Prevent far markets starving near markets
-# - Allow structural trades >60m
-# ======================================================================================================
+        # --------------------------------------------------
+        # Market lookup (timing surface)
+        # --------------------------------------------------
+        market_map = {
+            m.get("marketId"): m
+            for m in report.get("timing", {}).get("markets", [])
+            if m.get("marketId")
+        }
 
-        buckets = self._get_bus_buckets()
-
-# ======================================================================================================
-# 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
-# 🔎 SEARCH: return final
-# 🧩 ACTION: configurable long-bucket expansion
-# 📆 PATCHED: 2026-03-16 — exploratory capacity + long-market toggle
-#
-# PURPOSE
-# -------
-# Allow exploratory capacity to include additional long-distance markets.
-#
-# DESIGN
-# ------
-# BASE_EXPLORATORY = 5
-# LONG_BUCKET_EXTRA = configurable toggle
-#
-# RESULT
-# ------
-# total exploratory candidates =
-#     BASE_EXPLORATORY + LONG_BUCKET_EXTRA
-#
-# This allows early anchors to exist without interfering with the core
-# top-ranked candidates.
-# ======================================================================================================
-        
-        candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-        # ======================================================================================================
-        # 📍 EXPLORATORY ANTI-STARVATION (ISOLATED TO EXPLORATORY ONLY)
-        # 📆 PATCHED: 2026-03-18
-        #
-        # PURPOSE
-        # -------
-        # Prevent ≤20min markets from dominating exploratory selection.
-        #
-        # IMPORTANT
-        # ---------
-        # This ONLY affects exploratory candidate selection.
-        # It does NOT affect scoring, risk, or in-play logic.
-        #
-        # DESIGN
-        # ------
-        # Apply temporary score penalty ONLY for sorting.
-        # ======================================================================================================
-
-        adjusted = []
+        # --------------------------------------------------
+        # Partition into buckets
+        #   >20min → CORE
+        #   >60min → LONG
+        # --------------------------------------------------
+        core_pool = []
+        long_pool = []
 
         for c in candidates:
 
-            score = c.get("score", 0)
+            mid = c.get("marketId")
+            market = market_map.get(mid)
 
-            mid = c["marketId"]
-            market = next(
-                (m for m in report.get("timing", {}).get("markets", [])
-                 if m.get("marketId") == mid),
-                None
-            )
+            if not market:
+                continue
 
-            if market:
-                tto = market.get("tto_seconds")
+            tto = market.get("tto_seconds")
 
-                # penalty ONLY for exploratory selection
-                if tto is not None and tto <= 1200:
-                    score -= 5   # ← penalty strength
+            if tto is None:
+                continue
 
-            adjusted.append((score, c))
+            # >20 minutes
+            if tto > 1200:
+                core_pool.append(c)
 
-        adjusted.sort(key=lambda x: x[0], reverse=True)
-
-        candidates = [c for _, c in adjusted]
-
-        BASE_EXPLORATORY = 5
-        LONG_BUCKET_EXTRA = 1   # ← toggle here
-
-
-  
+            # >60 minutes (subset of above)
+            if tto > 3600:
+                long_pool.append(c)
 
         # --------------------------------------------------
-        # Core top candidates
+        # Sort BOTH pools by score (unchanged scoring)
         # --------------------------------------------------
-
-        core = candidates[:BASE_EXPLORATORY]
+        core_pool.sort(key=lambda x: x.get("score", 0), reverse=True)
+        long_pool.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         # --------------------------------------------------
-        # Long bucket candidates
+        # Select TOP 5 from core (>20min)
         # --------------------------------------------------
+        core = core_pool[:5]
 
-        # ======================================================================================================
-        # 📍 TARGET: engines/micro_scalper_v7/unified_engine.py:_select_exploratory_candidates
-        # 🧩 ACTION: add best long-bucket candidate
-        # ======================================================================================================
-
+        # --------------------------------------------------
+        # Select BEST from long (>60min), de-duped
+        # --------------------------------------------------
         core_keys = {(r["marketId"], r["selectionId"]) for r in core}
-
-        long_candidates = [
-            r for r in candidates
-            if (r["marketId"], r["selectionId"]) in buckets.get("long", [])
-        ]
-
-        long_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         extra = []
 
-        for r in long_candidates:
+        for r in long_pool:
 
             key = (r["marketId"], r["selectionId"])
 
@@ -2973,14 +2907,11 @@ class UnifiedEngine:
                 continue
 
             extra.append(r)
-
-            if len(extra) >= LONG_BUCKET_EXTRA:
-                break
+            break  # only ONE long candidate
 
         # --------------------------------------------------
-        # Rebind execution fields from route ctx
+        # Rebind execution fields (unchanged)
         # --------------------------------------------------
-
         route = getattr(self, "_route_ctx_map", {})
 
         for r in core + extra:
@@ -2994,10 +2925,9 @@ class UnifiedEngine:
                     r["direction"] = rctx.get("direction")
 
                 if not r.get("px"):
-                    r["px"] = rctx.get("px")        
+                    r["px"] = rctx.get("px")
 
         return core + extra
-
 
     # --------------------------------------------------------------------------------------------------
     # LAYER 2 — TRADE SIGNAL INTELLIGENCE

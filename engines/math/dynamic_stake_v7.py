@@ -513,7 +513,21 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
         return compute_risk_dynamic_stake(ctx=ctx, engine="MSC_RISK")
 
     if bet_type == "EXPLORATORY":
-        return compute_exploratory_dynamic_stake(ctx=ctx, engine="MSC_EXPLORATORY")
+        try:
+            # --------------------------------------------------
+            # FIXED BUDGET SLICE (AUTHORITATIVE)
+            # --------------------------------------------------
+            engine_budget = budget_manager.get_engine_allocation("MSC_EXPLORATORY")
+
+            if not engine_budget or engine_budget <= 0:
+                return MIN_STAKE
+
+            stake = float(engine_budget) / 14.0
+
+            return round(max(stake, MIN_STAKE), 2)
+
+        except Exception:
+            return MIN_STAKE
 
     if bet_type == "INPLAY":
         return compute_inplay_dynamic_stake(ctx=ctx, engine="MSC_INPLAY")

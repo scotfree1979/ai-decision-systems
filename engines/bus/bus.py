@@ -320,33 +320,82 @@ class CadenceController:
             self.tick_index = 0
             self.queue.clear()
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def enqueue(self, plans: list[tuple]):
+# 🧩 ACTION: REPLACE — tick-local plan buffer (no cross-tick carry)
+# 📆 PATCHED: 2026-03-22 — remove stale plan backlog + duplication bug
+#
+# PURPOSE
+# -------
+# - Plans must be evaluated per tick ONLY
+# - No persistence across ticks
+# - No duplication
+#
+# FIXES
+# -----
+# - Removes double append bug
+# - Removes window carry-over behaviour
+# - Enforces fresh plan set each tick
+# ======================================================================================================
+
     def enqueue(self, plans: list[tuple]):
         """
-        Accept raw BUS plans (non-blocking).
+        Accept raw BUS plans (tick-local only).
         """
         self._roll_window_if_needed()
-        for p in plans:
-            if len(self.queue) < self.plans_per_window:
-                self.queue.append(p)
-            else:
-                # Hard backpressure: defer to next window
-                break
+
+        # 🔑 CRITICAL: overwrite (NO accumulation)
+        self.queue = list(plans)
+
+        print(f"[CADENCE] received={len(plans)} (fresh tick)")
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: def admit_for_tick(self) -> list[tuple]:
+# 🧩 ACTION: REPLACE — tick-only admission (drop overflow immediately)
+# 📆 PATCHED: 2026-03-22 — eliminate stale execution + enforce fresh selection
+#
+# PURPOSE
+# -------
+# - Only current tick plans are considered
+# - Overflow plans are DROPPED (not deferred)
+# - No queue persistence
+#
+# RESULT
+# ------
+# Each tick is independent:
+#   generate → filter → execute → discard remainder
+# ======================================================================================================
 
     def admit_for_tick(self) -> list[tuple]:
         """
-        Admit up to plans_per_tick plans for this tick.
+        Admit plans for THIS tick only.
         """
         self._roll_window_if_needed()
         self.tick_index += 1
 
-        admitted = []
-        for _ in range(min(self.plans_per_tick, len(self.queue))):
-            admitted.append(self.queue.popleft())
+        incoming = list(self.queue)
+
+        admitted = incoming[:self.plans_per_tick]
+        dropped  = incoming[self.plans_per_tick:]
+
+        # --------------------------------------------------
+        # 📊 DROP REASON ANNOTATION (DIAGNOSTIC ONLY)
+        # --------------------------------------------------
+        for _eng, p, _ctx in dropped:
+            try:
+                p["_drop_reason"] = "capacity_limit"
+            except Exception:
+                pass
 
         print(
             f"[CADENCE] tick={self.tick_index}/{self.ticks_per_window} "
-            f"admitted={len(admitted)} remaining={len(self.queue)}"
+            f"admitted={len(admitted)} dropped={len(dropped)}"
         )
+
+        # 🔑 CRITICAL: clear queue (no carry-over)
+        self.queue = []
 
         return admitted
 
@@ -1108,6 +1157,204 @@ class DecisionBus:
 
         finally:
             con.close()
+
+        # ======================================================================
+        # 🟩 LANE 6 — REAL-TIME PnL CORRECTION (IN-PLAY WINDOW ONLY)
+        # 📆 PATCHED: 2026-XX-XX — unified corrective layer (profit locking)
+        #
+        # PURPOSE:
+        # - Enforce PnL shaping (target £5 baseline)
+        # - Act ONLY in ≤5min window
+        # - Respect unmatched orders already working
+        # - React instantly if exposure is at risk
+        #
+        # NO ARCHITECTURE CHANGE:
+        # - Uses ctx_map (already available)
+        # - Emits plans like any engine
+        # - BUS handles sizing + routing
+        # ======================================================================
+
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            if not ctx:
+                continue
+
+            # --------------------------------------------------
+            # ⏱️ TIME GATE (ONLY ≤5 MINUTES)
+            # --------------------------------------------------
+            tto = ctx.get("tto_seconds")
+
+            if tto is None or tto > 300:
+                continue
+
+            px = ctx.get("px")
+            if px is None:
+                continue
+
+            try:
+                px = float(px)
+            except Exception:
+                continue
+
+            orders = ctx.get("orders_by_runner", [])
+            if not orders:
+                continue
+
+            # --------------------------------------------------
+            # 📊 COMPUTE RUNNER PnL (BOOK VIEW)
+            # --------------------------------------------------
+            # --------------------------------------------------
+            # 📊 AUTHORITATIVE RUNNER PnL (BANKSTATE SNAPSHOT)
+            # --------------------------------------------------
+
+            try:
+                
+                from engines.config_paths import open_auto_db
+                import sqlite3
+
+                con = open_auto_db(rw=False)
+                con.row_factory = sqlite3.Row
+
+                row = con.execute("""
+                    SELECT pnl_if_win
+                    FROM bankstate_runner_snapshot
+                    WHERE marketId = ?
+                      AND selectionId = ?
+                    ORDER BY ts DESC
+                    LIMIT 1
+                """, (mid, sid)).fetchone()
+
+                pnl = float(row["pnl_if_win"] or 0.0) if row else 0.0
+
+                con.close()
+
+            except Exception:
+                continue
+
+            # --------------------------------------------------
+            # 🎯 TARGET PROGRESSION (RUNNER-LEVEL, LIVE)
+            # --------------------------------------------------
+
+            abs_pnl = abs(pnl)
+
+            if abs_pnl < 50:
+                TARGET_PNL = 5.0
+            elif abs_pnl < 150:
+                TARGET_PNL = 15.0
+            else:
+                TARGET_PNL = 30.0
+
+            # --------------------------------------------------
+            # 🎯 WITHIN TARGET → DO NOTHING
+            # --------------------------------------------------
+            if abs(pnl) <= TARGET_PNL:
+                continue
+
+            # --------------------------------------------------
+            # 📌 UNMATCHED CHILD ORDERS (PROTECTION CHECK)
+            # --------------------------------------------------
+            unmatched_children = [
+                o for o in orders
+                if o.get("role") == "CHILD"
+                and (o.get("entry_status") or "").upper()
+                   not in ("MATCHED", "CANCELLED", "EXPIRED")
+            ]
+
+            has_helpful_unmatched = False
+
+            for o in unmatched_children:
+
+                side_u = str(o.get("side")).upper()
+                px_u   = float(o.get("entry_odds") or 0.0)
+
+                # Losing → need BACK, and price moving toward it
+                if pnl < 0 and side_u == "BACK" and px <= px_u:
+                    has_helpful_unmatched = True
+
+                # Winning → need LAY, and price moving toward it
+                if pnl > 0 and side_u == "LAY" and px >= px_u:
+                    has_helpful_unmatched = True
+
+            if has_helpful_unmatched:
+                continue  # let existing orders resolve
+
+            # --------------------------------------------------
+            # 📉 DIRECTION CHECK (ARE WE GETTING WORSE?)
+            # --------------------------------------------------
+            prev_px = ctx.get("_prev_px")
+            direction = None
+
+            if prev_px is not None:
+                if px > prev_px:
+                    direction = "DRIFT"
+                elif px < prev_px:
+                    direction = "STEAM"
+
+            # --------------------------------------------------
+            # 🚨 CORRECTION TRIGGER
+            # --------------------------------------------------
+            # Losing and getting worse → act immediately
+            # Winning and drifting → lock profit
+
+            fire = False
+            side = None
+
+            if pnl < -TARGET_PNL:
+                if direction == "STEAM":
+                    fire = True
+                    side = "BACK"
+
+            elif pnl > TARGET_PNL:
+                if direction == "DRIFT":
+                    fire = True
+                    side = "LAY"
+
+            if not fire:
+                continue
+
+            # --------------------------------------------------
+            # 🧮 GREEN-UP STAKE (AUTHORITATIVE)
+            # --------------------------------------------------
+            anchor_odds  = ctx.get("anchor_entry_odds")
+            parent_stake = ctx.get("anchor_entry_stake")
+
+            if not anchor_odds or not parent_stake:
+                continue
+
+            try:
+                from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+                hedge_size = calc_greenup_stake(
+                    parent_side=side,
+                    entry_odds=float(anchor_odds),
+                    parent_stake=float(parent_stake),
+                    hedge_odds=float(px),
+                )
+            except Exception:
+                continue
+
+            if hedge_size <= 0:
+                continue
+
+            # --------------------------------------------------
+            # 📤 EMIT CORRECTION PLAN
+            # --------------------------------------------------
+            repair_plans.append((
+                "MSC_CORRECTIVE",
+                {
+                    "enter": True,
+                    "engine": "MSC_CORRECTIVE",
+                    "bet_type": "CORRECTION",
+                    "role": "CHILD",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "side": side,
+                    "px": float(px),
+                    "size": float(hedge_size),
+                    "why": "lane6_pnl_correction",
+                },
+                dict(ctx),
+            ))
 
         return repair_plans
 
@@ -4059,6 +4306,7 @@ class DecisionBus:
         from engines.bus_route import ROUTE_SPLIT, PLANS_PER_TICK
 
         slot_budget = dict(ROUTE_SPLIT)
+        slot_budget["MSC_CORRECTIVE"] = 999  # never capped
 
         # Seen keys per engine
         slot_seen = {
@@ -4071,7 +4319,8 @@ class DecisionBus:
             "MSC_BLUEPRINT": set(),     # (mid, sid)
             "MSC_CONTEXT": set(),       # (mid, sid)
             "MSC_STRUCTURE": set(),     # (mid, sid)
-            "MSC_META": set(),       # (mid, sid)
+            "MSC_META": set(),          # (mid, sid)
+            "MSC_CORRECTIVE": set(),
 
         }
 
@@ -4303,7 +4552,8 @@ class DecisionBus:
                 # --------------------------------------------------
 
                 # 🔥 BUS IS AUTHORITATIVE — DROP ANY UPSTREAM STAKE
-                plan.pop("size", None)
+                if plan.get("engine") != "MSC_CORRECTIVE":
+                    plan.pop("size", None)
 
                 engine = plan.get("engine")
                 px = float(plan.get("px") or 0.0)
@@ -4726,7 +4976,7 @@ class DecisionBus:
 
             # enrichment loop ends
 
-            self._cadence.enqueue(final_plans)
+
 
             # ======================================================================================================
             # 📍 TARGET: engines/bus/bus.py
@@ -4798,7 +5048,7 @@ class DecisionBus:
                 # --------------------------------------------------
                 # SAFETY PASS-THROUGH
                 # --------------------------------------------------
-                if bet_type == "STOPLOSS" or role == "CHILD":
+                if bet_type in ("STOPLOSS", "CORRECTION") or role == "CHILD":
                     filtered.append((eng, plan, ctx))
                     continue
 
@@ -4844,6 +5094,7 @@ class DecisionBus:
             filtered.sort(key=lambda x: x[0], reverse=True)
 
             final_plans = [(eng, plan, ctx) for (_s, eng, plan, ctx) in filtered]
+            self._cadence.enqueue(final_plans)
 
             admitted = self._cadence.admit_for_tick()
 
