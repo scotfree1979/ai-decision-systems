@@ -1448,9 +1448,46 @@ class BlueprintEngine:
         plans = stoploss + exploratory + risk + inplay
 # ======================================================================================================
 
-        # ------------------------------------------------------------------
+        # ==================================================
+        # 🔑 UNIVERSAL CANDIDATE → PLAN PROMOTION
+        # ==================================================
+
+        # If engine has candidates but no plans, FORCE promotion
+        if not plans:
+
+            candidates = (
+                report.get("layer2", {}).get("candidates")
+                if "report" in locals()
+                else None
+            )
+
+            if candidates:
+                plans = []
+
+                for c in candidates:
+                    px = c.get("px")
+                    if px is None:
+                        continue
+
+                    try:
+                        px = float(px)
+                    except Exception:
+                        continue
+
+                    plans.append({
+                        "enter": True,
+                        "engine": "MSC_BLUEPRINT",   # replace per engine
+                        "role": "PARENT",
+                        "marketId": c["marketId"],
+                        "selectionId": c["selectionId"],
+                        "direction": c.get("direction") or "LAY->BACK",
+                        "px": px,
+                        "why": "forced_candidate_promotion",
+                    })
+
+        # ==================================================
         # RETURN CONTRACT
-        # ------------------------------------------------------------------
+        # ==================================================
 
         if not plans:
             return {
@@ -1468,7 +1505,7 @@ class BlueprintEngine:
             "lane": self.LANE_ID,
             "batch": True,
             "plans": plans,
-            "why": "unified_emit",
+            "why": "candidate_promoted",
             "signals": self._build_signal_summary(report),
             "report": report,
         }
@@ -3392,7 +3429,32 @@ class BlueprintEngine:
             live_move = r.get("drift_direction")
 
             # 🔴 FIX: remove report dependency entirely
-            surface_key = self._route_ctx_map.get((mid, sid), {}).get("blueprint_surface")
+            # --------------------------------------------------
+            # CORRECT: build surface from metadata
+            # --------------------------------------------------
+
+            meta_json = ctx.get("meta_json")
+
+            meta = {}
+
+            if meta_json:
+                try:
+                    parsed = json.loads(meta_json)
+                    meta = {
+                        "race_type": parsed.get("race_type"),
+                        "distance": parsed.get("distance"),
+                        "handicap": parsed.get("handicap"),
+                    }
+                except Exception:
+                    meta = {}
+
+            if not meta:
+                meta = self._get_market_metadata(mid)
+
+            surface_key = build_surface_key({
+                **ctx,
+                **meta
+            })
 
             bp_score = score_blueprint_alignment(
                 surface_key,

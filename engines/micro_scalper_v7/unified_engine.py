@@ -1211,9 +1211,46 @@ class UnifiedEngine:
 # ======================================================================================================
 # ======================================================================================================
 
-        # ------------------------------------------------------------------
+        # ==================================================
+        # 🔑 UNIVERSAL CANDIDATE → PLAN PROMOTION
+        # ==================================================
+
+        # If engine has candidates but no plans, FORCE promotion
+        if not plans:
+
+            candidates = (
+                report.get("layer2", {}).get("candidates")
+                if "report" in locals()
+                else None
+            )
+
+            if candidates:
+                plans = []
+
+                for c in candidates:
+                    px = c.get("px")
+                    if px is None:
+                        continue
+
+                    try:
+                        px = float(px)
+                    except Exception:
+                        continue
+
+                    plans.append({
+                        "enter": True,
+                        "engine": "MSC_UNIFIED",   # replace per engine
+                        "role": "PARENT",
+                        "marketId": c["marketId"],
+                        "selectionId": c["selectionId"],
+                        "direction": c.get("direction") or "LAY->BACK",
+                        "px": px,
+                        "why": "forced_candidate_promotion",
+                    })
+
+        # ==================================================
         # RETURN CONTRACT
-        # ------------------------------------------------------------------
+        # ==================================================
 
         if not plans:
             return {
@@ -1231,7 +1268,7 @@ class UnifiedEngine:
             "lane": self.LANE_ID,
             "batch": True,
             "plans": plans,
-            "why": "unified_emit",
+            "why": "candidate_promoted",
             "signals": self._build_signal_summary(report),
             "report": report,
         }

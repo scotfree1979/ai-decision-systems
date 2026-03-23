@@ -663,7 +663,57 @@ def compute_dynamic_stake(*, engine: str, ctx: dict) -> float:
     # SCORE → STAKE (30-STEP LINEAR)
     # --------------------------------------------------
     step = (hi - lo) / 29.0 if hi > lo else 0.0
-    stake = lo + (score - 1) * step
+# ======================================================================================================
+# 📍 TARGET: engines/math/dynamic_stake_v7.py:compute_dynamic_stake
+# 🔎 SEARCH: step = (hi - lo) / 29.0 if hi > lo else 0.0
+# 🧩 ACTION: ADD BELOW — signal_score → stake compression bridge
+# 📆 PATCHED: 2026-03-23 — FINAL bridge (engine score → stake)
+#
+# PURPOSE
+# -------
+# Convert engine-level signal_score into stake conviction.
+#
+# DESIGN
+# ------
+# - Keeps existing 30-point model
+# - Caps stake based on signal quality
+# - Low score → low stake
+# - High score → full envelope
+#
+# SAFETY
+# ------
+# - Fail-open (missing score = normal behaviour)
+# - No impact on other bet types
+# ======================================================================================================
+
+    # --------------------------------------------------
+    # ORIGINAL 30-POINT STAKE
+    # --------------------------------------------------
+    raw_stake = lo + (score - 1) * step
+
+    # --------------------------------------------------
+    # ENGINE SCORE BRIDGE
+    # --------------------------------------------------
+    engine_score = float(ctx.get("signal_score") or 0.0)
+
+    # clamp safe range
+    engine_score = max(0.0, min(engine_score, 10.0))
+
+    # normalise → 0–1
+    engine_weight = engine_score / 10.0
+
+    # minimum participation (prevents dead engine)
+    MIN_WEIGHT = 0.25
+
+    weight = MIN_WEIGHT + (engine_weight * (1.0 - MIN_WEIGHT))
+
+    # compress envelope
+    compressed_hi = lo + weight * (hi - lo)
+
+    # --------------------------------------------------
+    # FINAL STAKE
+    # --------------------------------------------------
+    stake = min(raw_stake, compressed_hi)
 
     # HARD CLAMP
     stake = max(lo, min(stake, hi))
