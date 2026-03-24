@@ -1378,191 +1378,123 @@ class DecisionBus:
 # - adaptive sizing (distance + anchors cleared)
 # ======================================================================================================
 
-            # --------------------------------------------------
-            # 🧠 DETERMINE HEDGE SIDE (PnL TRUTH)
-            # --------------------------------------------------
-            if pnl < 0:
-                hedge_side = "BACK"   # reduce liability
-            else:
-                hedge_side = "LAY"    # reduce profit
+            # ======================================================================
+            # 🟢 PORTFOLIO-DRIVEN CORRECTION (FINAL MODEL)
+            # 📆 PATCHED: 2026-03-XX — bookmaker logic (NO self-hedging bias)
+            #
+            # PURPOSE:
+            # - Fix book, not runner
+            # - LOW odds → LAY others
+            # - HIGH odds → BACK self
+            # - Never lock loss
+            # ======================================================================
 
-            # --------------------------------------------------
-            # 🧠 ANCHOR CHECK
-            # --------------------------------------------------
-            anchor_odds = ctx.get("anchor_entry_odds")
-            parent_stake = ctx.get("anchor_entry_stake")
-
-            if not anchor_odds or not parent_stake:
+            px_now = ctx.get("px")
+            if px_now is None:
                 continue
 
             try:
-                anchor_odds = float(anchor_odds)
-                px_now = float(px)
+                px_now = float(px_now)
             except Exception:
                 continue
 
             # --------------------------------------------------
-            # 🎯 PRICE ADVANTAGE (MANDATORY)
+            # 🧠 BUILD MARKET BOOK (once per runner loop)
             # --------------------------------------------------
-            if hedge_side == "BACK":
-                if px_now <= anchor_odds:
-                    continue
-                edge_ticks = px_now - anchor_odds
+            market_book = {}
 
-            else:  # LAY
-                if px_now >= anchor_odds:
-                    continue
-                edge_ticks = anchor_odds - px_now
+            for (_mid, _sid), ctx_m in self._route_ctx_map.items():
+                pnl_m = runner_pnl_map.get((_mid, _sid))
+                if pnl_m is not None:
+                    try:
+                        market_book[(_mid, _sid)] = float(pnl_m)
+                    except Exception:
+                        pass
 
-            if edge_ticks <= 0:
+            if not market_book:
                 continue
 
             # --------------------------------------------------
-            # 🧠 MULTI-ANCHOR CLEARANCE (STRENGTH SIGNAL)
+            # 🎯 TARGET LADDER
             # --------------------------------------------------
-            anchor_stack = ctx.get("anchor_stack") or []
-            anchors_cleared = 0
-
-            for a in anchor_stack:
-                try:
-                    a = float(a)
-
-                    if hedge_side == "BACK" and px_now > a:
-                        anchors_cleared += 1
-                    elif hedge_side == "LAY" and px_now < a:
-                        anchors_cleared += 1
-
-                except Exception:
-                    pass
-
-            # --------------------------------------------------
-            # 🧠 ADAPTIVE HARVEST RATIO (CORE UPGRADE)
-            # --------------------------------------------------
-            # BASE: small harvest
-            # --------------------------------------------------
-            # 🧠 VOLATILITY-AWARE HARVESTING
-            # --------------------------------------------------
-            prev_px = ctx.get("_prev_px")
-
-            volatility = 0.0
-
-            if prev_px is not None:
-                try:
-                    volatility = abs(float(px) - float(prev_px))
-                except Exception:
-                    volatility = 0.0
-
-            # BASE
-            harvest_ratio = 0.10
-
-            # volatility scaling
-            if volatility > 0.2:
-                harvest_ratio += 0.10
-            if volatility > 0.5:
-                harvest_ratio += 0.15
-            if volatility > 1.0:
-                harvest_ratio += 0.20
-
-            # Distance boost
-            if edge_ticks > 1.0:
-                harvest_ratio += 0.10
-            if edge_ticks > 2.0:
-                harvest_ratio += 0.10
-
-            # Anchor clearance boost
-            if anchors_cleared >= 1:
-                harvest_ratio += 0.10
-            if anchors_cleared >= 2:
-                harvest_ratio += 0.15
-
-            # Strong pnl → more aggressive
-            if abs(pnl) > 2 * TARGET_PNL:
-                harvest_ratio += 0.10
-
-            # Clamp
-            harvest_ratio = min(harvest_ratio, 0.75)
-
-# ======================================================================================================
-# 📍 TARGET: engines/bus/bus.py
-# 🔎 ANCHOR: inside Lane 6 (after adaptive harvest block)
-# 🧩 ACTION: ADD — cross-runner portfolio balancing (book equalisation)
-# 📆 PATCHED: 2026-03-23 — market-level hedge controller
-#
-# PURPOSE:
-# - Balance full market book (not just runner)
-# - Reduce worst-case loss
-# - Converge toward green book
-#
-# INVARIANTS:
-# - engine stays MSC_CORRECTIVE
-# - bet_type stays CORRECTION
-# - no new contracts
-# ======================================================================================================
-
-        # ======================================================================
-        # 🟢 TRUE GREEN + PORTFOLIO CONTROL (UNIFIED BLOCK)
-        # 📆 PATCHED: 2026-03-23 — full book lock + controlled balancing
-        #
-        # PURPOSE:
-        # - Add TRUE GREEN (full book lock)
-        # - Preserve portfolio balancing
-        # - Prevent conflicting emissions
-        #
-        # PRIORITY:
-        #   1️⃣ TRUE GREEN (full lock)
-        #   2️⃣ PORTFOLIO BALANCE
-        #   3️⃣ continue normal flow
-        # ======================================================================
-
-        # --------------------------------------------------
-        # 🧠 BUILD FULL MARKET BOOK (runner pnl)
-        # --------------------------------------------------
-        market_book = {}
-
-        for (_mid, _sid), ctx_m in self._route_ctx_map.items():
-            pnl_m = runner_pnl.get((_mid, _sid))
-            if pnl_m is not None:
-                try:
-                    market_book[(_mid, _sid)] = float(pnl_m)
-                except Exception:
-                    pass
-
-        # need at least 2 runners
-        if len(market_book) >= 2:
-
             pnl_values = list(market_book.values())
             worst = min(pnl_values)
 
+            if worst < 5:
+                TARGET = 5.0
+            elif worst < 15:
+                TARGET = 15.0
+            else:
+                TARGET = 30.0
+
             # --------------------------------------------------
-            # 🎯 TRUE GREEN (FULL BOOK LOCK)
+            # 🟡 IF THIS RUNNER IS FINE → SKIP
             # --------------------------------------------------
-            if worst > TARGET_PNL:
+            if pnl >= TARGET:
+                continue
 
-                hedge_side = "LAY" if pnl > 0 else "BACK"
-
-                px_now = ctx.get("px")
-                if px_now is None:
-                    continue
-
-                try:
-                    px_now = float(px_now)
-                except Exception:
-                    continue
+            # --------------------------------------------------
+            # 🔵 HIGH ODDS → BACK SELF (cheap fix)
+            # --------------------------------------------------
+            if px_now >= 8.0:
 
                 try:
                     from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
                     hedge_size = calc_greenup_stake(
-                        parent_side=hedge_side,
+                        parent_side="BACK",
                         entry_odds=float(ctx.get("anchor_entry_odds") or px_now),
                         parent_stake=float(ctx.get("anchor_entry_stake") or 1.0),
                         hedge_odds=px_now,
                     )
-
                 except Exception:
                     continue
 
                 if hedge_size > 0:
+
+                # --------------------------------------------------
+                # 🔒 PORTFOLIO SAFETY CHECK (BUS AUTHORITY)
+                # --------------------------------------------------
+                # Simulate post-hedge outcome BEFORE emitting
+
+                test_book = dict(market_book)
+
+                # Apply hypothetical effect
+                if hedge_side == "BACK":
+                    # backing increases this runner, reduces others
+                    test_book[(mid, sid)] = pnl + hedge_size
+
+                    for k in test_book:
+                        if k != (mid, sid):
+                            test_book[k] -= hedge_size
+
+                elif hedge_side == "LAY":
+                    # laying reduces this runner, increases others
+                    test_book[(mid, sid)] = pnl - hedge_size
+
+                    for k in test_book:
+                        if k != (mid, sid):
+                            test_book[k] += hedge_size
+
+                # --------------------------------------------------
+                # ❌ BLOCK IF ANY RUNNER GOES NEGATIVE
+                # --------------------------------------------------
+                if any(v < 0 for v in test_book.values()):
+                    continue
+
+                # --------------------------------------------------
+                # ❌ BLOCK IF NO MEANINGFUL IMPROVEMENT
+                # --------------------------------------------------
+                new_worst = min(test_book.values())
+
+                if new_worst <= worst:
+                    continue
+
+                # --------------------------------------------------
+                # ❌ BLOCK IF DOES NOT PROGRESS TOWARD TARGET
+                # --------------------------------------------------
+                if new_worst < TARGET:
+                    continue
 
                     repair_plans.append((
                         "MSC_CORRECTIVE",
@@ -1573,15 +1505,123 @@ class DecisionBus:
                             "role": "CHILD",
                             "marketId": mid,
                             "selectionId": sid,
-                            "side": hedge_side,
+                            "side": "BACK",
                             "px": px_now,
-                            "size": float(hedge_size),
-                            "why": "lane6_full_green",
+                            "size": None,  # 🔑 BUS defers to dynamic stake (greenout)
+                            "why": "lane6_high_odds_repair",
                         },
                         dict(ctx),
                     ))
 
-                    continue  # 🔑 HARD STOP — full lock wins
+                continue  # 🔑 do not continue to other logic
+
+
+            # --------------------------------------------------
+            # 🔴 LOW ODDS LOSER → LAY OTHER RUNNERS
+            # --------------------------------------------------
+            # Find candidates that improve book
+            for (_mid, _sid), pnl_other in market_book.items():
+
+                if (_mid, _sid) == (mid, sid):
+                    continue  # not self
+
+                ctx_other = self._route_ctx_map.get((_mid, _sid))
+                if not ctx_other:
+                    continue
+
+                px_other = ctx_other.get("px")
+                if px_other is None:
+                    continue
+
+                try:
+                    px_other = float(px_other)
+                except Exception:
+                    continue
+
+                # Prefer mid/high odds runners
+                if px_other < 4.0:
+                    continue
+
+                # --------------------------------------------------
+                # 🧠 LAY to improve book
+                # --------------------------------------------------
+                try:
+                    from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+                    hedge_size = calc_greenup_stake(
+                        parent_side="LAY",
+                        entry_odds=float(ctx_other.get("anchor_entry_odds") or px_other),
+                        parent_stake=float(ctx_other.get("anchor_entry_stake") or 1.0),
+                        hedge_odds=px_other,
+                    )
+                except Exception:
+                    continue
+
+                if hedge_size <= 0:
+                    continue
+
+                # --------------------------------------------------
+                # 🔒 PORTFOLIO SAFETY CHECK (BUS AUTHORITY)
+                # --------------------------------------------------
+                # Simulate post-hedge outcome BEFORE emitting
+
+                test_book = dict(market_book)
+
+                # Apply hypothetical effect
+                if hedge_side == "BACK":
+                    # backing increases this runner, reduces others
+                    test_book[(mid, sid)] = pnl + hedge_size
+
+                    for k in test_book:
+                        if k != (mid, sid):
+                            test_book[k] -= hedge_size
+
+                elif hedge_side == "LAY":
+                    # laying reduces this runner, increases others
+                    test_book[(mid, sid)] = pnl - hedge_size
+
+                    for k in test_book:
+                        if k != (mid, sid):
+                            test_book[k] += hedge_size
+
+                # --------------------------------------------------
+                # ❌ BLOCK IF ANY RUNNER GOES NEGATIVE
+                # --------------------------------------------------
+                if any(v < 0 for v in test_book.values()):
+                    continue
+
+                # --------------------------------------------------
+                # ❌ BLOCK IF NO MEANINGFUL IMPROVEMENT
+                # --------------------------------------------------
+                new_worst = min(test_book.values())
+
+                if new_worst <= worst:
+                    continue
+
+                # --------------------------------------------------
+                # ❌ BLOCK IF DOES NOT PROGRESS TOWARD TARGET
+                # --------------------------------------------------
+                if new_worst < TARGET:
+                    continue
+
+                repair_plans.append((
+                    "MSC_CORRECTIVE",
+                    {
+                        "enter": True,
+                        "engine": "MSC_CORRECTIVE",
+                        "bet_type": "CORRECTION",
+                        "role": "CHILD",
+                        "marketId": _mid,
+                        "selectionId": _sid,
+                        "side": "LAY",
+                        "px": px_other,
+                        "size": None,  # 🔑 BUS defers to dynamic stake (greenout)
+                        "why": "lane6_low_odds_balance",
+                    },
+                    dict(ctx_other),
+                ))
+
+                break  # 🔑 ONE action per tick per runner
 
             # --------------------------------------------------
             # 🧠 PORTFOLIO BALANCE (existing logic preserved)
@@ -5170,6 +5210,106 @@ class DecisionBus:
             corrective_plans
         )
 
+        # ======================================================================
+        # 🟢 BAC — PORTFOLIO SAFETY FILTER (PRE-STAKE)
+        # 📆 PATCHED: 2026-03-XX — Prevent loss-lock + negative runner creation
+        #
+        # PURPOSE:
+        # - Block bad trades BEFORE dynamic stake
+        # - Ensure:
+        #     • no runner goes negative
+        #     • worst runner improves
+        #     • moves toward £5/£15/£30 ladder
+        #
+        # NOTE:
+        # - Uses lightweight stake proxy (1 unit)
+        # - Final sizing handled by dynamic stake later
+        # ======================================================================
+
+        safe_plans = []
+
+        # Build current market book (same as Lane 6 logic)
+        market_book = {}
+
+        for (mid, sid), pnl_val in runner_pnl.items():
+            try:
+                market_book[(mid, sid)] = float(pnl_val)
+            except Exception:
+                continue
+
+        if market_book:
+
+            worst = min(market_book.values())
+
+            for eng, plan, ctx in plans:
+
+                # --------------------------------------------------
+                # PASS-THROUGH (never block these)
+                # --------------------------------------------------
+                if plan.get("bet_type") in ("STOPLOSS", "CORRECTION") or plan.get("role") == "CHILD":
+                    safe_plans.append((eng, plan, ctx))
+                    continue
+
+                mid = plan.get("marketId")
+                sid = plan.get("selectionId")
+
+                if not mid or not sid:
+                    continue
+
+                key = (mid, sid)
+
+                pnl = market_book.get(key)
+                if pnl is None:
+                    continue
+
+                side = str(plan.get("side") or "").upper()
+                if not side:
+                    continue
+
+
+
+                # --------------------------------------------------
+                # 🧪 SIMULATION (1 UNIT PROXY)
+                # --------------------------------------------------
+                test_book = dict(market_book)
+                test_size = 1.0  # proxy size only
+
+                if side == "BACK":
+                    test_book[key] = pnl + test_size
+                    for k in test_book:
+                        if k != key:
+                            test_book[k] -= test_size
+
+                elif side == "LAY":
+                    test_book[key] = pnl - test_size
+                    for k in test_book:
+                        if k != key:
+                            test_book[k] += test_size
+
+                else:
+                    continue
+
+                # --------------------------------------------------
+                # ❌ BLOCK: ANY NEGATIVE RUNNER
+                # --------------------------------------------------
+                if any(v < 0 for v in test_book.values()):
+                    continue
+
+                # --------------------------------------------------
+                # ❌ BLOCK: NO IMPROVEMENT
+                # --------------------------------------------------
+                new_worst = min(test_book.values())
+
+                if new_worst <= worst:
+                    continue
+
+                # --------------------------------------------------
+                # ✅ PASS
+                # --------------------------------------------------
+                safe_plans.append((eng, plan, ctx))
+
+            plans = safe_plans
+
         # ======================================================================================================
         # END PATCH
         # ======================================================================================================
@@ -5789,6 +5929,47 @@ class DecisionBus:
                 # 3️⃣ EXPOSURE REDUCTION BIAS (SCORING ONLY)
                 # --------------------------------------------------
                 side = str(plan.get("side") or "").upper()
+
+                # --------------------------------------------------
+                # 🧭 DIRECTIONAL EXPOSURE CONTROL (BOOKMAKER RULE)
+                # --------------------------------------------------
+                direction = ctx.get("trend_direction") or ctx.get("direction")
+
+                # Normalise
+                if direction == "LAY->BACK":
+                    direction = "DRIFT"
+                elif direction == "BACK->LAY":
+                    direction = "STEAM"
+
+                current_pnl = pnl
+
+                # --------------------------------------------------
+                # ❌ BLOCK: STEAMERS ADDING RISK
+                # --------------------------------------------------
+                # If runner is steaming (price shortening):
+                # - BACK = increases liability → BLOCK
+                # - LAY  = reduces liability → ALLOW
+
+                if direction == "STEAM":
+                    if side == "BACK":
+                        continue  # ❌ never add risk on steamers
+
+                # --------------------------------------------------
+                # ❌ BLOCK: DRIFTERS REDUCING EDGE
+                # --------------------------------------------------
+                # If runner is drifting (price rising):
+                # - LAY  = increases liability → ALLOW
+                # - BACK = reduces position → BLOCK (unless corrective)
+
+                if direction == "DRIFT":
+                    if side == "BACK" and current_pnl >= 0:
+                        continue  # ❌ don't kill edge too early
+
+                # --------------------------------------------------
+                # ❌ BLOCK: NEUTRAL (NO EDGE)
+                # --------------------------------------------------
+                if direction is None:
+                    continue
 
                 score = 0
 
