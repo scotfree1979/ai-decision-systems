@@ -1452,49 +1452,49 @@ class DecisionBus:
 
                 if hedge_size > 0:
 
-                # --------------------------------------------------
-                # 🔒 PORTFOLIO SAFETY CHECK (BUS AUTHORITY)
-                # --------------------------------------------------
-                # Simulate post-hedge outcome BEFORE emitting
+                    # --------------------------------------------------
+                    # 🔒 PORTFOLIO SAFETY CHECK (BUS AUTHORITY)
+                    # --------------------------------------------------
+                    # Simulate post-hedge outcome BEFORE emitting
 
-                test_book = dict(market_book)
+                    test_book = dict(market_book)
 
-                # Apply hypothetical effect
-                if hedge_side == "BACK":
-                    # backing increases this runner, reduces others
-                    test_book[(mid, sid)] = pnl + hedge_size
+                    # Apply hypothetical effect
+                    if hedge_side == "BACK":
+                        # backing increases this runner, reduces others
+                        test_book[(mid, sid)] = pnl + hedge_size
 
-                    for k in test_book:
-                        if k != (mid, sid):
-                            test_book[k] -= hedge_size
+                        for k in test_book:
+                            if k != (mid, sid):
+                                test_book[k] -= hedge_size
 
-                elif hedge_side == "LAY":
-                    # laying reduces this runner, increases others
-                    test_book[(mid, sid)] = pnl - hedge_size
+                    elif hedge_side == "LAY":
+                        # laying reduces this runner, increases others
+                        test_book[(mid, sid)] = pnl - hedge_size
 
-                    for k in test_book:
-                        if k != (mid, sid):
-                            test_book[k] += hedge_size
+                        for k in test_book:
+                            if k != (mid, sid):
+                                test_book[k] += hedge_size
 
-                # --------------------------------------------------
-                # ❌ BLOCK IF ANY RUNNER GOES NEGATIVE
-                # --------------------------------------------------
-                if any(v < 0 for v in test_book.values()):
-                    continue
+                    # --------------------------------------------------
+                    # ❌ BLOCK IF ANY RUNNER GOES NEGATIVE
+                    # --------------------------------------------------
+                    if any(v < 0 for v in test_book.values()):
+                        continue
 
-                # --------------------------------------------------
-                # ❌ BLOCK IF NO MEANINGFUL IMPROVEMENT
-                # --------------------------------------------------
-                new_worst = min(test_book.values())
+                    # --------------------------------------------------
+                    # ❌ BLOCK IF NO MEANINGFUL IMPROVEMENT
+                    # --------------------------------------------------
+                    new_worst = min(test_book.values())
+   
+                    if new_worst <= worst:
+                        continue
 
-                if new_worst <= worst:
-                    continue
-
-                # --------------------------------------------------
-                # ❌ BLOCK IF DOES NOT PROGRESS TOWARD TARGET
-                # --------------------------------------------------
-                if new_worst < TARGET:
-                    continue
+                    # --------------------------------------------------
+                    # ❌ BLOCK IF DOES NOT PROGRESS TOWARD TARGET
+                    # --------------------------------------------------
+                    if new_worst < TARGET:
+                        continue
 
                     repair_plans.append((
                         "MSC_CORRECTIVE",
@@ -6443,16 +6443,42 @@ def _write_bus_runtime_snapshot(data: dict):
         from engines.config_paths import open_auto_db
 
         con = open_auto_db(rw=True)
-# === PATCH START ==============================================================
+# === PATCH START ===
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: INSERT INTO bus_runtime_snapshot
-# 🛠 ACTION: Store generated / routed counts instead of fill_rate
-# 📆 PATCHED: 2026-03-05 — snapshot stores raw execution counts
-# ==============================================================================
+# 🧩 ACTION: REPLACE
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE:
+# Persist CTX metrics directly from BUS runtime state:
+#   • ctx_runners     → len(self._route_ctx_map)
+#   • ctx_refresh_ms  → dt from refresh_ctx_dynamic_fields()
+#
+# NO GUESSING:
+# Uses authoritative values already computed in tick()
+# ===
+
+        # --------------------------------------------------
+        # 🔑 CTX METRICS (AUTHORITATIVE)
+        # --------------------------------------------------
+        ctx_runners = len(self._route_ctx_map) if hasattr(self, "_route_ctx_map") else 0
+        ctx_refresh_ms = float(self._ctx_refresh_times[-1]) if self._ctx_refresh_times else 0.0
 
         con.execute("""
-        INSERT INTO bus_runtime_snapshot
-        VALUES (?,?,?,?,?,?,?,?,?)
+        INSERT INTO bus_runtime_snapshot (
+            ts,
+            route_id,
+            bus_stop,
+            tick_id,
+            hz,
+            window_size,
+            avg_ctx_refresh,
+            plans_generated,
+            plans_routed,
+            ctx_runners,
+            ctx_refresh_ms
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now(timezone.utc).isoformat(),
             data.get("route_id"),
@@ -6463,9 +6489,11 @@ def _write_bus_runtime_snapshot(data: dict):
             data.get("avg_ctx_refresh"),
             data.get("plans_generated"),
             data.get("plans_routed"),
+            ctx_runners,        # ← derived from BUS world
+            ctx_refresh_ms,     # ← last refresh duration
         ))
 
-# === PATCH END ================================================================
+
         con.commit()
         con.close()
     except Exception:
