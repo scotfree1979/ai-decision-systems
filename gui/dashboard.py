@@ -61,6 +61,27 @@ def minutes_to_off(off_at_utc: str, now_utc: datetime | None = None) -> float | 
     return (dt - now).total_seconds() / 60.0
 # === PATCH END ===
 
+# === PATCH START ===
+# 📍 TARGET: gui/dashboard.py (helpers section)
+# 📆 PATCHED: 2026-04-08 — traffic light helper
+
+def traffic_colour(value, low, high):
+    """
+    Returns colour based on thresholds.
+    """
+    try:
+        v = float(value)
+    except:
+        return "#bdc3c7"  # grey
+
+    if v >= high:
+        return "#2ecc71"  # green
+    elif v >= low:
+        return "#f1c40f"  # yellow
+    else:
+        return "#e74c3c"  # red
+
+# === PATCH END ===
 
 # ── Settlements resolver ───────────────────────────────────────────────
 def _ensure_settlements_path() -> str:
@@ -1579,7 +1600,45 @@ class DashboardView(ttk.Frame):
                     return name
                 return name[:max_len-3] + "..."
 
+
             # clear grid
+# === PATCH START ===
+# 📍 TARGET: gui/dashboard.py:_refresh_execution_intelligence
+# 🔎 SEARCH: winners = []
+# 🧩 ACTION: INSERT ABOVE winners/losers split
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE:
+# - Add net exposure traffic light
+# - Gives instant portfolio direction signal
+# - No structural change
+# ==============================================================================
+
+            # --------------------------------------------------
+            # NET EXPOSURE SIGNAL (LIVE)
+            # --------------------------------------------------
+
+            net_exposure = sum(float(r["pnl_if_win"] or 0) for r in runner_rows)
+
+            if net_exposure > 0:
+                net_colour = "#2ecc71"   # green
+            elif net_exposure < 0:
+                net_colour = "#e74c3c"   # red
+            else:
+                net_colour = "#bdc3c7"   # neutral
+
+            # Update LIVE EXPOSURE header dynamically
+            for w in self.pnl_today_header.winfo_children():
+                w.destroy()
+
+            tk.Label(
+                self.pnl_today_header,
+                text=f"⚡ LIVE EXPOSURE (Net: £{net_exposure:.2f})",
+                fg=net_colour,
+                font=("TkDefaultFont", 10, "bold")
+            ).pack(anchor="w")
+
+# === PATCH END ===
 # === PATCH START ==============================================================
 # 📍 TARGET: gui/dashboard.py
 # 🔎 SEARCH: # clear grid
@@ -2937,7 +2996,13 @@ class DashboardView(ttk.Frame):
             vol_card.grid(row=1, column=1, padx=8, pady=8, sticky="ew")
 
             ttk.Label(vol_card, text="🌊 VOLATILITY", font=("TkDefaultFont",10,"bold")).pack(anchor="w")
-            ttk.Label(vol_card, text=f"Moves (2m): {volatility_moves}").pack(anchor="w")
+            colour = (
+                "#bdc3c7" if volatility_moves == 0 else
+                "#f1c40f" if volatility_moves <= 10 else
+                "#e74c3c"
+            )
+
+            tk.Label(vol_card, text=f"Moves (2m): {volatility_moves}", fg=colour).pack(anchor="w")
             ttk.Label(vol_card, text=f"Active Runners: {volatility_unique}").pack(anchor="w")
             ttk.Label(vol_card, text="Source: BUS").pack(anchor="w")
             ttk.Label(vol_card, text="Status: LIVE").pack(anchor="w")
@@ -2963,7 +3028,13 @@ class DashboardView(ttk.Frame):
             signal_card.grid(row=2, column=2, padx=8, pady=8, sticky="ew")
 
             ttk.Label(signal_card, text="📊 SIGNAL INTEL", font=("TkDefaultFont",10,"bold")).pack(anchor="w")
-            ttk.Label(signal_card, text=f"Candidates: {candidates}").pack(anchor="w")
+            colour = (
+                "#bdc3c7" if candidates == 0 else
+                "#f1c40f" if candidates <= 5 else
+                "#2ecc71"
+            )
+
+            tk.Label(signal_card, text=f"Candidates: {candidates}", fg=colour).pack(anchor="w")
             ttk.Label(signal_card, text=f"Markets: {candidate_markets}").pack(anchor="w")
             ttk.Label(signal_card, text="Source: Monitor").pack(anchor="w")
             ttk.Label(signal_card, text="Status: ACTIVE").pack(anchor="w")
@@ -3189,11 +3260,34 @@ class DashboardView(ttk.Frame):
             ttk.Label(card, text=f"Reserved   £{unmatched:,.2f}").pack(anchor="w")
             ttk.Label(card, text=f"Headroom   £{headroom:,.2f}").pack(anchor="w")
 
-            ttk.Label(
+            # === PATCH START ===
+# 📍 TARGET: gui/dashboard.py:_render_bankstate_report
+# 🔎 SEARCH: ttk.Label( card, text=f"Utilisation {utilisation:.1f}%",
+# 🧩 ACTION: REPLACE utilisation label with traffic-light colour logic
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE:
+# - Add traffic light system to Engine Pot utilisation
+# - Green = safe, Yellow = building, Red = risk
+# - No layout change, only colour enhancement
+# ==============================================================================
+
+            # Traffic light colouring for utilisation
+            if utilisation < 25:
+                util_colour = "#2ecc71"   # green
+            elif utilisation < 60:
+                util_colour = "#f1c40f"   # yellow
+            else:
+                util_colour = "#e74c3c"   # red
+
+            tk.Label(
                 card,
                 text=f"Utilisation {utilisation:.1f}%",
+                fg=util_colour,
                 font=("TkDefaultFont", 9, "italic")
             ).pack(anchor="w", pady=(4, 0))
+
+# === PATCH END ===
 
 # === PATCH END ==============================================================
 
@@ -3238,6 +3332,43 @@ def open_dashboard_window(master=None, *, source="LIVE", app=None):
     view.pack(fill="both", expand=True)
     return win, view
 
+# === PATCH START ==============================================================
+# 📍 TARGET: gui/dashboard.py (after Tk root creation)
+# 📆 PATCHED: 2026-04-08 — Global UI shrink for laptop fit
+#
+# PURPOSE:
+# - Scale entire UI down uniformly
+# - No layout changes
+# - Ensures dashboard fits on 14" screen
+# - Safe: affects fonts + widget density only
+# ==============================================================================
+
+def apply_global_ui_scale(root, scale=0.85):
+    """
+    Apply a global UI shrink across all Tkinter widgets.
+    Scale < 1.0 shrinks UI.
+    """
+
+    try:
+        # Tk global scaling (affects fonts + spacing)
+        root.tk.call("tk", "scaling", scale)
+
+        # Reduce default font sizes slightly (extra tightening)
+        import tkinter.font as tkfont
+
+        for name in ["TkDefaultFont", "TkTextFont", "TkHeadingFont"]:
+            try:
+                f = tkfont.nametofont(name)
+                size = f.cget("size")
+                f.configure(size=max(int(size * scale), 8))
+            except Exception:
+                pass
+
+    except Exception as e:
+        print("[UI SCALE] failed:", e)
+
+# === PATCH END ==============================================================
+
 # === PATCH START ===
 # 📍 TARGET: gui/dashboard.py (end of file)
 # 📆 PATCHED: 2025-10-27Z — standalone launcher for direct execution
@@ -3246,6 +3377,7 @@ if __name__ == "__main__":
     print("[dashboard] standalone launch (direct execution mode)")
 
     root = tk.Tk()
+    apply_global_ui_scale(root, 0.20)   # try 0.80 first
     root.title("AutoScalp — LIVE Dashboard")
     root.geometry("1280x800")
 
