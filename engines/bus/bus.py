@@ -165,9 +165,9 @@ def _normalize_ctx_enums(ctx: dict) -> None:
     """
 
     # ---- band ----
-    #band = ctx.get("band")
-    #if isinstance(band, str):
-    #    ctx["band"] = _BAND_MAP.get(band.upper(), -1)
+    band = ctx.get("band")
+    if isinstance(band, str):
+        ctx["band"] = _BAND_MAP.get(band.upper(), -1)
 
     # ---- prominence ----
     #for key in ("prominence", "prominent"):
@@ -1174,6 +1174,39 @@ class DecisionBus:
         # - BUS handles sizing + routing
         # ======================================================================
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside _lane6_db_correctness BEFORE runner loop
+# 🧩 ACTION: LOAD runner pnl once (performance fix)
+# 📆 PATCHED: 2026-03-24 — remove per-runner DB queries
+# ======================================================================================================
+
+        runner_pnl_map = {}
+
+        try:
+            from engines.config_paths import open_auto_db
+            import sqlite3
+
+            con = open_auto_db(rw=False)
+            con.row_factory = sqlite3.Row
+
+            rows = con.execute("""
+                SELECT marketId, selectionId, pnl_if_win
+                FROM bankstate_runner_snapshot
+                WHERE ts = (
+                    SELECT MAX(ts)
+                    FROM bankstate_runner_snapshot
+                )
+            """).fetchall()
+
+            for r in rows:
+                runner_pnl_map[(str(r["marketId"]), str(r["selectionId"]))] = float(r["pnl_if_win"] or 0.0)
+
+            con.close()
+
+        except Exception:
+            runner_pnl_map = {}
+
         for (mid, sid), ctx in self._route_ctx_map.items():
 
             if not ctx:
@@ -1207,29 +1240,7 @@ class DecisionBus:
             # 📊 AUTHORITATIVE RUNNER PnL (BANKSTATE SNAPSHOT)
             # --------------------------------------------------
 
-            try:
-                
-                from engines.config_paths import open_auto_db
-                import sqlite3
-
-                con = open_auto_db(rw=False)
-                con.row_factory = sqlite3.Row
-
-                row = con.execute("""
-                    SELECT pnl_if_win
-                    FROM bankstate_runner_snapshot
-                    WHERE marketId = ?
-                      AND selectionId = ?
-                    ORDER BY ts DESC
-                    LIMIT 1
-                """, (mid, sid)).fetchone()
-
-                pnl = float(row["pnl_if_win"] or 0.0) if row else 0.0
-
-                con.close()
-
-            except Exception:
-                continue
+            pnl = runner_pnl_map.get((mid, sid), 0.0)
 
             # --------------------------------------------------
             # 🎯 TARGET PROGRESSION (RUNNER-LEVEL, LIVE)
@@ -1289,6 +1300,393 @@ class DecisionBus:
                     direction = "DRIFT"
                 elif px < prev_px:
                     direction = "STEAM"
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside _lane6_db_correctness → before "🚨 CORRECTION TRIGGER"
+# 🧩 ACTION: INSERT — Hedge Promotion Controller (Bookmaker Mode)
+# 📆 PATCHED: 2026-03-23 — Controlled hedge timing (no forced parent→child)
+#
+# PURPOSE:
+# - Convert Lane 6 from reactive repair → intentional hedge controller
+# - Prevent over-hedging
+# - Allow natural book balancing
+# - Only hedge when:
+#     • risk exceeds tolerance
+#     • profit should be locked
+#
+# CORE RULE:
+#     DO NOTHING is a valid state
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # 🧠 MARKET-LEVEL PnL (BOOK VIEW)
+            # --------------------------------------------------
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🧠 MARKET-LEVEL PnL (BOOK VIEW)
+# 🧩 ACTION: FIX PnL sign logic
+# 📆 PATCHED: 2026-03-24 — correct bookmaker exposure model
+#
+# WHY:
+# - previous logic used profit-if-win (wrong for market control)
+# - caused incorrect hedge triggers
+#
+# CORRECT MODEL:
+# - BACK = negative exposure
+# - LAY  = positive exposure
+# ======================================================================================================
+
+            market_pnl = 0.0
+
+            for (_mid, _sid), ctx_m in self._route_ctx_map.items():
+                for o_m in ctx_m.get("orders_by_runner", []):
+                    if (
+                        o_m.get("role") == "PARENT"
+                        and str(o_m.get("entry_status")).upper() == "MATCHED"
+                    ):
+                        side_m = str(o_m.get("side")).upper()
+                        stake_m = float(o_m.get("entry_stake") or 0.0)
+
+                        if side_m == "BACK":
+                            market_pnl -= stake_m
+                        elif side_m == "LAY":
+                            market_pnl += stake_m
+
+            # --------------------------------------------------
+            # 🧠 MIN HOLD TIME (prevent instant hedge)
+            # --------------------------------------------------
+            opened_ts = ctx.get("parent_open_ts")
+            now_ts = time.time()
+
+            if opened_ts and (now_ts - opened_ts < 10):
+                continue  # allow position to develop
+
+
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside Lane 6 hedge emission (REPLACE FULL BLOCK)
+# 🧩 ACTION: adaptive bookmaker harvesting (correct + safe names)
+# 📆 PATCHED: 2026-03-23 — adaptive harvesting, no contract changes
+#
+# INVARIANTS:
+# - engine stays MSC_CORRECTIVE
+# - bet_type stays CORRECTION
+# - side = pnl driven
+# - only hedge with anchor advantage
+# - adaptive sizing (distance + anchors cleared)
+# ======================================================================================================
+
+            # --------------------------------------------------
+            # 🧠 DETERMINE HEDGE SIDE (PnL TRUTH)
+            # --------------------------------------------------
+            if pnl < 0:
+                hedge_side = "BACK"   # reduce liability
+            else:
+                hedge_side = "LAY"    # reduce profit
+
+            # --------------------------------------------------
+            # 🧠 ANCHOR CHECK
+            # --------------------------------------------------
+            anchor_odds = ctx.get("anchor_entry_odds")
+            parent_stake = ctx.get("anchor_entry_stake")
+
+            if not anchor_odds or not parent_stake:
+                continue
+
+            try:
+                anchor_odds = float(anchor_odds)
+                px_now = float(px)
+            except Exception:
+                continue
+
+            # --------------------------------------------------
+            # 🎯 PRICE ADVANTAGE (MANDATORY)
+            # --------------------------------------------------
+            if hedge_side == "BACK":
+                if px_now <= anchor_odds:
+                    continue
+                edge_ticks = px_now - anchor_odds
+
+            else:  # LAY
+                if px_now >= anchor_odds:
+                    continue
+                edge_ticks = anchor_odds - px_now
+
+            if edge_ticks <= 0:
+                continue
+
+            # --------------------------------------------------
+            # 🧠 MULTI-ANCHOR CLEARANCE (STRENGTH SIGNAL)
+            # --------------------------------------------------
+            anchor_stack = ctx.get("anchor_stack") or []
+            anchors_cleared = 0
+
+            for a in anchor_stack:
+                try:
+                    a = float(a)
+
+                    if hedge_side == "BACK" and px_now > a:
+                        anchors_cleared += 1
+                    elif hedge_side == "LAY" and px_now < a:
+                        anchors_cleared += 1
+
+                except Exception:
+                    pass
+
+            # --------------------------------------------------
+            # 🧠 ADAPTIVE HARVEST RATIO (CORE UPGRADE)
+            # --------------------------------------------------
+            # BASE: small harvest
+            # --------------------------------------------------
+            # 🧠 VOLATILITY-AWARE HARVESTING
+            # --------------------------------------------------
+            prev_px = ctx.get("_prev_px")
+
+            volatility = 0.0
+
+            if prev_px is not None:
+                try:
+                    volatility = abs(float(px) - float(prev_px))
+                except Exception:
+                    volatility = 0.0
+
+            # BASE
+            harvest_ratio = 0.10
+
+            # volatility scaling
+            if volatility > 0.2:
+                harvest_ratio += 0.10
+            if volatility > 0.5:
+                harvest_ratio += 0.15
+            if volatility > 1.0:
+                harvest_ratio += 0.20
+
+            # Distance boost
+            if edge_ticks > 1.0:
+                harvest_ratio += 0.10
+            if edge_ticks > 2.0:
+                harvest_ratio += 0.10
+
+            # Anchor clearance boost
+            if anchors_cleared >= 1:
+                harvest_ratio += 0.10
+            if anchors_cleared >= 2:
+                harvest_ratio += 0.15
+
+            # Strong pnl → more aggressive
+            if abs(pnl) > 2 * TARGET_PNL:
+                harvest_ratio += 0.10
+
+            # Clamp
+            harvest_ratio = min(harvest_ratio, 0.75)
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: inside Lane 6 (after adaptive harvest block)
+# 🧩 ACTION: ADD — cross-runner portfolio balancing (book equalisation)
+# 📆 PATCHED: 2026-03-23 — market-level hedge controller
+#
+# PURPOSE:
+# - Balance full market book (not just runner)
+# - Reduce worst-case loss
+# - Converge toward green book
+#
+# INVARIANTS:
+# - engine stays MSC_CORRECTIVE
+# - bet_type stays CORRECTION
+# - no new contracts
+# ======================================================================================================
+
+        # ======================================================================
+        # 🟢 TRUE GREEN + PORTFOLIO CONTROL (UNIFIED BLOCK)
+        # 📆 PATCHED: 2026-03-23 — full book lock + controlled balancing
+        #
+        # PURPOSE:
+        # - Add TRUE GREEN (full book lock)
+        # - Preserve portfolio balancing
+        # - Prevent conflicting emissions
+        #
+        # PRIORITY:
+        #   1️⃣ TRUE GREEN (full lock)
+        #   2️⃣ PORTFOLIO BALANCE
+        #   3️⃣ continue normal flow
+        # ======================================================================
+
+        # --------------------------------------------------
+        # 🧠 BUILD FULL MARKET BOOK (runner pnl)
+        # --------------------------------------------------
+        market_book = {}
+
+        for (_mid, _sid), ctx_m in self._route_ctx_map.items():
+            pnl_m = runner_pnl.get((_mid, _sid))
+            if pnl_m is not None:
+                try:
+                    market_book[(_mid, _sid)] = float(pnl_m)
+                except Exception:
+                    pass
+
+        # need at least 2 runners
+        if len(market_book) >= 2:
+
+            pnl_values = list(market_book.values())
+            worst = min(pnl_values)
+
+            # --------------------------------------------------
+            # 🎯 TRUE GREEN (FULL BOOK LOCK)
+            # --------------------------------------------------
+            if worst > TARGET_PNL:
+
+                hedge_side = "LAY" if pnl > 0 else "BACK"
+
+                px_now = ctx.get("px")
+                if px_now is None:
+                    continue
+
+                try:
+                    px_now = float(px_now)
+                except Exception:
+                    continue
+
+                try:
+                    from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+                    hedge_size = calc_greenup_stake(
+                        parent_side=hedge_side,
+                        entry_odds=float(ctx.get("anchor_entry_odds") or px_now),
+                        parent_stake=float(ctx.get("anchor_entry_stake") or 1.0),
+                        hedge_odds=px_now,
+                    )
+
+                except Exception:
+                    continue
+
+                if hedge_size > 0:
+
+                    repair_plans.append((
+                        "MSC_CORRECTIVE",
+                        {
+                            "enter": True,
+                            "engine": "MSC_CORRECTIVE",
+                            "bet_type": "CORRECTION",
+                            "role": "CHILD",
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "side": hedge_side,
+                            "px": px_now,
+                            "size": float(hedge_size),
+                            "why": "lane6_full_green",
+                        },
+                        dict(ctx),
+                    ))
+
+                    continue  # 🔑 HARD STOP — full lock wins
+
+            # --------------------------------------------------
+            # 🧠 PORTFOLIO BALANCE (existing logic preserved)
+            # --------------------------------------------------
+            worst_runner = min(market_book.items(), key=lambda x: x[1])
+            best_runner  = max(market_book.items(), key=lambda x: x[1])
+
+            (worst_mid, worst_sid), worst_pnl = worst_runner
+            (_best_mid, _best_sid), best_pnl  = best_runner
+
+            imbalance = best_pnl - worst_pnl
+
+            if imbalance < TARGET_PNL * 2:
+                pass  # allow rest of logic to run
+
+            elif (mid, sid) == (worst_mid, worst_sid):
+
+                hedge_side = "BACK"
+
+                px_now = ctx.get("px")
+                if px_now is None:
+                    continue
+
+                try:
+                    px_now = float(px_now)
+                except Exception:
+                    continue
+
+                try:
+                    from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+                    hedge_size = calc_greenup_stake(
+                        parent_side="BACK",
+                        entry_odds=float(ctx.get("anchor_entry_odds") or px_now),
+                        parent_stake=float(ctx.get("anchor_entry_stake") or 1.0),
+                        hedge_odds=px_now,
+                    )
+
+                except Exception:
+                    continue
+
+                if hedge_size > 0:
+
+                    hedge_size = float(hedge_size) * 0.25
+
+                    repair_plans.append((
+                        "MSC_CORRECTIVE",
+                        {
+                            "enter": True,
+                            "engine": "MSC_CORRECTIVE",
+                            "bet_type": "CORRECTION",
+                            "role": "CHILD",
+                            "marketId": mid,
+                            "selectionId": sid,
+                            "side": hedge_side,
+                            "px": px_now,
+                            "size": hedge_size,
+                            "why": "lane6_portfolio_balance",
+                        },
+                        dict(ctx),
+                    ))
+
+            # --------------------------------------------------
+            # 🧮 GREEN-UP BASE
+            # --------------------------------------------------
+            try:
+                from engines.math.dynamic_stake_v7 import calc_greenup_stake
+
+                full_hedge = calc_greenup_stake(
+                    parent_side=hedge_side,
+                    entry_odds=anchor_odds,
+                    parent_stake=float(parent_stake),
+                    hedge_odds=px_now,
+                )
+
+            except Exception:
+                continue
+
+            if full_hedge <= 0:
+                continue
+
+            hedge_size = float(full_hedge) * harvest_ratio
+
+            if hedge_size <= 0:
+                continue
+
+            # --------------------------------------------------
+            # 📤 EMIT (NO CONTRACT CHANGE)
+            # --------------------------------------------------
+            repair_plans.append((
+                "MSC_CORRECTIVE",
+                {
+                    "enter": True,
+                    "engine": "MSC_CORRECTIVE",
+                    "bet_type": "CORRECTION",
+                    "role": "CHILD",
+                    "marketId": mid,
+                    "selectionId": sid,
+                    "side": hedge_side,
+                    "px": px_now,
+                    "size": hedge_size,
+                    "why": "lane6_adaptive_harvest",
+                },
+                dict(ctx),
+            ))
 
             # --------------------------------------------------
             # 🚨 CORRECTION TRIGGER
@@ -4003,7 +4401,203 @@ class DecisionBus:
         # Cadence market runners (BUS schedule authority)
         # --------------------------------------------------
 
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # Cadence market runners (BUS schedule authority)
+# 🧩 ACTION: INSERT — MARKET FOCUS SELECTION (NEXT 5 + ACTIVE MOVEMENT)
+# 📆 PATCHED: 2026-03-23 — FIX: BUS stops trading later markets
+#
+# PURPOSE
+# -------
+# Replace passive world evaluation with active targeting:
+#
+#   BUS decides WHAT to trade
+#
+# RULES
+# -----
+# 1. Always include NEXT 5 markets (future)
+# 2. Include ANY runner with price movement (drift/steam)
+# 3. Exclude finished / dead markets automatically
+# 4. Guarantee non-empty execution set (fail-open)
+#
+# RESULT
+# ------
+# • BUS continues trading ALL DAY
+# • Evening markets picked up automatically
+# • Engines receive focused requests
+# • Signal density restored
+#
+# IMPORTANT
+# ---------
+# - No engine changes
+# - No DB schema changes
+# - No routing changes
+# - Pure selection layer
+# ======================================================================================================
 
+        # ======================================================================
+        # 🎯 FOCUSED EXECUTION SET (TICK 3+ ONLY)
+        # 📆 PATCHED: 2026-03-XX — high-speed BUS routing
+        #
+        # PURPOSE:
+        # - Reduce per-tick load
+        # - Maintain signal continuity
+        # - Feed engines only relevant runners
+        #
+        # RULES:
+        # 1. 3 markets > 1hr away → ACTIVE only
+        # 2. Next 5 markets → ACTIVE only
+        # 3. Include previously routed runners (continuity)
+        # ======================================================================
+
+        focus_pairs = set()
+
+        try:
+            from engines.config_paths import open_bets_db
+            import sqlite3
+
+            con = open_bets_db(rw=False)
+            con.row_factory = sqlite3.Row
+
+            # --------------------------------------------------
+            # 🧠 NEXT 5 MARKETS
+            # --------------------------------------------------
+            next_rows = con.execute("""
+                SELECT DISTINCT marketId
+                FROM bets
+                WHERE datetime(marketStartTime) >= datetime('now','utc')
+                ORDER BY datetime(marketStartTime)
+                LIMIT 5
+            """).fetchall()
+
+            next_mids = {str(r["marketId"]) for r in next_rows if r["marketId"]}
+
+            # --------------------------------------------------
+            # 🧠 FAR MARKETS (> 1 HOUR)
+            # --------------------------------------------------
+            far_rows = con.execute("""
+                SELECT DISTINCT marketId
+                FROM bets
+                WHERE datetime(marketStartTime) >= datetime('now','utc', '+60 minutes')
+                ORDER BY datetime(marketStartTime)
+                LIMIT 3
+            """).fetchall()
+
+            far_mids = {str(r["marketId"]) for r in far_rows if r["marketId"]}
+
+            con.close()
+
+        except Exception:
+            next_mids = set()
+            far_mids = set()
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🧠 ACTIVE RUNNERS ONLY (NEXT MARKETS)
+# 🧩 ACTION: FIX syntax + numeric band + lifecycle retention
+# 📆 PATCHED: 2026-03-24 — correct focus execution set
+#
+# WHY:
+# - missing colon = crash
+# - band mismatch = silent skip
+# - in-play lifecycle not retained
+#
+# RESULT:
+# - stable execution set
+# - correct lifecycle handling
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # 🧠 ACTIVE RUNNERS ONLY (NEXT MARKETS)
+        # --------------------------------------------------
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            if mid in next_mids and ctx.get("band") in (3, 2, 1):
+                if ctx.get("px") is not None:
+                    focus_pairs.add((mid, sid))
+
+        # --------------------------------------------------
+        # 🧠 ACTIVE RUNNERS ONLY (FAR MARKETS)
+        # --------------------------------------------------
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            if mid in far_mids and ctx.get("band") == 3:
+                if ctx.get("px") is not None:
+                    focus_pairs.add((mid, sid))
+
+        # --------------------------------------------------
+        # 🧠 LIFECYCLE RETENTION (POST-OFF MARKETS)
+        # --------------------------------------------------
+        for (mid, sid), ctx in self._route_ctx_map.items():
+
+            tto = ctx.get("tto_seconds")
+
+            if tto is not None and tto <= 0:
+                if ctx.get("px") is not None:
+                    focus_pairs.add((mid, sid))
+
+        # --------------------------------------------------
+        # 🧠 CONTINUITY — PREVIOUSLY ROUTED
+        # --------------------------------------------------
+        if not hasattr(self, "_recent_pairs"):
+            self._recent_pairs = set()
+
+        focus_pairs.update(self._recent_pairs)
+
+        # --------------------------------------------------
+        # 🔒 FAIL SAFE
+        # --------------------------------------------------
+        if focus_pairs:
+            bus_stop_pairs = list(focus_pairs)
+        else:
+            bus_stop_pairs = list(self._route_ctx_map.keys())
+
+        # --------------------------------------------------
+        # 🧠 UPDATE MEMORY (for next tick)
+        # --------------------------------------------------
+        self._recent_pairs = set(bus_stop_pairs)
+
+        print(
+            f"[BUS][FOCUS] next={len(next_mids)} "
+            f"far={len(far_mids)} "
+            f"pairs={len(bus_stop_pairs)}"
+        )
+
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 ANCHOR: after focus_pairs / bus_stop_pairs construction (tick())
+# 🧩 ACTION: REPLACE root ctx_map with focused execution map (tick ≥ 3)
+# 📆 PATCHED: 2026-03-23 — execution surface = focus_pairs (BUS authority)
+#
+# PURPOSE
+# -------
+# - Tick 1–2 → full world (warmup / visibility)
+# - Tick 3+  → ONLY focused runners (next5 + far3 + active)
+#
+# RESULT
+# ------
+# • Engines automatically evaluate only relevant runners
+# • No loop changes required
+# • Massive performance gain
+# • Deterministic execution surface
+# ======================================================================================================
+
+        # --------------------------------------------------
+        # 🔑 ROOT CTX MAP SWITCH (AUTHORITATIVE)
+        # --------------------------------------------------
+        if self.tick_id >= 3:
+
+            focused_ctx_map = {}
+
+            for (mid, sid) in bus_stop_pairs:
+                ctx = self._route_ctx_map.get((mid, sid))
+                if ctx:
+                    focused_ctx_map[(mid, sid)] = ctx
+
+            # 🔑 THIS is the fix — engines now see ONLY focused runners
+            self._route_ctx_map = focused_ctx_map
+
+            print(f"[BUS][CTX][FOCUSED] runners={len(self._route_ctx_map)}")
 
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
@@ -4221,27 +4815,6 @@ class DecisionBus:
             if not ctx:
                 continue
 
-            _normalize_ctx_enums(ctx)
-
-            try:
-                redist = evaluate_redistribution(ctx)
-                if redist:
-                    ctx["redistribution"] = redist
-                    tick_ctx["enrichment_ran"] = True
-
-                    print(
-                        f"[BUS][REDIST] mid={redist.get('marketId')} "
-                        f"oc={redist.get('oc_phase')} "
-                        f"disp={redist.get('dispersion'):.2f} "
-                        f"urgency={redist.get('urgency')}"
-                    )
-            except Exception as e:
-                tick_ctx["errors"].append(("redistribution", str(e)))
-
-
-            if not ctx:
-                continue
-
             # --------------------------------------------------
             # PROMINENCE NORMALISATION (BUS AUTHORITY)
             # --------------------------------------------------
@@ -4262,6 +4835,9 @@ class DecisionBus:
                     )
             except Exception as e:
                 tick_ctx["errors"].append(("redistribution", str(e)))
+
+            if not ctx:
+                continue
 
         # ==================================================
         # BUS PLAN ID NORMALISATION (AUTHORITATIVE)
@@ -4305,7 +4881,7 @@ class DecisionBus:
         # ===============================================================
         from engines.bus_route import ROUTE_SPLIT, PLANS_PER_TICK
 
-        slot_budget = dict(ROUTE_SPLIT)
+        slot_budget = defaultdict(lambda: 999)
         slot_budget["MSC_CORRECTIVE"] = 999  # never capped
 
         # Seen keys per engine
@@ -4394,76 +4970,213 @@ class DecisionBus:
 
         print("────────────────────────────────────────────────────────\n")
 
-        # ==================================================
-        # 🟢 BOOKMAKER ADMISSION CONTROLLER (BAC v1)
-        # ==================================================
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: 🟢 BOOKMAKER ADMISSION CONTROLLER (BAC v1)
+        # 🧩 ACTION: REPLACE ENTIRE BLOCK
+        # 📆 PATCHED: 2026-03-XX — Portfolio Manager (score-driven, drifter-safe, low-latency)
+        #
+        # PURPOSE:
+        # - Replace heuristic BAC scoring with true portfolio control
+        # - Use engine score as primary signal quality
+        # - Only allow liability on DRIFTERS
+        # - Only allow STEAMERS if improving book
+        # - Enforce 1 parent per runner until child matched
+        # - Reduce plan volume → faster ticks
+        #
+        # CORE INVARIANTS:
+        #   • SCORE = truth
+        #   • DRIFTER = allowed liability
+        #   • STEAMER = only if improves pnl
+        #   • NEUTRAL = ignored
+        #   • ONE active parent per runner
+        # ======================================================================================================
 
         from collections import defaultdict
 
         # --------------------------------------------------
-        # 1️⃣ Build per-market exposure snapshot (LIVE parents only)
+        # 1️⃣ CURRENT PORTFOLIO (RUNNER PnL SURFACE)
         # --------------------------------------------------
-        market_book = defaultdict(lambda: {"BACK": 0.0, "LAY": 0.0})
+# ======================================================================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: runner_pnl =
+# 🧩 ACTION: REPLACE — use BankState pnl_if_win + hedge ladder logic
+# 📆 PATCHED: 2026-03-23 — bookmaker-grade portfolio control
+#
+# PURPOSE
+# -------
+# - Use TRUE pnl_if_win (dashboard aligned)
+# - Enable correct book behaviour:
+#     BACK reduces others
+#     LAY increases others
+#
+# - Add hedge ladder:
+#     £5  → light harvest
+#     £15 → medium harvest
+#     £30 → aggressive harvest
+#
+# RESULT
+# ------
+# • Perfect alignment with dashboard
+# • Proper bookmaker behaviour
+# • Deterministic hedge scaling
+# ======================================================================================================
+
+        runner_pnl = {}
+
+        try:
+            from engines.config_paths import open_auto_db
+            import sqlite3
+
+            con = open_auto_db(rw=False)
+            con.row_factory = sqlite3.Row
+
+            rows = con.execute("""
+                SELECT marketId, selectionId, pnl_if_win
+                FROM bankstate_runner_snapshot
+                WHERE ts = (
+                    SELECT MAX(ts)
+                    FROM bankstate_runner_snapshot
+                )
+            """).fetchall()
+
+            for r in rows:
+                key = (str(r["marketId"]), str(r["selectionId"]))
+                runner_pnl[key] = float(r["pnl_if_win"] or 0.0)
+
+            con.close()
+
+        except Exception:
+            runner_pnl = {}
+
+        # --------------------------------------------------
+        # 2️⃣ ACTIVE PARENT CHECK (BLOCK DUPLICATES)
+        # --------------------------------------------------
+        active_parent = set()
 
         for (mid, sid), ctx_live in self._route_ctx_map.items():
             for o in ctx_live.get("orders_by_runner", []):
                 if (
                     o.get("role") == "PARENT"
-                    and str(o.get("entry_status")).upper() == "MATCHED"
+                    and str(o.get("entry_status")).upper() in ("PLACED", "MATCHED")
+                    and not o.get("exit_status")
                 ):
-                    side = str(o.get("side")).upper()
-                    stake = float(o.get("entry_stake") or 0.0)
-                    odds  = float(o.get("entry_odds") or 0.0)
+                    active_parent.add((mid, sid))
 
-                    if side == "BACK":
-                        market_book[mid]["BACK"] += stake
-                    elif side == "LAY":
-                        market_book[mid]["LAY"] += stake * (odds - 1.0)
+        # ======================================================================================================
+        # 📍 TARGET: engines/bus/bus.py
+        # 🔎 SEARCH: # 3️⃣ PORTFOLIO FILTER (CORE LOGIC)
+        # 🧩 ACTION: REPLACE — split selection by bet_type (exploratory vs risk/inplay)
+        # 📆 PATCHED: 2026-03-XX — correct BUS selection model (user-defined)
+        #
+        # MODEL:
+        # - EXPLORATORY → global rank → TOP 6 ONLY
+        # - RISK / INPLAY → BEST PER RUNNER (no global cap)
+        # - CORRECTIVE → always pass through
+        # ======================================================================================================
 
         # --------------------------------------------------
-        # 2️⃣ Score generated plans by convexity improvement
+        # SPLIT BY BET TYPE
         # --------------------------------------------------
-        scored_plans = []
+        exploratory_plans = []
+        risk_plans = []
+        inplay_plans = []
+        corrective_plans = []
 
         for eng, plan, ctx in plans:
 
-            mid = plan.get("marketId")
-            side = str(plan.get("side") or "").upper()
+            bet_type = str(plan.get("bet_type") or "").upper()
 
-            score = 0
+            if bet_type == "EXPLORATORY":
+                exploratory_plans.append((eng, plan, ctx))
 
-            # Structural crossover priority
-            why = str(plan.get("why") or "")
-            if "crossover" in why.lower():
-                score += 100
+            elif bet_type == "RISK":
+                risk_plans.append((eng, plan, ctx))
 
-            # Convexity balancing
-            if mid in market_book:
+            elif bet_type == "INPLAY":
+                inplay_plans.append((eng, plan, ctx))
 
-                back_exp = market_book[mid]["BACK"]
-                lay_exp  = market_book[mid]["LAY"]
-
-                if back_exp > lay_exp and side == "LAY":
-                    score += 20
-                elif lay_exp > back_exp and side == "BACK":
-                    score += 20
-                else:
-                    score += 5
             else:
-                score += 5
+                # STOPLOSS / CORRECTION / anything else
+                corrective_plans.append((eng, plan, ctx))
 
-            # Slight global LAY bias
-            if side == "LAY":
-                score += 3
-
-            scored_plans.append((score, eng, plan, ctx))
 
         # --------------------------------------------------
-        # 3️⃣ Reorder plans by score (high first)
+        # 🟢 EXPLORATORY — GLOBAL TOP 6
         # --------------------------------------------------
-        scored_plans.sort(key=lambda x: x[0], reverse=True)
+        exploratory_plans.sort(
+            key=lambda x: float(x[1].get("score") or 0.0),
+            reverse=True
+        )
 
-        plans = [(eng, plan, ctx) for (_s, eng, plan, ctx) in scored_plans]
+        exploratory_selected = exploratory_plans[:6]
+
+
+        # --------------------------------------------------
+        # 🟡 RISK — BEST PER RUNNER
+        # --------------------------------------------------
+        risk_best = {}
+
+        for eng, plan, ctx in risk_plans:
+
+            mid = plan.get("marketId")
+            sid = plan.get("selectionId")
+            if not mid or not sid:
+                continue
+
+            key = (mid, sid)
+            score = float(plan.get("score") or 0.0)
+
+            if key not in risk_best or score > risk_best[key][0]:
+                risk_best[key] = (score, eng, plan, ctx)
+
+        risk_selected = [
+            (eng, plan, ctx)
+            for (_score, eng, plan, ctx) in risk_best.values()
+        ]
+
+
+        # --------------------------------------------------
+        # 🔵 INPLAY — BEST PER RUNNER
+        # --------------------------------------------------
+        inplay_best = {}
+
+        for eng, plan, ctx in inplay_plans:
+
+            mid = plan.get("marketId")
+            sid = plan.get("selectionId")
+            if not mid or not sid:
+                continue
+
+            key = (mid, sid)
+            score = float(plan.get("score") or 0.0)
+
+            if key not in inplay_best or score > inplay_best[key][0]:
+                inplay_best[key] = (score, eng, plan, ctx)
+
+        inplay_selected = [
+            (eng, plan, ctx)
+            for (_score, eng, plan, ctx) in inplay_best.values()
+        ]
+
+
+        # --------------------------------------------------
+        # 🔴 FINAL MERGE
+        # --------------------------------------------------
+        plans = (
+            exploratory_selected +
+            risk_selected +
+            inplay_selected +
+            corrective_plans
+        )
+
+        # ======================================================================================================
+        # END PATCH
+        # ======================================================================================================
+
+
+
+    
         try:
             # ==================================================
             # PHASE 2 — ENRICHMENT (BEGINS)

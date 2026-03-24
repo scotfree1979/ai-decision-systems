@@ -90,6 +90,8 @@ def _router_parent_worker_loop():
 
         except Exception as e:
 
+            _orders_update_parent_failed(parent_ref, str(e))
+
             _log_event(
                 "ERROR",
                 "live_router",
