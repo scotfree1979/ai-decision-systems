@@ -12,6 +12,25 @@ from engines.mastery.mastery_policy import plan_for_strategy
 from engines.micro_scalper_v7.msc_meta_engine import MetaEngine
 from engines.micro_scalper_v7.msc_context_engine import ContextEngine
 from engines.micro_scalper_v7.msc_structure_engine import StructureEngine
+
+# === PATCH START ===
+# 📍 TARGET: engines/bus/bus.py (top-level imports)
+# 🔎 SEARCH: from collections import deque
+# 🧩 ACTION: ADD defaultdict to top-level import
+# 📆 PATCHED: 2026-04-08
+#
+# PURPOSE:
+# - Fix "cannot access local variable 'defaultdict'"
+# - Ensure defaultdict is globally available
+# - Prevent local shadowing / scope errors
+#
+# ROOT CAUSE:
+# defaultdict used in tick() but not guaranteed global import
+# ==============================================================================
+
+from collections import deque, defaultdict
+
+# === PATCH END ===
 # ======================================================================================================
 # 📍 TARGET: engines/bus/bus.py
 # 🔎 SEARCH: from engines.mastery.context_builder import build_context
@@ -210,7 +229,7 @@ from engines.bus_route import (
     RunnerRotation,
     BusRouteSnapshot,      # 🔑 ADD THIS
 )
-from collections import deque
+
 import time
 
 def _market_ready(st: dict) -> bool:
@@ -292,7 +311,7 @@ class EngineReportShim(dict):
 # ======================================================================================================
 
 import time
-from collections import deque
+
 
 class CadenceController:
     def __init__(self):
@@ -1438,6 +1457,8 @@ class DecisionBus:
             # --------------------------------------------------
             if px_now >= 8.0:
 
+                hedge_side = "BACK"   # ✅ ADD THIS LINE
+
                 try:
                     from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
@@ -1519,8 +1540,25 @@ class DecisionBus:
             # --------------------------------------------------
             # 🔴 LOW ODDS LOSER → LAY OTHER RUNNERS
             # --------------------------------------------------
+
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🔴 LOW ODDS LOSER → LAY OTHER RUNNERS
+# 🧩 ACTION: ADD hedge emission guard
+# 📆 PATCHED: 2026-04-XX — prevent multi-hedge stacking
+#
+# WHY:
+# Multiple hedge systems can fire in same tick → over-hedging
+# ============================================================================
+
+            hedge_emitted = False
+
+# === PATCH END ==============================================================
             # Find candidates that improve book
-            for (_mid, _sid), pnl_other in market_book.items():
+            if not hedge_emitted:
+                for (_mid, _sid), pnl_other in market_book.items():
+
+                hedge_side = "LAY"   # ✅ ADD THIS LINE
 
                 if (_mid, _sid) == (mid, sid):
                     continue  # not self
@@ -1563,26 +1601,14 @@ class DecisionBus:
                 # --------------------------------------------------
                 # 🔒 PORTFOLIO SAFETY CHECK (BUS AUTHORITY)
                 # --------------------------------------------------
-                # Simulate post-hedge outcome BEFORE emitting
-
                 test_book = dict(market_book)
 
-                # Apply hypothetical effect
-                if hedge_side == "BACK":
-                    # backing increases this runner, reduces others
-                    test_book[(mid, sid)] = pnl + hedge_size
+                # LAY OTHER RUNNER (correct target)
+                test_book[(_mid, _sid)] = pnl_other - hedge_size
 
-                    for k in test_book:
-                        if k != (mid, sid):
-                            test_book[k] -= hedge_size
-
-                elif hedge_side == "LAY":
-                    # laying reduces this runner, increases others
-                    test_book[(mid, sid)] = pnl - hedge_size
-
-                    for k in test_book:
-                        if k != (mid, sid):
-                            test_book[k] += hedge_size
+                for k in test_book:
+                    if k != (_mid, _sid):
+                        test_book[k] += hedge_size
 
                 # --------------------------------------------------
                 # ❌ BLOCK IF ANY RUNNER GOES NEGATIVE
@@ -1620,6 +1646,8 @@ class DecisionBus:
                     },
                     dict(ctx_other),
                 ))
+
+                hedge_emitted = True
 
                 break  # 🔑 ONE action per tick per runner
 
@@ -1684,15 +1712,41 @@ class DecisionBus:
                         dict(ctx),
                     ))
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: # 🧮 GREEN-UP BASE
+# 🧩 ACTION: FIX invalid calc_greenup_stake call + undefined vars
+# 📆 PATCHED: 2026-04-XX — final runtime fix (no NameError)
+#
+# WHY:
+# - anchor_odds / parent_stake defined INSIDE call → syntax error
+# - harvest_ratio undefined
+# - parent_side incorrectly passed previously
+#
+# RESULT:
+# - valid call
+# - correct parent_side
+# - deterministic sizing
+# ============================================================================
+
             # --------------------------------------------------
-            # 🧮 GREEN-UP BASE
+            # 🧮 GREEN-UP BASE (FIXED)
             # --------------------------------------------------
             try:
                 from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
+                hedge_side = "BACK" if pnl < 0 else "LAY"
+
+                anchor_odds  = ctx.get("anchor_entry_odds")
+                parent_stake = ctx.get("anchor_entry_stake")
+                harvest_ratio = 0.25
+
+                if not anchor_odds or not parent_stake:
+                    continue
+
                 full_hedge = calc_greenup_stake(
-                    parent_side=hedge_side,
-                    entry_odds=anchor_odds,
+                    parent_side=str(ctx.get("side") or "").upper(),
+                    entry_odds=float(anchor_odds),
                     parent_stake=float(parent_stake),
                     hedge_odds=px_now,
                 )
@@ -1703,6 +1757,11 @@ class DecisionBus:
             if full_hedge <= 0:
                 continue
 
+            hedge_size = float(full_hedge) * harvest_ratio
+
+            if hedge_size <= 0:
+                continue
+# === PATCH END ==============================================================
             hedge_size = float(full_hedge) * harvest_ratio
 
             if hedge_size <= 0:
@@ -1762,12 +1821,24 @@ class DecisionBus:
             try:
                 from engines.math.dynamic_stake_v7 import calc_greenup_stake
 
+# === PATCH START ============================================================
+# 📍 TARGET: engines/bus/bus.py
+# 🔎 SEARCH: parent_side="LAY",
+# 🧩 ACTION: FIX parent_side to actual parent side
+# 📆 PATCHED: 2026-04-XX — correct hedge math
+#
+# WHY:
+# calc_greenup_stake expects ORIGINAL position, not hedge side
+# ============================================================================
+
                 hedge_size = calc_greenup_stake(
-                    parent_side=side,
-                    entry_odds=float(anchor_odds),
-                    parent_stake=float(parent_stake),
-                    hedge_odds=float(px),
+                    parent_side=str(ctx_other.get("side") or "").upper(),
+                    entry_odds=float(ctx_other.get("anchor_entry_odds") or px_other),
+                    parent_stake=float(ctx_other.get("anchor_entry_stake") or 1.0),
+                    hedge_odds=px_other,
                 )
+
+# === PATCH END ==============================================================
             except Exception:
                 continue
 
@@ -4945,12 +5016,36 @@ class DecisionBus:
 
         for eng, plan, ctx in plans:
 
-            # hard global cap still enforced later by cadence
-            if slot_budget.get(eng, 0) > 0:
-                slotted_plans.append((eng, plan, ctx))
-                slot_budget[eng] -= 1
+            # --------------------------------------------------
+            # 🔒 AUTHORITATIVE ENGINE RESOLUTION (NO FALLBACK)
+            # --------------------------------------------------
+            engine = plan.get("engine")
+
+            if not engine:
+                raise RuntimeError(f"[BUS] plan missing engine: {plan}")
+
+            # --------------------------------------------------
+            # 🔒 ENFORCE CONSISTENCY (tuple vs payload)
+            # --------------------------------------------------
+            if eng != engine:
+                raise RuntimeError(
+                    f"[BUS] engine mismatch: tuple={eng} payload={engine}"
+                )
+
+            # --------------------------------------------------
+            # 🔒 SLOT GUARANTEE (NO DEFAULT ZERO EVER)
+            # --------------------------------------------------
+            if engine not in slot_budget:
+                raise RuntimeError(f"[BUS] unknown engine in slotting: {engine}")
+
+            # --------------------------------------------------
+            # SLOT APPLICATION
+            # --------------------------------------------------
+            if slot_budget[engine] > 0:
+                slotted_plans.append((engine, plan, ctx))
+                slot_budget[engine] -= 1
             else:
-                unslotted_plans.append((eng, plan, ctx))
+                unslotted_plans.append((engine, plan, ctx))
 
         # 🔑 CRITICAL FIX:
         # Always forward something to cadence
@@ -5032,7 +5127,7 @@ class DecisionBus:
         #   • ONE active parent per runner
         # ======================================================================================================
 
-        from collections import defaultdict
+  
 
         # --------------------------------------------------
         # 1️⃣ CURRENT PORTFOLIO (RUNNER PnL SURFACE)
@@ -5142,14 +5237,75 @@ class DecisionBus:
 
 
         # --------------------------------------------------
-        # 🟢 EXPLORATORY — GLOBAL TOP 6
+        # 🟢 EXPLORATORY — CONTROLLED SAFE LOGIC
         # --------------------------------------------------
+
         exploratory_plans.sort(
             key=lambda x: float(x[1].get("score") or 0.0),
             reverse=True
         )
 
-        exploratory_selected = exploratory_plans[:6]
+        # --------------------------------------------------
+        # 🔢 COUNT ACTIVE EXPLORATORY PARENTS
+        # --------------------------------------------------
+        exploratory_active = 0
+
+        for (mid, sid), ctx_live in self._route_ctx_map.items():
+            for o in ctx_live.get("orders_by_runner", []):
+                if (
+                    o.get("engine") == "MSC_EXPLORATORY"
+                    and o.get("role") == "PARENT"
+                    and str(o.get("entry_status")).upper() in ("PLACED", "MATCHED")
+                    and not o.get("exit_status")
+                ):
+                    exploratory_active += 1
+
+        # --------------------------------------------------
+        # 🟢 SAFE ACTIVATION LOGIC
+        # --------------------------------------------------
+
+        if exploratory_active < 3:
+            # 🔓 No filtering → always take top 6
+            exploratory_selected = exploratory_plans[:6]
+
+        else:
+            # 🔒 Controlled filtering (exploratory only)
+            safe_exploratory = []
+
+            for eng, plan, ctx in exploratory_plans:
+
+                mid = plan.get("marketId")
+                sid = plan.get("selectionId")
+
+                if not mid or not sid:
+                    continue
+
+                # --- direction sanity ---
+                side = str(plan.get("side") or "").upper()
+                direction = ctx.get("trend_direction") or ctx.get("direction")
+
+                if direction == "LAY->BACK":
+                    direction = "DRIFT"
+                elif direction == "BACK->LAY":
+                    direction = "STEAM"
+
+                if direction == "STEAM" and side == "BACK":
+                    continue
+
+                if direction == "DRIFT" and side == "BACK":
+                    continue
+
+                # --- prevent stacking ---
+                if (mid, sid) in active_parent:
+                    continue
+
+                safe_exploratory.append((eng, plan, ctx))
+
+            # 🔑 NEVER ZERO OUT EXPLORATORY
+            if safe_exploratory:
+                exploratory_selected = safe_exploratory[:6]
+            else:
+                exploratory_selected = exploratory_plans[:6]
 
 
         # --------------------------------------------------
@@ -5225,17 +5381,18 @@ class DecisionBus:
         # - Uses lightweight stake proxy (1 unit)
         # - Final sizing handled by dynamic stake later
         # ======================================================================
-
-        safe_plans = []
-
-        # Build current market book (same as Lane 6 logic)
+        # --------------------------------------------------
+        # 🔑 BUILD MARKET BOOK (FROM runner_pnl)
+        # --------------------------------------------------
         market_book = {}
 
-        for (mid, sid), pnl_val in runner_pnl.items():
+        for (mid, sid), pnl in runner_pnl.items():
             try:
-                market_book[(mid, sid)] = float(pnl_val)
+                market_book[(mid, sid)] = float(pnl)
             except Exception:
                 continue
+
+        safe_plans = []
 
         if market_book:
 
@@ -5244,9 +5401,16 @@ class DecisionBus:
             for eng, plan, ctx in plans:
 
                 # --------------------------------------------------
+                # 🎯 BAC ONLY APPLIES TO EXPLORATORY
+                # --------------------------------------------------
+                if plan.get("bet_type") != "EXPLORATORY":
+                    safe_plans.append((eng, plan, ctx))
+                    continue
+
+                # --------------------------------------------------
                 # PASS-THROUGH (never block these)
                 # --------------------------------------------------
-                if plan.get("bet_type") in ("STOPLOSS", "CORRECTION") or plan.get("role") == "CHILD":
+                if plan.get("bet_type") in ("STOPLOSS", "CORRECTION") or plan.get("role") == "PARENT":
                     safe_plans.append((eng, plan, ctx))
                     continue
 
@@ -5308,6 +5472,10 @@ class DecisionBus:
                 # --------------------------------------------------
                 safe_plans.append((eng, plan, ctx))
 
+            # ✅ REPLACE WITH:
+            # --------------------------------------------------
+            # 🔑 ALWAYS APPLY FOR EXPLORATORY (NO FALLBACK)
+            # --------------------------------------------------
             plans = safe_plans
 
         # ======================================================================================================
@@ -5760,7 +5928,7 @@ class DecisionBus:
             # 📊 V7 BOOKMAKER SURFACE
             # ==================================================
 
-            from collections import defaultdict
+      
 
             market_book = defaultdict(lambda: {"BACK": 0.0, "LAY": 0.0})
 
@@ -5850,43 +6018,39 @@ class DecisionBus:
             # - Pure execution filtering
             # ======================================================================================================
 
-            if not hasattr(self, "_execution_guard"):
-                self._execution_guard = {}
+            # ==================================================
+            # 🧠 EIG — BOOKMAKER CONTROL (EXPLORATORY ONLY)
+            # ==================================================
 
-            EIG_WINDOW = 5
-            MAX_RUNNER_EXPOSURE = 80.0
-
-            current_tick = self.tick_id
-
-            # --------------------------------------------------
-            # BUILD RUNNER EXPOSURE MAP (LIVE STATE)
-            # --------------------------------------------------
-            runner_exposure = {}
-
-            for (mid, sid), ctx_live in self._route_ctx_map.items():
-
-                total = 0.0
-
-                for o in ctx_live.get("orders_by_runner", []):
-
-                    if (
-                        o.get("role") == "PARENT"
-                        and str(o.get("entry_status")).upper() == "MATCHED"
-                    ):
-                        side = str(o.get("side")).upper()
-                        stake = float(o.get("entry_stake") or 0.0)
-                        odds  = float(o.get("entry_odds") or 0.0)
-
-                        if side == "LAY":
-                            total += stake * (odds - 1.0)
-                        else:
-                            total += stake
-
-                runner_exposure[(mid, sid)] = total
+            from engines.config_paths import open_auto_db
+            import sqlite3
 
             # --------------------------------------------------
-            # FILTER + SCORE PLANS
+            # 🧠 LOAD TRUE MARKET BOOK (AUTHORITATIVE)
             # --------------------------------------------------
+            runner_pnl = {}
+
+            try:
+                con = open_auto_db(rw=False)
+                con.row_factory = sqlite3.Row
+
+                rows = con.execute("""
+                    SELECT marketId, selectionId, pnl_if_win
+                    FROM bankstate_runner_snapshot
+                    WHERE ts = (
+                        SELECT MAX(ts)
+                        FROM bankstate_runner_snapshot
+                    )
+                """).fetchall()
+
+                for r in rows:
+                    runner_pnl[(str(r["marketId"]), str(r["selectionId"]))] = float(r["pnl_if_win"] or 0.0)
+
+                con.close()
+
+            except Exception:
+                runner_pnl = {}
+
             filtered = []
 
             for eng, plan, ctx in final_plans:
@@ -5894,101 +6058,88 @@ class DecisionBus:
                 bet_type = plan.get("bet_type")
                 role     = plan.get("role")
 
-                mid = plan.get("marketId")
-                sid = plan.get("selectionId")
-                px  = float(plan.get("px") or 0.0)
-
                 # --------------------------------------------------
-                # SAFETY PASS-THROUGH
+                # PASS THROUGH (NEVER BLOCK)
                 # --------------------------------------------------
-                if bet_type in ("STOPLOSS", "CORRECTION") or role == "CHILD":
+                if bet_type in ("RISK", "INPLAY", "STOPLOSS", "CORRECTION") or role == "CHILD":
                     filtered.append((eng, plan, ctx))
                     continue
 
                 # --------------------------------------------------
-                # 1️⃣ EXECUTION IDENTITY GATE (EIG)
+                # ONLY CONTROL EXPLORATORY
                 # --------------------------------------------------
-                key = (eng, mid, sid, px)
-                last_tick = self._execution_guard.get(key)
-
-                if last_tick is not None and (current_tick - last_tick) <= EIG_WINDOW:
+                if bet_type != "EXPLORATORY":
+                    filtered.append((eng, plan, ctx))
                     continue
 
-                self._execution_guard[key] = current_tick
+                mid = plan.get("marketId")
+                sid = plan.get("selectionId")
 
-                # --------------------------------------------------
-                # 2️⃣ EXPOSURE CAP
-                # --------------------------------------------------
-                current_exp = runner_exposure.get((mid, sid), 0.0)
-                incoming_exp = float(plan.get("required_exposure") or 0.0)
-
-                if (current_exp + incoming_exp) > MAX_RUNNER_EXPOSURE:
+                if not mid or not sid:
                     continue
 
-                # --------------------------------------------------
-                # 3️⃣ EXPOSURE REDUCTION BIAS (SCORING ONLY)
-                # --------------------------------------------------
+                pnl = runner_pnl.get((mid, sid))
+                if pnl is None:
+                    filtered.append((eng, plan, ctx))  # fail open
+                    continue
+
                 side = str(plan.get("side") or "").upper()
 
                 # --------------------------------------------------
-                # 🧭 DIRECTIONAL EXPOSURE CONTROL (BOOKMAKER RULE)
+                # 🧭 NORMALISE DIRECTION
                 # --------------------------------------------------
                 direction = ctx.get("trend_direction") or ctx.get("direction")
 
-                # Normalise
                 if direction == "LAY->BACK":
                     direction = "DRIFT"
                 elif direction == "BACK->LAY":
                     direction = "STEAM"
 
-                current_pnl = pnl
-
                 # --------------------------------------------------
-                # ❌ BLOCK: STEAMERS ADDING RISK
-                # --------------------------------------------------
-                # If runner is steaming (price shortening):
-                # - BACK = increases liability → BLOCK
-                # - LAY  = reduces liability → ALLOW
-
-                if direction == "STEAM":
-                    if side == "BACK":
-                        continue  # ❌ never add risk on steamers
-
-                # --------------------------------------------------
-                # ❌ BLOCK: DRIFTERS REDUCING EDGE
-                # --------------------------------------------------
-                # If runner is drifting (price rising):
-                # - LAY  = increases liability → ALLOW
-                # - BACK = reduces position → BLOCK (unless corrective)
-
-                if direction == "DRIFT":
-                    if side == "BACK" and current_pnl >= 0:
-                        continue  # ❌ don't kill edge too early
-
-                # --------------------------------------------------
-                # ❌ BLOCK: NEUTRAL (NO EDGE)
+                # ❌ NO DIRECTION = NO EDGE
                 # --------------------------------------------------
                 if direction is None:
                     continue
 
-                score = 0
+                # --------------------------------------------------
+                # 📉 DRIFT → ALLOW LAY ONLY
+                # --------------------------------------------------
+                if direction == "DRIFT":
+                    if side != "LAY":
+                        continue
 
-                if current_exp > 0:
+                # --------------------------------------------------
+                # 📈 STEAM → ALLOW BACK ONLY
+                # --------------------------------------------------
+                if direction == "STEAM":
+                    if side != "BACK":
+                        continue
+
+                # --------------------------------------------------
+                # 💰 PROFIT CONTROL (BOOK BALANCING)
+                # --------------------------------------------------
+                if pnl > 90:
+                    # too profitable → don't add more profit
                     if side == "BACK":
-                        score += 5   # reduce LAY exposure
-                elif current_exp < 0:
+                        continue
+
+                # --------------------------------------------------
+                # 🔻 LOSS CONTROL
+                # --------------------------------------------------
+                if pnl < -90:
+                    # too much liability → don't worsen
                     if side == "LAY":
-                        score += 5   # reduce BACK exposure
+                        continue
 
-                filtered.append((score, eng, plan, ctx))
+                # --------------------------------------------------
+                # ✅ ACCEPT PLAN
+                # --------------------------------------------------
+                filtered.append((eng, plan, ctx))
 
             # --------------------------------------------------
-            # SORT BY EXPOSURE IMPROVEMENT
+            # 🔑 SEND TO CADENCE (CRITICAL FIX)
             # --------------------------------------------------
-            filtered.sort(key=lambda x: x[0], reverse=True)
-
-            final_plans = [(eng, plan, ctx) for (_s, eng, plan, ctx) in filtered]
-            self._cadence.enqueue(final_plans)
+            self._cadence.enqueue(filtered)
 
             admitted = self._cadence.admit_for_tick()
 

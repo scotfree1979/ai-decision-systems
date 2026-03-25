@@ -185,8 +185,8 @@ def _settle_conn(rw: bool = True, timeout: float = 8.0) -> sqlite3.Connection:
     con = settlements_db(rw=rw)
 
     # Ensure row factory is maintained (legacy compatibility)
+    # ✅ FIX: use global sqlite3 (already imported at top)
     try:
-        import sqlite3
         con.row_factory = sqlite3.Row
     except Exception:
         pass
